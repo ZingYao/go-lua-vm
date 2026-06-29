@@ -10,19 +10,20 @@ if [[ "${actual_go_version}" != "${expected_go_version}" ]]; then
   exit 1
 fi
 
-if rg -n 'import\s+"C"' --glob '*.go' . >/tmp/go-lua-vm-cgo-check.txt; then
+if command -v rg >/dev/null 2>&1; then
+  rg -n 'import\s+"C"|^\s*"C"\s*$' --glob '*.go' . >/tmp/go-lua-vm-cgo-check.txt || true
+else
+  git grep -nE 'import[[:space:]]+"C"|^[[:space:]]*"C"[[:space:]]*$' -- '*.go' >/tmp/go-lua-vm-cgo-check.txt || true
+fi
+
+if [[ -s /tmp/go-lua-vm-cgo-check.txt ]]; then
   cat /tmp/go-lua-vm-cgo-check.txt >&2
   echo "CGO is forbidden: remove import \"C\"" >&2
   exit 1
 fi
 
-if rg -n '^\s*"C"\s*$' --glob '*.go' . >/tmp/go-lua-vm-cgo-check.txt; then
-  cat /tmp/go-lua-vm-cgo-check.txt >&2
-  echo "CGO is forbidden: remove C imports from import blocks" >&2
-  exit 1
-fi
-
-if git ls-files --others --exclude-standard | rg '\.go$|_test\.go$' >/tmp/go-lua-vm-untracked-go.txt; then
+git ls-files --others --exclude-standard | grep -E '\.go$|_test\.go$' >/tmp/go-lua-vm-untracked-go.txt || true
+if [[ -s /tmp/go-lua-vm-untracked-go.txt ]]; then
   cat /tmp/go-lua-vm-untracked-go.txt >&2
   echo "untracked Go files must be added before delivery" >&2
   exit 1
