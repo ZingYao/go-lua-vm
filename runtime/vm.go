@@ -1860,9 +1860,10 @@ func (vm *VM) executeForPrep(instruction bytecode.Instruction) error {
 		return ErrRegisterOutOfRange
 	}
 
-	if initialValue, _, stepValue, ok := forIntegerControlValues(vm.registers[baseIndex], vm.registers[baseIndex+1], vm.registers[baseIndex+2]); ok {
-		// integer for 在进入循环前先执行 init -= step。
+	if initialValue, limitValue, stepValue, ok := forIntegerControlValues(vm.registers[baseIndex], vm.registers[baseIndex+1], vm.registers[baseIndex+2]); ok {
+		// integer for 在进入循环前先执行 init -= step，并写回已折算的 integer 上界供 FORLOOP 快路径复用。
 		vm.registers[baseIndex] = IntegerValue(initialValue - stepValue)
+		vm.registers[baseIndex+1] = IntegerValue(limitValue)
 		vm.pcOffset = instruction.SBx()
 		return nil
 	}
@@ -1889,10 +1890,10 @@ func (vm *VM) executeForLoop(instruction bytecode.Instruction) error {
 		return ErrRegisterOutOfRange
 	}
 
-	if indexValue, limitValue, stepValue, ok := forIntegerControlValues(vm.registers[baseIndex], vm.registers[baseIndex+1], vm.registers[baseIndex+2]); ok {
-		// integer for 使用 int64 补码溢出语义，避免 MaxInt64/MinInt64 经 float64 丢精度。
-		nextValue := indexValue + stepValue
-		if !forIntegerLoopContinues(nextValue, limitValue, stepValue) {
+	if vm.registers[baseIndex].Kind == KindInteger && vm.registers[baseIndex+1].Kind == KindInteger && vm.registers[baseIndex+2].Kind == KindInteger {
+		// 三个控制槽都是真实 integer 时直接执行热路径，避免每轮重复折算循环上界。
+		nextValue := vm.registers[baseIndex].Integer + vm.registers[baseIndex+2].Integer
+		if !forIntegerLoopContinues(nextValue, vm.registers[baseIndex+1].Integer, vm.registers[baseIndex+2].Integer) {
 			// 循环越界时不跳转，也不更新外部可见控制变量 R(A+3)。
 			return nil
 		}
