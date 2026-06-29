@@ -1,0 +1,4 @@
+boom
+stack traceback:
+	[go] ref(kind=7)
+	[lua] ref(kind=6)

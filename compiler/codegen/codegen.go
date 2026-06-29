@@ -1,0 +1,3166 @@
+// Package codegen 提供 Lua 5.3 AST 到 Proto 字节码的生成能力。
+//
+// 当前阶段实现最小表达式与局部赋值编译闭环，后续会逐步补齐控制流、闭包、upvalue 和标准调试信息。
+package codegen
+
+import (
+	"fmt"
+
+	"github.com/zing/go-lua-vm/bytecode"
+	"github.com/zing/go-lua-vm/compiler/lexer"
+	"github.com/zing/go-lua-vm/compiler/parser"
+)
+
+const (
+	// envUpvalueName 是 Lua 5.3 chunk 默认捕获的环境 upvalue 名称。
+	envUpvalueName = "_ENV"
+	// maxProtoRegisters 是 Proto.MaxStackSize 可表达的最大寄存器数量。
+	maxProtoRegisters = 255
+)
+
+// CompileChunk 将 parser.Chunk 编译为 Lua 5.3 Proto。
+//
+// chunk 必须已经通过 parser.ParseChunk 语法和基础语义校验；source 写入 Proto.Source 便于调试输出。
+func CompileChunk(chunk *parser.Chunk, source string) (*bytecode.Proto, error) {
+	// 创建函数级生成器，并从顶层 block 开始生成指令。
+	generator := newGenerator(source)
+	// Lua chunk 本身按 vararg 函数执行，CLI 脚本参数会通过 `...` 暴露。
+	generator.proto.IsVararg = true
+	if err := generator.compileBlock(chunk.Block); err != nil {
+		// 编译失败时返回带上下文的错误，调用方不能使用部分 Proto。
+		return nil, err
+	}
+	if err := generator.patchPendingGotos(); err != nil {
+		// parser 正常会先完成 goto 合法性校验；这里保留 codegen 防御错误。
+		return nil, err
+	}
+	if !generator.returned {
+		// 没有显式 return 时补默认无返回值 RETURN。
+		generator.emitABC(bytecode.OpReturn, 0, 1, 0)
+	}
+	generator.closeLocals(len(generator.proto.Code))
+	generator.proto.MaxStackSize = generator.maxStackSize()
+
+	// 返回完整 Proto。
+	return generator.proto, nil
+}
+
+// generator 保存单个 Proto 的 codegen 状态。
+//
+// 寄存器、常量池和局部变量映射都只在当前函数原型内有效。
+type generator struct {
+	// proto 保存正在生成的函数原型。
+	proto *bytecode.Proto
+	// parent 保存外层函数生成器，用于嵌套函数捕获 upvalue。
+	parent *generator
+	// nextRegister 保存下一个可分配寄存器。
+	nextRegister int
+	// maxRegister 保存生成过程中到达过的最大寄存器数量。
+	maxRegister int
+	// constants 保存常量去重索引，key 由 stableConstantKey 生成。
+	constants map[string]int
+	// locals 保存当前函数已声明局部变量到寄存器的映射。
+	locals map[string]localBinding
+	// upvalues 保存当前函数已捕获 upvalue 到 upvalue 索引的映射。
+	upvalues map[string]int
+	// breakJumps 保存嵌套循环中待回填的 break 跳转列表。
+	breakJumps [][]int
+	// continueJumps 保存嵌套循环中待回填的 continue 跳转列表。
+	continueJumps [][]int
+	// labelPCs 保存当前函数内已遇到的 label 名称到目标 PC 和作用域水位列表的映射。
+	labelPCs map[string][]labelInfo
+	// pendingGotos 保存当前函数内尚未回填的 goto 占位跳转。
+	pendingGotos []pendingGoto
+	// scopes 按 parser scope ID 保存当前函数内 block 作用域，供 goto/label 可见性解析。
+	scopes map[int]*parser.ScopeInfo
+	// scopeStack 保存当前正在生成的 block 作用域栈。
+	scopeStack []*parser.ScopeInfo
+	// returned 表示当前函数已经生成显式 return 或 tail call 终结指令。
+	returned bool
+	// currentLine 保存当前正在编译的源码行，用于给后续 emit 的指令填充 LineInfo。
+	currentLine int
+}
+
+// localBinding 描述 codegen 阶段的局部变量绑定。
+//
+// register 保存局部变量所在寄存器，localVarIndex 保存对应 Proto.LocalVars 下标。
+type localBinding struct {
+	// register 保存局部变量寄存器。
+	register int
+	// localVarIndex 保存调试局部变量表下标。
+	localVarIndex int
+}
+
+// pendingGoto 描述 codegen 阶段尚未确定目标 PC 的 goto 跳转。
+//
+// label 保存目标 label 名称；jumpPC 保存已经生成的 JMP 指令位置。
+type pendingGoto struct {
+	// label 保存 goto 目标 label 名称。
+	label string
+	// jumpPC 保存待回填 JMP 指令位置。
+	jumpPC int
+	// sourceNextRegister 保存 goto 发出时的寄存器水位，用于判断是否跳出局部作用域。
+	sourceNextRegister int
+	// sourceScope 保存 goto 所在 block 作用域。
+	sourceScope *parser.ScopeInfo
+}
+
+// labelInfo 描述 codegen 阶段 label 的跳转目标和作用域水位。
+//
+// pc 是 label 对应的下一条指令位置；nextRegister 是 label 处可见局部变量之后的寄存器水位。
+type labelInfo struct {
+	// pc 保存 label 目标指令位置。
+	pc int
+	// nextRegister 保存 label 处的寄存器水位。
+	nextRegister int
+	// scope 保存 label 所在 block 作用域。
+	scope *parser.ScopeInfo
+}
+
+// assignmentTarget 描述普通赋值左值已经求值后的写入位置。
+//
+// name 非空表示名称左值；tableRegister 非负表示 table/index 左值。keyOperand 是 SETTABLE
+// 使用的 RK key 操作数，keyRegister 仅在 key 常量溢出 RK 范围时保存临时寄存器下标。
+type assignmentTarget struct {
+	// name 保存名称左值；空字符串表示不是名称写回。
+	name string
+	// position 保存名称左值源码位置，用于 upvalue 上限错误行号。
+	position lexer.Position
+	// resolvedUpvalue 保存左值地址分析阶段已解析的 upvalue 下标，-1 表示未预解析。
+	resolvedUpvalue int
+	// resolvedEnv 表示左值是未声明 `_ENV`，写回时直接替换当前环境 upvalue。
+	resolvedEnv bool
+	// tableRegister 保存 table/index 左值的接收者寄存器。
+	tableRegister int
+	// keyOperand 保存 SETTABLE 使用的 key 操作数。
+	keyOperand int
+	// keyRegister 保存 key 常量溢出时额外分配的寄存器，-1 表示未分配。
+	keyRegister int
+}
+
+// scopeSnapshot 保存进入嵌套 block 前的局部变量和寄存器状态。
+//
+// locals 是函数级局部绑定的浅拷贝；localVarCount 用于关闭本作用域新增调试局部变量；
+// nextRegister 用于退出作用域后复用内层临时和局部寄存器。
+type scopeSnapshot struct {
+	// locals 保存进入 block 前可见的局部变量绑定。
+	locals map[string]localBinding
+	// localVarCount 保存进入 block 前 Proto.LocalVars 数量。
+	localVarCount int
+	// nextRegister 保存进入 block 前下一个可分配寄存器。
+	nextRegister int
+}
+
+// newGenerator 创建函数级 codegen 状态。
+//
+// source 会写入 Proto.Source；返回值已初始化常量表索引和局部变量表。
+func newGenerator(source string) *generator {
+	// 初始化最小状态，寄存器从 0 开始按 Lua VM 约定分配。
+	return &generator{
+		proto:     bytecode.NewProto(source),
+		constants: make(map[string]int),
+		locals:    make(map[string]localBinding),
+		upvalues:  make(map[string]int),
+		labelPCs:  make(map[string][]labelInfo),
+		scopes:    make(map[int]*parser.ScopeInfo),
+	}
+}
+
+// newChildGenerator 创建嵌套函数 codegen 状态。
+//
+// child 使用独立 Proto、寄存器和常量池，但保留 parent 用于 upvalue 捕获。
+func newChildGenerator(parent *generator, source string) *generator {
+	// 子函数状态与顶层一致，只额外记录 parent。
+	child := newGenerator(source)
+	child.parent = parent
+	return child
+}
+
+// compileBlock 编译一个 block。
+//
+// 当前阶段支持 local 赋值、普通赋值和 return；控制流会在后续 TODO 中接入。
+func (generator *generator) compileBlock(block *parser.Block) error {
+	generator.pushScope(block)
+	defer generator.popScope()
+	for _, statement := range block.Statements {
+		// 逐条语句按源码顺序生成指令。
+		if err := generator.withSourceLine(statement.Pos(), func() error {
+			// 语句内生成的指令继承该语句起始行，嵌套 block 会继续覆盖自己的语句行。
+			return generator.compileStatement(statement)
+		}); err != nil {
+			// 任一语句生成失败都会终止当前 block。
+			return err
+		}
+	}
+	if block.Return != nil {
+		// return 是 block 终结语句，必须在普通语句之后生成。
+		return generator.withSourceLine(block.Return.Pos(), func() error {
+			// return 表达式和 RETURN 指令都归属 return 关键字所在行。
+			return generator.compileReturn(block.Return)
+		})
+	}
+
+	// 没有 return 时由调用方补默认 RETURN。
+	return nil
+}
+
+// pushScope 进入一个 parser block 作用域。
+//
+// block.Scope 由 parser 语义阶段标注；codegen 使用该作用域解析同名 label 的可见目标。
+func (generator *generator) pushScope(block *parser.Block) {
+	if block == nil || block.Scope == nil {
+		// 缺少作用域信息时仍允许生成，但后续 goto 只能走防御错误。
+		generator.scopeStack = append(generator.scopeStack, nil)
+		return
+	}
+	generator.scopes[block.Scope.ID] = block.Scope
+	generator.scopeStack = append(generator.scopeStack, block.Scope)
+}
+
+// popScope 离开当前 parser block 作用域。
+//
+// 作用域栈只服务 codegen 当前递归路径，退出 block 后恢复外层作用域。
+func (generator *generator) popScope() {
+	if len(generator.scopeStack) == 0 {
+		// 空栈说明调用方嵌套不平衡，防御性忽略。
+		return
+	}
+	generator.scopeStack = generator.scopeStack[:len(generator.scopeStack)-1]
+}
+
+// currentScope 返回当前正在生成的 block 作用域。
+//
+// 返回 nil 表示 parser 未提供 scope 信息，调用方应保守延迟到最终校验。
+func (generator *generator) currentScope() *parser.ScopeInfo {
+	if len(generator.scopeStack) == 0 {
+		// 顶层 compileBlock 进入前理论上不会查询；保留防御 nil。
+		return nil
+	}
+	return generator.scopeStack[len(generator.scopeStack)-1]
+}
+
+// withSourceLine 在指定源码行上下文中执行 codegen 动作。
+//
+// position 来自 AST 节点起始 token；当行号有效时后续 emit 会把它写入 Proto.LineInfo。action
+// 返回后恢复原行号，避免嵌套 block 或子表达式污染外层语句的调试信息。
+func (generator *generator) withSourceLine(position lexer.Position, action func() error) error {
+	previousLine := generator.currentLine
+	if position.Line > 0 {
+		// 只接受有效源码行号；零值表示 parser 未提供位置。
+		generator.currentLine = position.Line
+	}
+	err := action()
+	generator.currentLine = previousLine
+	return err
+}
+
+// compileScopedBlock 编译会引入独立 local 生命周期的嵌套 block。
+//
+// block 可为 nil；进入前会保存外层 locals 和寄存器水位，退出时关闭本 block 新增 local
+// 并恢复外层绑定，保证 `do local x end`、if/loop 体内 local 不泄漏到外层。
+func (generator *generator) compileScopedBlock(block *parser.Block) error {
+	scope := generator.beginScope()
+	if block == nil {
+		// nil block 没有语句，直接恢复外层作用域。
+		generator.endScope(scope, len(generator.proto.Code))
+		return nil
+	}
+	if err := generator.compileBlock(block); err != nil {
+		// 编译失败前也恢复作用域，避免调用方继续使用污染后的 generator。
+		generator.endScope(scope, len(generator.proto.Code))
+		return err
+	}
+	generator.endScope(scope, len(generator.proto.Code))
+	return nil
+}
+
+// compileStatement 编译单条语句。
+//
+// 当前阶段只覆盖局部赋值和已声明局部变量赋值，其他语句返回明确错误。
+func (generator *generator) compileStatement(statement parser.Statement) error {
+	switch typedStatement := statement.(type) {
+	case *parser.DoStatement:
+		// do 语句只引入子 block，按源码顺序递归生成内部语句。
+		return generator.compileScopedBlock(typedStatement.Body)
+	case *parser.LocalAssignmentStatement:
+		// local 赋值会为每个局部变量分配稳定寄存器。
+		return generator.compileLocalAssignment(typedStatement)
+	case *parser.AssignmentStatement:
+		// 普通赋值当前只支持写入已经声明的局部名称。
+		return generator.compileAssignment(typedStatement)
+	case *parser.LocalFunctionStatement:
+		// local function 会声明局部函数名并生成子 Proto closure。
+		return generator.compileLocalFunction(typedStatement)
+	case *parser.FunctionStatement:
+		// 普通 function 当前仅支持写入已声明局部或作为全局能力后续扩展。
+		return generator.compileFunctionStatement(typedStatement)
+	case *parser.IfStatement:
+		// if/elseif/else 使用 TEST/JMP 组合生成条件分支。
+		return generator.compileIfStatement(typedStatement)
+	case *parser.WhileStatement:
+		// while 使用 TEST/JMP 组合生成条件循环。
+		return generator.compileWhileStatement(typedStatement)
+	case *parser.RepeatUntilStatement:
+		// repeat-until 先执行循环体，再在尾部测试条件。
+		return generator.compileRepeatUntilStatement(typedStatement)
+	case *parser.BreakStatement:
+		// break 生成待当前循环结束位置回填的 JMP。
+		return generator.compileBreakStatement()
+	case *parser.ContinueStatement:
+		// continue 生成待当前循环续迭代位置回填的 JMP。
+		return generator.compileContinueStatement()
+	case *parser.FunctionCallStatement:
+		// 函数调用语句会生成 CALL 并丢弃返回值。
+		return generator.compileFunctionCallStatement(typedStatement)
+	case *parser.NumericForStatement:
+		// 数值 for 使用 FORPREP/FORLOOP 和连续寄存器区间。
+		return generator.compileNumericFor(typedStatement)
+	case *parser.GenericForStatement:
+		// 泛型 for 使用 TFORCALL/TFORLOOP 和迭代器寄存器区间。
+		return generator.compileGenericFor(typedStatement)
+	case *parser.SwitchStatement:
+		// switch 使用现有 EQ/JMP 组合生成非贯穿多分支。
+		return generator.compileSwitchStatement(typedStatement)
+	case *parser.LabelStatement:
+		// label 不生成指令，只记录当前位置供 goto 回填。
+		return generator.compileLabelStatement(typedStatement)
+	case *parser.GotoStatement:
+		// goto 生成待当前函数 label 位置确定后回填的 JMP。
+		return generator.compileGotoStatement(typedStatement)
+	case *parser.EmptyStatement:
+		// 空语句不产生运行时指令。
+		return nil
+	default:
+		return fmt.Errorf("codegen unsupported statement %T", statement)
+	}
+}
+
+// compileLabelStatement 编译 Lua label 语句。
+//
+// label 自身没有运行时效果；记录当前 PC 作为后续 goto 的目标位置。
+func (generator *generator) compileLabelStatement(statement *parser.LabelStatement) error {
+	generator.labelPCs[statement.Name] = append(generator.labelPCs[statement.Name], labelInfo{
+		pc:           len(generator.proto.Code),
+		nextRegister: generator.nextRegister,
+		scope:        generator.currentScope(),
+	})
+
+	// label 记录完成。
+	return nil
+}
+
+// compileGotoStatement 编译 Lua goto 语句。
+//
+// goto 先生成 JMP 占位；目标 label 可能位于后文，统一在函数编译结束时回填。
+func (generator *generator) compileGotoStatement(statement *parser.GotoStatement) error {
+	jumpPC := generator.emitJump(0)
+	generator.pendingGotos = append(generator.pendingGotos, pendingGoto{
+		label:              statement.Label,
+		jumpPC:             jumpPC,
+		sourceNextRegister: generator.nextRegister,
+		sourceScope:        generator.currentScope(),
+	})
+
+	// 所有 goto 等待函数编译结束后统一回填，确保同名 label 按最终作用域可见性解析。
+	return nil
+}
+
+// compileLocalAssignment 编译 local 变量声明赋值。
+//
+// 未提供初始化表达式的变量按 Lua 语义生成 nil；多余表达式当前仍会求值并释放临时寄存器。
+func (generator *generator) compileLocalAssignment(statement *parser.LocalAssignmentStatement) error {
+	targetRegisters := make([]int, 0, len(statement.Names))
+	for range statement.Names {
+		// 每个 local 名称先占用一个长期寄存器，但暂不进入作用域，保证初始化 RHS 读取外层同名变量。
+		register := generator.allocateRegister()
+		targetRegisters = append(targetRegisters, register)
+	}
+	for index, register := range targetRegisters {
+		if index < len(statement.Values) {
+			if _, ok := statement.Values[index].(*parser.VarargExpression); ok && index == len(statement.Values)-1 {
+				// 初始化列表最后一个 `...` 会展开到剩余 local 变量，固定数量字段为实际数量加一。
+				generator.emitABC(bytecode.OpVararg, register, len(targetRegisters)-index+1, 0)
+				break
+			}
+			if callExpression, ok := statement.Values[index].(*parser.FunctionCallExpression); ok && index == len(statement.Values)-1 {
+				// 初始化列表最后一个函数调用会展开到剩余 local 变量，兼容 `local a,b = f()`。
+				if err := generator.compileFunctionCallTo(callExpression, register, len(targetRegisters)-index); err != nil {
+					// 函数调用初始化失败时保留原始错误上下文。
+					return err
+				}
+				break
+			}
+			if callExpression, ok := statement.Values[index].(*parser.MethodCallExpression); ok && index == len(statement.Values)-1 {
+				// 初始化列表最后一个方法调用同样会展开到剩余 local 变量，兼容 `local a,b = obj:f()`。
+				if err := generator.compileMethodCallTo(callExpression, register, len(targetRegisters)-index); err != nil {
+					// 方法调用初始化失败时保留原始错误上下文。
+					return err
+				}
+				break
+			}
+			// 有对应初始化表达式时，直接生成到目标寄存器。
+			compileValue := func() error {
+				return generator.compileExpressionTo(statement.Values[index], register)
+			}
+			if functionExpression, ok := statement.Values[index].(*parser.FunctionExpression); ok {
+				// Lua 5.3 对 local 函数表达式初始化的 line hook 会先报告函数 end 行，此时 local 名称尚不可见。
+				compileValue = func() error {
+					return generator.withSourceLine(functionExpressionClosureLine(functionExpression), func() error {
+						return generator.compileExpressionTo(functionExpression, register)
+					})
+				}
+			}
+			if err := compileValue(); err != nil {
+				// 初始化表达式失败时保留原始错误上下文。
+				return err
+			}
+			continue
+		}
+		// 没有对应初始化表达式时，Lua local 默认初始化为 nil。
+		generator.emitABC(bytecode.OpLoadNil, register, 0, 0)
+	}
+	for expressionIndex := len(targetRegisters); expressionIndex < len(statement.Values); expressionIndex++ {
+		// 多余表达式仍需要求值以保留潜在副作用，当前表达式子集无副作用但保持结构兼容。
+		tempRegister := generator.allocateRegister()
+		if err := generator.compileExpressionTo(statement.Values[expressionIndex], tempRegister); err != nil {
+			// 多余表达式编译失败时返回错误。
+			return err
+		}
+		generator.releaseRegister(tempRegister)
+	}
+	if len(targetRegisters) > 0 {
+		// 初始化 RHS 可能为了函数调用实参占用 target 之后的临时寄存器；local 声明完成前回收这些临时槽，
+		// 保证后续 local 继续使用连续栈槽，binary chunk 的 LocVar 隐式寄存器顺序依赖该语义。
+		generator.releaseRegistersFrom(targetRegisters[0] + len(targetRegisters))
+	}
+	for index, name := range statement.Names {
+		// 初始化表达式全部完成后再登记局部变量，匹配 Lua 5.3 local 作用域从声明之后开始。
+		generator.defineLocal(name, targetRegisters[index], statement.Position)
+	}
+
+	// local 声明编译完成。
+	return nil
+}
+
+// compileAssignment 编译普通赋值语句。
+//
+// 当前阶段左侧支持已经声明的局部变量名称，未知名称按 Lua 5.3 语义写入 `_ENV[name]`。
+func (generator *generator) compileAssignment(statement *parser.AssignmentStatement) error {
+	firstTempRegister := generator.nextRegister
+	targets := make([]assignmentTarget, 0, len(statement.Left))
+	for _, leftExpression := range statement.Left {
+		// 左值中的 receiver 和 index 表达式必须先求值，写回延后到 RHS 全部完成之后。
+		target, err := generator.compileAssignmentTarget(leftExpression)
+		if err != nil {
+			// 左值地址编译失败时释放本语句临时寄存器并返回。
+			generator.releaseRegistersFrom(firstTempRegister)
+			return err
+		}
+		targets = append(targets, target)
+	}
+
+	valueRegisters := make([]int, 0, len(statement.Left))
+	for range statement.Left {
+		// RHS 结果统一写入独立临时寄存器，避免提前覆盖任一左值或后续 RHS 读取。
+		valueRegisters = append(valueRegisters, generator.allocateRegister())
+	}
+	if err := generator.compileAssignmentValues(statement.Right, len(statement.Left), valueRegisters); err != nil {
+		// RHS 编译失败时释放所有 LHS/RHS 临时寄存器。
+		generator.releaseRegistersFrom(firstTempRegister)
+		return err
+	}
+
+	for index, target := range targets {
+		// 所有 RHS 求值完成后才按左到右顺序写回左值，匹配 Lua 5.3 赋值语义。
+		if err := generator.emitAssignmentTarget(target, valueRegisters[index]); err != nil {
+			// 写回失败时释放临时寄存器并返回。
+			generator.releaseRegistersFrom(firstTempRegister)
+			return err
+		}
+	}
+	generator.releaseRegistersFrom(firstTempRegister)
+
+	// 普通赋值编译完成。
+	return nil
+}
+
+// compileAssignmentTarget 编译普通赋值左值地址。
+//
+// expression 必须是名称、点号字段或方括号索引左值。table/index 左值会立即求出 receiver
+// 和 key，实际写入延后到所有 RHS 求值之后，兼容 Lua 5.3 多重赋值冲突规则。
+func (generator *generator) compileAssignmentTarget(expression parser.Expression) (assignmentTarget, error) {
+	switch targetExpression := expression.(type) {
+	case *parser.NameExpression:
+		// 名称左值不需要提前分配地址寄存器，但 upvalue 名称要先于 RHS 登记。
+		target := assignmentTarget{name: targetExpression.Name, position: targetExpression.Position, resolvedUpvalue: -1, tableRegister: -1, keyRegister: -1}
+		if _, ok := generator.locals[targetExpression.Name]; ok {
+			// 当前 local 写回不涉及 upvalue 捕获，保持普通名称目标。
+			return target, nil
+		}
+		if targetExpression.Name == envUpvalueName {
+			// 未声明 `_ENV` 作为左值时，先登记环境 upvalue，避免 RHS 捕获顺序抢先。
+			target.resolvedUpvalue = generator.envUpvalueIndex()
+			target.resolvedEnv = true
+			return target, nil
+		}
+		upvalueIndex, captured, err := generator.resolveUpvalue(targetExpression.Name, targetExpression.Position)
+		if err != nil {
+			// upvalue 数量超过 Lua 5.3 上限时返回编译错误。
+			return assignmentTarget{}, err
+		}
+		if captured {
+			// 外层局部赋值需要在 RHS 之前登记，兼容 Lua 5.3 对赋值左值 upvalue 的枚举顺序。
+			target.resolvedUpvalue = upvalueIndex
+		}
+		return target, nil
+	case *parser.FieldAccessExpression:
+		// 点号字段先求 receiver，字段名作为字符串 key。
+		tableRegister := generator.allocateRegister()
+		if err := generator.compileExpressionTo(targetExpression.Receiver, tableRegister); err != nil {
+			// receiver 编译失败时释放已分配寄存器。
+			generator.releaseRegister(tableRegister)
+			return assignmentTarget{}, err
+		}
+		keyIndex := generator.addConstant(bytecode.StringConstant(targetExpression.Field))
+		keyOperand, keyRegister, err := generator.rkOperandForConstantIndex(keyIndex)
+		if err != nil {
+			// key 常量无法编码时释放 receiver 寄存器。
+			generator.releaseRegister(tableRegister)
+			return assignmentTarget{}, err
+		}
+		return assignmentTarget{tableRegister: tableRegister, keyOperand: keyOperand, keyRegister: keyRegister}, nil
+	case *parser.IndexExpression:
+		// 方括号索引先求 receiver 和 index，二者都必须早于 RHS 写入。
+		tableRegister := generator.allocateRegister()
+		keyRegister := generator.allocateRegister()
+		if err := generator.compileExpressionTo(targetExpression.Receiver, tableRegister); err != nil {
+			// receiver 编译失败时释放地址寄存器。
+			generator.releaseRegister(keyRegister)
+			generator.releaseRegister(tableRegister)
+			return assignmentTarget{}, err
+		}
+		if err := generator.compileExpressionTo(targetExpression.Index, keyRegister); err != nil {
+			// index 编译失败时释放地址寄存器。
+			generator.releaseRegister(keyRegister)
+			generator.releaseRegister(tableRegister)
+			return assignmentTarget{}, err
+		}
+		return assignmentTarget{tableRegister: tableRegister, keyOperand: keyRegister, keyRegister: keyRegister}, nil
+	default:
+		// parser 理论上已保证左值形态；这里保留错误便于暴露新语法缺口。
+		return assignmentTarget{}, fmt.Errorf("codegen unsupported assignment target %T", expression)
+	}
+}
+
+// compileAssignmentValues 编译普通赋值 RHS 并按左值数量调整结果。
+//
+// rights 是完整 RHS 表达式列表；targetCount 是左值数量；valueRegisters 长度必须等于
+// targetCount。若 RHS 不足补 nil；若最后一个参与赋值的 RHS 是函数调用、方法调用或
+// vararg 且没有多余 RHS，则展开到剩余左值；多余 RHS 仍会先求值以保留副作用。
+func (generator *generator) compileAssignmentValues(rights []parser.Expression, targetCount int, valueRegisters []int) error {
+	for index, register := range valueRegisters {
+		if index >= len(rights) {
+			// 右值不足时按 Lua 普通赋值语义补 nil。
+			generator.emitABC(bytecode.OpLoadNil, register, 0, 0)
+			continue
+		}
+		if index == len(rights)-1 {
+			// 最后一个 RHS 参与赋值且右值不多于左值时，允许多返回展开。
+			remaining := targetCount - index
+			expanded, err := generator.compileTrailingAssignmentValue(rights[index], register, remaining)
+			if err != nil {
+				// 尾部多返回表达式编译失败时返回错误。
+				return err
+			}
+			if expanded {
+				// 多返回表达式已写入剩余寄存器，结束主要 RHS 编译。
+				break
+			}
+		}
+		// 非尾部多返回表达式只产生一个结果。
+		if err := generator.compileExpressionTo(rights[index], register); err != nil {
+			// 普通 RHS 编译失败时返回错误。
+			return err
+		}
+	}
+	for expressionIndex := targetCount; expressionIndex < len(rights); expressionIndex++ {
+		// 多余 RHS 必须在写回前求值，以保留函数调用等副作用；其结果随后丢弃。
+		tempRegister := generator.allocateRegister()
+		if err := generator.compileExpressionTo(rights[expressionIndex], tempRegister); err != nil {
+			// 多余 RHS 编译失败时返回错误。
+			generator.releaseRegister(tempRegister)
+			return err
+		}
+		generator.releaseRegister(tempRegister)
+	}
+
+	// RHS 调整完成。
+	return nil
+}
+
+// compileTrailingAssignmentValue 尝试按多返回语义编译赋值尾部 RHS。
+//
+// 返回 expanded=true 表示 expression 已处理并写入 targetRegister 起的 remaining 个结果；
+// expanded=false 表示调用方需要按普通单值表达式编译。
+func (generator *generator) compileTrailingAssignmentValue(expression parser.Expression, targetRegister int, remaining int) (expanded bool, err error) {
+	switch typedExpression := expression.(type) {
+	case *parser.FunctionCallExpression:
+		// 函数调用按剩余左值数量请求固定返回值。
+		return true, generator.compileFunctionCallTo(typedExpression, targetRegister, remaining)
+	case *parser.MethodCallExpression:
+		// 方法调用同样按剩余左值数量请求固定返回值。
+		return true, generator.compileMethodCallTo(typedExpression, targetRegister, remaining)
+	case *parser.VarargExpression:
+		// vararg 按剩余左值数量展开，不足部分由 VM 补 nil。
+		generator.emitABC(bytecode.OpVararg, targetRegister, remaining+1, 0)
+		return true, nil
+	default:
+		// 普通表达式不具备多返回展开能力。
+		return false, nil
+	}
+}
+
+// emitAssignmentTarget 将已求值 RHS 写回左值目标。
+//
+// target 来自 compileAssignmentTarget；valueRegister 保存要写入的单个 Lua 值。名称写回
+// 会解析 local/upvalue/global，table/index 写回生成 SETTABLE。
+func (generator *generator) emitAssignmentTarget(target assignmentTarget, valueRegister int) error {
+	if target.name != "" {
+		if target.resolvedEnv {
+			// 左值地址阶段已确认 `_ENV` upvalue，直接写回当前环境。
+			generator.emitABC(bytecode.OpSetupVal, valueRegister, target.resolvedUpvalue, 0)
+			return nil
+		}
+		if target.resolvedUpvalue >= 0 {
+			// 左值地址阶段已确认外层 upvalue，直接写回该 upvalue 下标。
+			generator.emitABC(bytecode.OpSetupVal, valueRegister, target.resolvedUpvalue, 0)
+			return nil
+		}
+		// 名称左值按 local、upvalue、_ENV 顺序写回。
+		return generator.compileNameAssignmentFromRegister(&parser.NameExpression{Name: target.name}, valueRegister)
+	}
+	// table/index 左值使用先前求好的 receiver 和 key，不重新读取任何表达式。
+	generator.emitABC(bytecode.OpSetTable, target.tableRegister, target.keyOperand, valueRegister)
+
+	// table/index 写回完成。
+	return nil
+}
+
+// compileNameAssignmentFromRegister 将已求值寄存器写回名称左值。
+//
+// target 优先匹配当前 local，其次写回捕获 upvalue，最后按 Lua 5.3 语义写入 `_ENV[name]`。
+func (generator *generator) compileNameAssignmentFromRegister(target *parser.NameExpression, valueRegister int) error {
+	targetBinding, ok := generator.locals[target.Name]
+	if ok {
+		// 当前作用域 local 直接 MOVE，避免 RHS 临时寄存器生命周期泄漏。
+		generator.emitABC(bytecode.OpMove, targetBinding.register, valueRegister, 0)
+		return nil
+	}
+	if target.Name == envUpvalueName {
+		// 未声明的 `_ENV` 是 Lua 5.3 隐式环境 upvalue，赋值应替换当前环境而非写入全局字段。
+		generator.emitABC(bytecode.OpSetupVal, valueRegister, generator.envUpvalueIndex(), 0)
+		return nil
+	}
+	if upvalueIndex, captured, err := generator.resolveUpvalue(target.Name, target.Position); err != nil {
+		// upvalue 数量超过 Lua 5.3 上限时返回编译错误。
+		return err
+	} else if captured {
+		// 外层变量通过 SETUPVAL 写回捕获 upvalue。
+		generator.emitABC(bytecode.OpSetupVal, valueRegister, upvalueIndex, 0)
+		return nil
+	}
+
+	// 未声明名称写入当前 `_ENV` 全局表。
+	return generator.emitSetGlobalName(target.Name, valueRegister)
+}
+
+// compileNameAssignment 编译名称左值赋值。
+//
+// target 是赋值左侧名称；rights 是完整右侧表达式列表；index 指向当前左值下标。
+func (generator *generator) compileNameAssignment(target *parser.NameExpression, rights []parser.Expression, index int) error {
+	targetBinding, ok := generator.locals[target.Name]
+	if !ok {
+		if target.Name == envUpvalueName {
+			// 未声明 `_ENV` 写回隐式环境 upvalue，兼容模块内 `_ENV = {}`。
+			valueRegister := generator.allocateRegister()
+			if err := generator.compileAssignmentValueTo(rights, index, valueRegister); err != nil {
+				// 右值生成失败时释放临时寄存器并返回。
+				generator.releaseRegister(valueRegister)
+				return err
+			}
+			generator.emitABC(bytecode.OpSetupVal, valueRegister, generator.envUpvalueIndex(), 0)
+			generator.releaseRegister(valueRegister)
+			return nil
+		}
+		upvalueIndex, captured, err := generator.resolveUpvalue(target.Name, target.Position)
+		if err != nil {
+			// upvalue 数量超过 Lua 5.3 上限时返回编译错误。
+			return err
+		}
+		if captured {
+			// 未命中当前局部但命中外层局部/upvalue 时，赋值应写回捕获的 upvalue。
+			valueRegister := generator.allocateRegister()
+			if err := generator.compileAssignmentValueTo(rights, index, valueRegister); err != nil {
+				// 右值生成失败时释放临时寄存器并返回。
+				generator.releaseRegister(valueRegister)
+				return err
+			}
+			generator.emitABC(bytecode.OpSetupVal, valueRegister, upvalueIndex, 0)
+			generator.releaseRegister(valueRegister)
+			return nil
+		}
+		// 未声明且外层也未命中时，按 Lua 5.3 普通赋值语义写入当前 `_ENV` 表。
+		return generator.compileGlobalAssignment(target.Name, rights, index)
+	}
+	if index < len(rights) {
+		// 有右侧表达式时先写入临时寄存器，避免 `a = f(a)` 覆盖 RHS 读取旧局部值。
+		valueRegister := generator.allocateRegister()
+		if err := generator.compileExpressionTo(rights[index], valueRegister); err != nil {
+			// 右侧表达式编译失败时返回错误。
+			generator.releaseRegister(valueRegister)
+			return err
+		}
+		generator.emitABC(bytecode.OpMove, targetBinding.register, valueRegister, 0)
+		generator.releaseRegister(valueRegister)
+		return nil
+	}
+	// 右侧表达式不足时，Lua 赋值会补 nil。
+	generator.emitABC(bytecode.OpLoadNil, targetBinding.register, 0, 0)
+
+	// 名称赋值编译完成。
+	return nil
+}
+
+// compileFieldAssignment 编译点号字段左值赋值。
+//
+// expression.Receiver 在运行期必须是可写 table；字段名作为字符串 key 写入 SETTABLE。
+func (generator *generator) compileFieldAssignment(expression *parser.FieldAccessExpression, rights []parser.Expression, index int) error {
+	tableRegister := generator.allocateRegister()
+	if err := generator.compileExpressionTo(expression.Receiver, tableRegister); err != nil {
+		// 接收者表达式失败时释放临时寄存器。
+		generator.releaseRegister(tableRegister)
+		return err
+	}
+	valueRegister := generator.allocateRegister()
+	if err := generator.compileAssignmentValueTo(rights, index, valueRegister); err != nil {
+		// 右值表达式失败时释放临时寄存器。
+		generator.releaseRegister(valueRegister)
+		generator.releaseRegister(tableRegister)
+		return err
+	}
+	keyIndex := generator.addConstant(bytecode.StringConstant(expression.Field))
+	keyOperand, keyRegister, err := generator.rkOperandForConstantIndex(keyIndex)
+	if err != nil {
+		// 字段名常量无法编码或加载时释放临时寄存器。
+		generator.releaseRegister(valueRegister)
+		generator.releaseRegister(tableRegister)
+		return err
+	}
+	generator.emitABC(bytecode.OpSetTable, tableRegister, keyOperand, valueRegister)
+	generator.releaseOptionalRegister(keyRegister)
+	generator.releaseRegister(valueRegister)
+	generator.releaseRegister(tableRegister)
+
+	// 字段赋值编译完成。
+	return nil
+}
+
+// compileIndexAssignment 编译方括号索引左值赋值。
+//
+// expression.Index 会生成到临时寄存器并作为 SETTABLE 的 RK 寄存器 key。
+func (generator *generator) compileIndexAssignment(expression *parser.IndexExpression, rights []parser.Expression, index int) error {
+	tableRegister := generator.allocateRegister()
+	if err := generator.compileExpressionTo(expression.Receiver, tableRegister); err != nil {
+		// 接收者表达式失败时释放临时寄存器。
+		generator.releaseRegister(tableRegister)
+		return err
+	}
+	keyRegister := generator.allocateRegister()
+	if err := generator.compileExpressionTo(expression.Index, keyRegister); err != nil {
+		// 索引表达式失败时释放临时寄存器。
+		generator.releaseRegister(keyRegister)
+		generator.releaseRegister(tableRegister)
+		return err
+	}
+	valueRegister := generator.allocateRegister()
+	if err := generator.compileAssignmentValueTo(rights, index, valueRegister); err != nil {
+		// 右值表达式失败时释放临时寄存器。
+		generator.releaseRegister(valueRegister)
+		generator.releaseRegister(keyRegister)
+		generator.releaseRegister(tableRegister)
+		return err
+	}
+	generator.emitABC(bytecode.OpSetTable, tableRegister, keyRegister, valueRegister)
+	generator.releaseRegister(valueRegister)
+	generator.releaseRegister(keyRegister)
+	generator.releaseRegister(tableRegister)
+
+	// 索引赋值编译完成。
+	return nil
+}
+
+// compileAssignmentValueTo 编译赋值右侧单个结果。
+//
+// rights 是完整右侧表达式列表；index 超出范围时按 Lua 普通赋值语义写入 nil。
+func (generator *generator) compileAssignmentValueTo(rights []parser.Expression, index int, targetRegister int) error {
+	if index < len(rights) {
+		// 有对应右值时直接编译到目标寄存器。
+		return generator.compileExpressionTo(rights[index], targetRegister)
+	}
+	// 右值不足时补 nil。
+	generator.emitABC(bytecode.OpLoadNil, targetRegister, 0, 0)
+
+	// 赋值右值编译完成。
+	return nil
+}
+
+// compileLocalFunction 编译 local function 语句。
+//
+// local 名称先分配寄存器，再把子 Proto closure 写入该寄存器。
+func (generator *generator) compileLocalFunction(statement *parser.LocalFunctionStatement) error {
+	register := generator.allocateRegister()
+	generator.defineLocal(statement.Name, register, statement.Position)
+	childIndex, err := generator.compileChildProto(statement.Body)
+	if err != nil {
+		// 子函数编译失败时返回错误，外层不能继续使用无效 closure。
+		return err
+	}
+	generator.emitABx(bytecode.OpClosure, register, childIndex)
+
+	// local function 编译完成。
+	return nil
+}
+
+// functionExpressionClosureLine 返回函数表达式初始化时外层 CLOSURE 应暴露的源码行。
+//
+// expression 必须是 local 初始化中的函数表达式；Lua 5.3 line hook 会在 local 名称进入作用域前报告
+// 函数体 end 行，用于让 debug.getlocal 看到 `(*temporary)`。若函数体没有 end 行信息，则退回
+// function 关键字行，避免写入 0 行号。
+func functionExpressionClosureLine(expression *parser.FunctionExpression) lexer.Position {
+	if expression == nil || expression.Body == nil {
+		// 损坏表达式无法读取函数体，退回零值位置交由调用方保留原行号。
+		return lexer.Position{}
+	}
+	body := expression.Body
+	if body.LastLineDefined > 0 {
+		// 函数 end 行用于 local 初始化期 CLOSURE 的 line hook。
+		return lexer.Position{Line: body.LastLineDefined}
+	}
+	// 最后退回表达式自身位置。
+	return expression.Position
+}
+
+// compileFunctionStatement 编译普通 function 语句。
+//
+// 当前阶段支持函数名对应已有 local，未知函数名按 Lua 5.3 语义写入 `_ENV[name]`。
+func (generator *generator) compileFunctionStatement(statement *parser.FunctionStatement) error {
+	targetBinding, ok := generator.locals[statement.Name]
+	childIndex, err := generator.compileChildProto(statement.Body)
+	if err != nil {
+		// 子函数编译失败时返回错误。
+		return err
+	}
+	if !ok {
+		// 普通全局函数定义等价于 `_ENV[name] = closure`。
+		valueRegister := generator.allocateRegister()
+		generator.emitABx(bytecode.OpClosure, valueRegister, childIndex)
+		if err := generator.emitSetGlobalName(statement.Name, valueRegister); err != nil {
+			// 全局函数名常量无法 RK 编码时返回错误。
+			generator.releaseRegister(valueRegister)
+			return err
+		}
+		generator.releaseRegister(valueRegister)
+		return nil
+	}
+	generator.emitABx(bytecode.OpClosure, targetBinding.register, childIndex)
+
+	// 普通 function 编译完成。
+	return nil
+}
+
+// compileIfStatement 编译 if/elseif/else 条件分支语句。
+//
+// 每个条件先生成到临时寄存器，TEST C=0 搭配 JMP 表示 false/nil 时跳到下一分支。
+func (generator *generator) compileIfStatement(statement *parser.IfStatement) error {
+	var endJumpPCs []int
+	for clauseIndex := range statement.Clauses {
+		// 每个 if/elseif 条件失败时跳到下一 clause 或 else。
+		clause := statement.Clauses[clauseIndex]
+		conditionRegister := generator.allocateRegister()
+		if err := generator.withSourceLine(clause.Condition.Pos(), func() error {
+			// 条件表达式自身归属表达式起始行，避免继承 if/elseif 关键字行。
+			return generator.compileExpressionTo(clause.Condition, conditionRegister)
+		}); err != nil {
+			// 条件表达式编译失败时释放临时寄存器并返回。
+			generator.releaseRegister(conditionRegister)
+			return err
+		}
+		if err := generator.withSourceLine(clause.ThenPosition, func() error {
+			// TEST 表示进入 then 检查；多行 if 条件需要暴露 then 所在行给 line hook。
+			generator.emitABC(bytecode.OpTest, conditionRegister, 0, 0)
+			return nil
+		}); err != nil {
+			// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
+			generator.releaseRegister(conditionRegister)
+			return err
+		}
+		falseTargetPosition := generator.ifFalseTargetPosition(statement, clauseIndex)
+		falseJumpPC := 0
+		if err := generator.withSourceLine(falseTargetPosition, func() error {
+			// 条件失败时执行该 JMP，因此它的行号应指向下一分支、else 或 end。
+			falseJumpPC = generator.emitJump(0)
+			return nil
+		}); err != nil {
+			// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
+			generator.releaseRegister(conditionRegister)
+			return err
+		}
+		generator.releaseRegister(conditionRegister)
+		if err := generator.compileScopedBlock(clause.Block); err != nil {
+			// 分支 block 编译失败时返回错误。
+			return err
+		}
+		endJumpPC := 0
+		if err := generator.withSourceLine(statement.EndPosition, func() error {
+			// 分支执行完成后跳到 if 结束，该 JMP 被执行时应报告 end 行。
+			endJumpPC = generator.emitJump(0)
+			return nil
+		}); err != nil {
+			// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
+			return err
+		}
+		endJumpPCs = append(endJumpPCs, endJumpPC)
+		generator.patchJump(falseJumpPC, len(generator.proto.Code))
+	}
+	if statement.ElseBlock != nil {
+		// else block 没有条件，位于所有条件失败路径之后。
+		if err := generator.compileScopedBlock(statement.ElseBlock); err != nil {
+			// else block 编译失败时返回错误。
+			return err
+		}
+		elseEndJumpPC := 0
+		if err := generator.withSourceLine(statement.EndPosition, func() error {
+			// else 分支没有统一的 endJump；补一个零距离 JMP 让 line hook 能看到 end 行。
+			elseEndJumpPC = generator.emitJump(0)
+			return nil
+		}); err != nil {
+			// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
+			return err
+		}
+		generator.patchJump(elseEndJumpPC, len(generator.proto.Code))
+	}
+	for _, jumpPC := range endJumpPCs {
+		// 所有已执行分支统一跳过后续分支到 if 结束位置。
+		generator.patchJump(jumpPC, len(generator.proto.Code))
+	}
+
+	// if 语句编译完成。
+	return nil
+}
+
+// ifFalseTargetPosition 返回 if/elseif 条件失败时跳转指令应标注的源码行。
+//
+// statement 必须是完整 if 语句；clauseIndex 是当前条件分支下标。返回值优先指向下一 elseif，
+// 其次指向 else，最后指向 end，匹配 Lua line hook 在控制流跳转上的可见行。
+func (generator *generator) ifFalseTargetPosition(statement *parser.IfStatement, clauseIndex int) lexer.Position {
+	if clauseIndex+1 < len(statement.Clauses) {
+		// 失败后进入下一 elseif 条件，JMP 行号标注到 elseif 关键字。
+		return statement.Clauses[clauseIndex+1].Position
+	}
+	if statement.ElseBlock != nil {
+		// 失败后进入 else 分支，JMP 行号标注到 else 内第一条语句；空 else 则退回 end。
+		return firstBlockLinePosition(statement.ElseBlock, statement.EndPosition)
+	}
+	// 没有后续分支时失败直接越过 if，JMP 行号标注到 end 关键字。
+	return statement.EndPosition
+}
+
+// firstBlockLinePosition 返回 block 第一条可执行语句或 return 的源码位置。
+//
+// block 可为空；fallback 用于空 block 或无普通语句时保持 line hook 有稳定落点。
+func firstBlockLinePosition(block *parser.Block, fallback lexer.Position) lexer.Position {
+	if block == nil {
+		// 空 block 没有可执行语句，使用调用方提供的兜底位置。
+		return fallback
+	}
+	if len(block.Statements) > 0 {
+		// 普通语句优先作为 block 入口行。
+		return block.Statements[0].Pos()
+	}
+	if block.Return != nil {
+		// 只有 return 的 block 以 return 行作为入口行。
+		return block.Return.Pos()
+	}
+	return fallback
+}
+
+// compileWhileStatement 编译 while 条件循环语句。
+//
+// 条件每轮在循环头重新求值；TEST C=0 搭配下一条 JMP 表示 false/nil 时跳出循环。
+// 循环体结束后生成回跳到条件起点的 JMP。break/goto 的跳转列表会在后续控制流任务接入。
+func (generator *generator) compileWhileStatement(statement *parser.WhileStatement) error {
+	conditionPC := len(generator.proto.Code)
+	conditionRegister := generator.allocateRegister()
+	loopIndex := generator.beginLoop()
+	if err := generator.withSourceLine(statement.Condition.Pos(), func() error {
+		// while 条件表达式每轮执行时报告条件所在源码行。
+		return generator.compileExpressionTo(statement.Condition, conditionRegister)
+	}); err != nil {
+		// 条件表达式编译失败时释放临时寄存器并返回。
+		generator.releaseRegister(conditionRegister)
+		generator.discardLoop(loopIndex)
+		return err
+	}
+	if err := generator.withSourceLine(statement.DoPosition, func() error {
+		// TEST 对应 while 条件到 do 的控制检查，多行条件时需要保留 do 行。
+		generator.emitABC(bytecode.OpTest, conditionRegister, 0, 0)
+		return nil
+	}); err != nil {
+		// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
+		generator.releaseRegister(conditionRegister)
+		generator.discardLoop(loopIndex)
+		return err
+	}
+	falseJumpPC := 0
+	if err := generator.withSourceLine(statement.EndPosition, func() error {
+		// 条件失败时执行该 JMP，line hook 应能看到 while 的 end 行。
+		falseJumpPC = generator.emitJump(0)
+		return nil
+	}); err != nil {
+		// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
+		generator.releaseRegister(conditionRegister)
+		generator.discardLoop(loopIndex)
+		return err
+	}
+	generator.releaseRegister(conditionRegister)
+
+	if err := generator.compileScopedBlock(statement.Body); err != nil {
+		// 循环体编译失败时返回错误。
+		generator.discardLoop(loopIndex)
+		return err
+	}
+	backJumpPC := 0
+	if err := generator.withSourceLine(statement.Position, func() error {
+		// 循环体末尾回跳到 while 条件，执行该 JMP 时报告 while 关键字行。
+		backJumpPC = generator.emitJump(0)
+		return nil
+	}); err != nil {
+		// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
+		generator.discardLoop(loopIndex)
+		return err
+	}
+	if err := generator.patchJumpChecked(backJumpPC, conditionPC); err != nil {
+		// 循环体过长导致回跳超出 sBx 编码范围时，按 Lua 5.3 编译错误返回。
+		generator.discardLoop(loopIndex)
+		return err
+	}
+	generator.patchLoopContinues(loopIndex, conditionPC)
+	if err := generator.patchJumpChecked(falseJumpPC, len(generator.proto.Code)); err != nil {
+		// 跳出 while 的前向距离过长时同样报告控制结构过长。
+		generator.discardLoop(loopIndex)
+		return err
+	}
+	generator.patchLoopBreaks(loopIndex, len(generator.proto.Code))
+
+	// while 语句编译完成。
+	return nil
+}
+
+// compileRepeatUntilStatement 编译 repeat-until 后置条件循环。
+//
+// repeat 至少执行一次循环体；until 条件为 false/nil 时回跳到循环体起点，条件为真时继续向后。
+func (generator *generator) compileRepeatUntilStatement(statement *parser.RepeatUntilStatement) error {
+	bodyPC := len(generator.proto.Code)
+	loopIndex := generator.beginLoop()
+	scope := generator.beginScope()
+	if err := generator.compileBlock(statement.Body); err != nil {
+		// 循环体编译失败时恢复 repeat 作用域、丢弃 break 列表并返回。
+		generator.endScope(scope, len(generator.proto.Code))
+		generator.discardLoop(loopIndex)
+		return err
+	}
+	conditionPC := len(generator.proto.Code)
+	conditionRegister := generator.allocateRegister()
+	if err := generator.withSourceLine(statement.Condition.Pos(), func() error {
+		// until 后置条件表达式归属条件起始行。
+		return generator.compileExpressionTo(statement.Condition, conditionRegister)
+	}); err != nil {
+		// 条件表达式编译失败时释放寄存器、恢复 repeat 作用域并丢弃循环状态。
+		generator.releaseRegister(conditionRegister)
+		generator.endScope(scope, len(generator.proto.Code))
+		generator.discardLoop(loopIndex)
+		return err
+	}
+	// repeat-until 的条件表达式可以访问循环体 local；条件求值完成后立即闭合本轮作用域，
+	// 让回跳进入下一轮时重新创建 local/upvalue cell。
+	generator.endScope(scope, len(generator.proto.Code))
+	if err := generator.withSourceLine(statement.UntilPosition, func() error {
+		// TEST/JMP 都属于 until 条件检查，line hook 应报告 until 所在行。
+		generator.emitABC(bytecode.OpTest, conditionRegister, 0, 0)
+		return nil
+	}); err != nil {
+		// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
+		generator.releaseRegister(conditionRegister)
+		generator.discardLoop(loopIndex)
+		return err
+	}
+	backJumpPC := 0
+	if err := generator.withSourceLine(statement.UntilPosition, func() error {
+		// 条件失败时执行回跳，保持与 until 行一致。
+		backJumpPC = generator.emitJump(0)
+		return nil
+	}); err != nil {
+		// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
+		generator.releaseRegister(conditionRegister)
+		generator.discardLoop(loopIndex)
+		return err
+	}
+	if err := generator.patchJumpChecked(backJumpPC, bodyPC); err != nil {
+		// repeat-until 循环体过长时，回跳无法编码为 sBx，必须停止编译。
+		generator.releaseRegister(conditionRegister)
+		generator.discardLoop(loopIndex)
+		return err
+	}
+	generator.patchLoopContinues(loopIndex, conditionPC)
+	generator.releaseRegister(conditionRegister)
+	generator.patchLoopBreaks(loopIndex, len(generator.proto.Code))
+
+	// repeat-until 语句编译完成。
+	return nil
+}
+
+// compileBreakStatement 编译 break 语句。
+//
+// break 只能出现在循环体内；当前生成一条待回填 JMP，循环编译结束时统一跳到循环后一条指令。
+func (generator *generator) compileBreakStatement() error {
+	if len(generator.breakJumps) == 0 {
+		// parser 语义通常会拦截循环外 break；这里保留防御式错误。
+		return fmt.Errorf("codegen break outside loop")
+	}
+
+	breakPC := generator.emitJump(0)
+	lastLoopIndex := len(generator.breakJumps) - 1
+	generator.breakJumps[lastLoopIndex] = append(generator.breakJumps[lastLoopIndex], breakPC)
+	return nil
+}
+
+// compileContinueStatement 编译扩展 continue 语句。
+//
+// continue 只能出现在循环体内；当前生成一条待回填 JMP，由各循环在续迭代位置确定后统一回填。
+func (generator *generator) compileContinueStatement() error {
+	if len(generator.continueJumps) == 0 {
+		// parser 语义通常会拦截循环外 continue；这里保留防御式错误。
+		return fmt.Errorf("codegen continue outside loop")
+	}
+
+	continuePC := generator.emitJump(0)
+	lastLoopIndex := len(generator.continueJumps) - 1
+	generator.continueJumps[lastLoopIndex] = append(generator.continueJumps[lastLoopIndex], continuePC)
+	return nil
+}
+
+// compileFunctionCallStatement 编译函数调用语句。
+//
+// Lua 调用语句会丢弃全部返回值，因此 CALL 的 C 字段使用 1。
+func (generator *generator) compileFunctionCallStatement(statement *parser.FunctionCallStatement) error {
+	switch callExpression := statement.Call.(type) {
+	case *parser.FunctionCallExpression:
+		// 普通函数调用语句丢弃全部返回值。
+		callRegister := generator.allocateRegister()
+		if err := generator.compileFunctionCallTo(callExpression, callRegister, 0); err != nil {
+			// 调用表达式失败时释放调用寄存器后返回。
+			generator.releaseRegister(callRegister)
+			return err
+		}
+		generator.releaseRegistersFrom(callRegister)
+		return nil
+	case *parser.MethodCallExpression:
+		// method call 语句通过 SELF 生成隐式 self 参数，并丢弃全部返回值。
+		callRegister := generator.allocateRegister()
+		if err := generator.compileMethodCallTo(callExpression, callRegister, 0); err != nil {
+			// 调用表达式失败时释放调用寄存器后返回。
+			generator.releaseRegister(callRegister)
+			return err
+		}
+		generator.releaseRegistersFrom(callRegister)
+		return nil
+	default:
+		// 其他表达式不能作为调用语句。
+		return fmt.Errorf("codegen unsupported call statement %T", statement.Call)
+	}
+}
+
+// compileNumericFor 编译数值 for 循环。
+//
+// 寄存器布局为 R(A)=内部 index、R(A+1)=limit、R(A+2)=step、R(A+3)=外部控制槽。
+// 循环体开始时额外创建同名 body local 并从 R(A+3) 拷贝当前值，让闭包捕获每轮独立变量。
+func (generator *generator) compileNumericFor(statement *parser.NumericForStatement) error {
+	loopIndex := generator.beginLoop()
+	scope := generator.beginScope()
+	baseRegister := generator.allocateRegister()
+	limitRegister := generator.allocateRegister()
+	stepRegister := generator.allocateRegister()
+	externalRegister := generator.allocateRegister()
+	if err := generator.compileExpressionTo(statement.Init, baseRegister); err != nil {
+		// 初始值表达式必须生成到内部 index 寄存器。
+		generator.endScope(scope, len(generator.proto.Code))
+		generator.discardLoop(loopIndex)
+		return err
+	}
+	if err := generator.compileExpressionTo(statement.Limit, limitRegister); err != nil {
+		// 边界值表达式必须生成到 limit 寄存器。
+		generator.endScope(scope, len(generator.proto.Code))
+		generator.discardLoop(loopIndex)
+		return err
+	}
+	if statement.Step != nil {
+		// 显式步长生成到 step 寄存器。
+		if err := generator.compileExpressionTo(statement.Step, stepRegister); err != nil {
+			// 步长表达式编译失败时返回错误。
+			generator.endScope(scope, len(generator.proto.Code))
+			generator.discardLoop(loopIndex)
+			return err
+		}
+	} else {
+		// 缺省步长按 Lua 语义使用 integer 1。
+		stepIndex := generator.addConstant(bytecode.IntegerConstant(1))
+		generator.emitABx(bytecode.OpLoadK, stepRegister, stepIndex)
+	}
+	perIterationControl := blockContainsFunction(statement.Body)
+	if !perIterationControl {
+		// 无闭包捕获风险时复用 R(A+3) 作为可见循环变量，保持空循环指令数接近 Lua 5.3。
+		generator.defineLocal(statement.Name, externalRegister, statement.Position)
+	}
+	forPrepPC := generator.emitJumpFor(bytecode.OpForPrep, baseRegister)
+	bodyStartPC := len(generator.proto.Code)
+	bodyScope := generator.beginScope()
+	if perIterationControl {
+		// 循环体含闭包时，每轮创建同名可见局部，避免闭包共享 numeric for 控制槽。
+		visibleRegister := generator.allocateRegister()
+		generator.emitABC(bytecode.OpMove, visibleRegister, externalRegister, 0)
+		generator.defineLocal(statement.Name, visibleRegister, statement.Position)
+	}
+	if err := generator.compileBlock(statement.Body); err != nil {
+		// 循环体编译失败时返回错误。
+		generator.endScope(bodyScope, len(generator.proto.Code))
+		generator.endScope(scope, len(generator.proto.Code))
+		generator.discardLoop(loopIndex)
+		return err
+	}
+	generator.endScope(bodyScope, len(generator.proto.Code))
+	forLoopPC := generator.emitJumpFor(bytecode.OpForLoop, baseRegister)
+	generator.patchLoopContinues(loopIndex, forLoopPC)
+	generator.patchJump(forPrepPC, forLoopPC)
+	generator.patchJump(forLoopPC, bodyStartPC)
+	endMarkerPC := 0
+	if err := generator.withSourceLine(statement.EndPosition, func() error {
+		// FORLOOP 退出后顺序执行该零距离 JMP，用于向 line hook 暴露 end 行。
+		endMarkerPC = generator.emitJump(0)
+		return nil
+	}); err != nil {
+		// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
+		generator.endScope(scope, len(generator.proto.Code))
+		generator.discardLoop(loopIndex)
+		return err
+	}
+	generator.patchJump(endMarkerPC, len(generator.proto.Code))
+	generator.patchLoopBreaks(loopIndex, endMarkerPC)
+	if err := generator.withSourceLine(statement.EndPosition, func() error {
+		// 关闭循环局部变量的 close-only JMP 也归属 end 行，避免退出后误报 for 行。
+		generator.endScope(scope, len(generator.proto.Code))
+		return nil
+	}); err != nil {
+		// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
+		generator.discardLoop(loopIndex)
+		return err
+	}
+
+	// numeric for 作用域结束后释放循环寄存器和循环体局部变量。
+	return nil
+}
+
+// compileGenericFor 编译泛型 for 循环。
+//
+// 寄存器布局为 R(A)=迭代函数、R(A+1)=状态、R(A+2)=控制变量，R(A+3).. 保存迭代变量。
+func (generator *generator) compileGenericFor(statement *parser.GenericForStatement) error {
+	loopIndex := generator.beginLoop()
+	scope := generator.beginScope()
+	baseRegister := generator.allocateRegister()
+	stateRegister := generator.allocateRegister()
+	controlRegister := generator.allocateRegister()
+	iteratorRegisters := []int{baseRegister, stateRegister, controlRegister}
+	filledIteratorRegisters := 0
+	for iteratorIndex, iteratorExpression := range statement.Iterators {
+		if iteratorIndex >= len(iteratorRegisters) {
+			// 当前最小实现只接收 Lua 泛型 for 需要的前三个迭代表达式。
+			break
+		}
+		if iteratorIndex == len(statement.Iterators)-1 {
+			// 最后一个迭代表达式需要按泛型 for 协议展开到 iterator/state/control。
+			remaining := len(iteratorRegisters) - iteratorIndex
+			expandedIterator := true
+			switch expression := iteratorExpression.(type) {
+			case *parser.FunctionCallExpression:
+				if err := generator.compileFunctionCallTo(expression, iteratorRegisters[iteratorIndex], remaining); err != nil {
+					// 迭代函数调用编译失败时返回错误。
+					generator.endScope(scope, len(generator.proto.Code))
+					generator.discardLoop(loopIndex)
+					return err
+				}
+			case *parser.MethodCallExpression:
+				if err := generator.compileMethodCallTo(expression, iteratorRegisters[iteratorIndex], remaining); err != nil {
+					// 迭代方法调用编译失败时返回错误。
+					generator.endScope(scope, len(generator.proto.Code))
+					generator.discardLoop(loopIndex)
+					return err
+				}
+			case *parser.VarargExpression:
+				// vararg 作为最后迭代表达式时展开到剩余 iterator/state/control。
+				generator.emitABC(bytecode.OpVararg, iteratorRegisters[iteratorIndex], remaining+1, 0)
+			default:
+				// 普通迭代表达式只产生单个值，继续走通用表达式编译。
+				expandedIterator = false
+			}
+			if expandedIterator {
+				// 已经完成剩余 iterator/state/control 写入，不再继续编译后续迭代表达式。
+				filledIteratorRegisters = len(iteratorRegisters)
+				break
+			}
+		}
+		if err := generator.compileExpressionTo(iteratorExpression, iteratorRegisters[iteratorIndex]); err != nil {
+			// 任一迭代表达式编译失败时返回错误。
+			generator.endScope(scope, len(generator.proto.Code))
+			generator.discardLoop(loopIndex)
+			return err
+		}
+		filledIteratorRegisters = iteratorIndex + 1
+	}
+	for iteratorIndex := filledIteratorRegisters; iteratorIndex < len(iteratorRegisters); iteratorIndex++ {
+		// 缺失的 state/control 按 Lua 多返回值补 nil 的效果处理。
+		generator.emitABC(bytecode.OpLoadNil, iteratorRegisters[iteratorIndex], 0, 0)
+	}
+	// 迭代表达式编译可能使用 R(A+3).. 作为临时寄存器；循环变量必须紧跟隐藏三元组重新分配。
+	generator.releaseRegistersFrom(baseRegister + len(iteratorRegisters))
+	for _, name := range statement.Names {
+		// 迭代变量从 R(A+3) 开始，供 TFORCALL 写入。
+		register := generator.allocateRegister()
+		generator.defineLocal(name, register, statement.Position)
+	}
+	entryJumpPC := generator.emitJump(0)
+	bodyStartPC := len(generator.proto.Code)
+	if err := generator.compileBlock(statement.Body); err != nil {
+		// 循环体编译失败时返回错误。
+		generator.endScope(scope, len(generator.proto.Code))
+		generator.discardLoop(loopIndex)
+		return err
+	}
+	tforCallPosition := statement.Position
+	if len(statement.Iterators) > 0 {
+		// TFORCALL 运行期错误应指向迭代表达式所在行，而不是 for 关键字行。
+		tforCallPosition = statement.Iterators[0].Pos()
+	}
+	tforCallPC := 0
+	if err := generator.withSourceLine(tforCallPosition, func() error {
+		tforCallPC = generator.emitABC(bytecode.OpTForCall, baseRegister, 0, len(statement.Names))
+		return nil
+	}); err != nil {
+		// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
+		generator.endScope(scope, len(generator.proto.Code))
+		generator.discardLoop(loopIndex)
+		return err
+	}
+	generator.patchLoopContinues(loopIndex, tforCallPC)
+	tforLoopPC := generator.emitJumpFor(bytecode.OpTForLoop, baseRegister+2)
+	generator.patchJump(entryJumpPC, tforCallPC)
+	generator.patchJump(tforLoopPC, bodyStartPC)
+	endMarkerPC := 0
+	if err := generator.withSourceLine(statement.EndPosition, func() error {
+		// TFORLOOP 退出后顺序执行该零距离 JMP，用于向 line hook 暴露 end 行。
+		endMarkerPC = generator.emitJump(0)
+		return nil
+	}); err != nil {
+		// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
+		generator.endScope(scope, len(generator.proto.Code))
+		generator.discardLoop(loopIndex)
+		return err
+	}
+	generator.patchJump(endMarkerPC, len(generator.proto.Code))
+	generator.patchLoopBreaks(loopIndex, endMarkerPC)
+	if err := generator.withSourceLine(statement.EndPosition, func() error {
+		// 关闭循环局部变量的 close-only JMP 也归属 end 行，避免退出后误报 for 行。
+		generator.endScope(scope, len(generator.proto.Code))
+		return nil
+	}); err != nil {
+		// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
+		generator.discardLoop(loopIndex)
+		return err
+	}
+
+	// generic for 作用域结束后释放迭代寄存器和循环体局部变量。
+	return nil
+}
+
+// compileSwitchStatement 编译扩展 switch/case/default 语句。
+//
+// switch 主表达式只求值一次；每个 case 通过 EQ/JMP 测试匹配，命中分支执行后跳到 switch 结束。
+func (generator *generator) compileSwitchStatement(statement *parser.SwitchStatement) error {
+	switchRegister := generator.allocateRegister()
+	if err := generator.compileExpressionTo(statement.Expression, switchRegister); err != nil {
+		// 主表达式编译失败时释放临时寄存器并返回。
+		generator.releaseRegister(switchRegister)
+		return err
+	}
+
+	var endJumpPCs []int
+	for caseIndex := range statement.Cases {
+		// 每个 case 按源码顺序生成匹配检查，未命中则落到下一分支检查。
+		switchCase := statement.Cases[caseIndex]
+		var matchJumpPCs []int
+		for _, valueExpression := range switchCase.Values {
+			caseRegister := generator.allocateRegister()
+			if err := generator.compileExpressionTo(valueExpression, caseRegister); err != nil {
+				// case 表达式编译失败时释放寄存器并返回。
+				generator.releaseRegister(caseRegister)
+				generator.releaseRegister(switchRegister)
+				return err
+			}
+			if err := generator.withSourceLine(switchCase.ThenPosition, func() error {
+				// EQ A=1 时匹配成功会执行下一条 JMP；匹配失败会跳过该 JMP 继续检查后续 case 值。
+				generator.emitABC(bytecode.OpEq, 1, switchRegister, caseRegister)
+				return nil
+			}); err != nil {
+				// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
+				generator.releaseRegister(caseRegister)
+				generator.releaseRegister(switchRegister)
+				return err
+			}
+			matchJumpPCs = append(matchJumpPCs, generator.emitJump(0))
+			generator.releaseRegister(caseRegister)
+		}
+		nextCaseJumpPC := generator.emitJump(0)
+		bodyStartPC := len(generator.proto.Code)
+		for _, matchJumpPC := range matchJumpPCs {
+			// 所有命中的 case 值都跳到同一个 case body 入口。
+			generator.patchJump(matchJumpPC, bodyStartPC)
+		}
+		if err := generator.compileScopedBlock(switchCase.Body); err != nil {
+			// case body 编译失败时释放 switch 临时寄存器并返回。
+			generator.releaseRegister(switchRegister)
+			return err
+		}
+		endJumpPCs = append(endJumpPCs, generator.emitJump(0))
+		generator.patchJump(nextCaseJumpPC, len(generator.proto.Code))
+	}
+
+	if statement.DefaultBlock != nil {
+		// default 位于所有 case 未命中路径之后，无需额外匹配检查。
+		if err := generator.compileScopedBlock(statement.DefaultBlock); err != nil {
+			// default body 编译失败时释放 switch 临时寄存器并返回。
+			generator.releaseRegister(switchRegister)
+			return err
+		}
+	}
+	for _, endJumpPC := range endJumpPCs {
+		// 所有已执行 case 分支统一跳过后续分支到 switch 结束位置。
+		generator.patchJump(endJumpPC, len(generator.proto.Code))
+	}
+	generator.releaseRegister(switchRegister)
+
+	// switch 语句编译完成。
+	return nil
+}
+
+// compileChildProto 编译嵌套函数体并追加到当前 Proto。
+//
+// 函数参数会作为子函数局部变量写入连续寄存器，返回值是当前 Proto.p 的子原型索引。
+func (generator *generator) compileChildProto(body *parser.FunctionBody) (int, error) {
+	child := newChildGenerator(generator, generator.proto.Source)
+	child.proto.NumParams = uint8(len(body.Params))
+	child.proto.IsVararg = body.Vararg
+	child.proto.LineDefined = body.LineDefined
+	child.proto.LastLineDefined = body.LastLineDefined
+	for _, paramName := range body.Params {
+		// 参数寄存器从 R0 开始，既是入参位置也是局部变量位置。
+		register := child.allocateRegister()
+		child.defineLocal(paramName, register, body.Position)
+	}
+	if err := child.compileBlock(body.Body); err != nil {
+		// 子函数 block 编译失败时返回错误。
+		return 0, err
+	}
+	if err := child.patchPendingGotos(); err != nil {
+		// 子函数内 goto 必须只回填到子函数自己的 label。
+		return 0, err
+	}
+	if !child.returned {
+		// 子函数没有显式 return 时补默认无返回值 RETURN。
+		if err := child.withSourceLine(lexer.Position{Line: body.LastLineDefined}, func() error {
+			child.emitABC(bytecode.OpReturn, 0, 1, 0)
+			return nil
+		}); err != nil {
+			// 默认 RETURN 发射失败时返回错误；当前实现不会触发，仅保持控制流一致。
+			return 0, err
+		}
+	}
+	child.closeLocals(len(child.proto.Code))
+	child.proto.MaxStackSize = child.maxStackSize()
+
+	// 追加子 Proto 并返回索引。
+	return generator.proto.AddChild(child.proto), nil
+}
+
+// compileReturn 编译 return 语句。
+//
+// 当前阶段返回表达式会连续写入从 R0 开始的寄存器区间。
+func (generator *generator) compileReturn(statement *parser.ReturnStatement) error {
+	if len(statement.Values) == 1 {
+		// return 单个函数调用可生成 TAILCALL，保持 Lua 尾调用语义。
+		if callExpression, ok := statement.Values[0].(*parser.FunctionCallExpression); ok {
+			if err := generator.compileTailCallReturn(callExpression); err != nil {
+				// 尾调用生成失败时返回错误。
+				return err
+			}
+			generator.returned = true
+			return nil
+		}
+		if callExpression, ok := statement.Values[0].(*parser.MethodCallExpression); ok {
+			if err := generator.compileTailMethodCallReturn(callExpression); err != nil {
+				// method 尾调用生成失败时返回错误。
+				return err
+			}
+			generator.returned = true
+			return nil
+		}
+	}
+	if len(statement.Values) > 0 && isOpenListExpression(statement.Values[len(statement.Values)-1]) {
+		// return 列表末尾为开放表达式时，必须保留全部返回值。
+		return generator.compileOpenReturn(statement)
+	}
+	if len(statement.Values) == 0 {
+		// 空 return 不读取任何返回寄存器，固定使用 R0 起始的空返回区避免越过当前栈顶。
+		generator.emitABC(bytecode.OpReturn, 0, 1, 0)
+		generator.returned = true
+		return nil
+	}
+	firstTempRegister := generator.nextRegister
+	tempRegisters := make([]int, 0, len(statement.Values))
+	for range statement.Values {
+		// 返回表达式先写入临时区，避免 `return upvalue, local` 覆盖后续读取的局部寄存器。
+		tempRegisters = append(tempRegisters, generator.allocateRegister())
+	}
+	for index, expression := range statement.Values {
+		// 返回值按源码顺序求值，但暂不写入最终 RETURN 区间。
+		if err := generator.withSourceLine(expression.Pos(), func() error {
+			// return 列表可能跨行，表达式内部 CALL 应使用表达式自身行号。
+			return generator.compileExpressionTo(expression, tempRegisters[index])
+		}); err != nil {
+			// 任一返回表达式失败时释放临时区并终止 return 生成。
+			generator.releaseRegistersFrom(firstTempRegister)
+			return err
+		}
+	}
+	generator.emitABC(bytecode.OpReturn, firstTempRegister, len(statement.Values)+1, 0)
+	generator.releaseRegistersFrom(firstTempRegister)
+	generator.returned = true
+
+	// return 指令生成完成。
+	return nil
+}
+
+// compileOpenReturn 编译末尾为开放表达式的 return 列表。
+//
+// 所有返回表达式写入一段连续临时寄存器，最后使用 RETURN B=0 返回从临时起点到开放栈顶的全部值。
+func (generator *generator) compileOpenReturn(statement *parser.ReturnStatement) error {
+	firstTempRegister := generator.nextRegister
+	for index, expression := range statement.Values {
+		// 返回值按源码顺序写入连续临时区，避免覆盖仍需读取的局部变量。
+		targetRegister := firstTempRegister + index
+		generator.ensureRegister(targetRegister)
+		if index == len(statement.Values)-1 {
+			// 末尾开放表达式负责设置 VM openTop。
+			if err := generator.withSourceLine(expression.Pos(), func() error {
+				// 开放 return 的末尾表达式同样需要保留自身源码行。
+				return generator.compileOpenListExpressionTo(expression, targetRegister)
+			}); err != nil {
+				// 开放表达式编译失败时释放临时区并返回。
+				generator.releaseRegistersFrom(firstTempRegister)
+				return err
+			}
+			break
+		}
+		if err := generator.withSourceLine(expression.Pos(), func() error {
+			// 固定返回表达式按自身行号生成，避免多行 return 调试信息全部落在 return 行。
+			return generator.compileExpressionTo(expression, targetRegister)
+		}); err != nil {
+			// 固定返回表达式编译失败时释放临时区并返回。
+			generator.releaseRegistersFrom(firstTempRegister)
+			return err
+		}
+	}
+	generator.emitABC(bytecode.OpReturn, firstTempRegister, 0, 0)
+	generator.releaseRegistersFrom(firstTempRegister)
+	generator.returned = true
+
+	// 开放 return 编译完成。
+	return nil
+}
+
+// blockContainsFunction 判断 block 内是否出现函数定义或匿名函数表达式。
+//
+// 该辅助用于 numeric for codegen：只有循环体内存在闭包时，才需要为可见循环变量创建每轮
+// 独立 local；普通空循环保留更少指令，维持 debug count hook 与 Lua 5.3 官方范围接近。
+func blockContainsFunction(block *parser.Block) bool {
+	if block == nil {
+		// nil block 没有语句。
+		return false
+	}
+	for _, statement := range block.Statements {
+		if statementContainsFunction(statement) {
+			// 任一语句含函数定义即可启用保守拆分。
+			return true
+		}
+	}
+	if block.Return != nil {
+		for _, expression := range block.Return.Values {
+			if expressionContainsFunction(expression) {
+				// return 表达式中的匿名函数同样可能捕获循环变量。
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// statementContainsFunction 判断语句子树是否包含函数定义。
+//
+// 该扫描只服务 codegen 策略选择，不改变 AST；遇到嵌套 block 会继续递归，遇到函数体本身则
+// 立即返回 true，无需进入函数体内部。
+func statementContainsFunction(statement parser.Statement) bool {
+	switch typedStatement := statement.(type) {
+	case *parser.LocalFunctionStatement, *parser.FunctionStatement:
+		// 显式函数语句会创建 closure。
+		return true
+	case *parser.AssignmentStatement:
+		for _, expression := range typedStatement.Right {
+			if expressionContainsFunction(expression) {
+				// 赋值 RHS 中的匿名函数会创建 closure。
+				return true
+			}
+		}
+	case *parser.LocalAssignmentStatement:
+		for _, expression := range typedStatement.Values {
+			if expressionContainsFunction(expression) {
+				// local 初始化中的匿名函数会创建 closure。
+				return true
+			}
+		}
+	case *parser.IfStatement:
+		for _, clause := range typedStatement.Clauses {
+			if expressionContainsFunction(clause.Condition) || blockContainsFunction(clause.Block) {
+				// 条件或分支 block 中出现函数时返回 true。
+				return true
+			}
+		}
+		return blockContainsFunction(typedStatement.ElseBlock)
+	case *parser.WhileStatement:
+		return expressionContainsFunction(typedStatement.Condition) || blockContainsFunction(typedStatement.Body)
+	case *parser.RepeatUntilStatement:
+		return blockContainsFunction(typedStatement.Body) || expressionContainsFunction(typedStatement.Condition)
+	case *parser.NumericForStatement:
+		return expressionContainsFunction(typedStatement.Init) || expressionContainsFunction(typedStatement.Limit) || expressionContainsFunction(typedStatement.Step) || blockContainsFunction(typedStatement.Body)
+	case *parser.GenericForStatement:
+		for _, expression := range typedStatement.Iterators {
+			if expressionContainsFunction(expression) {
+				// 迭代表达式中的函数需要保守处理。
+				return true
+			}
+		}
+		return blockContainsFunction(typedStatement.Body)
+	case *parser.SwitchStatement:
+		if expressionContainsFunction(typedStatement.Expression) {
+			// switch 主表达式中的匿名函数需要保守处理。
+			return true
+		}
+		for _, switchCase := range typedStatement.Cases {
+			for _, value := range switchCase.Values {
+				if expressionContainsFunction(value) {
+					// case 匹配表达式中的匿名函数需要保守处理。
+					return true
+				}
+			}
+			if blockContainsFunction(switchCase.Body) {
+				// case body 中出现函数时返回 true。
+				return true
+			}
+		}
+		return blockContainsFunction(typedStatement.DefaultBlock)
+	case *parser.FunctionCallStatement:
+		return expressionContainsFunction(typedStatement.Call)
+	}
+	return false
+}
+
+// expressionContainsFunction 判断表达式子树是否包含匿名函数表达式。
+func expressionContainsFunction(expression parser.Expression) bool {
+	switch typedExpression := expression.(type) {
+	case nil:
+		// nil 表达式没有子树。
+		return false
+	case *parser.FunctionExpression:
+		// 匿名函数表达式会创建 closure。
+		return true
+	case *parser.TableConstructorExpression:
+		for _, field := range typedExpression.Fields {
+			if expressionContainsFunction(field) {
+				// 数组字段中出现函数。
+				return true
+			}
+		}
+		for _, field := range typedExpression.RecordFields {
+			if expressionContainsFunction(field.Value) {
+				// 记录字段值中出现函数。
+				return true
+			}
+		}
+		for _, field := range typedExpression.IndexFields {
+			if expressionContainsFunction(field.Key) || expressionContainsFunction(field.Value) {
+				// 动态 key 或 value 中出现函数。
+				return true
+			}
+		}
+	case *parser.PrefixExpression:
+		return expressionContainsFunction(typedExpression.Inner)
+	case *parser.FieldAccessExpression:
+		return expressionContainsFunction(typedExpression.Receiver)
+	case *parser.IndexExpression:
+		return expressionContainsFunction(typedExpression.Receiver) || expressionContainsFunction(typedExpression.Index)
+	case *parser.FunctionCallExpression:
+		if expressionContainsFunction(typedExpression.Function) {
+			// 被调表达式中出现函数。
+			return true
+		}
+		for _, argument := range typedExpression.Arguments {
+			if expressionContainsFunction(argument) {
+				// 调用参数中出现函数。
+				return true
+			}
+		}
+	case *parser.MethodCallExpression:
+		if expressionContainsFunction(typedExpression.Receiver) {
+			// method 接收者中出现函数。
+			return true
+		}
+		for _, argument := range typedExpression.Arguments {
+			if expressionContainsFunction(argument) {
+				// method 参数中出现函数。
+				return true
+			}
+		}
+	case *parser.UnaryExpression:
+		return expressionContainsFunction(typedExpression.Operand)
+	case *parser.BinaryExpression:
+		return expressionContainsFunction(typedExpression.Left) || expressionContainsFunction(typedExpression.Right)
+	}
+	return false
+}
+
+// compileExpressionTo 将表达式编译到指定目标寄存器。
+//
+// targetRegister 必须是当前函数可用寄存器；必要时会分配临时寄存器并在使用后释放。
+func (generator *generator) compileExpressionTo(expression parser.Expression, targetRegister int) error {
+	generator.ensureRegister(targetRegister)
+	switch typedExpression := expression.(type) {
+	case *parser.LiteralExpression:
+		// 字面量根据类型生成 LOADNIL、LOADBOOL 或 LOADK。
+		return generator.compileLiteralTo(typedExpression, targetRegister)
+	case *parser.NameExpression:
+		// 名称表达式当前只支持读取局部变量。
+		return generator.compileNameTo(typedExpression, targetRegister)
+	case *parser.UnaryExpression:
+		// 一元表达式先生成操作数再生成一元 opcode。
+		return generator.compileUnaryTo(typedExpression, targetRegister)
+	case *parser.BinaryExpression:
+		// 二元表达式包含普通算术/位运算和 and/or 短路逻辑。
+		return generator.compileBinaryTo(typedExpression, targetRegister)
+	case *parser.PrefixExpression:
+		// 括号表达式只影响解析优先级，codegen 直接生成内部表达式。
+		return generator.compileExpressionTo(typedExpression.Inner, targetRegister)
+	case *parser.TableConstructorExpression:
+		// table constructor 当前支持数组字段写入。
+		return generator.compileTableConstructorTo(typedExpression, targetRegister)
+	case *parser.FunctionExpression:
+		// 匿名函数表达式生成子 Proto closure。
+		childIndex, err := generator.compileChildProto(typedExpression.Body)
+		if err != nil {
+			// 子函数体编译失败时返回错误。
+			return err
+		}
+		generator.emitABx(bytecode.OpClosure, targetRegister, childIndex)
+		return nil
+	case *parser.FunctionCallExpression:
+		// 函数调用表达式默认请求一个返回值。
+		return generator.compileFunctionCallTo(typedExpression, targetRegister, 1)
+	case *parser.MethodCallExpression:
+		// method call 表达式默认请求一个返回值，并隐式传入 self。
+		return generator.compileMethodCallTo(typedExpression, targetRegister, 1)
+	case *parser.FieldAccessExpression:
+		// 点号字段访问编译为 GETTABLE，字段名作为字符串 key。
+		return generator.compileFieldAccessTo(typedExpression, targetRegister)
+	case *parser.IndexExpression:
+		// 方括号索引访问编译为 GETTABLE，索引表达式生成到 RK 寄存器。
+		return generator.compileIndexAccessTo(typedExpression, targetRegister)
+	case *parser.VarargExpression:
+		// vararg 表达式默认读取一个返回值。
+		generator.emitABC(bytecode.OpVararg, targetRegister, 2, 0)
+		return nil
+	default:
+		return fmt.Errorf("codegen unsupported expression %T", expression)
+	}
+}
+
+// compileTailCallReturn 编译 return f(...) 形式的尾调用。
+//
+// 普通函数调用会把被调函数放在 baseRegister，参数从 baseRegister+1 开始连续排列。
+func (generator *generator) compileTailCallReturn(expression *parser.FunctionCallExpression) error {
+	baseRegister := generator.allocateRegister()
+	argumentCount, err := generator.prepareFunctionCall(expression, baseRegister)
+	if err != nil {
+		// 函数或参数编译失败时返回错误。
+		generator.releaseRegister(baseRegister)
+		return err
+	}
+	callArgumentField := argumentCount + 1
+	if argumentCount < 0 {
+		// 开放实参列表通过 B=0 交给 VM 按开放栈顶确定参数数量。
+		callArgumentField = 0
+	}
+	generator.emitABC(bytecode.OpTailCall, baseRegister, callArgumentField, 0)
+	generator.emitABC(bytecode.OpReturn, baseRegister, 0, 0)
+	generator.releaseRegister(baseRegister)
+
+	// 尾调用 return 编译完成。
+	return nil
+}
+
+// compileTailMethodCallReturn 编译 return receiver:method(...) 形式的尾调用。
+//
+// method 调用会通过 SELF 指令把方法函数放在 baseRegister、self 放在 baseRegister+1，
+// 显式参数从 baseRegister+2 开始，因此 TAILCALL 的 B 字段需要包含隐式 self。
+func (generator *generator) compileTailMethodCallReturn(expression *parser.MethodCallExpression) error {
+	baseRegister := generator.allocateRegister()
+	argumentCount, err := generator.prepareMethodCall(expression, baseRegister)
+	if err != nil {
+		// 接收者、方法名或参数编译失败时返回错误。
+		generator.releaseRegister(baseRegister)
+		return err
+	}
+	callArgumentField := argumentCount + 2
+	if argumentCount < 0 {
+		// 开放实参列表通过 B=0 交给 VM 按开放栈顶确定参数数量。
+		callArgumentField = 0
+	}
+	generator.emitABC(bytecode.OpTailCall, baseRegister, callArgumentField, 0)
+	generator.emitABC(bytecode.OpReturn, baseRegister, 0, 0)
+	generator.releaseRegister(baseRegister)
+
+	// method 尾调用 return 编译完成。
+	return nil
+}
+
+// compileFunctionCallTo 编译普通函数调用表达式。
+//
+// resultCount 为 0 表示调用语句丢弃返回值；为 1 表示表达式需要一个返回值。
+func (generator *generator) compileFunctionCallTo(expression *parser.FunctionCallExpression, targetRegister int, resultCount int) error {
+	argumentCount, err := generator.prepareFunctionCall(expression, targetRegister)
+	if err != nil {
+		// 函数或参数编译失败时返回错误。
+		return err
+	}
+	callArgumentField := argumentCount + 1
+	if argumentCount < 0 {
+		// 最后一个实参是 vararg 时，CALL B=0 表示参数列表开放到当前栈顶。
+		callArgumentField = 0
+	}
+	generator.emitABC(bytecode.OpCall, targetRegister, callArgumentField, resultCount+1)
+
+	// 调用表达式编译完成。
+	return nil
+}
+
+// compileMethodCallTo 编译 Lua method call 表达式。
+//
+// targetRegister 保存方法函数；targetRegister+1 保存隐式 self，显式参数从 targetRegister+2 开始。
+func (generator *generator) compileMethodCallTo(expression *parser.MethodCallExpression, targetRegister int, resultCount int) error {
+	argumentCount, err := generator.prepareMethodCall(expression, targetRegister)
+	if err != nil {
+		// 接收者、方法名或参数编译失败时返回错误。
+		return err
+	}
+	callArgumentField := argumentCount + 2
+	if argumentCount < 0 {
+		// method call 的显式实参尾部为 vararg 时，同样使用开放参数列表。
+		callArgumentField = 0
+	}
+	generator.emitABC(bytecode.OpCall, targetRegister, callArgumentField, resultCount+1)
+
+	// method call 编译完成。
+	return nil
+}
+
+// prepareFunctionCall 将函数和参数写入连续寄存器区间。
+//
+// baseRegister 保存函数值，后续参数从 baseRegister+1 开始连续写入。
+func (generator *generator) prepareFunctionCall(expression *parser.FunctionCallExpression, baseRegister int) (int, error) {
+	if len(expression.Arguments) > 0 && baseRegister+len(expression.Arguments)+1 > maxProtoRegisters {
+		// 固定实参数量超过 CALL 可寻址寄存器区间时按 Lua 5.3 编译错误返回。
+		return 0, fmt.Errorf("too many registers")
+	}
+	if err := generator.compileExpressionTo(expression.Function, baseRegister); err != nil {
+		// 被调用函数表达式必须先写入 baseRegister。
+		return 0, err
+	}
+	for argumentIndex, argument := range expression.Arguments {
+		if isOpenListExpression(argument) && argumentIndex == len(expression.Arguments)-1 {
+			// 最后一个实参为 vararg/function call/method call 时必须按多返回值展开，供 CALL B=0 消费。
+			if err := generator.compileOpenListExpressionTo(argument, baseRegister+argumentIndex+1); err != nil {
+				// 开放实参编译失败时返回错误，避免外层 CALL 读取不完整参数区。
+				return 0, err
+			}
+			return -1, nil
+		}
+		// 每个参数写入函数寄存器之后的连续寄存器。
+		if err := generator.compileExpressionTo(argument, baseRegister+argumentIndex+1); err != nil {
+			// 任一参数编译失败时返回错误。
+			return 0, err
+		}
+	}
+
+	// 返回固定参数数量。
+	return len(expression.Arguments), nil
+}
+
+// prepareMethodCall 将方法、self 和显式参数写入连续寄存器区间。
+//
+// baseRegister 保存方法函数，baseRegister+1 保存 receiver/self，显式参数从 baseRegister+2 开始。
+func (generator *generator) prepareMethodCall(expression *parser.MethodCallExpression, baseRegister int) (int, error) {
+	if len(expression.Arguments) > 0 && baseRegister+len(expression.Arguments)+2 > maxProtoRegisters {
+		// method call 还需要隐式 self 寄存器，超过时按 Lua 5.3 编译错误返回。
+		return 0, fmt.Errorf("too many registers")
+	}
+	if err := generator.compileExpressionTo(expression.Receiver, baseRegister); err != nil {
+		// 接收者表达式必须先写入 baseRegister，随后 SELF 会搬到 baseRegister+1。
+		return 0, err
+	}
+	methodIndex := generator.addConstant(bytecode.StringConstant(expression.Method))
+	generator.ensureRegister(baseRegister + 1)
+	methodOperand, methodRegister, err := generator.rkOperandForConstantIndex(methodIndex)
+	if err != nil {
+		// 方法名常量无法编码或加载时返回错误，调用方会回收调用寄存器区间。
+		return 0, err
+	}
+	generator.emitABC(bytecode.OpSelf, baseRegister, baseRegister, methodOperand)
+	generator.releaseOptionalRegister(methodRegister)
+	for argumentIndex, argument := range expression.Arguments {
+		if isOpenListExpression(argument) && argumentIndex == len(expression.Arguments)-1 {
+			// 显式实参末尾为开放表达式时从 baseRegister+2 起展开，并保留隐式 self。
+			if err := generator.compileOpenListExpressionTo(argument, baseRegister+argumentIndex+2); err != nil {
+				// 开放实参编译失败时返回错误，避免 method call 读取不完整参数区。
+				return 0, err
+			}
+			return -1, nil
+		}
+		// 显式参数紧跟隐式 self 之后写入连续寄存器。
+		if err := generator.compileExpressionTo(argument, baseRegister+argumentIndex+2); err != nil {
+			// 任一参数编译失败时返回错误。
+			return 0, err
+		}
+	}
+
+	// 返回显式参数数量，调用方会额外计算隐式 self。
+	return len(expression.Arguments), nil
+}
+
+// compileLiteralTo 编译字面量表达式。
+//
+// Lua nil/boolean 使用专用指令，数字和字符串进入常量池并通过 LOADK 读取。
+func (generator *generator) compileLiteralTo(expression *parser.LiteralExpression, targetRegister int) error {
+	if expression.Kind == lexer.TokenKeyword {
+		// Lua 基础关键字字面量按文本区分 nil/true/false。
+		switch expression.Value {
+		case "nil":
+			// nil 使用 LOADNIL 写单个寄存器。
+			generator.emitABC(bytecode.OpLoadNil, targetRegister, 0, 0)
+			return nil
+		case "true":
+			// true 使用 LOADBOOL，C=0 表示不跳过下一条指令。
+			generator.emitABC(bytecode.OpLoadBool, targetRegister, 1, 0)
+			return nil
+		case "false":
+			// false 使用 LOADBOOL，B=0 表示 false。
+			generator.emitABC(bytecode.OpLoadBool, targetRegister, 0, 0)
+			return nil
+		default:
+			return fmt.Errorf("codegen unsupported keyword literal %q", expression.Value)
+		}
+	}
+	if expression.Kind == lexer.TokenString {
+		// 字符串常量去重后通过 LOADK 加载。
+		index := generator.addConstant(bytecode.StringConstant(expression.Value))
+		return generator.emitLoadConstantIndexTo(index, targetRegister)
+	}
+	if expression.Kind == lexer.TokenNumber {
+		// 数字按 lexer 分类保留 integer/number 双模型。
+		index := generator.addNumberConstant(expression.Number)
+		return generator.emitLoadConstantIndexTo(index, targetRegister)
+	}
+
+	// 其他 token kind 不是当前阶段支持的字面量。
+	return fmt.Errorf("codegen unsupported literal kind %s", expression.Kind)
+}
+
+// compileNameTo 编译名称表达式。
+//
+// 当前阶段优先读取局部和 upvalue；未知名称按 Lua 5.3 语义读取 `_ENV[name]`。
+func (generator *generator) compileNameTo(expression *parser.NameExpression, targetRegister int) error {
+	sourceBinding, ok := generator.locals[expression.Name]
+	if !ok {
+		if expression.Name == envUpvalueName {
+			// 未声明的 `_ENV` 名称读取当前函数环境 upvalue，而不是读取 `_ENV["_ENV"]`。
+			generator.emitABC(bytecode.OpGetUpval, targetRegister, generator.envUpvalueIndex(), 0)
+			return nil
+		}
+		// 未命中局部变量时尝试捕获外层局部变量为 upvalue。
+		upvalueIndex, captured, err := generator.resolveUpvalue(expression.Name, expression.Position)
+		if err != nil {
+			// upvalue 数量超过 Lua 5.3 上限时返回编译错误。
+			return err
+		}
+		if !captured {
+			// 未声明名称降级为 `_ENV[name]`，保持 Lua 5.3 全局变量语义。
+			return generator.compileGlobalNameTo(expression.Name, targetRegister)
+		}
+		generator.emitABC(bytecode.OpGetUpval, targetRegister, upvalueIndex, 0)
+		return nil
+	}
+	if sourceBinding.register == targetRegister {
+		// 源和目标相同时无需生成 MOVE。
+		return nil
+	}
+	generator.emitABC(bytecode.OpMove, targetRegister, sourceBinding.register, 0)
+
+	// 名称读取完成。
+	return nil
+}
+
+// compileFieldAccessTo 编译点号字段访问表达式。
+//
+// expression.Receiver 必须在运行期得到 table 或支持索引的值；字段名使用字符串常量作为 key。
+func (generator *generator) compileFieldAccessTo(expression *parser.FieldAccessExpression, targetRegister int) error {
+	tableRegister := generator.allocateRegister()
+	if err := generator.compileExpressionTo(expression.Receiver, tableRegister); err != nil {
+		// 接收者表达式失败时释放临时寄存器。
+		generator.releaseRegister(tableRegister)
+		return err
+	}
+	keyIndex := generator.addConstant(bytecode.StringConstant(expression.Field))
+	keyOperand, keyRegister, err := generator.rkOperandForConstantIndex(keyIndex)
+	if err != nil {
+		// 字段名常量无法编码或加载时释放接收者寄存器。
+		generator.releaseRegister(tableRegister)
+		return err
+	}
+	generator.emitABC(bytecode.OpGetTable, targetRegister, tableRegister, keyOperand)
+	generator.releaseOptionalRegister(keyRegister)
+	generator.releaseRegister(tableRegister)
+
+	// 点号字段访问编译完成。
+	return nil
+}
+
+// compileIndexAccessTo 编译方括号索引访问表达式。
+//
+// receiver 运行期必须可索引；index 表达式生成到临时寄存器并作为 GETTABLE 的 RK 寄存器参数。
+func (generator *generator) compileIndexAccessTo(expression *parser.IndexExpression, targetRegister int) error {
+	tableRegister := generator.allocateRegister()
+	keyRegister := generator.allocateRegister()
+	if err := generator.compileExpressionTo(expression.Receiver, tableRegister); err != nil {
+		// 接收者表达式失败时释放两个临时寄存器。
+		generator.releaseRegister(keyRegister)
+		generator.releaseRegister(tableRegister)
+		return err
+	}
+	if err := generator.compileExpressionTo(expression.Index, keyRegister); err != nil {
+		// 索引表达式失败时释放两个临时寄存器。
+		generator.releaseRegister(keyRegister)
+		generator.releaseRegister(tableRegister)
+		return err
+	}
+	generator.emitABC(bytecode.OpGetTable, targetRegister, tableRegister, keyRegister)
+	generator.releaseRegister(keyRegister)
+	generator.releaseRegister(tableRegister)
+
+	// 方括号索引访问编译完成。
+	return nil
+}
+
+// compileGlobalNameTo 编译全局名称读取。
+//
+// name 必须是 Lua 标识符；targetRegister 接收 `_ENV[name]` 的结果，常量索引超过 RK 上限时返回错误。
+func (generator *generator) compileGlobalNameTo(name string, targetRegister int) error {
+	keyIndex := generator.addConstant(bytecode.StringConstant(name))
+	keyOperand, keyRegister, err := generator.rkOperandForConstantIndex(keyIndex)
+	if err != nil {
+		// 全局名常量无法编码或加载时返回错误。
+		return err
+	}
+	if envBinding, ok := generator.locals[envUpvalueName]; ok {
+		// 当前作用域显式声明 local _ENV 时，未声明名称必须访问该表而不是顶层 globals。
+		generator.emitABC(bytecode.OpGetTable, targetRegister, envBinding.register, keyOperand)
+	} else {
+		// 没有 local _ENV 时沿用 upvalue 形式访问环境表。
+		envIndex := generator.envUpvalueIndex()
+		generator.emitABC(bytecode.OpGetTabUp, targetRegister, envIndex, keyOperand)
+	}
+	generator.releaseOptionalRegister(keyRegister)
+
+	// 全局名称读取完成。
+	return nil
+}
+
+// compileGlobalAssignment 编译普通名称的全局赋值。
+//
+// rights 是赋值语句完整右侧列表；index 是当前左值下标。缺少右值时按 Lua 语义写入 nil。
+func (generator *generator) compileGlobalAssignment(name string, rights []parser.Expression, index int) error {
+	valueRegister := generator.allocateRegister()
+	if index < len(rights) {
+		// 有对应右值时先求值到临时寄存器，随后写入 `_ENV[name]`。
+		if err := generator.compileExpressionTo(rights[index], valueRegister); err != nil {
+			// 右值生成失败时释放临时寄存器并返回。
+			generator.releaseRegister(valueRegister)
+			return err
+		}
+	} else {
+		// 右值不足时普通赋值会补 nil。
+		generator.emitABC(bytecode.OpLoadNil, valueRegister, 0, 0)
+	}
+	if err := generator.emitSetGlobalName(name, valueRegister); err != nil {
+		// 全局 key 无法编码时释放临时寄存器并返回。
+		generator.releaseRegister(valueRegister)
+		return err
+	}
+	generator.releaseRegister(valueRegister)
+
+	// 全局赋值编译完成。
+	return nil
+}
+
+// emitSetGlobalName 生成 `_ENV[name] = R(valueRegister)`。
+//
+// name 会写入当前函数常量池并通过 RK 编码；valueRegister 必须保存已求值的右侧结果。
+func (generator *generator) emitSetGlobalName(name string, valueRegister int) error {
+	keyIndex := generator.addConstant(bytecode.StringConstant(name))
+	keyOperand, keyRegister, err := generator.rkOperandForConstantIndex(keyIndex)
+	if err != nil {
+		// 全局名常量无法编码或加载时返回错误。
+		return err
+	}
+	if envBinding, ok := generator.locals[envUpvalueName]; ok {
+		// 当前作用域显式声明 local _ENV 时，未声明名称写入该环境表。
+		generator.emitABC(bytecode.OpSetTable, envBinding.register, keyOperand, valueRegister)
+	} else {
+		// 没有 local _ENV 时沿用 upvalue 形式写入环境表。
+		envIndex := generator.envUpvalueIndex()
+		generator.emitABC(bytecode.OpSetTabUp, envIndex, keyOperand, valueRegister)
+	}
+	generator.releaseOptionalRegister(keyRegister)
+
+	// 全局写入指令生成完成。
+	return nil
+}
+
+// compileUnaryTo 编译一元表达式。
+//
+// Lua 5.3 一元操作符映射到 UNM、BNOT、NOT 和 LEN。
+func (generator *generator) compileUnaryTo(expression *parser.UnaryExpression, targetRegister int) error {
+	operandRegister := generator.allocateRegister()
+	if err := generator.compileExpressionTo(expression.Operand, operandRegister); err != nil {
+		// 操作数编译失败时释放临时寄存器后返回。
+		generator.releaseRegister(operandRegister)
+		return err
+	}
+	if err := generator.withSourceLine(expression.Position, func() error {
+		switch expression.Operator {
+		case "-":
+			// 算术取负映射到 OP_UNM，行号使用一元操作符位置。
+			generator.emitABC(bytecode.OpUnm, targetRegister, operandRegister, 0)
+		case "~":
+			// 按位取反映射到 OP_BNOT，行号使用一元操作符位置。
+			generator.emitABC(bytecode.OpBNot, targetRegister, operandRegister, 0)
+		case "not":
+			// 逻辑取反映射到 OP_NOT，行号使用一元操作符位置。
+			generator.emitABC(bytecode.OpNot, targetRegister, operandRegister, 0)
+		case "#":
+			// 长度运算映射到 OP_LEN，行号使用一元操作符位置。
+			generator.emitABC(bytecode.OpLen, targetRegister, operandRegister, 0)
+		default:
+			return fmt.Errorf("codegen unsupported unary operator %q", expression.Operator)
+		}
+		return nil
+	}); err != nil {
+		generator.releaseRegister(operandRegister)
+		return err
+	}
+	generator.releaseRegister(operandRegister)
+
+	// 一元表达式编译完成。
+	return nil
+}
+
+// compileBinaryTo 编译二元表达式。
+//
+// `and` 与 `or` 使用短路生成，其余当前支持算术、位运算和连接。
+func (generator *generator) compileBinaryTo(expression *parser.BinaryExpression, targetRegister int) error {
+	if expression.Operator == "and" || expression.Operator == "or" {
+		// 短路逻辑必须避免无条件求值右侧表达式。
+		return generator.compileShortCircuitTo(expression, targetRegister)
+	}
+	if isComparisonOperator(expression.Operator) {
+		// 比较表达式使用测试指令和 LOADBOOL 合成布尔结果。
+		return generator.compileComparisonTo(expression, targetRegister)
+	}
+	if expression.Operator != ".." && !generator.registerHasActiveLocal(targetRegister) {
+		// 目标寄存器不是当前 local 时，可以安全复用它保存左操作数，降低长表达式寄存器压力。
+		return generator.compileBinaryWithReusableTargetTo(expression, targetRegister)
+	}
+	leftRegister := generator.allocateRegister()
+	rightRegister := generator.allocateRegister()
+	if err := generator.compileExpressionTo(expression.Left, leftRegister); err != nil {
+		// 左侧表达式失败时释放两个临时寄存器。
+		generator.releaseRegister(rightRegister)
+		generator.releaseRegister(leftRegister)
+		return err
+	}
+	if err := generator.compileExpressionTo(expression.Right, rightRegister); err != nil {
+		// 右侧表达式失败时释放两个临时寄存器。
+		generator.releaseRegister(rightRegister)
+		generator.releaseRegister(leftRegister)
+		return err
+	}
+	opCode, ok := binaryOpCode(expression.Operator)
+	if !ok {
+		// 不支持的二元操作符返回明确错误。
+		generator.releaseRegister(rightRegister)
+		generator.releaseRegister(leftRegister)
+		return fmt.Errorf("codegen unsupported binary operator %q", expression.Operator)
+	}
+	if err := generator.withSourceLine(expression.Position, func() error {
+		// 二元运算运行期错误应归因到操作符所在行，匹配 Lua 5.3 的 lineinfo。
+		generator.emitABC(opCode, targetRegister, leftRegister, rightRegister)
+		return nil
+	}); err != nil {
+		generator.releaseRegister(rightRegister)
+		generator.releaseRegister(leftRegister)
+		return err
+	}
+	generator.releaseRegister(rightRegister)
+	generator.releaseRegister(leftRegister)
+
+	// 二元表达式编译完成。
+	return nil
+}
+
+// compileBinaryWithReusableTargetTo 复用目标寄存器编译普通二元表达式。
+//
+// 该路径只在 targetRegister 不承载当前 active local 时使用；否则左操作数求值会提前覆盖
+// 后续右操作数可能读取的局部变量，破坏 Lua 5.3 左到右求值语义。
+func (generator *generator) compileBinaryWithReusableTargetTo(expression *parser.BinaryExpression, targetRegister int) error {
+	generator.ensureRegister(targetRegister)
+	if err := generator.compileExpressionTo(expression.Left, targetRegister); err != nil {
+		// 左操作数失败时不继续生成右操作数，保留原始错误。
+		return err
+	}
+	rightRegister := generator.allocateRegister()
+	if err := generator.compileExpressionTo(expression.Right, rightRegister); err != nil {
+		// 右操作数失败时释放临时寄存器并返回。
+		generator.releaseRegister(rightRegister)
+		return err
+	}
+	opCode, ok := binaryOpCode(expression.Operator)
+	if !ok {
+		// 不支持的二元操作符返回明确错误。
+		generator.releaseRegister(rightRegister)
+		return fmt.Errorf("codegen unsupported binary operator %q", expression.Operator)
+	}
+	if err := generator.withSourceLine(expression.Position, func() error {
+		// 复用目标寄存器路径同样需要把运行期错误归因到二元操作符所在行。
+		generator.emitABC(opCode, targetRegister, targetRegister, rightRegister)
+		return nil
+	}); err != nil {
+		generator.releaseRegister(rightRegister)
+		return err
+	}
+	generator.releaseRegister(rightRegister)
+
+	// 复用目标寄存器的二元表达式编译完成。
+	return nil
+}
+
+// registerHasActiveLocal 判断寄存器当前是否承载可见局部变量。
+//
+// 若返回 true，表达式编译不能把该寄存器作为中间结果覆盖，否则后续子表达式读取同名 local
+// 会看到错误值。
+func (generator *generator) registerHasActiveLocal(register int) bool {
+	for _, binding := range generator.locals {
+		// 任一可见 local 使用该寄存器时都视为不可复用。
+		if binding.register == register {
+			return true
+		}
+	}
+
+	// 没有 active local 占用该寄存器。
+	return false
+}
+
+// compileComparisonTo 编译比较表达式。
+//
+// targetRegister 接收 boolean 结果；比较操作符必须属于 `== ~= < <= > >=`。
+func (generator *generator) compileComparisonTo(expression *parser.BinaryExpression, targetRegister int) error {
+	leftRegister := generator.allocateRegister()
+	rightRegister := generator.allocateRegister()
+	if err := generator.compileExpressionTo(expression.Left, leftRegister); err != nil {
+		// 左侧表达式失败时释放比较临时寄存器。
+		generator.releaseRegister(rightRegister)
+		generator.releaseRegister(leftRegister)
+		return err
+	}
+	if err := generator.compileExpressionTo(expression.Right, rightRegister); err != nil {
+		// 右侧表达式失败时释放比较临时寄存器。
+		generator.releaseRegister(rightRegister)
+		generator.releaseRegister(leftRegister)
+		return err
+	}
+	opCode, expectedTrue, swapOperands := comparisonOpCode(expression.Operator)
+	leftOperand := leftRegister
+	rightOperand := rightRegister
+	if swapOperands {
+		// `>` 和 `>=` 通过交换左右操作数复用 Lua 5.3 的 LT/LE 指令。
+		leftOperand, rightOperand = rightRegister, leftRegister
+	}
+	generator.emitABC(opCode, expectedTrue, leftOperand, rightOperand)
+	generator.emitABC(bytecode.OpLoadBool, targetRegister, 1, 1)
+	generator.emitABC(bytecode.OpLoadBool, targetRegister, 0, 0)
+	generator.releaseRegister(rightRegister)
+	generator.releaseRegister(leftRegister)
+
+	// 比较表达式编译完成。
+	return nil
+}
+
+// compileShortCircuitTo 编译 and/or 短路表达式。
+//
+// 当前实现使用 TEST/JMP/MOVE 形态保留右侧惰性求值，后续跳转回填任务会扩展为公共 patch list。
+func (generator *generator) compileShortCircuitTo(expression *parser.BinaryExpression, targetRegister int) error {
+	if err := generator.compileExpressionTo(expression.Left, targetRegister); err != nil {
+		// 左侧表达式决定是否短路，必须先生成到目标寄存器。
+		return err
+	}
+	if expression.Operator == "and" {
+		// and 在左侧为 false/nil 时跳过右侧，TEST 的 C=0 表示期望假值。
+		generator.emitABC(bytecode.OpTest, targetRegister, 0, 0)
+	} else {
+		// or 在左侧为 truthy 时跳过右侧，TEST 的 C=1 表示期望真值。
+		generator.emitABC(bytecode.OpTest, targetRegister, 0, 1)
+	}
+	jumpPC := generator.emitJump(0)
+
+	// 未短路时覆盖目标寄存器为右侧表达式结果。
+	if err := generator.compileExpressionTo(expression.Right, targetRegister); err != nil {
+		// 右侧表达式失败时返回错误。
+		return err
+	}
+	generator.patchJump(jumpPC, len(generator.proto.Code))
+
+	// 短路表达式编译完成。
+	return nil
+}
+
+// compileTableConstructorTo 编译 table constructor 表达式。
+//
+// 默认数组字段使用 NEWTABLE 和 SETTABLE 写入 1-based integer key；末尾字段为 vararg 或函数调用
+// 时改用开放写入与 SETLIST B=0，让 `{..., f()}` 按 Lua 5.3 语义展开全部返回值。
+func (generator *generator) compileTableConstructorTo(expression *parser.TableConstructorExpression, targetRegister int) error {
+	generator.emitABC(bytecode.OpNewTable, targetRegister, 0, 0)
+	if len(expression.Fields) > 0 {
+		// table 数组字段末尾是开放表达式时必须展开为开放列表。
+		if isOpenListExpression(expression.Fields[len(expression.Fields)-1]) {
+			for fieldIndex, fieldExpression := range expression.Fields {
+				// SETLIST 消费 R(A+1)..，因此字段值必须紧跟 table 目标寄存器。
+				valueRegister := targetRegister + 1 + fieldIndex
+				generator.ensureRegister(valueRegister)
+				if fieldIndex == len(expression.Fields)-1 {
+					// 末尾开放表达式使用开放写入，SETLIST B=0 后续按 VM openTop 决定真实字段数。
+					if err := generator.compileOpenListExpressionTo(fieldExpression, valueRegister); err != nil {
+						// 开放表达式编译失败时停止构造。
+						return err
+					}
+					generator.emitABC(bytecode.OpSetList, targetRegister, 0, 1)
+					break
+				}
+				if err := generator.compileExpressionTo(fieldExpression, valueRegister); err != nil {
+					// 固定字段编译失败时停止构造，避免生成部分 table 初始化。
+					return err
+				}
+			}
+			// trailing vararg 的数组部分已经通过 SETLIST 完成。
+			goto recordFields
+		}
+	}
+	for fieldIndex, fieldExpression := range expression.Fields {
+		// Lua 数组字段从 1 开始编号。
+		valueRegister := generator.allocateRegister()
+		if err := generator.compileExpressionTo(fieldExpression, valueRegister); err != nil {
+			// 字段表达式编译失败时释放临时寄存器。
+			generator.releaseRegister(valueRegister)
+			return err
+		}
+		keyIndex := generator.addConstant(bytecode.IntegerConstant(int64(fieldIndex + 1)))
+		keyOperand, keyRegister, err := generator.rkOperandForConstantIndex(keyIndex)
+		if err != nil {
+			// 数组 key 常量无法编码或加载时释放字段值寄存器。
+			generator.releaseRegister(valueRegister)
+			return err
+		}
+		generator.emitABC(bytecode.OpSetTable, targetRegister, keyOperand, valueRegister)
+		generator.releaseOptionalRegister(keyRegister)
+		generator.releaseRegister(valueRegister)
+	}
+recordFields:
+	for _, recordField := range expression.RecordFields {
+		// 记录字段使用字段名字符串作为 table key。
+		valueRegister := generator.allocateRegister()
+		if err := generator.compileExpressionTo(recordField.Value, valueRegister); err != nil {
+			// 字段值表达式编译失败时释放临时寄存器。
+			generator.releaseRegister(valueRegister)
+			return err
+		}
+		keyIndex := generator.addConstant(bytecode.StringConstant(recordField.Name))
+		keyOperand, keyRegister, err := generator.rkOperandForConstantIndex(keyIndex)
+		if err != nil {
+			// 记录字段 key 常量无法编码或加载时释放字段值寄存器。
+			generator.releaseRegister(valueRegister)
+			return err
+		}
+		generator.emitABC(bytecode.OpSetTable, targetRegister, keyOperand, valueRegister)
+		generator.releaseOptionalRegister(keyRegister)
+		generator.releaseRegister(valueRegister)
+	}
+	for _, indexField := range expression.IndexFields {
+		// 动态键字段需要分别求值 key 和 value，再用 SETTABLE 写入 table。
+		keyRegister := generator.allocateRegister()
+		if err := generator.compileExpressionTo(indexField.Key, keyRegister); err != nil {
+			// key 表达式失败时释放临时寄存器。
+			generator.releaseRegister(keyRegister)
+			return err
+		}
+		valueRegister := generator.allocateRegister()
+		if err := generator.compileExpressionTo(indexField.Value, valueRegister); err != nil {
+			// value 表达式失败时释放两个临时寄存器。
+			generator.releaseRegister(valueRegister)
+			generator.releaseRegister(keyRegister)
+			return err
+		}
+		generator.emitABC(bytecode.OpSetTable, targetRegister, keyRegister, valueRegister)
+		generator.releaseRegister(valueRegister)
+		generator.releaseRegister(keyRegister)
+	}
+
+	// table constructor 编译完成。
+	return nil
+}
+
+// isOpenListExpression 判断表达式在列表尾部是否需要展开多返回值。
+//
+// Lua 5.3 只有 vararg、普通函数调用和 method call 在表达式列表最后位置保留多返回值。
+func isOpenListExpression(expression parser.Expression) bool {
+	switch expression.(type) {
+	case *parser.VarargExpression, *parser.FunctionCallExpression, *parser.MethodCallExpression:
+		// 这些表达式位于列表尾部时应展开为开放列表。
+		return true
+	default:
+		// 其他表达式只产生一个值。
+		return false
+	}
+}
+
+// compileOpenListExpressionTo 编译表达式列表尾部的开放表达式。
+//
+// targetRegister 是开放列表起始寄存器；编译结果必须设置 VM openTop，供后续 SETLIST B=0 消费。
+func (generator *generator) compileOpenListExpressionTo(expression parser.Expression, targetRegister int) error {
+	switch typedExpression := expression.(type) {
+	case *parser.VarargExpression:
+		// vararg B=0 写入全部 vararg 并设置开放栈顶。
+		generator.emitABC(bytecode.OpVararg, targetRegister, 0, 0)
+		return nil
+	case *parser.FunctionCallExpression:
+		// CALL C=0 写入被调函数全部返回值并设置开放栈顶。
+		return generator.compileFunctionCallTo(typedExpression, targetRegister, -1)
+	case *parser.MethodCallExpression:
+		// method call 同样通过 CALL C=0 展开全部返回值。
+		return generator.compileMethodCallTo(typedExpression, targetRegister, -1)
+	default:
+		// 调用方应先用 isOpenListExpression 判断，保留防御式错误。
+		return fmt.Errorf("codegen unsupported open list expression %T", expression)
+	}
+}
+
+// allocateRegister 分配一个寄存器。
+//
+// 返回值是当前函数内的寄存器下标；超过 Lua 5.3 A 字段上限时会在后续范围检查任务中报错。
+func (generator *generator) allocateRegister() int {
+	// 使用单调递增的 nextRegister 表示栈顶。
+	register := generator.nextRegister
+	generator.nextRegister++
+	if generator.nextRegister > generator.maxRegister {
+		// 记录最大寄存器数量，用于 Proto.MaxStackSize。
+		generator.maxRegister = generator.nextRegister
+	}
+
+	// 返回新分配的寄存器下标。
+	return register
+}
+
+// ensureRegister 确保指定寄存器纳入当前 Proto 栈大小统计。
+//
+// targetRegister 可能来自 return 固定目标或长期 local 寄存器，不一定通过 allocateRegister 分配。
+func (generator *generator) ensureRegister(targetRegister int) {
+	if targetRegister+1 > generator.maxRegister {
+		// MaxStackSize 表示需要的寄存器数量，因此使用下标加一更新。
+		generator.maxRegister = targetRegister + 1
+	}
+	if targetRegister >= generator.nextRegister {
+		// 直接写入高位寄存器时推进 nextRegister，避免后续临时寄存器覆盖目标。
+		generator.nextRegister = targetRegister + 1
+	}
+}
+
+// releaseRegister 释放最近分配的临时寄存器。
+//
+// 当前分配器按栈 discipline 工作；释放非栈顶寄存器会被忽略以保护长期 local 寄存器。
+func (generator *generator) releaseRegister(register int) {
+	if register == generator.nextRegister-1 {
+		// 只有栈顶临时寄存器可以安全回退。
+		generator.nextRegister--
+	}
+}
+
+// releaseOptionalRegister 释放可选临时寄存器。
+//
+// register 小于 0 表示调用方使用了 RK 常量内联路径，没有额外寄存器需要释放。
+func (generator *generator) releaseOptionalRegister(register int) {
+	if register >= 0 {
+		// 仅当 helper 实际分配寄存器时才回退临时寄存器水位。
+		generator.releaseRegister(register)
+	}
+}
+
+// maxStackSize 返回当前函数原型可写入 Proto 的栈大小。
+//
+// Proto.MaxStackSize 是 uint8；深表达式只被官方测试用于 load 成功性验证时可能产生较高的临时
+// 水位，这里饱和到可编码上限。实际 CALL 等连续寄存器需求会在对应生成路径提前报错。
+func (generator *generator) maxStackSize() uint8 {
+	if generator.maxRegister > maxProtoRegisters {
+		// 防止 uint8 回绕污染 Proto 元信息。
+		return uint8(maxProtoRegisters)
+	}
+
+	// 寄存器数量可被 Proto.MaxStackSize 精确表达。
+	return uint8(generator.maxRegister)
+}
+
+// releaseRegistersFrom 释放从指定寄存器开始的临时寄存器区间。
+//
+// startRegister 通常是调用语句的函数寄存器，调用参数位于其后，整个区间可一次回收。
+func (generator *generator) releaseRegistersFrom(startRegister int) {
+	if startRegister < generator.nextRegister {
+		// 只向下回退栈顶，不影响更低位置的长期 local。
+		generator.nextRegister = startRegister
+	}
+}
+
+// defineLocal 登记一个局部变量和调试生命周期。
+//
+// name 是 Lua 局部变量名；register 是对应寄存器；position 当前保留给后续行号映射扩展。
+func (generator *generator) defineLocal(name string, register int, position lexer.Position) {
+	localVar := bytecode.LocalVar{Name: name, Register: register, StartPC: len(generator.proto.Code), EndPC: len(generator.proto.Code)}
+	index := len(generator.proto.LocalVars)
+	generator.proto.LocalVars = append(generator.proto.LocalVars, localVar)
+	generator.locals[name] = localBinding{register: register, localVarIndex: index}
+}
+
+// beginScope 保存进入嵌套 block 前的 codegen 可见局部状态。
+//
+// 返回快照必须传给 endScope；该机制只恢复 codegen 解析名称所需的 locals 与寄存器水位，
+// 不回退已经生成的指令、常量或调试局部变量表。
+func (generator *generator) beginScope() scopeSnapshot {
+	locals := make(map[string]localBinding, len(generator.locals))
+	for name, binding := range generator.locals {
+		// 浅拷贝局部绑定，退出作用域时恢复外层同名变量。
+		locals[name] = binding
+	}
+	return scopeSnapshot{
+		locals:        locals,
+		localVarCount: len(generator.proto.LocalVars),
+		nextRegister:  generator.nextRegister,
+	}
+}
+
+// endScope 关闭嵌套 block 新增 local 并恢复外层 codegen 状态。
+//
+// endPC 是当前 block 结束时的指令位置；本作用域新增的 LocalVars 都会把 EndPC 回填到这里。
+func (generator *generator) endScope(scope scopeSnapshot, endPC int) {
+	if scope.localVarCount < len(generator.proto.LocalVars) {
+		// 退出包含新增 local 的 block 时发出 close-only JMP，运行期据此闭合被捕获的 open upvalue。
+		generator.emitAsBx(bytecode.OpJmp, scope.nextRegister+1, 0)
+		endPC = len(generator.proto.Code)
+	}
+	for index := scope.localVarCount; index < len(generator.proto.LocalVars); index++ {
+		// 所有本作用域新增局部变量都在当前 block 末尾结束。
+		generator.proto.LocalVars[index].EndPC = endPC
+	}
+	generator.locals = scope.locals
+	generator.nextRegister = scope.nextRegister
+}
+
+// closeLocals 将当前函数所有局部变量生命周期结束位置回填为 endPC。
+//
+// 未被嵌套 block 提前关闭的函数级 local 使用函数结束作为 EndPC。
+func (generator *generator) closeLocals(endPC int) {
+	for _, binding := range generator.locals {
+		// 每个局部变量的 EndPC 使用函数最终指令位置。
+		generator.proto.LocalVars[binding.localVarIndex].EndPC = endPC
+	}
+}
+
+// resolveUpvalue 解析并登记当前函数需要捕获的 upvalue。
+//
+// 返回值 upvalueIndex 是当前 Proto.Upvalues 下标；ok=false 表示外层也找不到该名称。
+// position 用于 Lua 5.3 upvalue 上限错误行号。
+func (generator *generator) resolveUpvalue(name string, position lexer.Position) (upvalueIndex int, ok bool, err error) {
+	if index, exists := generator.upvalues[name]; exists {
+		// 已捕获名称直接复用 upvalue 下标。
+		return index, true, nil
+	}
+	if generator.parent == nil {
+		// 顶层函数没有外层作用域，无法捕获 upvalue。
+		return 0, false, nil
+	}
+	if binding, exists := generator.parent.locals[name]; exists {
+		if len(generator.proto.Upvalues) >= maxProtoRegisters {
+			// Lua 5.3 单函数 upvalue 数量超过上限时报告源码行号。
+			return 0, true, tooManyUpvaluesError(position)
+		}
+		// 命中父函数 local 时，登记 InStack upvalue。
+		index := len(generator.proto.Upvalues)
+		generator.proto.Upvalues = append(generator.proto.Upvalues, bytecode.UpvalueDesc{Name: name, InStack: true, Index: uint8(binding.register)})
+		generator.upvalues[name] = index
+		return index, true, nil
+	}
+	parentIndex, exists, err := generator.parent.resolveUpvalue(name, position)
+	if err != nil {
+		// 外层捕获链路已经命中 upvalue 上限。
+		return 0, true, err
+	}
+	if !exists {
+		// 递归外层也找不到该名称。
+		return 0, false, nil
+	}
+	if len(generator.proto.Upvalues) >= maxProtoRegisters {
+		// 间接捕获同样受单函数 upvalue 数量上限约束。
+		return 0, true, tooManyUpvaluesError(position)
+	}
+	index := len(generator.proto.Upvalues)
+	generator.proto.Upvalues = append(generator.proto.Upvalues, bytecode.UpvalueDesc{Name: name, InStack: false, Index: uint8(parentIndex)})
+	generator.upvalues[name] = index
+
+	// 返回间接捕获的 upvalue 下标。
+	return index, true, nil
+}
+
+// tooManyUpvaluesError 构造 Lua 5.3 upvalue 上限错误。
+//
+// position 来自触发捕获的名称表达式；无有效行号时仍保留固定错误片段。
+func tooManyUpvaluesError(position lexer.Position) error {
+	if position.Line > 0 {
+		// 官方 errors.lua 同时匹配 `line N` 和 `too many upvalues`。
+		return fmt.Errorf("line %d: too many upvalues", position.Line)
+	}
+
+	// 缺少行号时仍返回核心错误文本。
+	return fmt.Errorf("too many upvalues")
+}
+
+// envUpvalueIndex 返回当前函数 `_ENV` upvalue 下标。
+//
+// 顶层 Proto 把 `_ENV` 描述为外部注入 upvalue；嵌套函数通过外层 `_ENV` 间接捕获。
+func (generator *generator) envUpvalueIndex() int {
+	if index, exists := generator.upvalues[envUpvalueName]; exists {
+		// 已登记 `_ENV` 时复用下标，避免重复 UpvalueDesc。
+		return index
+	}
+	index := len(generator.proto.Upvalues)
+	if generator.parent == nil {
+		// 顶层 `_ENV` 由 lua.LoadString 绑定到 State globals，不来自源码局部寄存器。
+		generator.proto.Upvalues = append(generator.proto.Upvalues, bytecode.UpvalueDesc{Name: envUpvalueName, InStack: true, Index: 0})
+		generator.upvalues[envUpvalueName] = index
+		return index
+	}
+	if binding, exists := generator.parent.locals[envUpvalueName]; exists {
+		// 父函数显式 local _ENV 时，嵌套函数必须捕获该寄存器作为自身环境。
+		generator.proto.Upvalues = append(generator.proto.Upvalues, bytecode.UpvalueDesc{Name: envUpvalueName, InStack: true, Index: uint8(binding.register)})
+		generator.upvalues[envUpvalueName] = index
+		return index
+	}
+	parentIndex := generator.parent.envUpvalueIndex()
+	// 嵌套函数捕获父函数的 `_ENV` upvalue，运行时 CLOSURE 会从父 closure.Upvalues 读取。
+	generator.proto.Upvalues = append(generator.proto.Upvalues, bytecode.UpvalueDesc{Name: envUpvalueName, InStack: false, Index: uint8(parentIndex)})
+	generator.upvalues[envUpvalueName] = index
+
+	// 返回当前函数中的 `_ENV` upvalue 下标。
+	return index
+}
+
+// emitJump 追加待回填 JMP 指令。
+//
+// sbx 使用 0 占位；调用方后续必须用 patchJump 写入真实目标。
+func (generator *generator) emitJump(a int) int {
+	// 先生成 sBx=0 占位跳转。
+	return generator.emitAsBx(bytecode.OpJmp, a, 0)
+}
+
+// emitJumpFor 追加待回填 for 循环跳转指令。
+//
+// opCode 必须是 FORPREP 或 FORLOOP；A 字段传入数值 for 的基准寄存器。
+func (generator *generator) emitJumpFor(opCode bytecode.OpCode, a int) int {
+	// 先生成 sBx=0 占位，由 patchJump 根据目标 pc 回填。
+	return generator.emitAsBx(opCode, a, 0)
+}
+
+// patchJump 将 jumpPC 处的 JMP 回填到 targetPC。
+//
+// targetPC 是跳转后要执行的指令位置；sBx 按 Lua pc 已经前移一条的语义计算。
+func (generator *generator) patchJump(jumpPC int, targetPC int) {
+	offset := targetPC - jumpPC - 1
+	original := generator.proto.Code[jumpPC]
+	generator.proto.Code[jumpPC] = bytecode.CreateAsBx(original.OpCode(), original.A(), offset)
+}
+
+// patchGotoJump 回填 goto 跳转，并在跳出局部作用域时设置 close 起点。
+//
+// jumpPC 指向 goto 的 JMP 占位；target 是 label 的目标 PC 与作用域水位；sourceNextRegister
+// 是 goto 发出时的寄存器水位。若源水位高于目标水位，说明 goto 离开了部分 local 作用域，
+// JMP A 必须设为目标水位加一，运行期据此关闭对应 open upvalue。
+func (generator *generator) patchGotoJump(jumpPC int, target labelInfo, sourceNextRegister int) {
+	offset := target.pc - jumpPC - 1
+	closeRegister := 0
+	if sourceNextRegister > target.nextRegister {
+		// Lua 5.3 JMP 的 A 字段保存待关闭寄存器加一，0 表示不关闭。
+		closeRegister = target.nextRegister + 1
+	}
+	generator.proto.Code[jumpPC] = bytecode.CreateAsBx(bytecode.OpJmp, closeRegister, offset)
+}
+
+// patchJumpChecked 校验 sBx 范围后回填跳转目标。
+//
+// jumpPC 必须指向待回填的 iAsBx 跳转指令；targetPC 是跳转后要执行的指令位置。offset 超出
+// Lua 5.3 sBx 可编码范围时返回包含 `too long` 的编译错误，兼容官方 constructs.lua 检查。
+func (generator *generator) patchJumpChecked(jumpPC int, targetPC int) error {
+	offset := targetPC - jumpPC - 1
+	if offset < -bytecode.MaxArgSBx || offset > bytecode.MaxArgSBx {
+		// sBx 只有 18 位 excess-K 表达，过长控制结构不能静默截断。
+		return fmt.Errorf("control structure too long")
+	}
+
+	// 范围合法时复用原有回填逻辑。
+	generator.patchJump(jumpPC, targetPC)
+	return nil
+}
+
+// patchPendingGotos 回填当前函数内所有前向 goto 跳转。
+//
+// parser 语义分析已保证 label 存在且不会非法跳入内层作用域；这里仅把名称解析为 PC。
+func (generator *generator) patchPendingGotos() error {
+	for _, pending := range generator.pendingGotos {
+		// 每个 goto 都必须能在当前函数 label 表中找到当前作用域可见的目标位置。
+		target, exists := generator.resolveGotoLabel(pending)
+		if !exists {
+			// 未定义 label 正常会被 parser 拦截；保留错误便于直接调用 codegen 时定位。
+			return fmt.Errorf("codegen undefined label %q", pending.label)
+		}
+		generator.patchGotoJump(pending.jumpPC, target, pending.sourceNextRegister)
+	}
+	generator.pendingGotos = nil
+
+	// 所有 goto 已完成回填。
+	return nil
+}
+
+// resolveGotoLabel 按 Lua label 可见性解析 goto 的目标。
+//
+// 解析优先选择同 block label，其次选择最近外层祖先 block label；兄弟或内层 block 的同名 label
+// 对当前 goto 不可见，不能被用于回填。
+func (generator *generator) resolveGotoLabel(pending pendingGoto) (labelInfo, bool) {
+	labels := generator.labelPCs[pending.label]
+	if pending.sourceScope == nil {
+		// 旧 parser 语义阶段可能没有给函数表达式内 block 标注 scope；若当前函数内同名
+		// label 唯一，仍可安全回填。多个同名 label 缺少 scope 时目标不唯一，保持失败。
+		return uniqueLabelInfo(labels)
+	}
+	var best labelInfo
+	found := false
+	for _, candidate := range labels {
+		if !generator.scopeContains(candidate.scope, pending.sourceScope) {
+			// label 所在作用域不是 goto 作用域的祖先时不可见。
+			continue
+		}
+		if !found || candidate.scope.Depth > best.scope.Depth {
+			// 越深的祖先作用域越接近 goto，优先作为跳转目标。
+			best = candidate
+			found = true
+		}
+	}
+	return best, found
+}
+
+// uniqueLabelInfo 在缺失 scope 信息时返回唯一 label 目标。
+//
+// labels 为空或包含多个同名目标时返回 false，避免在作用域信息不足时误解析 goto。
+func uniqueLabelInfo(labels []labelInfo) (labelInfo, bool) {
+	if len(labels) != 1 {
+		// 没有目标或目标不唯一时不能安全回填。
+		return labelInfo{}, false
+	}
+
+	// 唯一目标在当前函数内无歧义。
+	return labels[0], true
+}
+
+// scopeContains 判断 outer 是否为 inner 的同一作用域或祖先作用域。
+//
+// codegen 复用 parser 语义阶段的 ScopeInfo 父链，保证同名 label 在不相交 block 中不会互相抢占。
+func (generator *generator) scopeContains(outer *parser.ScopeInfo, inner *parser.ScopeInfo) bool {
+	if outer == nil || inner == nil {
+		// 缺失 scope 信息时无法证明可见，按不可见处理。
+		return false
+	}
+	for current := inner; current != nil; current = generator.scopes[current.ParentID] {
+		if current.ID == outer.ID {
+			// 在父链上命中 outer，说明 outer label 对 inner goto 可见。
+			return true
+		}
+		if current.ParentID == outer.ID {
+			// 子函数 codegen 只索引当前函数内已编译 block；直接父 scope 可能尚未在索引中，
+			// 但 ParentID 已足以证明 outer 是 inner 的父作用域。
+			return true
+		}
+		if current.ParentID < 0 {
+			// 到达函数顶层仍未命中 outer，说明不是祖先。
+			return false
+		}
+	}
+
+	// 父链索引缺失时按不可见处理。
+	return false
+}
+
+// beginLoop 开始记录一个循环内部的 break 跳转。
+//
+// 返回值是循环在 breakJumps 栈中的下标，必须传给 patchLoopBreaks 或 discardLoop。
+func (generator *generator) beginLoop() int {
+	// 每个循环拥有独立 break/continue 列表，嵌套循环只回填最内层控制流。
+	generator.breakJumps = append(generator.breakJumps, nil)
+	generator.continueJumps = append(generator.continueJumps, nil)
+	return len(generator.breakJumps) - 1
+}
+
+// discardLoop 丢弃编译失败循环的 break 记录。
+//
+// loopIndex 必须是 beginLoop 返回的当前最内层循环下标；异常路径不回填 break，避免污染外层循环。
+func (generator *generator) discardLoop(loopIndex int) {
+	if loopIndex < 0 || loopIndex >= len(generator.breakJumps) {
+		// 非法下标只可能来自内部调用错误，保持 no-op 避免二次 panic 掩盖原错误。
+		return
+	}
+	if loopIndex == len(generator.breakJumps)-1 {
+		// 正常路径丢弃最内层循环记录。
+		generator.breakJumps = generator.breakJumps[:loopIndex]
+		generator.continueJumps = generator.continueJumps[:loopIndex]
+		return
+	}
+
+	// 非最内层异常极少发生，保守清理到该层，避免外层 break 列表错位。
+	generator.breakJumps = generator.breakJumps[:loopIndex]
+	generator.continueJumps = generator.continueJumps[:loopIndex]
+}
+
+// patchLoopBreaks 回填当前循环内所有 break 跳转。
+//
+// loopIndex 必须是 beginLoop 返回的当前最内层循环下标；targetPC 是循环后一条指令位置。
+func (generator *generator) patchLoopBreaks(loopIndex int, targetPC int) {
+	if loopIndex < 0 || loopIndex >= len(generator.breakJumps) {
+		// 非法下标表示内部状态异常；没有可回填列表时保持 no-op。
+		return
+	}
+	for _, breakPC := range generator.breakJumps[loopIndex] {
+		// 每个 break 都跳到循环结束位置。
+		generator.patchJump(breakPC, targetPC)
+	}
+	generator.breakJumps = generator.breakJumps[:loopIndex]
+	generator.continueJumps = generator.continueJumps[:loopIndex]
+}
+
+// patchLoopContinues 回填当前循环内所有 continue 跳转。
+//
+// loopIndex 必须是 beginLoop 返回的当前最内层循环下标；targetPC 是最近循环的续迭代入口。
+func (generator *generator) patchLoopContinues(loopIndex int, targetPC int) {
+	if loopIndex < 0 || loopIndex >= len(generator.continueJumps) {
+		// 非法下标表示内部状态异常；没有可回填列表时保持 no-op。
+		return
+	}
+	for _, continuePC := range generator.continueJumps[loopIndex] {
+		// 每个 continue 都跳到当前循环的下一轮入口。
+		generator.patchJump(continuePC, targetPC)
+	}
+}
+
+// addConstant 追加或复用 Proto 常量。
+//
+// 返回值是常量表索引，可直接用于 LOADK 的 Bx 字段。
+func (generator *generator) addConstant(constant bytecode.Constant) int {
+	key := stableConstantKey(constant)
+	if index, ok := generator.constants[key]; ok {
+		// 常量已存在时复用索引，保持常量池去重。
+		return index
+	}
+	index := generator.proto.AddConstant(constant)
+	generator.constants[key] = index
+
+	// 返回新增常量索引。
+	return index
+}
+
+// addNumberConstant 按 lexer 数字分类添加常量。
+//
+// 十进制/十六进制整数生成 integer 常量，浮点生成 number 常量。
+func (generator *generator) addNumberConstant(number lexer.NumberLiteral) int {
+	switch number.Kind {
+	case lexer.NumberDecimalInteger, lexer.NumberHexInteger:
+		// integer 字面量必须保留精确整数语义。
+		return generator.addConstant(bytecode.IntegerConstant(number.Integer))
+	case lexer.NumberDecimalFloat, lexer.NumberHexFloat:
+		// float 字面量使用 Lua number 常量。
+		return generator.addConstant(bytecode.NumberConstant(number.Number))
+	default:
+		// 未知分类按源码文本保底为 string 不合适，因此返回 nil 常量触发后续测试暴露。
+		return generator.addConstant(bytecode.NilConstant())
+	}
+}
+
+// rkOperandForConstantIndex 返回常量索引对应的 RK 操作数。
+//
+// index 不超过 RK 常量范围时直接编码为常量操作数；超过 RK 范围时分配一个临时寄存器并
+// 生成 LOADK/LOADKX，把常量装入寄存器后返回寄存器操作数。返回的 register 小于 0 表示
+// 未分配临时寄存器；调用方必须在使用完指令后按栈顺序释放非负 register。
+func (generator *generator) rkOperandForConstantIndex(index int) (operand int, register int, err error) {
+	if index <= bytecode.MaxIndexRK {
+		// 小常量保留 Lua 5.3 RK 内联编码，避免额外 LOADK 指令。
+		return bytecode.RKAsK(index), -1, nil
+	}
+	register = generator.allocateRegister()
+	if err := generator.emitLoadConstantIndexTo(index, register); err != nil {
+		// 常量无法写入临时寄存器时立即释放，避免污染后续寄存器分配。
+		generator.releaseRegister(register)
+		return 0, -1, err
+	}
+
+	// RK 字段未设置 BitRK 时表示寄存器下标。
+	return register, register, nil
+}
+
+// emitLoadConstantIndexTo 生成把常量索引写入目标寄存器的指令。
+//
+// Lua 5.3 对 Bx 范围内常量使用 LOADK；超过 Bx 但仍在 Ax 范围内时使用 LOADKX + EXTRAARG。
+// 常量索引超过 Ax 字段时返回错误，调用方应终止 codegen。
+func (generator *generator) emitLoadConstantIndexTo(index int, targetRegister int) error {
+	if index <= bytecode.MaxArgBx {
+		// Bx 可容纳时使用单条 LOADK。
+		generator.emitABx(bytecode.OpLoadK, targetRegister, index)
+		return nil
+	}
+	if index <= bytecode.MaxArgAx {
+		// 大常量索引用 LOADKX 等待下一条 EXTRAARG 提供 Ax。
+		generator.emitABx(bytecode.OpLoadKX, targetRegister, 0)
+		generator.emitAx(bytecode.OpExtraArg, index)
+		return nil
+	}
+
+	// Ax 已经是 Lua 5.3 可编码的最大常量索引。
+	return fmt.Errorf("codegen constant index too large: %d", index)
+}
+
+// emitABC 追加 iABC 指令。
+//
+// 参数含义由 opcode 决定；调用方负责传入符合 Lua 5.3 字段宽度的值。
+func (generator *generator) emitABC(opCode bytecode.OpCode, a int, b int, c int) int {
+	// 使用 bytecode 统一指令构造器，避免本包重复维护位布局。
+	return generator.addInstruction(bytecode.CreateABC(opCode, a, b, c))
+}
+
+// emitABx 追加 iABx 指令。
+//
+// 主要用于 LOADK 和 CLOSURE 等使用 Bx 字段的 opcode。
+func (generator *generator) emitABx(opCode bytecode.OpCode, a int, bx int) int {
+	// 使用 bytecode 统一指令构造器，避免字段编码分叉。
+	return generator.addInstruction(bytecode.CreateABx(opCode, a, bx))
+}
+
+// emitAx 追加 iAx 指令。
+//
+// 当前用于 LOADKX 和 SETLIST 等需要 EXTRAARG 扩展参数的场景。
+func (generator *generator) emitAx(opCode bytecode.OpCode, ax int) int {
+	// 使用 bytecode 统一指令构造器，保持 Ax 位布局与 VM 解码一致。
+	return generator.addInstruction(bytecode.CreateAx(opCode, ax))
+}
+
+// emitAsBx 追加 iAsBx 指令。
+//
+// 当前用于短路逻辑生成的小范围 JMP。
+func (generator *generator) emitAsBx(opCode bytecode.OpCode, a int, sbx int) int {
+	// 使用 bytecode excess-K 编码构造有符号偏移指令。
+	return generator.addInstruction(bytecode.CreateAsBx(opCode, a, sbx))
+}
+
+// addInstruction 追加指令并同步写入当前源码行号。
+//
+// 指令和 LineInfo 必须保持一一对应；currentLine 为 0 时写入 0，debug 层会把它视为未知行。
+func (generator *generator) addInstruction(instruction bytecode.Instruction) int {
+	pc := generator.proto.AddInstruction(instruction)
+	generator.proto.LineInfo = append(generator.proto.LineInfo, generator.currentLine)
+	return pc
+}
+
+// stableConstantKey 返回常量去重 key。
+//
+// key 包含类型前缀，避免 integer(1)、number(1) 和 string("1") 互相碰撞。
+func stableConstantKey(constant bytecode.Constant) string {
+	switch constant.Kind {
+	case bytecode.ConstantNil:
+		// nil 常量全局唯一。
+		return "nil"
+	case bytecode.ConstantBoolean:
+		// boolean key 包含 true/false。
+		return fmt.Sprintf("bool:%v", constant.Bool)
+	case bytecode.ConstantInteger:
+		// integer key 保留十进制整数值。
+		return fmt.Sprintf("int:%d", constant.Integer)
+	case bytecode.ConstantNumber:
+		// number key 使用 %g 保持稳定且区分浮点类型前缀。
+		return fmt.Sprintf("num:%g", constant.Number)
+	case bytecode.ConstantString:
+		// string key 使用 %q 保留转义边界。
+		return fmt.Sprintf("str:%q", constant.String)
+	default:
+		return fmt.Sprintf("unknown:%d", constant.Kind)
+	}
+}
+
+// binaryOpCode 返回普通二元操作符对应的 Lua opcode。
+//
+// ok=false 表示当前 codegen 阶段尚未支持该操作符。
+func binaryOpCode(operator string) (bytecode.OpCode, bool) {
+	switch operator {
+	case "+":
+		// 加法映射到 OP_ADD。
+		return bytecode.OpAdd, true
+	case "-":
+		// 减法映射到 OP_SUB。
+		return bytecode.OpSub, true
+	case "*":
+		// 乘法映射到 OP_MUL。
+		return bytecode.OpMul, true
+	case "%":
+		// 取模映射到 OP_MOD。
+		return bytecode.OpMod, true
+	case "^":
+		// 幂运算映射到 OP_POW。
+		return bytecode.OpPow, true
+	case "/":
+		// 浮点除法映射到 OP_DIV。
+		return bytecode.OpDiv, true
+	case "//":
+		// 整除映射到 OP_IDIV。
+		return bytecode.OpIDiv, true
+	case "&":
+		// 位与映射到 OP_BAND。
+		return bytecode.OpBAnd, true
+	case "|":
+		// 位或映射到 OP_BOR。
+		return bytecode.OpBOr, true
+	case "~":
+		// 位异或映射到 OP_BXOR。
+		return bytecode.OpBXor, true
+	case "<<":
+		// 左移映射到 OP_SHL。
+		return bytecode.OpShl, true
+	case ">>":
+		// 右移映射到 OP_SHR。
+		return bytecode.OpShr, true
+	case "..":
+		// 连接当前按普通二元形态生成 OP_CONCAT。
+		return bytecode.OpConcat, true
+	default:
+		return 0, false
+	}
+}
+
+// isComparisonOperator 判断操作符是否属于 Lua 5.3 比较表达式。
+//
+// 返回 true 时 codegen 应使用比较测试指令，而不是普通二元算术指令。
+func isComparisonOperator(operator string) bool {
+	switch operator {
+	case "==", "~=", "<", "<=", ">", ">=":
+		// 六个 Lua 比较操作符都产生 boolean 表达式结果。
+		return true
+	default:
+		// 其他操作符交由算术、位运算、连接或短路逻辑处理。
+		return false
+	}
+}
+
+// comparisonOpCode 返回比较操作符对应的测试 opcode。
+//
+// expectedTrue 是 opcode A 字段；swapOperands 为 true 表示通过交换左右操作数复用 LT/LE。
+func comparisonOpCode(operator string) (opCode bytecode.OpCode, expectedTrue int, swapOperands bool) {
+	switch operator {
+	case "==":
+		// EQ A=1 表示比较为 false 时跳过下一条，配合 LOADBOOL 生成 true/false。
+		return bytecode.OpEq, 1, false
+	case "~=":
+		// EQ A=0 表示比较为 true 时跳过下一条，从而得到“不等于”的布尔结果。
+		return bytecode.OpEq, 0, false
+	case "<":
+		// LT A=1 直接表达小于为真。
+		return bytecode.OpLt, 1, false
+	case "<=":
+		// LE A=1 直接表达小于等于为真。
+		return bytecode.OpLe, 1, false
+	case ">":
+		// 大于通过交换操作数复用 LT。
+		return bytecode.OpLt, 1, true
+	case ">=":
+		// 大于等于通过交换操作数复用 LE。
+		return bytecode.OpLe, 1, true
+	default:
+		// 调用方应先通过 isComparisonOperator 过滤，默认值只作为防御兜底。
+		return 0, 0, false
+	}
+}

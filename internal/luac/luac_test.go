@@ -1,0 +1,255 @@
+package luac
+
+import (
+	"bytes"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/zing/go-lua-vm/bytecode"
+)
+
+// TestParseArgs 验证 gluac 参数解析覆盖 luac 兼容选项和开发 trace 选项。
+func TestParseArgs(t *testing.T) {
+	// 表驱动覆盖单输入、输出路径、重复 -l 和 trace 标记。
+	tests := []struct {
+		name string
+		args []string
+		want Options
+	}{
+		{
+			name: "compile output",
+			args: []string{"-o", "out.luac", "input.lua"},
+			want: Options{InputPath: "input.lua", OutputPath: "out.luac"},
+		},
+		{
+			name: "verbose list",
+			args: []string{"-l", "-l", "input.luac"},
+			want: Options{InputPath: "input.luac", OutputPath: DefaultOutputPath, ListLevel: 2},
+		},
+		{
+			name: "developer trace",
+			args: []string{"--opcode-trace", "--step-trace", "--minimal-disassembly", "input.lua"},
+			want: Options{InputPath: "input.lua", OutputPath: DefaultOutputPath, OpcodeTrace: true, StepTrace: true, MinimalDisassembly: true},
+		},
+	}
+	for _, test := range tests {
+		// 每个用例独立解析，避免状态互相污染。
+		t.Run(test.name, func(t *testing.T) {
+			got, err := ParseArgs(test.args)
+			if err != nil {
+				// 参数应合法，错误代表解析器回归。
+				t.Fatalf("ParseArgs error: %v", err)
+			}
+			if got != test.want {
+				// Options 必须逐字段稳定，便于 CLI 行为可预测。
+				t.Fatalf("Options mismatch: got=%+v want=%+v", got, test.want)
+			}
+		})
+	}
+}
+
+// TestParseArgsRejectsInvalidInput 验证参数错误会在读取文件前暴露。
+func TestParseArgsRejectsInvalidInput(t *testing.T) {
+	// 每个参数组合都应返回明确错误。
+	invalidArgs := [][]string{
+		{"-o"},
+		{"--unknown", "input.lua"},
+		{"one.lua", "two.lua"},
+		{},
+	}
+	for _, args := range invalidArgs {
+		// 参数解析失败即可，不需要断言完整错误文案。
+		if _, err := ParseArgs(args); err == nil {
+			// 没有错误会导致 CLI 后续行为歧义。
+			t.Fatalf("ParseArgs(%v) succeeded unexpectedly", args)
+		}
+	}
+}
+
+// TestDumpSourceAndDisassembleChunk 验证源码可编译为 binary chunk 且可反汇编。
+func TestDumpSourceAndDisassembleChunk(t *testing.T) {
+	// 使用当前 codegen 已支持的最小源码，避免跨越 VM 执行依赖。
+	chunk, err := DumpSource("local x = 1\nreturn x\n", "@unit.lua", false)
+	if err != nil {
+		// 编译失败时附加最小反汇编帮助定位。
+		t.Fatalf("DumpSource error: %v\n%s", err, MinimalDisassembly("local x = 1\nreturn x\n", "@unit.lua"))
+	}
+	if !bytes.HasPrefix(chunk, []byte(bytecode.ChunkSignature)) {
+		// binary chunk 必须以 Lua 5.3 签名开头。
+		t.Fatalf("chunk signature mismatch: % x", chunk[:4])
+	}
+	text, err := DisassembleChunk(chunk)
+	if err != nil {
+		// 刚生成的 chunk 必须能被 loader 读取。
+		t.Fatalf("DisassembleChunk error: %v", err)
+	}
+	if !strings.Contains(text, "LOADK") || !strings.Contains(text, "RETURN") {
+		// 反汇编至少应包含当前源码对应的核心指令。
+		t.Fatalf("disassembly missing opcodes:\n%s", text)
+	}
+}
+
+// TestDebugTraceAndMinimalDisassembly 验证 debug dump、opcode trace、step trace 和最小反汇编。
+func TestDebugTraceAndMinimalDisassembly(t *testing.T) {
+	// 先编译 Proto，后续所有调试文本都复用同一产物。
+	proto, err := CompileSource("local x = 1\nreturn x\n", "@trace.lua")
+	if err != nil {
+		// 编译失败说明测试源码或 codegen 出现回归。
+		t.Fatalf("CompileSource error: %v", err)
+	}
+	debugText := DebugDumpProto(proto)
+	if !strings.Contains(debugText, "lineinfo=") || !strings.Contains(debugText, "local[0]") {
+		// debug dump 必须暴露 lineinfo 和 local var，满足 Proto 调试需求。
+		t.Fatalf("debug dump missing details:\n%s", debugText)
+	}
+	opcodeTrace := OpcodeTraceProto(proto)
+	if !strings.Contains(opcodeTrace, "opcode-trace main") || !strings.Contains(opcodeTrace, "op=LOADK") {
+		// opcode trace 必须按 pc 输出 opcode 名称。
+		t.Fatalf("opcode trace missing details:\n%s", opcodeTrace)
+	}
+	stepTrace := StepTraceProto(proto)
+	if !strings.Contains(stepTrace, "step-trace main") || !strings.Contains(stepTrace, "A=") {
+		// step trace 必须包含寄存器字段，便于对照 VM Step。
+		t.Fatalf("step trace missing details:\n%s", stepTrace)
+	}
+	minimal := MinimalDisassemblyProto(proto)
+	if strings.Contains(minimal, "constants") || !strings.Contains(minimal, "RETURN") {
+		// 最小反汇编应保持短文本，但仍包含 opcode。
+		t.Fatalf("minimal disassembly mismatch:\n%s", minimal)
+	}
+}
+
+// TestStripDebugKeepsExecutableShape 验证 -s 只剥离调试信息不破坏字节码结构。
+func TestStripDebugKeepsExecutableShape(t *testing.T) {
+	// 编译带局部变量的源码，确保 strip 前存在调试表。
+	proto, err := CompileSource("local x = 1\nreturn x\n", "@strip.lua")
+	if err != nil {
+		// 编译失败说明测试源码或 codegen 出现回归。
+		t.Fatalf("CompileSource error: %v", err)
+	}
+	stripped := StripDebug(proto)
+	if len(stripped.Code) != len(proto.Code) || len(stripped.Constants) != len(proto.Constants) {
+		// strip 不应改变指令和常量，否则 binary chunk 语义会变化。
+		t.Fatalf("stripped shape mismatch: code=%d/%d constants=%d/%d", len(stripped.Code), len(proto.Code), len(stripped.Constants), len(proto.Constants))
+	}
+	if len(stripped.LineInfo) != 0 || len(stripped.LocalVars) != len(proto.LocalVars) || stripped.LocalVars[0].Name != "" {
+		// lineinfo 应被剥离；local 生命周期保留但名称清空，供 stripped chunk 枚举 temporary local。
+		t.Fatalf("debug tables not stripped: lineinfo=%v locals=%v", stripped.LineInfo, stripped.LocalVars)
+	}
+	if len(proto.LocalVars) == 0 {
+		// 原始 Proto 的已实现调试表不能被 StripDebug 修改。
+		t.Fatalf("original proto was modified: lineinfo=%v locals=%v", proto.LineInfo, proto.LocalVars)
+	}
+}
+
+// TestRunCompileAndList 验证 cmd 级 Run 可写出 chunk 并读取 chunk 反汇编。
+func TestRunCompileAndList(t *testing.T) {
+	// 使用临时目录隔离输入输出文件。
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "input.lua")
+	outputPath := filepath.Join(dir, "out.luac")
+	if err := os.WriteFile(sourcePath, []byte("local x = 1\nreturn x\n"), 0o644); err != nil {
+		// 测试夹具写入失败时无法继续。
+		t.Fatalf("write source: %v", err)
+	}
+	if err := Run([]string{"-o", outputPath, sourcePath}, Streams{}); err != nil {
+		// 正常编译写出不应失败。
+		t.Fatalf("Run compile error: %v", err)
+	}
+	outputBytes, err := os.ReadFile(outputPath)
+	if err != nil {
+		// 输出文件必须存在。
+		t.Fatalf("read output: %v", err)
+	}
+	if !bytes.HasPrefix(outputBytes, []byte(bytecode.ChunkSignature)) {
+		// 输出内容必须是 binary chunk。
+		t.Fatalf("output is not a chunk: % x", outputBytes[:4])
+	}
+
+	var stdout bytes.Buffer
+	if err := Run([]string{"-l", "-l", outputPath}, Streams{Stdout: &stdout}); err != nil {
+		// 反汇编刚生成的 chunk 不应失败。
+		t.Fatalf("Run list error: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "LOADK") || !strings.Contains(stdout.String(), "debug main") {
+		// -l -l 必须包含反汇编和 debug dump。
+		t.Fatalf("list output missing details:\n%s", stdout.String())
+	}
+}
+
+// TestAttachMinimalDisassemblyOnFailure 验证测试失败时才输出最小反汇编。
+func TestAttachMinimalDisassemblyOnFailure(t *testing.T) {
+	// 成功 reporter 不应产生日志。
+	passingReporter := &fakeFailureReporter{}
+	AttachMinimalDisassemblyOnFailure(passingReporter, "local x = 1\nreturn x\n", "@pass.lua")
+	passingReporter.runCleanups()
+	if passingReporter.logs.Len() != 0 {
+		// 成功测试不应输出最小反汇编，避免污染正常日志。
+		t.Fatalf("passing reporter logs = %q", passingReporter.logs.String())
+	}
+
+	// 失败 reporter 应在 cleanup 阶段输出最小反汇编。
+	failingReporter := &fakeFailureReporter{failed: true}
+	AttachMinimalDisassemblyOnFailure(failingReporter, "local x = 1\nreturn x\n", "@fail.lua")
+	failingReporter.runCleanups()
+	if !strings.Contains(failingReporter.logs.String(), "minimal lua disassembly") || !strings.Contains(failingReporter.logs.String(), "RETURN") {
+		// 失败测试必须携带短反汇编，帮助定位 codegen 或 VM 断言。
+		t.Fatalf("failing reporter logs = %q", failingReporter.logs.String())
+	}
+}
+
+// TestAttachMinimalProtoDisassemblyOnFailure 验证测试失败时可直接输出 Proto 最小反汇编。
+func TestAttachMinimalProtoDisassemblyOnFailure(t *testing.T) {
+	// 先编译 Proto，模拟 codegen/VM 测试中已有 Proto 的场景。
+	proto, err := CompileSource("local x = 1\nreturn x\n", "@proto.lua")
+	if err != nil {
+		// 编译失败说明测试源码或 codegen 出现回归。
+		t.Fatalf("CompileSource error: %v", err)
+	}
+	reporter := &fakeFailureReporter{failed: true}
+	AttachMinimalProtoDisassemblyOnFailure(reporter, proto)
+	reporter.runCleanups()
+	if !strings.Contains(reporter.logs.String(), "minimal lua proto disassembly") || !strings.Contains(reporter.logs.String(), "LOADK") {
+		// Proto helper 必须输出最小指令列表。
+		t.Fatalf("proto reporter logs = %q", reporter.logs.String())
+	}
+}
+
+// fakeFailureReporter 模拟 testing.TB 的失败、cleanup 和日志能力。
+type fakeFailureReporter struct {
+	// failed 表示测试最终是否失败。
+	failed bool
+	// cleanups 保存注册的 cleanup 回调。
+	cleanups []func()
+	// logs 保存 Logf 输出。
+	logs bytes.Buffer
+}
+
+// Failed 返回当前 fake 测试是否失败。
+func (reporter *fakeFailureReporter) Failed() bool {
+	// 直接返回预置状态，测试用例可精确控制 cleanup 输出分支。
+	return reporter.failed
+}
+
+// Cleanup 注册 cleanup 回调。
+func (reporter *fakeFailureReporter) Cleanup(cleanup func()) {
+	// cleanup 按注册顺序保存，runCleanups 统一执行。
+	reporter.cleanups = append(reporter.cleanups, cleanup)
+}
+
+// Logf 记录格式化测试日志。
+func (reporter *fakeFailureReporter) Logf(format string, args ...any) {
+	// 追加换行模拟 testing.TB 日志块的可读性。
+	_, _ = fmt.Fprintf(&reporter.logs, format+"\n", args...)
+}
+
+// runCleanups 执行所有注册的 cleanup 回调。
+func (reporter *fakeFailureReporter) runCleanups() {
+	for _, cleanup := range reporter.cleanups {
+		// cleanup 按注册顺序执行，满足本测试的简单语义。
+		cleanup()
+	}
+}

@@ -1,0 +1,9 @@
+R0=integer(2)
+R1=integer(3)
+R2=integer(5)
+R3=ref(kind=5)
+R4=integer(5)
+R5=string("=")
+R6=string("=5")
+R7=integer(2)
+skipNext=false

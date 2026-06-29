@@ -1,0 +1,15 @@
+keyword:local@1:1
+identifier:x@1:7
+operator:=@1:9
+number:0x1.8p1@1:11
+keyword:if@2:1
+identifier:x@2:4
+operator:>=@2:6
+number:3@2:9
+keyword:then@2:11
+keyword:return@2:16
+string:ok@2:23
+operator:..@2:28
+string:!@2:31
+keyword:end@2:35
+eof:<eof>@2:38

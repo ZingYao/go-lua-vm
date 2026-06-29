@@ -1,0 +1,4 @@
+bytecode roundtrip framework:
+- DumpBinaryChunk + LoadBinaryChunk
+- DumpProto + LoadProto
+- header, constants, instructions, upvalues, child protos, line info, local vars

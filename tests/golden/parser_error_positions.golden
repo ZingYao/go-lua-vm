@@ -1,0 +1,2 @@
+parse error at 1:1: undefined label 'missing'
+parse error at 1:14: undefined label 'other'

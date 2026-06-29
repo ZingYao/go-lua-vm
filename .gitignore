@@ -1,0 +1,10 @@
+.DS_Store
+.idea/
+logs/
+*.log
+tmp/
+dist/
+build/
+coverage.out
+*.test
+third_party/lua-5.3.6/

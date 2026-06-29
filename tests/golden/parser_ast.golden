@@ -1,0 +1,7 @@
+chunk@1:1
+block scope=0 parent=-1 depth=0 statements=3
+local x [0,3]
+label done @1
+stmt0 local x
+stmt1 label done
+stmt2 call
