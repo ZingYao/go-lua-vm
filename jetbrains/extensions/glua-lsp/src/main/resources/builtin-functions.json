@@ -1,0 +1,1573 @@
+{
+  "_schema": "glua builtin function docs. User builtinDocs JSON files use the same functions shape and override matching entries.",
+  "functions": {
+    "assert": {
+      "signature": {
+        "en": "assert(v [, message])",
+        "zh-CN": "assert(v [, message])"
+      },
+      "returns": {
+        "en": "returns: the original `v` and all following arguments unchanged; when `v` is false/nil, throws an error.",
+        "zh-CN": "返回：原始 `v` 以及后续全部参数；当 `v` 为 false/nil 时抛出错误。"
+      },
+      "params": {
+        "en": [
+          "v: any value to test",
+          "message (optional): custom error value"
+        ],
+        "zh-CN": [
+          "v: 需要检查的任意值",
+          "message (可选): 自定义错误值"
+        ]
+      },
+      "description": {
+        "en": "Checks that the first argument is truthy. Returns all arguments unchanged when true; otherwise throws an error.",
+        "zh-CN": "检查第一个参数是否为真值。若为真则原样返回全部参数，若为假则抛出错误。"
+      },
+      "example": {
+        "en": "local value = assert('ok', 'missing')\n-- value: original checked value, here 'ok'",
+        "zh-CN": "local value = assert('ok', '缺少值')\n-- value: 原始被检查的值，这里是 'ok'"
+      }
+    },
+    "collectgarbage": {
+      "signature": {
+        "en": "collectgarbage(opt [, arg])",
+        "zh-CN": "collectgarbage(opt [, arg])"
+      },
+      "returns": {
+        "en": "returns: command result, depends on `opt`.",
+        "zh-CN": "返回：命令结果，具体取决于 `opt`。"
+      },
+      "params": {
+        "en": [
+          "opt (optional): command string, defaults to \"collect\"",
+          "arg (optional): command argument"
+        ],
+        "zh-CN": [
+          "opt (可选): 命令字符串，默认是 \"collect\"",
+          "arg (可选): 命令参数"
+        ]
+      },
+      "description": {
+        "en": "Performs or controls garbage collection. The current implementation follows common Lua 5.3 command semantics.",
+        "zh-CN": "执行或控制垃圾回收接口。当前实现兼容 Lua 5.3 常见命令语义。"
+      },
+      "example": {
+        "en": "collectgarbage('collect')\nlocal count = collectgarbage('count')\n-- count: current memory usage in KB",
+        "zh-CN": "collectgarbage('collect')\nlocal count = collectgarbage('count')\n-- count: 当前内存使用量，单位 KB"
+      }
+    },
+    "dofile": {
+      "signature": {
+        "en": "dofile(filename)",
+        "zh-CN": "dofile(filename)"
+      },
+      "returns": {
+        "en": "returns: the chunk return values when execution is available.",
+        "zh-CN": "返回：文件 chunk 执行后的返回值；执行不可用或失败时按运行时错误语义处理。"
+      },
+      "params": {
+        "en": [
+          "filename: file path string"
+        ],
+        "zh-CN": [
+          "filename: 文件路径字符串"
+        ]
+      },
+      "description": {
+        "en": "Loads and runs a Lua file. Execution behavior follows the current runtime support and preserves loading/error boundaries.",
+        "zh-CN": "读取并执行一个 Lua 文件。当前阶段保留加载与错误边界，文件执行能力可按运行时阶段逐步完善。"
+      },
+      "example": {
+        "en": "local result = dofile('script.lua')\n-- result: first value returned by script.lua",
+        "zh-CN": "local result = dofile('script.lua')\n-- result: script.lua 返回的第一个值"
+      }
+    },
+    "error": {
+      "signature": {
+        "en": "error(object [, level])",
+        "zh-CN": "error(object [, level])"
+      },
+      "returns": {
+        "en": "returns: never returns normally; throws an error object.",
+        "zh-CN": "返回：不会正常返回；会抛出错误对象。"
+      },
+      "params": {
+        "en": [
+          "object: error object",
+          "level (optional): stack level"
+        ],
+        "zh-CN": [
+          "object: 错误对象",
+          "level (可选): 栈层级"
+        ]
+      },
+      "description": {
+        "en": "Raises an error explicitly, normally with stack information attached.",
+        "zh-CN": "显式抛出错误，通常会附带堆栈信息。"
+      },
+      "example": {
+        "en": "error('operation failed')\n-- throws: error object/message, here 'operation failed'",
+        "zh-CN": "error('操作失败')\n-- 抛出: 错误对象/消息，这里是 '操作失败'"
+      }
+    },
+    "getmetatable": {
+      "signature": {
+        "en": "getmetatable(object)",
+        "zh-CN": "getmetatable(object)"
+      },
+      "returns": {
+        "en": "returns: object's metatable or nil.",
+        "zh-CN": "返回：对象的元表或 nil。"
+      },
+      "params": {
+        "en": [
+          "object: Lua value"
+        ],
+        "zh-CN": [
+          "object: Lua 值"
+        ]
+      },
+      "description": {
+        "en": "Returns an object's metatable. If the metatable is protected, returns the protected metatable value.",
+        "zh-CN": "返回对象的元表；若元表被锁定，则返回其保护后的元表。"
+      },
+      "example": {
+        "en": "local mt = getmetatable(value)\n-- mt: metatable attached to value, or nil when absent",
+        "zh-CN": "local mt = getmetatable(value)\n-- mt: value 绑定的元表；不存在时为 nil"
+      }
+    },
+    "ipairs": {
+      "signature": {
+        "en": "ipairs(t)",
+        "zh-CN": "ipairs(t)"
+      },
+      "returns": {
+        "en": "returns: iterator function, initial index (0), table.",
+        "zh-CN": "返回：迭代函数、初始索引 0、原表。"
+      },
+      "params": {
+        "en": [
+          "t: table-like value"
+        ],
+        "zh-CN": [
+          "t: 类 table 值"
+        ]
+      },
+      "description": {
+        "en": "Returns the iterator triple used for array-style traversal.",
+        "zh-CN": "返回用于数组风格遍历的三元组。"
+      },
+      "example": {
+        "en": "for index, value in ipairs({'a', 'b'}) do\n  print(index, value)\nend\n-- index: array position starting from 1\n-- value: element at that index",
+        "zh-CN": "for index, value in ipairs({'a', 'b'}) do\n  print(index, value)\nend\n-- index: 从 1 开始的数组位置\n-- value: 对应位置上的元素"
+      }
+    },
+    "load": {
+      "signature": {
+        "en": "load(chunk [, chunkname [, mode [, env]]])",
+        "zh-CN": "load(chunk [, chunkname [, mode [, env]]])"
+      },
+      "returns": {
+        "en": "returns: compiled function, or nil plus error message.",
+        "zh-CN": "返回：编译后的函数；失败时返回 nil 和错误信息。"
+      },
+      "params": {
+        "en": [
+          "chunk: string/reader",
+          "chunkname (optional): chunk source name",
+          "mode (optional): load mode",
+          "env (optional): environment table"
+        ],
+        "zh-CN": [
+          "chunk: 字符串或 reader",
+          "chunkname (可选): chunk 来源名",
+          "mode (可选): 加载模式",
+          "env (可选): 环境表"
+        ]
+      },
+      "description": {
+        "en": "Compiles a chunk as an anonymous function without running it immediately.",
+        "zh-CN": "将代码片段编译为匿名函数，不会立即执行。"
+      },
+      "example": {
+        "en": "local fn = assert(load('return 1 + 2'))\nlocal result = fn()\n-- fn: compiled chunk function\n-- result: value returned by the chunk, here 3",
+        "zh-CN": "local fn = assert(load('return 1 + 2'))\nlocal result = fn()\n-- fn: 编译后的 chunk 函数\n-- result: chunk 返回的值，这里是 3"
+      }
+    },
+    "loadfile": {
+      "signature": {
+        "en": "loadfile([filename [, mode [, env]]])",
+        "zh-CN": "loadfile([filename [, mode [, env]]])"
+      },
+      "returns": {
+        "en": "returns: compiled function, or nil plus error message.",
+        "zh-CN": "返回：编译后的函数；失败时返回 nil 和错误信息。"
+      },
+      "params": {
+        "en": [
+          "filename (optional): file path",
+          "mode (optional): load mode",
+          "env (optional): environment table"
+        ],
+        "zh-CN": [
+          "filename (可选): 文件路径",
+          "mode (可选): 加载模式",
+          "env (可选): 环境表"
+        ]
+      },
+      "description": {
+        "en": "Loads and compiles a chunk from a file, returning an anonymous function by default.",
+        "zh-CN": "从文件中加载并编译 chunk，默认返回匿名函数。"
+      },
+      "example": {
+        "en": "local fn = assert(loadfile('script.lua'))\nlocal result = fn()\n-- fn: compiled file chunk function\n-- result: first value returned by script.lua",
+        "zh-CN": "local fn = assert(loadfile('script.lua'))\nlocal result = fn()\n-- fn: 编译后的文件 chunk 函数\n-- result: script.lua 返回的第一个值"
+      }
+    },
+    "math.abs": {
+      "signature": {
+        "en": "math.abs(x)",
+        "zh-CN": "math.abs(x)"
+      },
+      "returns": {
+        "en": "returns: absolute value.",
+        "zh-CN": "返回：绝对值。"
+      },
+      "params": {
+        "en": [
+          "x: number"
+        ],
+        "zh-CN": [
+          "x: 数字"
+        ]
+      },
+      "description": {
+        "en": "Returns the absolute value of a number.",
+        "zh-CN": "返回数字的绝对值。"
+      },
+      "example": {
+        "en": "local value = math.abs(-10)\n-- value: absolute value, here 10",
+        "zh-CN": "local value = math.abs(-10)\n-- value: 绝对值，这里是 10"
+      }
+    },
+    "math.acos": {
+      "signature": {
+        "en": "math.acos(x)",
+        "zh-CN": "math.acos(x)"
+      },
+      "returns": {
+        "en": "returns: arc cosine in radians.",
+        "zh-CN": "返回：反余弦值（弧度）。"
+      },
+      "params": {
+        "en": [
+          "x: number [-1,1]"
+        ],
+        "zh-CN": [
+          "x: 数字，范围 [-1,1]"
+        ]
+      },
+      "description": {
+        "en": "Returns the arc cosine in radians.",
+        "zh-CN": "返回反余弦值（弧度）。"
+      },
+      "example": {
+        "en": "local radians = math.acos(1)\n-- radians: arc cosine in radians, here 0",
+        "zh-CN": "local radians = math.acos(1)\n-- radians: 反余弦弧度值，这里是 0"
+      }
+    },
+    "math.asin": {
+      "signature": {
+        "en": "math.asin(x)",
+        "zh-CN": "math.asin(x)"
+      },
+      "returns": {
+        "en": "returns: arc sine in radians.",
+        "zh-CN": "返回：反正弦值（弧度）。"
+      },
+      "params": {
+        "en": [
+          "x: number [-1,1]"
+        ],
+        "zh-CN": [
+          "x: 数字，范围 [-1,1]"
+        ]
+      },
+      "description": {
+        "en": "Returns the arc sine in radians.",
+        "zh-CN": "返回反正弦值（弧度）。"
+      },
+      "example": {
+        "en": "local radians = math.asin(0)\n-- radians: arc sine in radians, here 0",
+        "zh-CN": "local radians = math.asin(0)\n-- radians: 反正弦弧度值，这里是 0"
+      }
+    },
+    "math.atan2": {
+      "signature": {
+        "en": "math.atan2(y, x)",
+        "zh-CN": "math.atan2(y, x)"
+      },
+      "returns": {
+        "en": "returns: arc tangent in radians.",
+        "zh-CN": "返回：反正切值（弧度）。"
+      },
+      "params": {
+        "en": [
+          "y: y coordinate",
+          "x: x coordinate"
+        ],
+        "zh-CN": [
+          "y: y 坐标",
+          "x: x 坐标"
+        ]
+      },
+      "description": {
+        "en": "Returns the arc tangent of y/x in radians.",
+        "zh-CN": "返回 y/x 的反正切值。"
+      },
+      "example": {
+        "en": "local radians = math.atan2(0, 1)\n-- radians: arc tangent in radians, here 0",
+        "zh-CN": "local radians = math.atan2(0, 1)\n-- radians: 反正切弧度值，这里是 0"
+      }
+    },
+    "math.ceil": {
+      "signature": {
+        "en": "math.ceil(x)",
+        "zh-CN": "math.ceil(x)"
+      },
+      "returns": {
+        "en": "returns: smallest integer >= x.",
+        "zh-CN": "返回：大于等于 x 的最小整数。"
+      },
+      "params": {
+        "en": [
+          "x: number"
+        ],
+        "zh-CN": [
+          "x: 数字"
+        ]
+      },
+      "description": {
+        "en": "Returns the smallest integer greater than or equal to the argument.",
+        "zh-CN": "返回不小于参数的最小整数。"
+      },
+      "example": {
+        "en": "local value = math.ceil(1.2)\n-- value: smallest integer >= input, here 2",
+        "zh-CN": "local value = math.ceil(1.2)\n-- value: 大于等于输入值的最小整数，这里是 2"
+      }
+    },
+    "math.cos": {
+      "signature": {
+        "en": "math.cos(x)",
+        "zh-CN": "math.cos(x)"
+      },
+      "returns": {
+        "en": "returns: cosine value.",
+        "zh-CN": "返回：余弦值。"
+      },
+      "params": {
+        "en": [
+          "x: radians"
+        ],
+        "zh-CN": [
+          "x: 弧度"
+        ]
+      },
+      "description": {
+        "en": "Returns the cosine of x where x is in radians.",
+        "zh-CN": "返回弧度 x 的余弦值。"
+      },
+      "example": {
+        "en": "local value = math.cos(0)\n-- value: cosine result, here 1",
+        "zh-CN": "local value = math.cos(0)\n-- value: 余弦结果，这里是 1"
+      }
+    },
+    "math.deg": {
+      "signature": {
+        "en": "math.deg(x)",
+        "zh-CN": "math.deg(x)"
+      },
+      "returns": {
+        "en": "returns: degrees.",
+        "zh-CN": "返回：角度。"
+      },
+      "params": {
+        "en": [
+          "x: radians"
+        ],
+        "zh-CN": [
+          "x: 弧度"
+        ]
+      },
+      "description": {
+        "en": "Converts radians to degrees.",
+        "zh-CN": "弧度转角度。"
+      },
+      "example": {
+        "en": "local degrees = math.deg(math.pi)\n-- degrees: angle in degrees, here 180",
+        "zh-CN": "local degrees = math.deg(math.pi)\n-- degrees: 角度值，这里是 180"
+      }
+    },
+    "math.exp": {
+      "signature": {
+        "en": "math.exp(x)",
+        "zh-CN": "math.exp(x)"
+      },
+      "returns": {
+        "en": "returns: e^x.",
+        "zh-CN": "返回：e^x。"
+      },
+      "params": {
+        "en": [
+          "x: exponent"
+        ],
+        "zh-CN": [
+          "x: 指数"
+        ]
+      },
+      "description": {
+        "en": "Returns e raised to the power x.",
+        "zh-CN": "返回自然常数 e 的 x 次方。"
+      },
+      "example": {
+        "en": "local value = math.exp(0)\n-- value: e raised to input, here 1",
+        "zh-CN": "local value = math.exp(0)\n-- value: e 的输入次方结果，这里是 1"
+      }
+    },
+    "math.floor": {
+      "signature": {
+        "en": "math.floor(x)",
+        "zh-CN": "math.floor(x)"
+      },
+      "returns": {
+        "en": "returns: largest integer <= x.",
+        "zh-CN": "返回：小于等于 x 的最大整数。"
+      },
+      "params": {
+        "en": [
+          "x: number"
+        ],
+        "zh-CN": [
+          "x: 数字"
+        ]
+      },
+      "description": {
+        "en": "Returns the largest integer less than or equal to the argument.",
+        "zh-CN": "返回不大于参数的最大整数。"
+      },
+      "example": {
+        "en": "local value = math.floor(1.8)\n-- value: largest integer <= input, here 1",
+        "zh-CN": "local value = math.floor(1.8)\n-- value: 小于等于输入值的最大整数，这里是 1"
+      }
+    },
+    "math.fmod": {
+      "signature": {
+        "en": "math.fmod(x, y)",
+        "zh-CN": "math.fmod(x, y)"
+      },
+      "returns": {
+        "en": "returns: remainder.",
+        "zh-CN": "返回：余数。"
+      },
+      "params": {
+        "en": [
+          "x: dividend",
+          "y: divisor"
+        ],
+        "zh-CN": [
+          "x: 被除数",
+          "y: 除数"
+        ]
+      },
+      "description": {
+        "en": "Returns the floating-point remainder of x divided by y.",
+        "zh-CN": "返回 x 除以 y 的浮点余数。"
+      },
+      "example": {
+        "en": "local value = math.fmod(7, 3)\n-- value: remainder after division, here 1",
+        "zh-CN": "local value = math.fmod(7, 3)\n-- value: 除法余数，这里是 1"
+      }
+    },
+    "math.log": {
+      "signature": {
+        "en": "math.log(x [, base])",
+        "zh-CN": "math.log(x [, base])"
+      },
+      "returns": {
+        "en": "returns: logarithm value.",
+        "zh-CN": "返回：对数值。"
+      },
+      "params": {
+        "en": [
+          "x: number",
+          "base (optional): logarithm base"
+        ],
+        "zh-CN": [
+          "x: 数字",
+          "base (可选): 对数底数"
+        ]
+      },
+      "description": {
+        "en": "Returns the logarithm with the given base, or the natural logarithm when base is omitted.",
+        "zh-CN": "返回以 base 为底的对数；未提供 base 时返回自然对数。"
+      },
+      "example": {
+        "en": "local value = math.log(8, 2)\n-- value: logarithm result, here 3",
+        "zh-CN": "local value = math.log(8, 2)\n-- value: 对数结果，这里是 3"
+      }
+    },
+    "math.max": {
+      "signature": {
+        "en": "math.max(x1, ...)",
+        "zh-CN": "math.max(x1, ...)"
+      },
+      "returns": {
+        "en": "returns: maximum argument.",
+        "zh-CN": "返回：最大参数值。"
+      },
+      "params": {
+        "en": [
+          "x1: first number",
+          "...: numbers"
+        ],
+        "zh-CN": [
+          "x1: 第一个数字",
+          "...: 其他数字"
+        ]
+      },
+      "description": {
+        "en": "Returns the maximum value among all arguments.",
+        "zh-CN": "返回所有参数中的最大值。"
+      },
+      "example": {
+        "en": "local value = math.max(1, 5, 3)\n-- value: largest argument, here 5",
+        "zh-CN": "local value = math.max(1, 5, 3)\n-- value: 最大参数值，这里是 5"
+      }
+    },
+    "math.min": {
+      "signature": {
+        "en": "math.min(x1, ...)",
+        "zh-CN": "math.min(x1, ...)"
+      },
+      "returns": {
+        "en": "returns: minimum argument.",
+        "zh-CN": "返回：最小参数值。"
+      },
+      "params": {
+        "en": [
+          "x1: first number",
+          "...: numbers"
+        ],
+        "zh-CN": [
+          "x1: 第一个数字",
+          "...: 其他数字"
+        ]
+      },
+      "description": {
+        "en": "Returns the minimum value among all arguments.",
+        "zh-CN": "返回所有参数中的最小值。"
+      },
+      "example": {
+        "en": "local value = math.min(1, 5, 3)\n-- value: smallest argument, here 1",
+        "zh-CN": "local value = math.min(1, 5, 3)\n-- value: 最小参数值，这里是 1"
+      }
+    },
+    "math.random": {
+      "signature": {
+        "en": "math.random([m [, n]])",
+        "zh-CN": "math.random([m [, n]])"
+      },
+      "returns": {
+        "en": "returns: pseudo-random integer or float.",
+        "zh-CN": "返回：伪随机整数或浮点数。"
+      },
+      "params": {
+        "en": [
+          "m (optional): max when single arg, or min when two args",
+          "n (optional): max"
+        ],
+        "zh-CN": [
+          "m (可选): 单参数时为上限；双参数时为下限",
+          "n (可选): 上限"
+        ]
+      },
+      "description": {
+        "en": "Returns a pseudo-random integer or float depending on arguments.",
+        "zh-CN": "返回伪随机数。"
+      },
+      "example": {
+        "en": "local value = math.random(1, 10)\n-- value: pseudo-random number in requested range, here 1..10",
+        "zh-CN": "local value = math.random(1, 10)\n-- value: 指定范围内的伪随机数，这里是 1..10"
+      }
+    },
+    "math.randomseed": {
+      "signature": {
+        "en": "math.randomseed(x [, y])",
+        "zh-CN": "math.randomseed(x [, y])"
+      },
+      "returns": {
+        "en": "returns: no return values.",
+        "zh-CN": "返回：无返回值。"
+      },
+      "params": {
+        "en": [
+          "x: seed value",
+          "y (optional): secondary seed"
+        ],
+        "zh-CN": [
+          "x: 种子值",
+          "y (可选): 第二种子值"
+        ]
+      },
+      "description": {
+        "en": "Sets the pseudo-random generator seed.",
+        "zh-CN": "设置随机数生成器种子。"
+      },
+      "example": {
+        "en": "math.randomseed(1234)\n-- returns: no values; subsequent math.random calls use the seed",
+        "zh-CN": "math.randomseed(1234)\n-- 返回: 无返回值；后续 math.random 调用会使用该种子"
+      }
+    },
+    "math.sin": {
+      "signature": {
+        "en": "math.sin(x)",
+        "zh-CN": "math.sin(x)"
+      },
+      "returns": {
+        "en": "returns: sine value.",
+        "zh-CN": "返回：正弦值。"
+      },
+      "params": {
+        "en": [
+          "x: radians"
+        ],
+        "zh-CN": [
+          "x: 弧度"
+        ]
+      },
+      "description": {
+        "en": "Returns the sine of x where x is in radians.",
+        "zh-CN": "返回弧度 x 的正弦值。"
+      },
+      "example": {
+        "en": "local value = math.sin(0)\n-- value: sine result, here 0",
+        "zh-CN": "local value = math.sin(0)\n-- value: 正弦结果，这里是 0"
+      }
+    },
+    "math.sqrt": {
+      "signature": {
+        "en": "math.sqrt(x)",
+        "zh-CN": "math.sqrt(x)"
+      },
+      "returns": {
+        "en": "returns: square root.",
+        "zh-CN": "返回：平方根。"
+      },
+      "params": {
+        "en": [
+          "x: number"
+        ],
+        "zh-CN": [
+          "x: 数字"
+        ]
+      },
+      "description": {
+        "en": "Returns the square root of a non-negative real number.",
+        "zh-CN": "返回非负实数 x 的平方根。"
+      },
+      "example": {
+        "en": "local value = math.sqrt(16)\n-- value: square root, here 4",
+        "zh-CN": "local value = math.sqrt(16)\n-- value: 平方根，这里是 4"
+      }
+    },
+    "math.tan": {
+      "signature": {
+        "en": "math.tan(x)",
+        "zh-CN": "math.tan(x)"
+      },
+      "returns": {
+        "en": "returns: tangent value.",
+        "zh-CN": "返回：正切值。"
+      },
+      "params": {
+        "en": [
+          "x: radians"
+        ],
+        "zh-CN": [
+          "x: 弧度"
+        ]
+      },
+      "description": {
+        "en": "Returns the tangent of x where x is in radians.",
+        "zh-CN": "返回弧度 x 的正切值。"
+      },
+      "example": {
+        "en": "local value = math.tan(0)\n-- value: tangent result, here 0",
+        "zh-CN": "local value = math.tan(0)\n-- value: 正切结果，这里是 0"
+      }
+    },
+    "math.tointeger": {
+      "signature": {
+        "en": "math.tointeger(x)",
+        "zh-CN": "math.tointeger(x)"
+      },
+      "returns": {
+        "en": "returns: integer or nil.",
+        "zh-CN": "返回：integer 或 nil。"
+      },
+      "params": {
+        "en": [
+          "x: number"
+        ],
+        "zh-CN": [
+          "x: 数字"
+        ]
+      },
+      "description": {
+        "en": "Converts a numeric value to an integer; returns nil when conversion fails.",
+        "zh-CN": "将数值向整数转换；失败返回 nil。"
+      },
+      "example": {
+        "en": "local value = math.tointeger(3.0)\n-- value: converted integer or nil, here 3",
+        "zh-CN": "local value = math.tointeger(3.0)\n-- value: 转换后的整数或 nil，这里是 3"
+      }
+    },
+    "math.type": {
+      "signature": {
+        "en": "math.type(x)",
+        "zh-CN": "math.type(x)"
+      },
+      "returns": {
+        "en": "returns: \"integer\" / \"float\" / nil.",
+        "zh-CN": "返回：\"integer\" / \"float\" / nil。"
+      },
+      "params": {
+        "en": [
+          "x: number"
+        ],
+        "zh-CN": [
+          "x: 数字"
+        ]
+      },
+      "description": {
+        "en": "Returns the internal numeric type, either integer, float, or nil.",
+        "zh-CN": "返回数字的内部类型（整数、浮点）或 nil。"
+      },
+      "example": {
+        "en": "local kind = math.type(1)\n-- kind: numeric subtype name, here 'integer'",
+        "zh-CN": "local kind = math.type(1)\n-- kind: 数字子类型名，这里是 'integer'"
+      }
+    },
+    "next": {
+      "signature": {
+        "en": "next(table [, index])",
+        "zh-CN": "next(table [, index])"
+      },
+      "returns": {
+        "en": "returns: next key and value, or nil.",
+        "zh-CN": "返回：下一组 key 和 value；遍历结束时返回 nil。"
+      },
+      "params": {
+        "en": [
+          "table: table",
+          "index (optional): previous key"
+        ],
+        "zh-CN": [
+          "table: table",
+          "index (可选): 上一个 key"
+        ]
+      },
+      "description": {
+        "en": "Returns the next key/value pair in a table according to internal traversal order.",
+        "zh-CN": "按内部遍历顺序返回 table 的下一组键值对。"
+      },
+      "example": {
+        "en": "local key, value = next({name = 'glua'})\n-- key: next table key, such as 'name'\n-- value: value stored at key, such as 'glua'",
+        "zh-CN": "local key, value = next({name = 'glua'})\n-- key: 下一项 table key，例如 'name'\n-- value: key 对应的值，例如 'glua'"
+      }
+    },
+    "os.exit": {
+      "signature": {
+        "en": "os.exit([code [, close]])",
+        "zh-CN": "os.exit([code [, close]])"
+      },
+      "returns": {
+        "en": "returns: no values; terminates the host process or current CLI execution.",
+        "zh-CN": "返回：无返回值；终止宿主进程或当前 CLI 执行。"
+      },
+      "params": {
+        "en": [
+          "code (optional): exit status, boolean or integer",
+          "close (optional): whether to close Lua state before exiting"
+        ],
+        "zh-CN": [
+          "code (可选): 退出状态，可以是布尔值或整数",
+          "close (可选): 退出前是否关闭 Lua 状态"
+        ]
+      },
+      "description": {
+        "en": "Terminates program execution with an optional exit status. In embedded runtimes this may be adapted by the host environment.",
+        "zh-CN": "使用可选退出状态终止程序执行。在嵌入式运行时中，具体退出行为可由宿主环境适配。"
+      },
+      "example": {
+        "en": "os.exit(0)\n-- returns: no values; process exits successfully",
+        "zh-CN": "os.exit(0)\n-- 返回: 无返回值；进程以成功状态退出"
+      }
+    },
+    "pairs": {
+      "signature": {
+        "en": "pairs(t)",
+        "zh-CN": "pairs(t)"
+      },
+      "returns": {
+        "en": "returns: iterator, state, initial value.",
+        "zh-CN": "返回：迭代器、状态值、初始值。"
+      },
+      "params": {
+        "en": [
+          "t: table or userdata"
+        ],
+        "zh-CN": [
+          "t: table 或 userdata"
+        ]
+      },
+      "description": {
+        "en": "Returns the iterator triple needed for generic table traversal.",
+        "zh-CN": "返回泛型遍历所需的迭代器三元组。"
+      },
+      "example": {
+        "en": "for key, value in pairs({name = 'glua'}) do\n  print(key, value)\nend\n-- key: current table key\n-- value: value stored at key",
+        "zh-CN": "for key, value in pairs({name = 'glua'}) do\n  print(key, value)\nend\n-- key: 当前 table key\n-- value: key 对应的值"
+      }
+    },
+    "pcall": {
+      "signature": {
+        "en": "pcall(f, arg1, ...)",
+        "zh-CN": "pcall(f, arg1, ...)"
+      },
+      "returns": {
+        "en": "returns: boolean status, followed by results or error.",
+        "zh-CN": "返回：布尔状态，后接函数结果或错误对象。"
+      },
+      "params": {
+        "en": [
+          "f: callable",
+          "arg1, ...: function arguments"
+        ],
+        "zh-CN": [
+          "f: 可调用对象",
+          "arg1, ...: 函数参数"
+        ]
+      },
+      "description": {
+        "en": "Calls a function in protected mode and returns a status flag plus results or an error.",
+        "zh-CN": "保护调用函数，捕获错误并返回状态码与返回值。"
+      },
+      "example": {
+        "en": "local ok, result = pcall(function() return 1 end)\n-- ok: true when call succeeds\n-- result: function return value when ok is true, here 1",
+        "zh-CN": "local ok, result = pcall(function() return 1 end)\n-- ok: 调用成功时为 true\n-- result: ok 为 true 时的函数返回值，这里是 1"
+      }
+    },
+    "print": {
+      "signature": {
+        "en": "print(...)",
+        "zh-CN": "print(...)"
+      },
+      "returns": {
+        "en": "returns: no return values.",
+        "zh-CN": "返回：无返回值。"
+      },
+      "params": {
+        "en": [
+          "...: values to print"
+        ],
+        "zh-CN": [
+          "...: 要输出的值"
+        ]
+      },
+      "description": {
+        "en": "Converts arguments to strings and writes them to standard output.",
+        "zh-CN": "把参数转换为字符串并输出到标准输出。"
+      },
+      "example": {
+        "en": "print('hello', 'glua')\n-- output: converted argument text written to stdout",
+        "zh-CN": "print('你好', 'glua')\n-- output: 参数转换为字符串后写入标准输出"
+      }
+    },
+    "rawequal": {
+      "signature": {
+        "en": "rawequal(v1, v2)",
+        "zh-CN": "rawequal(v1, v2)"
+      },
+      "returns": {
+        "en": "returns: boolean.",
+        "zh-CN": "返回：布尔值。"
+      },
+      "params": {
+        "en": [
+          "v1: value",
+          "v2: value"
+        ],
+        "zh-CN": [
+          "v1: 值",
+          "v2: 值"
+        ]
+      },
+      "description": {
+        "en": "Compares two values directly without invoking metamethods.",
+        "zh-CN": "不触发元方法，进行直接比较。"
+      },
+      "example": {
+        "en": "local same = rawequal(1, 1)\n-- same: true when two values are directly equal",
+        "zh-CN": "local same = rawequal(1, 1)\n-- same: 两个值直接相等时为 true"
+      }
+    },
+    "rawget": {
+      "signature": {
+        "en": "rawget(table, index)",
+        "zh-CN": "rawget(table, index)"
+      },
+      "returns": {
+        "en": "returns: raw value at key.",
+        "zh-CN": "返回：指定 key 的原始值。"
+      },
+      "params": {
+        "en": [
+          "table: table",
+          "index: key"
+        ],
+        "zh-CN": [
+          "table: table",
+          "index: key"
+        ]
+      },
+      "description": {
+        "en": "Reads a table field directly without invoking `__index`.",
+        "zh-CN": "直接读取表字段，不触发 `__index`。"
+      },
+      "example": {
+        "en": "local value = rawget({name = 'glua'}, 'name')\n-- value: raw table value at key, here 'glua'",
+        "zh-CN": "local value = rawget({name = 'glua'}, 'name')\n-- value: key 对应的原始 table 值，这里是 'glua'"
+      }
+    },
+    "rawlen": {
+      "signature": {
+        "en": "rawlen(v)",
+        "zh-CN": "rawlen(v)"
+      },
+      "returns": {
+        "en": "returns: integer length.",
+        "zh-CN": "返回：整数长度。"
+      },
+      "params": {
+        "en": [
+          "v: table or string"
+        ],
+        "zh-CN": [
+          "v: table 或 string"
+        ]
+      },
+      "description": {
+        "en": "Returns the length of a table or string without invoking metamethods.",
+        "zh-CN": "返回数组/字符串在不触发元方法情况下的长度。"
+      },
+      "example": {
+        "en": "local len = rawlen({'a', 'b'})\n-- len: raw table/string length, here 2",
+        "zh-CN": "local len = rawlen({'a', 'b'})\n-- len: table/string 的原始长度，这里是 2"
+      }
+    },
+    "rawset": {
+      "signature": {
+        "en": "rawset(table, index, value)",
+        "zh-CN": "rawset(table, index, value)"
+      },
+      "returns": {
+        "en": "returns: table.",
+        "zh-CN": "返回：原 table。"
+      },
+      "params": {
+        "en": [
+          "table: table",
+          "index: key",
+          "value: value"
+        ],
+        "zh-CN": [
+          "table: table",
+          "index: key",
+          "value: 值"
+        ]
+      },
+      "description": {
+        "en": "Writes a table field directly without invoking `__newindex`.",
+        "zh-CN": "直接设置表字段，不触发 `__newindex`。"
+      },
+      "example": {
+        "en": "local tbl = {}\nlocal result = rawset(tbl, 'name', 'glua')\n-- result: original table after assignment\n-- tbl.name: assigned raw value, here 'glua'",
+        "zh-CN": "local tbl = {}\nlocal result = rawset(tbl, 'name', 'glua')\n-- result: 设置后的原 table\n-- tbl.name: 写入的原始值，这里是 'glua'"
+      }
+    },
+    "require": {
+      "signature": {
+        "en": "require(modname)",
+        "zh-CN": "require(modname)"
+      },
+      "returns": {
+        "en": "returns: module value from cache or newly loaded value.",
+        "zh-CN": "返回：缓存中的模块值或新加载的模块值。"
+      },
+      "params": {
+        "en": [
+          "modname: module name"
+        ],
+        "zh-CN": [
+          "modname: 模块名"
+        ]
+      },
+      "description": {
+        "en": "Loads a module using package rules and returns the module result.",
+        "zh-CN": "按 package 加载规则加载模块并返回结果。"
+      },
+      "example": {
+        "en": "local mod = require('mymodule')\n-- mod: module return value or cached module value",
+        "zh-CN": "local mod = require('mymodule')\n-- mod: 模块返回值或缓存中的模块值"
+      }
+    },
+    "select": {
+      "signature": {
+        "en": "select(index, ...)",
+        "zh-CN": "select(index, ...)"
+      },
+      "returns": {
+        "en": "returns: vararg slice or count.",
+        "zh-CN": "返回：变长参数切片或参数个数。"
+      },
+      "params": {
+        "en": [
+          "index: integer or '#'",
+          "...: candidate values"
+        ],
+        "zh-CN": [
+          "index: 整数或 '#'",
+          "...: 候选值"
+        ]
+      },
+      "description": {
+        "en": "Selects varargs from an index, or returns the number of arguments.",
+        "zh-CN": "按索引选择变长参数，或返回参数个数。"
+      },
+      "example": {
+        "en": "local count = select('#', 'a', 'b')\nlocal first, second = select(1, 'a', 'b')\n-- count: number of vararg values, here 2\n-- first: selected value at index 1, here 'a'\n-- second: following selected value, here 'b'",
+        "zh-CN": "local count = select('#', 'a', 'b')\nlocal first, second = select(1, 'a', 'b')\n-- count: 变长参数个数，这里是 2\n-- first: 索引 1 选中的值，这里是 'a'\n-- second: 后续选中的值，这里是 'b'"
+      }
+    },
+    "setmetatable": {
+      "signature": {
+        "en": "setmetatable(object, metatable)",
+        "zh-CN": "setmetatable(object, metatable)"
+      },
+      "returns": {
+        "en": "returns: object.",
+        "zh-CN": "返回：原 object。"
+      },
+      "params": {
+        "en": [
+          "object: table",
+          "metatable: metatable or nil"
+        ],
+        "zh-CN": [
+          "object: table",
+          "metatable: 元表或 nil"
+        ]
+      },
+      "description": {
+        "en": "Sets the metatable of a table while preserving Lua semantic constraints.",
+        "zh-CN": "给 table 设置元表，当前实现保持 Lua 语义约束。"
+      },
+      "example": {
+        "en": "local object = setmetatable({}, mt)\n-- object: original table after metatable is attached",
+        "zh-CN": "local object = setmetatable({}, mt)\n-- object: 绑定元表后的原 table"
+      }
+    },
+    "string.byte": {
+      "signature": {
+        "en": "string.byte(s [, i [, j]])",
+        "zh-CN": "string.byte(s [, i [, j]])"
+      },
+      "returns": {
+        "en": "returns: byte value(s) (integer).",
+        "zh-CN": "返回：一个或多个字节值（整数）。"
+      },
+      "params": {
+        "en": [
+          "s: source string",
+          "i (optional): start index, default 1",
+          "j (optional): end index, default i"
+        ],
+        "zh-CN": [
+          "s: 源字符串",
+          "i (可选): 起始下标，默认 1",
+          "j (可选): 结束下标，默认 i"
+        ]
+      },
+      "description": {
+        "en": "Returns byte values for a selected range of a string. Lua indexes start at 1.",
+        "zh-CN": "返回字符串指定区间的字节值，索引按 Lua 起始 1 开始。"
+      },
+      "example": {
+        "en": "local b = string.byte('ABC', 1)\n-- b: byte value at selected index, here 65",
+        "zh-CN": "local b = string.byte('ABC', 1)\n-- b: 指定下标的字节值，这里是 65"
+      }
+    },
+    "string.char": {
+      "signature": {
+        "en": "string.char(...)",
+        "zh-CN": "string.char(...)"
+      },
+      "returns": {
+        "en": "returns: new string.",
+        "zh-CN": "返回：新字符串。"
+      },
+      "params": {
+        "en": [
+          "...: integer bytes"
+        ],
+        "zh-CN": [
+          "...: 整数字节值"
+        ]
+      },
+      "description": {
+        "en": "Converts byte values to characters and concatenates them into a string.",
+        "zh-CN": "将一组字节值转换为对应字符并拼接字符串。"
+      },
+      "example": {
+        "en": "local s = string.char(65, 66, 67)\n-- s: string built from byte values, here 'ABC'",
+        "zh-CN": "local s = string.char(65, 66, 67)\n-- s: 由字节值构造的字符串，这里是 'ABC'"
+      }
+    },
+    "string.find": {
+      "signature": {
+        "en": "string.find(s, pattern [, init [, plain]])",
+        "zh-CN": "string.find(s, pattern [, init [, plain]])"
+      },
+      "returns": {
+        "en": "returns: start index, end index, and captures; or nil.",
+        "zh-CN": "返回：起始下标、结束下标及捕获值；未匹配返回 nil。"
+      },
+      "params": {
+        "en": [
+          "s: source string",
+          "pattern: search pattern",
+          "init (optional): start index, default 1",
+          "plain (optional): disable pattern parsing"
+        ],
+        "zh-CN": [
+          "s: 源字符串",
+          "pattern: 搜索模式",
+          "init (可选): 起始下标，默认 1",
+          "plain (可选): 禁用模式解析"
+        ]
+      },
+      "description": {
+        "en": "Finds a pattern or plain substring and returns match positions plus captures.",
+        "zh-CN": "按模式或明文查找字符串，返回匹配位置及捕获值。"
+      },
+      "example": {
+        "en": "local startIndex, endIndex = string.find('hello world', 'world')\n-- startIndex: first matched position, here 7\n-- endIndex: last matched position, here 11",
+        "zh-CN": "local startIndex, endIndex = string.find('hello world', 'world')\n-- startIndex: 匹配起始位置，这里是 7\n-- endIndex: 匹配结束位置，这里是 11"
+      }
+    },
+    "string.format": {
+      "signature": {
+        "en": "string.format(format, ...)",
+        "zh-CN": "string.format(format, ...)"
+      },
+      "returns": {
+        "en": "returns: formatted string.",
+        "zh-CN": "返回：格式化后的字符串。"
+      },
+      "params": {
+        "en": [
+          "format: C-style format template",
+          "...: formatter arguments"
+        ],
+        "zh-CN": [
+          "format: C 风格格式模板",
+          "...: 格式化参数"
+        ]
+      },
+      "description": {
+        "en": "Builds a new string from a format template and arguments.",
+        "zh-CN": "按格式模板生成新字符串。"
+      },
+      "example": {
+        "en": "local text = string.format('score=%d', 100)\n-- text: formatted string, here 'score=100'",
+        "zh-CN": "local text = string.format('score=%d', 100)\n-- text: 格式化后的字符串，这里是 'score=100'"
+      }
+    },
+    "string.gmatch": {
+      "signature": {
+        "en": "string.gmatch(s, pattern)",
+        "zh-CN": "string.gmatch(s, pattern)"
+      },
+      "returns": {
+        "en": "returns: iterator for captures.",
+        "zh-CN": "返回：捕获值迭代器。"
+      },
+      "params": {
+        "en": [
+          "s: source string",
+          "pattern: pattern"
+        ],
+        "zh-CN": [
+          "s: 源字符串",
+          "pattern: 模式"
+        ]
+      },
+      "description": {
+        "en": "Returns an iterator function that traverses all matching fragments.",
+        "zh-CN": "返回匹配器函数，用于遍历所有匹配片段。"
+      },
+      "example": {
+        "en": "for word in string.gmatch('one two', '%w+') do\n  print(word)\nend\n-- word: next captured match, first 'one', then 'two'",
+        "zh-CN": "for word in string.gmatch('one two', '%w+') do\n  print(word)\nend\n-- word: 下一个匹配捕获值，依次为 'one'、'two'"
+      }
+    },
+    "string.gsub": {
+      "signature": {
+        "en": "string.gsub(s, pattern, repl [, n])",
+        "zh-CN": "string.gsub(s, pattern, repl [, n])"
+      },
+      "returns": {
+        "en": "returns: replaced string and count of substitutions.",
+        "zh-CN": "返回：替换后的字符串和替换次数。"
+      },
+      "params": {
+        "en": [
+          "s: source string",
+          "pattern: search pattern",
+          "repl: replacement string/function/table/string",
+          "n (optional): max replacements"
+        ],
+        "zh-CN": [
+          "s: 源字符串",
+          "pattern: 搜索模式",
+          "repl: 替换字符串/函数/table",
+          "n (可选): 最大替换次数"
+        ]
+      },
+      "description": {
+        "en": "Performs global replacement and returns the new string plus replacement count.",
+        "zh-CN": "全局替换字符串并返回新字符串与替换次数。"
+      },
+      "example": {
+        "en": "local text, count = string.gsub('hello world', 'world', 'glua')\n-- text: replaced string, here 'hello glua'\n-- count: replacement count, here 1",
+        "zh-CN": "local text, count = string.gsub('hello world', 'world', 'glua')\n-- text: 替换后的字符串，这里是 'hello glua'\n-- count: 替换次数，这里是 1"
+      }
+    },
+    "string.len": {
+      "signature": {
+        "en": "string.len(s)",
+        "zh-CN": "string.len(s)"
+      },
+      "returns": {
+        "en": "returns: string byte length.",
+        "zh-CN": "返回：字符串字节长度。"
+      },
+      "params": {
+        "en": [
+          "s: string"
+        ],
+        "zh-CN": [
+          "s: 字符串"
+        ]
+      },
+      "description": {
+        "en": "Returns the string length in bytes.",
+        "zh-CN": "返回字符串长度（以字节为单位）。"
+      },
+      "example": {
+        "en": "local len = string.len('hello')\n-- len: string byte length, here 5",
+        "zh-CN": "local len = string.len('hello')\n-- len: 字符串字节长度，这里是 5"
+      }
+    },
+    "string.lower": {
+      "signature": {
+        "en": "string.lower(s)",
+        "zh-CN": "string.lower(s)"
+      },
+      "returns": {
+        "en": "returns: lower-case string.",
+        "zh-CN": "返回：小写字符串。"
+      },
+      "params": {
+        "en": [
+          "s: string"
+        ],
+        "zh-CN": [
+          "s: 字符串"
+        ]
+      },
+      "description": {
+        "en": "Returns a lower-case copy of the string.",
+        "zh-CN": "返回小写转换后的字符串。"
+      },
+      "example": {
+        "en": "local value = string.lower('Hello')\n-- value: lower-case string, here 'hello'",
+        "zh-CN": "local value = string.lower('Hello')\n-- value: 小写转换后的字符串，这里是 'hello'"
+      }
+    },
+    "string.match": {
+      "signature": {
+        "en": "string.match(s, pattern [, init])",
+        "zh-CN": "string.match(s, pattern [, init])"
+      },
+      "returns": {
+        "en": "returns: captured value(s) or nil.",
+        "zh-CN": "返回：捕获值或 nil。"
+      },
+      "params": {
+        "en": [
+          "s: source string",
+          "pattern: pattern",
+          "init (optional): start index"
+        ],
+        "zh-CN": [
+          "s: 源字符串",
+          "pattern: 模式",
+          "init (可选): 起始下标"
+        ]
+      },
+      "description": {
+        "en": "Returns captures from the first pattern match.",
+        "zh-CN": "返回第一次匹配的捕获结果。"
+      },
+      "example": {
+        "en": "local first, second = string.match('Hello, world!', '(.-),(.-)!')\n-- first: first capture, here 'Hello'\n-- second: second capture, here ' world'",
+        "zh-CN": "local first, second = string.match('Hello, world!', '(.-),(.-)!')\n-- first: 第一个捕获值，这里是 'Hello'\n-- second: 第二个捕获值，这里是 ' world'"
+      }
+    },
+    "string.rep": {
+      "signature": {
+        "en": "string.rep(s, n [, sep])",
+        "zh-CN": "string.rep(s, n [, sep])"
+      },
+      "returns": {
+        "en": "returns: repeated string.",
+        "zh-CN": "返回：重复后的字符串。"
+      },
+      "params": {
+        "en": [
+          "s: source string",
+          "n: repeat count",
+          "sep (optional): separator"
+        ],
+        "zh-CN": [
+          "s: 源字符串",
+          "n: 重复次数",
+          "sep (可选): 分隔符"
+        ]
+      },
+      "description": {
+        "en": "Repeats a string n times with an optional separator.",
+        "zh-CN": "将字符串重复 n 次，可选分隔符。"
+      },
+      "example": {
+        "en": "local line = string.rep('-', 3)\n-- line: repeated string, here '---'",
+        "zh-CN": "local line = string.rep('-', 3)\n-- line: 重复后的字符串，这里是 '---'"
+      }
+    },
+    "string.reverse": {
+      "signature": {
+        "en": "string.reverse(s)",
+        "zh-CN": "string.reverse(s)"
+      },
+      "returns": {
+        "en": "returns: reversed string.",
+        "zh-CN": "返回：反转后的字符串。"
+      },
+      "params": {
+        "en": [
+          "s: string"
+        ],
+        "zh-CN": [
+          "s: 字符串"
+        ]
+      },
+      "description": {
+        "en": "Returns a string with bytes in reverse order.",
+        "zh-CN": "反转字符串字符顺序。"
+      },
+      "example": {
+        "en": "local reversed = string.reverse('abc')\n-- reversed: reversed string, here 'cba'",
+        "zh-CN": "local reversed = string.reverse('abc')\n-- reversed: 反转后的字符串，这里是 'cba'"
+      }
+    },
+    "string.sub": {
+      "signature": {
+        "en": "string.sub(s, i [, j])",
+        "zh-CN": "string.sub(s, i [, j])"
+      },
+      "returns": {
+        "en": "returns: substring.",
+        "zh-CN": "返回：子字符串。"
+      },
+      "params": {
+        "en": [
+          "s: source string",
+          "i: start index",
+          "j (optional): end index"
+        ],
+        "zh-CN": [
+          "s: 源字符串",
+          "i: 起始下标",
+          "j (可选): 结束下标"
+        ]
+      },
+      "description": {
+        "en": "Returns a substring for the selected range.",
+        "zh-CN": "返回指定区间的子串。"
+      },
+      "example": {
+        "en": "local sub = string.sub('hello', 1, 2)\n-- sub: selected substring, here 'he'",
+        "zh-CN": "local sub = string.sub('hello', 1, 2)\n-- sub: 指定区间的子串，这里是 'he'"
+      }
+    },
+    "string.upper": {
+      "signature": {
+        "en": "string.upper(s)",
+        "zh-CN": "string.upper(s)"
+      },
+      "returns": {
+        "en": "returns: upper-case string.",
+        "zh-CN": "返回：大写字符串。"
+      },
+      "params": {
+        "en": [
+          "s: string"
+        ],
+        "zh-CN": [
+          "s: 字符串"
+        ]
+      },
+      "description": {
+        "en": "Returns an upper-case copy of the string.",
+        "zh-CN": "返回大写转换后的字符串。"
+      },
+      "example": {
+        "en": "local value = string.upper('hello')\n-- value: upper-case string, here 'HELLO'",
+        "zh-CN": "local value = string.upper('hello')\n-- value: 大写转换后的字符串，这里是 'HELLO'"
+      }
+    },
+    "tonumber": {
+      "signature": {
+        "en": "tonumber(e [, base])",
+        "zh-CN": "tonumber(e [, base])"
+      },
+      "returns": {
+        "en": "returns: number or nil.",
+        "zh-CN": "返回：number 或 nil。"
+      },
+      "params": {
+        "en": [
+          "e: value to convert",
+          "base (optional): numeric base"
+        ],
+        "zh-CN": [
+          "e: 待转换值",
+          "base (可选): 数字进制"
+        ]
+      },
+      "description": {
+        "en": "Converts a value to a number; returns nil when conversion fails.",
+        "zh-CN": "将字符串转换为数字；转换失败返回 nil。"
+      },
+      "example": {
+        "en": "local n = tonumber('42')\n-- n: converted number, here 42; nil when conversion fails",
+        "zh-CN": "local n = tonumber('42')\n-- n: 转换后的数字，这里是 42；失败时为 nil"
+      }
+    },
+    "tostring": {
+      "signature": {
+        "en": "tostring(v)",
+        "zh-CN": "tostring(v)"
+      },
+      "returns": {
+        "en": "returns: string.",
+        "zh-CN": "返回：string。"
+      },
+      "params": {
+        "en": [
+          "v: value"
+        ],
+        "zh-CN": [
+          "v: 值"
+        ]
+      },
+      "description": {
+        "en": "Converts a value to a string and invokes `__tostring` when available.",
+        "zh-CN": "将值转换为字符串，并触发可用的 `__tostring` 元方法。"
+      },
+      "example": {
+        "en": "local text = tostring(42)\n-- text: converted string, here '42'",
+        "zh-CN": "local text = tostring(42)\n-- text: 转换后的字符串，这里是 '42'"
+      }
+    },
+    "type": {
+      "signature": {
+        "en": "type(v)",
+        "zh-CN": "type(v)"
+      },
+      "returns": {
+        "en": "returns: string type name.",
+        "zh-CN": "返回：字符串类型名。"
+      },
+      "params": {
+        "en": [
+          "v: value"
+        ],
+        "zh-CN": [
+          "v: 值"
+        ]
+      },
+      "description": {
+        "en": "Returns the Lua type name, such as `number` or `table`.",
+        "zh-CN": "返回 Lua 类型名，如 `number`、`table` 等。"
+      },
+      "example": {
+        "en": "local kind = type({})\n-- kind: Lua type name, here 'table'",
+        "zh-CN": "local kind = type({})\n-- kind: Lua 类型名，这里是 'table'"
+      }
+    },
+    "xpcall": {
+      "signature": {
+        "en": "xpcall(f, err, ...)",
+        "zh-CN": "xpcall(f, err, ...)"
+      },
+      "returns": {
+        "en": "returns: boolean status, followed by function results or error handler result.",
+        "zh-CN": "返回：布尔状态，后接函数结果或错误处理器结果。"
+      },
+      "params": {
+        "en": [
+          "f: callable",
+          "err: error handler",
+          "...: function arguments"
+        ],
+        "zh-CN": [
+          "f: 可调用对象",
+          "err: 错误处理器",
+          "...: 函数参数"
+        ]
+      },
+      "description": {
+        "en": "Calls a function in protected mode with an explicit error handler.",
+        "zh-CN": "带错误处理器的保护调用。"
+      },
+      "example": {
+        "en": "local ok, result = xpcall(function() return 1 end, debug.traceback)\n-- ok: true when call succeeds\n-- result: function return value or error handler result",
+        "zh-CN": "local ok, result = xpcall(function() return 1 end, debug.traceback)\n-- ok: 调用成功时为 true\n-- result: 函数返回值或错误处理器返回值"
+      }
+    }
+  }
+}

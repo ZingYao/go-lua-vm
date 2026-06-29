@@ -87,11 +87,15 @@ type VM struct {
 	// closeFrom 保存上一条 JMP 请求关闭 upvalue 的起始寄存器，-1 表示不关闭。
 	closeFrom int
 	// callRequest 保存上一条 CALL、TAILCALL 或 TFORCALL 生成的调用请求。
-	callRequest *CallRequest
+	callRequest CallRequest
+	// hasCallRequest 标记 callRequest 是否保存了可消费的调用请求。
+	hasCallRequest bool
 	// returned 标记上一条指令是否是 RETURN，避免裸 return 的 0 返回值被误判为未返回。
 	returned bool
 	// returnValues 保存上一条 RETURN 收集到的返回值。
 	returnValues []Value
+	// returnInline 保存少量返回值，避免普通 Lua 函数每次 return 都分配切片底层数组。
+	returnInline [2]Value
 }
 
 // LuaClosure 表示最小 VM 阶段的 Lua closure 值。
@@ -248,6 +252,82 @@ func NewVMWithConstantsAndUpvalues(registerCount int, constants []bytecode.Const
 //
 // registerCount 必须大于等于 0；所有切片都会被复制，调用方后续修改原切片不会影响 VM。
 func NewVMWithPrototypeData(registerCount int, constants []bytecode.Constant, upvalues []Value, protos []*bytecode.Proto, varargs []Value) *VM {
+	// 公开构造函数保留复制语义，避免测试和外部调用方持有切片后修改影响 VM。
+	return newVMWithPrototypeData(registerCount, constants, upvalues, protos, varargs, true)
+}
+
+// NewVMWithBorrowedPrototypeData 创建执行期 Lua closure VM。
+//
+// constants 与 protos 必须来自不可变 Proto，VM 会直接引用它们以避免每次函数调用复制 Proto 数据；
+// upvalues 与 varargs 仍会复制，因为它们是运行期可变快照。
+func NewVMWithBorrowedPrototypeData(registerCount int, constants []bytecode.Constant, upvalues []Value, protos []*bytecode.Proto, varargs []Value) *VM {
+	// Lua closure 执行路径借用 Proto 只读数据，贴近 Lua 5.3 C 实现的 Proto* 引用模型。
+	return newVMWithPrototypeData(registerCount, constants, upvalues, protos, varargs, false)
+}
+
+// ResetForBorrowedPrototypeData 用于 VM 池复用场景，按调用时快照重置 VM。
+//
+// constants 与 protos 按 Lua 5.3 的只读约束直接复用；upvalues 与 varargs 重新复制到 VM
+// 私有切片，避免调用方后续修改影响当前 closure 执行。registerCount 变化时只在必要时
+// 扩容寄存器窗口，避免重复申请；缩容只调整视图长度。返回 false 表示入参非法。
+func (vm *VM) ResetForBorrowedPrototypeData(registerCount int, constants []bytecode.Constant, upvalues []Value, protos []*bytecode.Proto, varargs []Value) bool {
+	if vm == nil {
+		// nil VM 无法复用，直接返回失败。
+		return false
+	}
+	if registerCount < 0 {
+		// 寄存器数量不能为负，保持调用方错误语义。
+		return false
+	}
+
+	// 先关闭全部 open upvalue，避免旧帧寄存器被复用后影响共享引用。
+	vm.CloseUpvaluesFrom(0)
+
+	// 仅在需要时扩展寄存器窗口，复用容量可避免每次调用重复申请。
+	if registerCount > len(vm.registers) {
+		// 新窗口大小超出容量时补齐到固定大小并 nil 初始化。
+		vm.registers = append(vm.registers, make([]Value, registerCount-len(vm.registers))...)
+	}
+	// 缩容只收窄切片视图，底层容量保留用于后续大窗口复用。
+	vm.registers = vm.registers[:registerCount]
+	for registerIndex := range vm.registers {
+		// 每次复用前清空寄存器，避免上一帧残留值被意外读取。
+		vm.registers[registerIndex] = NilValue()
+	}
+
+	// Proto 常量表和子 Proto 复用只读路径；仅替换切片头部引用，执行期由编译器保证不可变。
+	vm.constants = constants
+	vm.protos = protos
+	vm.luaMetamethodRunner = nil
+
+	// upvalues 与 varargs 是运行期可变快照，必须复制到本 VM 私有存储。
+	vm.upvalues = append(vm.upvalues[:0], upvalues...)
+	vm.upvalueCells = nil
+	vm.varargs = append(vm.varargs[:0], varargs...)
+
+	// 重置所有执行状态字段，确保下一次执行从纯净状态开始。
+	vm.proto = nil
+	vm.currentPC = 0
+	vm.openTop = -1
+	vm.pendingLoadKXTarget = -1
+	vm.pendingSetList = nil
+	vm.pendingComparison = nil
+	vm.skipNext = false
+	vm.pcOffset = 0
+	vm.closeFrom = -1
+	vm.callRequest = CallRequest{}
+	vm.hasCallRequest = false
+	vm.returned = false
+	vm.returnValues = nil
+
+	return true
+}
+
+// newVMWithPrototypeData 创建带寄存器、常量、upvalue、子 Proto 和 vararg 的最小 VM。
+//
+// copyProtoData 控制 constants/protos 是否复制；upvalues 与 varargs 始终复制，避免运行期写入污染闭包
+// 或调用方参数切片。
+func newVMWithPrototypeData(registerCount int, constants []bytecode.Constant, upvalues []Value, protos []*bytecode.Proto, varargs []Value, copyProtoData bool) *VM {
 	// 创建寄存器窗口，并显式填充 Lua nil，避免零值 Value 被误判为有效非 nil 值。
 	registers := make([]Value, registerCount)
 	for registerIndex := range registers {
@@ -255,9 +335,17 @@ func NewVMWithPrototypeData(registerCount int, constants []bytecode.Constant, up
 		registers[registerIndex] = NilValue()
 	}
 
-	copiedConstants := append([]bytecode.Constant(nil), constants...)
+	copiedConstants := constants
+	if copyProtoData {
+		// 公开构造路径需要隔离调用方后续修改。
+		copiedConstants = append([]bytecode.Constant(nil), constants...)
+	}
 	copiedUpvalues := append([]Value(nil), upvalues...)
-	copiedProtos := append([]*bytecode.Proto(nil), protos...)
+	copiedProtos := protos
+	if copyProtoData {
+		// 公开构造路径需要隔离调用方后续替换子 Proto 切片。
+		copiedProtos = append([]*bytecode.Proto(nil), protos...)
+	}
 	copiedVarargs := append([]Value(nil), varargs...)
 	return &VM{
 		registers:           registers,
@@ -301,6 +389,40 @@ func (vm *VM) Register(index int) (Value, bool) {
 
 	// 寄存器存在时返回当前值。
 	return vm.registers[index], true
+}
+
+// CopyRegisters 将连续寄存器区间复制到目标切片。
+//
+// start 是起始寄存器下标；target 的长度决定复制数量。返回 false 表示区间越界，调用方应按
+// Lua VM 寄存器错误处理。该方法用于 CALL 参数读取等热路径，避免逐个 Register 方法调用。
+func (vm *VM) CopyRegisters(start int, target []Value) bool {
+	if start < 0 || start+len(target) > len(vm.registers) {
+		// 源区间越界时不复制，保持调用方可恢复错误语义。
+		return false
+	}
+	copy(target, vm.registers[start:start+len(target)])
+	return true
+}
+
+// CopyRegistersTo 将当前 VM 的连续寄存器区间复制到另一个 VM。
+//
+// sourceStart 和 targetStart 都是 0-based 寄存器下标；count 是复制数量。返回 false 表示任一窗口
+// 越界，调用方应按寄存器错误处理。该方法用于 Lua CALL fixed-args 热路径。
+func (vm *VM) CopyRegistersTo(sourceStart int, target *VM, targetStart int, count int) bool {
+	if count < 0 || target == nil {
+		// 复制数量非法或目标 VM 缺失时不能继续。
+		return false
+	}
+	if sourceStart < 0 || sourceStart+count > len(vm.registers) {
+		// 源寄存器区间越界时不能复制。
+		return false
+	}
+	if targetStart < 0 || targetStart+count > len(target.registers) {
+		// 目标寄存器区间越界时不能复制。
+		return false
+	}
+	copy(target.registers[targetStart:targetStart+count], vm.registers[sourceStart:sourceStart+count])
+	return true
 }
 
 // RegisterCount 返回当前 VM 寄存器窗口大小。
@@ -453,7 +575,8 @@ func (vm *VM) ResetForTailCall(varargs []Value) {
 	vm.skipNext = false
 	vm.pcOffset = 0
 	vm.closeFrom = -1
-	vm.callRequest = nil
+	vm.callRequest = CallRequest{}
+	vm.hasCallRequest = false
 	vm.pendingComparison = nil
 	vm.returned = false
 	vm.returnValues = nil
@@ -624,8 +747,13 @@ func (vm *VM) CloseFrom() (int, bool) {
 //
 // 返回 nil 表示上一条指令不是 CALL、TAILCALL 或 TFORCALL。
 func (vm *VM) LastCallRequest() *CallRequest {
-	// 调用方只读取请求内容，不应修改其中字段；后续可改为复制返回。
-	return vm.callRequest
+	if !vm.hasCallRequest {
+		// 上一条指令不是调用类指令时没有可消费请求。
+		return nil
+	}
+
+	// 返回 VM 内嵌请求地址，避免每次 CALL 为请求对象额外分配。
+	return &vm.callRequest
 }
 
 // ReturnValues 返回上一条 RETURN 指令收集到的返回值。
@@ -642,6 +770,18 @@ func (vm *VM) ReturnValues() []Value {
 	return values
 }
 
+// BorrowReturnValues 返回上一条 RETURN 指令收集到的内部返回值切片。
+//
+// 返回值只允许 VM 执行循环在当前 Step 后立即读取；调用方不得修改或长期保存。公开测试和外部
+// 调用仍应使用 ReturnValues 获取副本，以避免破坏 VM 内部状态。
+func (vm *VM) BorrowReturnValues() []Value {
+	if !vm.returned {
+		// returned=false 表示上一条指令不是 RETURN。
+		return nil
+	}
+	return vm.returnValues
+}
+
 // Step 执行单条 Lua 5.3 指令。
 //
 // instruction 必须来自当前函数 Proto；当前阶段实现基础加载和寄存器复制指令。未实现 opcode
@@ -651,7 +791,8 @@ func (vm *VM) Step(instruction bytecode.Instruction) error {
 	vm.skipNext = false
 	vm.pcOffset = 0
 	vm.closeFrom = -1
-	vm.callRequest = nil
+	vm.callRequest = CallRequest{}
+	vm.hasCallRequest = false
 	vm.returned = false
 	vm.returnValues = nil
 	if (vm.pendingLoadKXTarget >= 0 || vm.pendingSetList != nil) && instruction.OpCode() != bytecode.OpExtraArg {
@@ -943,6 +1084,17 @@ func (vm *VM) executeGetTabUp(instruction bytecode.Instruction) error {
 		return err
 	}
 
+	if table.metatable == nil {
+		// 无元表 table 的普通读取等价于 raw get，跳过 __index 链检查以减少全局变量热路径开销。
+		value, err := table.RawGet(key)
+		if err != nil {
+			// raw get 的 key 编码错误需要直接返回，目标寄存器保持原值。
+			return err
+		}
+		vm.registers[targetIndex] = value
+		return nil
+	}
+
 	value, err := table.GetWithRunner(key, vm.luaMetamethodRunner)
 	if err != nil {
 		// table 普通读取可能因为 key 编码、不可索引源值或 Lua closure 元方法返回错误。
@@ -998,6 +1150,25 @@ func (vm *VM) executeGetTable(instruction bytecode.Instruction) error {
 		return err
 	}
 
+	if receiverValue := vm.registers[tableIndex]; receiverValue.Kind == KindTable {
+		// 普通无元表 table 读取等价于 raw get，可避开通用 __index 分派。
+		table, err := tableFromValue(receiverValue)
+		if err != nil {
+			// table 类型引用损坏时仍返回原有 table 解析错误。
+			return err
+		}
+		if table.metatable == nil {
+			// 无元表时 raw 未命中也直接返回 nil，符合 Lua 5.3 普通 table 读取语义。
+			value, err := table.RawGet(key)
+			if err != nil {
+				// raw get 的 key 编码错误需要直接返回，目标寄存器保持原值。
+				return err
+			}
+			vm.registers[targetIndex] = value
+			return nil
+		}
+	}
+
 	value, err := vm.indexedValue(vm.registers[tableIndex], key)
 	if err != nil {
 		// 普通读取可能因为 key 编码、不可索引源值或暂不支持的元方法返回错误。
@@ -1036,6 +1207,11 @@ func (vm *VM) executeSetTable(instruction bytecode.Instruction) error {
 		return err
 	}
 
+	if table.metatable == nil {
+		// 无元表 table 写入等价于 raw set，跳过 __newindex 链检查以减少数组/字段写入热路径开销。
+		return table.RawSet(key, value)
+	}
+
 	// SETTABLE 使用带 runner 的普通写入，支持 Lua closure 形式 __newindex 元方法。
 	return table.SetWithRunner(key, value, vm.luaMetamethodRunner)
 }
@@ -1065,6 +1241,11 @@ func (vm *VM) executeSetTabUp(instruction bytecode.Instruction) error {
 	if err != nil {
 		// value 读取失败时不能尝试写入 table。
 		return err
+	}
+
+	if table.metatable == nil {
+		// 无元表 upvalue table 写入等价于 raw set，常见于 _ENV 初始化和普通模块表更新。
+		return table.RawSet(key, value)
 	}
 
 	// SETTABUP 使用带 runner 的普通写入，支持 Lua closure 形式 __newindex 元方法。
@@ -1110,6 +1291,26 @@ func (vm *VM) executeSelf(instruction bytecode.Instruction) error {
 	if err != nil {
 		// RK method key 无法读取时不能覆盖目标寄存器。
 		return err
+	}
+
+	if receiverValue.Kind == KindTable {
+		// 无元表 table 的方法读取等价于 raw get，仍需保留 SELF 对接收者寄存器的写入布局。
+		table, err := tableFromValue(receiverValue)
+		if err != nil {
+			// table 类型引用损坏时保持两个目标寄存器不变。
+			return err
+		}
+		if table.metatable == nil {
+			// raw 未命中返回 nil，后续 CALL 会按原有语义报告不可调用错误。
+			methodValue, err := table.RawGet(key)
+			if err != nil {
+				// key 编码错误时不能覆盖 SELF 目标寄存器。
+				return err
+			}
+			vm.registers[receiverTargetIndex] = receiverValue
+			vm.registers[methodIndex] = methodValue
+			return nil
+		}
 	}
 
 	methodValue, err := vm.indexedValue(receiverValue, key)
@@ -1538,6 +1739,29 @@ func (vm *VM) executeConcat(instruction bytecode.Instruction) error {
 		return ErrRegisterOutOfRange
 	}
 
+	if endIndex == startIndex+1 &&
+		vm.registers[startIndex].Kind == KindString &&
+		vm.registers[endIndex].Kind == KindString {
+		if vm.registers[endIndex].String == "" {
+			// Lua 5.3 luaV_concat 对右侧空字符串直接保留左操作数，避免无意义结果分配。
+			vm.registers[targetIndex] = vm.registers[startIndex]
+			return nil
+		}
+		if vm.registers[startIndex].String == "" {
+			// 左侧空字符串时结果等于右操作数，保持字符串不可变语义且避免分配。
+			vm.registers[targetIndex] = vm.registers[endIndex]
+			return nil
+		}
+		// 最常见的二元 string 拼接直接使用 Go 字符串拼接，避免 Builder 和区间扫描开销。
+		vm.registers[targetIndex] = StringValue(vm.registers[startIndex].String + vm.registers[endIndex].String)
+		return nil
+	}
+	if result, ok := vm.concatStringRegisterRange(startIndex, endIndex); ok {
+		// 全部操作数已经是 string 时直接按寄存器范围拼接，避免构造临时 []string。
+		vm.registers[targetIndex] = StringValue(result)
+		return nil
+	}
+
 	parts := make([]string, 0, endIndex-startIndex+1)
 	allConvertible := true
 	for registerIndex := startIndex; registerIndex <= endIndex; registerIndex++ {
@@ -1556,11 +1780,11 @@ func (vm *VM) executeConcat(instruction bytecode.Instruction) error {
 		return nil
 	}
 
-	result := vm.registers[startIndex]
-	for registerIndex := startIndex + 1; registerIndex <= endIndex; registerIndex++ {
-		// Lua CONCAT 按寄存器顺序折叠当前累计值和下一个操作数。
-		nextValue := vm.registers[registerIndex]
-		combined, err := vm.concatPair(result, nextValue)
+	result := vm.registers[endIndex]
+	for registerIndex := endIndex - 1; registerIndex >= startIndex; registerIndex-- {
+		// CONCAT 是右结合运算；存在元方法时必须先折叠右侧相邻操作数，匹配 Lua 5.3 luaV_concat。
+		leftValue := vm.registers[registerIndex]
+		combined, err := vm.concatPair(leftValue, result)
 		if err != nil {
 			// 当前二元拼接无法完成且无元方法时，目标寄存器保持原值。
 			return err
@@ -1581,8 +1805,16 @@ func (vm *VM) concatPair(left Value, right Value) (Value, error) {
 	leftString, leftErr := valueToLuaString(left)
 	rightString, rightErr := valueToLuaString(right)
 	if leftErr == nil && rightErr == nil {
+		if rightString == "" {
+			// 右侧空字符串时结果为左操作数，避免基础折叠路径分配新字符串。
+			return StringValue(leftString), nil
+		}
+		if leftString == "" {
+			// 左侧空字符串时结果为右操作数，匹配 Lua 5.3 luaV_concat 的空串快路径。
+			return StringValue(rightString), nil
+		}
 		// 两侧均可转换为 string 时，使用基础字符串拼接快速路径。
-		return StringValue(concatStrings([]string{leftString, rightString})), nil
+		return StringValue(leftString + rightString), nil
 	}
 
 	result, found, err := vm.callBinaryMetamethod(left, right, metamethodConcat)
@@ -1811,13 +2043,14 @@ func (vm *VM) executeCall(instruction bytecode.Instruction, tail bool) error {
 	}
 
 	// 记录调用请求，后续执行循环会建立 Lua 或 Go 调用帧。
-	vm.callRequest = &CallRequest{
+	vm.callRequest = CallRequest{
 		FunctionIndex: functionIndex,
 		ArgumentCount: argumentCount,
 		ReturnCount:   returnCount,
 		Tail:          tail,
 		ResultIndex:   functionIndex,
 	}
+	vm.hasCallRequest = true
 	return nil
 }
 
@@ -1843,9 +2076,15 @@ func (vm *VM) executeReturn(instruction bytecode.Instruction) error {
 		return ErrRegisterOutOfRange
 	}
 
-	// 保存返回值快照，避免后续寄存器修改影响本次 RETURN 结果；0 个返回值也保留非 nil 切片。
+	// 保存返回值快照，避免后续寄存器修改影响本次 RETURN 结果；少量返回值复用内嵌数组。
 	vm.returned = true
-	vm.returnValues = make([]Value, valueCount)
+	if valueCount <= len(vm.returnInline) {
+		// 常见函数返回 0 到 2 个值，直接复用 VM 内嵌数组避免每次调用分配。
+		vm.returnValues = vm.returnInline[:valueCount]
+	} else {
+		// 大量返回值仍需要独立切片保存快照，避免覆盖内嵌小数组容量。
+		vm.returnValues = make([]Value, valueCount)
+	}
 	copy(vm.returnValues, vm.registers[startIndex:startIndex+valueCount])
 	return nil
 }
@@ -1861,7 +2100,7 @@ func (vm *VM) executeForPrep(instruction bytecode.Instruction) error {
 	}
 
 	if initialValue, limitValue, stepValue, ok := forIntegerControlValues(vm.registers[baseIndex], vm.registers[baseIndex+1], vm.registers[baseIndex+2]); ok {
-		// integer for 在进入循环前先执行 init -= step，并写回已折算的 integer 上界供 FORLOOP 快路径复用。
+		// integer for 在进入循环前先执行 init -= step。
 		vm.registers[baseIndex] = IntegerValue(initialValue - stepValue)
 		vm.registers[baseIndex+1] = IntegerValue(limitValue)
 		vm.pcOffset = instruction.SBx()
@@ -1941,13 +2180,14 @@ func (vm *VM) executeTForCall(instruction bytecode.Instruction) error {
 	}
 
 	// 记录泛型 for 调用请求，参数固定为 state/control 两个值。
-	vm.callRequest = &CallRequest{
+	vm.callRequest = CallRequest{
 		FunctionIndex: baseIndex,
 		ArgumentCount: 2,
 		ReturnCount:   resultCount,
 		GenericFor:    true,
 		ResultIndex:   baseIndex + 3,
 	}
+	vm.hasCallRequest = true
 	return nil
 }
 
@@ -2536,6 +2776,48 @@ func valueToLuaString(value Value) (string, error) {
 	return "", ErrConcatOperand
 }
 
+// concatStringRegisterRange 直接拼接寄存器区间内的纯 string 操作数。
+//
+// 任一寄存器不是 string 时返回 ok=false，调用方应回落到 number 转换和 __concat 元方法路径。
+func (vm *VM) concatStringRegisterRange(startIndex int, endIndex int) (string, bool) {
+	totalLength := 0
+	nonEmptyCount := 0
+	onlyNonEmpty := ""
+	for registerIndex := startIndex; registerIndex <= endIndex; registerIndex++ {
+		value := vm.registers[registerIndex]
+		if value.Kind != KindString {
+			// 非 string 操作数需要走完整转换逻辑。
+			return "", false
+		}
+		if value.String != "" {
+			// 记录非空片段，便于全空或单非空范围直接返回已有字符串。
+			nonEmptyCount++
+			onlyNonEmpty = value.String
+		}
+		if len(value.String) > math.MaxInt-totalLength {
+			// 长度超过 Go int 可表达范围时，交给完整路径返回拼接错误。
+			return "", false
+		}
+		totalLength += len(value.String)
+	}
+	if nonEmptyCount == 0 {
+		// 全部片段为空时结果仍为空串，不需要 Builder 分配。
+		return "", true
+	}
+	if nonEmptyCount == 1 {
+		// 只有一个非空片段时结果等于该片段，匹配 C 版空串快速路径。
+		return onlyNonEmpty, true
+	}
+
+	var builder strings.Builder
+	builder.Grow(totalLength)
+	for registerIndex := startIndex; registerIndex <= endIndex; registerIndex++ {
+		// 按寄存器顺序写入片段，保持 R(B)..R(C) 语义。
+		builder.WriteString(vm.registers[registerIndex].String)
+	}
+	return builder.String(), true
+}
+
 // concatPair 拼接两个 Lua 值。
 //
 // 两个值都能转换为 string 时走基础拼接；任一转换失败时按 Lua 5.3 规则尝试 `__concat`
@@ -2544,8 +2826,16 @@ func concatPair(left Value, right Value) (Value, error) {
 	leftString, leftErr := valueToLuaString(left)
 	rightString, rightErr := valueToLuaString(right)
 	if leftErr == nil && rightErr == nil {
+		if rightString == "" {
+			// 右侧空字符串时结果为左操作数，避免基础折叠路径分配新字符串。
+			return StringValue(leftString), nil
+		}
+		if leftString == "" {
+			// 左侧空字符串时结果为右操作数，匹配 Lua 5.3 luaV_concat 的空串快路径。
+			return StringValue(rightString), nil
+		}
 		// 两侧均可转换为 string 时，使用基础字符串拼接快速路径。
-		return StringValue(concatStrings([]string{leftString, rightString})), nil
+		return StringValue(leftString + rightString), nil
 	}
 
 	result, found, err := callBinaryMetamethod(left, right, metamethodConcat)

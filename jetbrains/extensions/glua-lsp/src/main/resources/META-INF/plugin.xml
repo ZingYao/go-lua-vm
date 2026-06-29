@@ -1,0 +1,69 @@
+<idea-plugin>
+  <id>com.glua.jetbrains</id>
+  <name>glua Language Support</name>
+  <vendor email="support@example.com">go-lua-vm</vendor>
+  <description><![CDATA[
+    Language support for glua syntax extensions across JetBrains IDEs.
+  ]]></description>
+
+  <depends>com.intellij.modules.platform</depends>
+
+  <extensions defaultExtensionNs="com.intellij">
+    <fileType
+      name="GLua"
+      language="GLua"
+      implementationClass="com.glua.jetbrains.GluaFileType"
+      fieldName="INSTANCE"
+      extensions="glua;lua"/>
+
+    <lang.syntaxHighlighterFactory
+      language="GLua"
+      implementationClass="com.glua.jetbrains.GluaSyntaxHighlighterFactory"/>
+
+    <lang.parserDefinition
+      language="GLua"
+      implementationClass="com.glua.jetbrains.GluaParserDefinition"/>
+
+    <annotator
+      language="GLua"
+      implementationClass="com.glua.jetbrains.GluaAnnotator"/>
+
+    <completion.contributor
+      language="GLua"
+      implementationClass="com.glua.jetbrains.GluaCompletionContributor"/>
+
+    <psi.referenceContributor
+      language="GLua"
+      implementation="com.glua.jetbrains.GluaBuiltinReferenceContributor"/>
+
+    <gotoDeclarationHandler
+      implementation="com.glua.jetbrains.GluaGotoDeclarationHandler"/>
+
+    <lang.documentationProvider
+      language="GLua"
+      implementationClass="com.glua.jetbrains.GluaDocumentationProvider"/>
+
+    <postFormatProcessor
+      implementation="com.glua.jetbrains.GluaPostFormatProcessor"/>
+
+    <com.intellij.platform.backend.documentation.targetProvider
+      implementation="com.glua.jetbrains.GluaDocumentationTargetProvider"/>
+
+    <applicationService
+      serviceImplementation="com.glua.jetbrains.GluaSettings"/>
+
+    <applicationConfigurable
+      instance="com.glua.jetbrains.GluaSettingsConfigurable"
+      displayName="GLua"/>
+  </extensions>
+
+  <actions>
+    <action
+      id="Glua.FormatFile"
+      class="com.glua.jetbrains.GluaFormatAction"
+      text="Format GLua File"
+      description="Format the current GLua file">
+      <add-to-group group-id="CodeMenu" anchor="last"/>
+    </action>
+  </actions>
+</idea-plugin>

@@ -113,6 +113,102 @@ func BenchmarkStringConcat(b *testing.B) {
 	}
 }
 
+// BenchmarkVMConcatInstruction 度量 VM OP_CONCAT 在纯字符串寄存器上的执行成本。
+//
+// 该基准隔离 DoString、循环和 GC，只观察 CONCAT 指令自身的寄存器读取、快路径分派和字符串分配。
+func BenchmarkVMConcatInstruction(b *testing.B) {
+	b.Run("binary_string", func(b *testing.B) {
+		// 二元短字符串拼接覆盖 `s = s .. "x"` codegen 后的核心 OP_CONCAT 形态。
+		vm := NewVM(3)
+		if err := vm.SetRegister(0, StringValue("prefix")); err != nil {
+			// 基准准备阶段必须能写入目标寄存器。
+			b.Fatalf("set left register failed: %v", err)
+		}
+		if err := vm.SetRegister(1, StringValue("x")); err != nil {
+			// 基准准备阶段必须能写入右操作数寄存器。
+			b.Fatalf("set right register failed: %v", err)
+		}
+		instruction := bytecode.CreateABC(bytecode.OpConcat, 2, 0, 1)
+
+		b.ReportAllocs()
+		b.ResetTimer()
+		for benchmarkIndex := 0; benchmarkIndex < b.N; benchmarkIndex++ {
+			if err := vm.Step(instruction); err != nil {
+				// 纯字符串 CONCAT 不应失败。
+				b.Fatalf("concat instruction failed: %v", err)
+			}
+		}
+		benchmarkValueSink, _ = vm.Register(2)
+	})
+
+	b.Run("empty_right", func(b *testing.B) {
+		// 右操作数为空字符串时，Lua 5.3 直接保留左操作数。
+		vm := NewVM(3)
+		if err := vm.SetRegister(0, StringValue("prefix")); err != nil {
+			b.Fatalf("set left register failed: %v", err)
+		}
+		if err := vm.SetRegister(1, StringValue("")); err != nil {
+			b.Fatalf("set right register failed: %v", err)
+		}
+		instruction := bytecode.CreateABC(bytecode.OpConcat, 2, 0, 1)
+
+		b.ReportAllocs()
+		b.ResetTimer()
+		for benchmarkIndex := 0; benchmarkIndex < b.N; benchmarkIndex++ {
+			if err := vm.Step(instruction); err != nil {
+				// 空字符串快路径不应改变 CONCAT 成功语义。
+				b.Fatalf("concat instruction failed: %v", err)
+			}
+		}
+		benchmarkValueSink, _ = vm.Register(2)
+	})
+
+	b.Run("empty_left", func(b *testing.B) {
+		// 左操作数为空字符串时，Lua 5.3 直接使用右操作数。
+		vm := NewVM(3)
+		if err := vm.SetRegister(0, StringValue("")); err != nil {
+			b.Fatalf("set left register failed: %v", err)
+		}
+		if err := vm.SetRegister(1, StringValue("suffix")); err != nil {
+			b.Fatalf("set right register failed: %v", err)
+		}
+		instruction := bytecode.CreateABC(bytecode.OpConcat, 2, 0, 1)
+
+		b.ReportAllocs()
+		b.ResetTimer()
+		for benchmarkIndex := 0; benchmarkIndex < b.N; benchmarkIndex++ {
+			if err := vm.Step(instruction); err != nil {
+				// 空字符串快路径不应改变 CONCAT 成功语义。
+				b.Fatalf("concat instruction failed: %v", err)
+			}
+		}
+		benchmarkValueSink, _ = vm.Register(2)
+	})
+
+	b.Run("four_strings", func(b *testing.B) {
+		// 多段字符串拼接覆盖 `a .. b .. c .. d` 这种寄存器范围快路径。
+		vm := NewVM(5)
+		parts := []string{"lua", "-", "5.3", "-vm"}
+		for partIndex, part := range parts {
+			// 将各片段预置到连续寄存器，循环内只测 CONCAT。
+			if err := vm.SetRegister(partIndex, StringValue(part)); err != nil {
+				b.Fatalf("set part register failed: %v", err)
+			}
+		}
+		instruction := bytecode.CreateABC(bytecode.OpConcat, 4, 0, 3)
+
+		b.ReportAllocs()
+		b.ResetTimer()
+		for benchmarkIndex := 0; benchmarkIndex < b.N; benchmarkIndex++ {
+			if err := vm.Step(instruction); err != nil {
+				// 纯字符串 CONCAT 不应失败。
+				b.Fatalf("concat instruction failed: %v", err)
+			}
+		}
+		benchmarkValueSink, _ = vm.Register(4)
+	})
+}
+
 // BenchmarkGoLuaCallback 度量当前 Go/Lua 回调边界的最小往返成本。
 //
 // 当前阶段尚未接入完整 Lua closure 执行循环，因此用 Thread.Resume 执行 Go closure 模拟 Lua 入口调 Go 回调。

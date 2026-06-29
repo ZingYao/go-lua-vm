@@ -17,6 +17,8 @@ import (
 
 	"github.com/zing/go-lua-vm/bytecode"
 	"github.com/zing/go-lua-vm/compiler/codegen"
+	"github.com/zing/go-lua-vm/compiler/formatter"
+	"github.com/zing/go-lua-vm/compiler/lexer"
 	"github.com/zing/go-lua-vm/compiler/parser"
 	"github.com/zing/go-lua-vm/extensions"
 	"github.com/zing/go-lua-vm/lua"
@@ -29,9 +31,13 @@ const (
 	ExitOK = 0
 	// ExitFailure 表示 CLI 遇到参数、加载或执行错误。
 	ExitFailure = 1
+	// ExitInterrupted 表示 CLI 被 Ctrl-C 中断。
+	ExitInterrupted = 130
 	// VersionText 是 glua 当前 CLI 版本输出。
-	VersionText = "Lua 5.3.6  Copyright (C) 1994-2020 Lua.org, PUC-Rio"
+	VersionText = "glua 0.1.0  go-lua-vm (Lua 5.3.6 compatible)"
 )
+
+var errCLIInterrupted = errors.New("interrupted")
 
 // Streams 保存 CLI 与宿主标准流之间的连接。
 //
@@ -67,9 +73,13 @@ type Options struct {
 	ArgPrefix []string
 	// ListBytecodePath 保存可选 glua 反汇编输入路径；该选项不能与官方执行参数混用。
 	ListBytecodePath string
+	// FormatPath 保存待格式化 Lua 源码文件路径；该选项不能与官方执行参数混用。
+	FormatPath string
+	// FormatWrite 表示格式化结果是否写回原文件。
+	FormatWrite bool
 	// SyntaxExtensions 保存源码编译阶段启用的语法扩展集合。
 	SyntaxExtensions extensions.SyntaxSet
-	// SyntaxExtensionsSet 表示命令行是否显式指定过 --syntax。
+	// SyntaxExtensionsSet 表示命令行是否显式指定过 --glua-syntax。
 	SyntaxExtensionsSet bool
 	// DisabledSyntaxExtensions 保存命令行显式关闭的语法扩展集合。
 	DisabledSyntaxExtensions extensions.SyntaxSet
@@ -81,6 +91,10 @@ type Options struct {
 func Main(ctx context.Context, args []string, streams Streams) int {
 	// 先执行带错误返回的主流程，确保 main.go 只负责 os.Exit。
 	if err := Run(ctx, args, streams); err != nil {
+		if errors.Is(err, errCLIInterrupted) {
+			// 交互模式 Ctrl-C 直接终止解释器，不按普通错误写 stderr。
+			return ExitInterrupted
+		}
 		if _, ok := luaExitError(err); ok {
 			// os.exit 是脚本主动请求进程退出，CLI 只映射退出码，不额外写 stderr。
 			return exitCodeForError(err)
@@ -88,11 +102,11 @@ func Main(ctx context.Context, args []string, streams Streams) int {
 		// 出错时写入 stderr 并返回非零退出码。
 		stderr := safeWriter(streams.Stderr)
 		if isCLISyntaxError(err) {
-			// 语法错误已经携带 source:line:column 主消息，CLI 再按需补充源码指针诊断。
-			writeSyntaxError(stderr, err)
+			// CLI 可执行文件按官方 Lua 5.3 形态输出一行语法错误，不展示 Go API 扩展指针诊断。
+			_, _ = fmt.Fprintf(stderr, "%s: %s\n", os.Args[0], cliSyntaxErrorTextFromError(err))
 		} else if lua.IsRuntimeError(err) {
-			// Lua 运行期错误优先打印 Lua error object，避免把包装错误固定显示为 "lua error"。
-			_, _ = fmt.Fprintf(stderr, "%s: %s\n", os.Args[0], luaErrorText(err))
+			// Lua 运行期错误输出程序名前缀、Lua error object 和官方风格 traceback。
+			_, _ = fmt.Fprintf(stderr, "%s: %s\n", os.Args[0], cliRuntimeErrorText(err))
 		} else {
 			// 非 Lua runtime 错误保留 Go error 文本，便于定位宿主侧失败。
 			_, _ = fmt.Fprintln(stderr, err)
@@ -100,6 +114,45 @@ func Main(ctx context.Context, args []string, streams Streams) int {
 		return exitCodeForError(err)
 	}
 	return ExitOK
+}
+
+// writeCLISyntaxError 输出官方 Lua CLI 风格的语法错误。
+//
+// err 可以是 lua.SyntaxError 或 parser 原始错误；结构化错误会降级为 `source:line: message`
+// 形态，避免 CLI stderr 出现 Go API 专用列号和源码指针块。
+func writeCLISyntaxError(stderr io.Writer, err error) {
+	_, _ = fmt.Fprintln(stderr, cliSyntaxErrorTextFromError(err))
+}
+
+// cliSyntaxErrorTextFromError 从错误链提取官方 Lua CLI 风格语法错误文本。
+func cliSyntaxErrorTextFromError(err error) string {
+	var syntaxErr *lua.SyntaxError
+	if errors.As(err, &syntaxErr) && syntaxErr != nil {
+		// 结构化语法错误可精确降级为官方一行文本。
+		return cliSyntaxErrorText(syntaxErr)
+	}
+	return err.Error()
+}
+
+// cliSyntaxErrorText 将结构化语法错误转换为官方 Lua CLI 的一行文本。
+//
+// Go API 的 SyntaxError 保留列号和详细提示；CLI 只输出 source:line:message。常见的非法语句
+// 起始和孤立表达式错误按官方 `unexpected symbol` / `syntax error` 文案映射。
+func cliSyntaxErrorText(syntaxErr *lua.SyntaxError) string {
+	if syntaxErr == nil {
+		// nil 错误没有更具体内容。
+		return ""
+	}
+	message := parser.LoadErrorText(syntaxErr.Cause, syntaxErr.Details.SourceName)
+	if strings.Contains(message, `expected operator "=" near <eof>`) {
+		// 官方 `lua -e a` 报 `syntax error near <eof>`，不暴露内部 assignment 期望。
+		message = strings.ReplaceAll(message, `expected operator "=" near <eof>`, "syntax error near <eof>")
+	}
+	if strings.Contains(message, `expected expression near <eof>`) {
+		// 官方 `if` 这类非法语句尾部报 `unexpected symbol near <eof>`。
+		message = strings.ReplaceAll(message, `expected expression near <eof>`, "unexpected symbol near <eof>")
+	}
+	return message
 }
 
 // writeSyntaxError 输出 CLI 语法错误。
@@ -115,6 +168,113 @@ func writeSyntaxError(stderr io.Writer, err error) {
 		return
 	}
 	_, _ = fmt.Fprintln(stderr, err)
+}
+
+// cliRuntimeErrorText 返回官方 Lua CLI 风格运行时错误文本。
+//
+// err 必须是 Lua 运行期错误；第一行是 Lua error object，后续在可用时追加 traceback。若运行时
+// 尚未保存 Lua 帧，也至少返回错误主消息，避免 CLI 打印空 traceback。
+func cliRuntimeErrorText(err error) string {
+	message := luaErrorText(err)
+	var runtimeErr *runtime.RuntimeError
+	if !errors.As(err, &runtimeErr) || runtimeErr == nil || len(runtimeErr.TracebackFrames) == 0 {
+		// 没有保存失败现场时只能输出主错误文本。
+		return message
+	}
+	traceback := formatCLITraceback(message, runtimeErr.TracebackFrames)
+	if traceback == "" {
+		// 防御空 traceback，保持原有错误主消息。
+		return message
+	}
+	return traceback
+}
+
+// formatCLITraceback 把 runtime 调用帧转换为官方 CLI 可读 traceback。
+//
+// frames 顺序为当前帧到最早帧；当前实现覆盖主 chunk、命名 Lua 函数和 Go/C 帧的常见 CLI
+// 错误展示。无法识别的帧会退回 runtime.Traceback，保证错误仍有诊断信息。
+func formatCLITraceback(message string, frames []runtime.CallFrame) string {
+	var builder strings.Builder
+	builder.WriteString(message)
+	builder.WriteString("\nstack traceback:")
+	wroteFrame := false
+	for _, frame := range frames {
+		// 按 Lua 5.3 traceback 顺序逐帧输出。
+		line, ok := cliTracebackFrameLine(frame)
+		if !ok {
+			// 非 Lua 帧按 C 帧展示。
+			builder.WriteString("\n\t[C]: in ?")
+			wroteFrame = true
+			continue
+		}
+		builder.WriteByte('\n')
+		builder.WriteByte('\t')
+		builder.WriteString(line)
+		wroteFrame = true
+	}
+	if !wroteFrame {
+		// 理论上不会出现；保留 runtime fallback 避免返回只有标题的 traceback。
+		return runtime.Traceback(message, frames)
+	}
+	if !strings.Contains(builder.String(), "\n\t[C]: in ?") {
+		// 主程序入口错误在官方 CLI 末尾会展示 C 调用边界。
+		builder.WriteString("\n\t[C]: in ?")
+	}
+	return builder.String()
+}
+
+// cliTracebackFrameLine 返回单个调用帧的官方 CLI traceback 行。
+//
+// 返回 false 表示该帧不是 Lua closure，调用方应按 C 帧处理。source 会去掉 `@` 前缀，行号缺失时
+// 只展示 source。
+func cliTracebackFrameLine(frame runtime.CallFrame) (string, bool) {
+	if frame.Function.Kind != runtime.KindLuaClosure {
+		// Go closure 对应官方 traceback 中的 C 帧。
+		if frame.Name != "" {
+			// 有调用点名称时展示官方 `in global 'error'` 等格式。
+			nameWhat := frame.NameWhat
+			if nameWhat == "" {
+				// 缺失名称来源时使用 function 兜底。
+				nameWhat = "function"
+			}
+			return fmt.Sprintf("[C]: in %s '%s'", nameWhat, frame.Name), true
+		}
+		return "[C]: in ?", true
+	}
+	closure, ok := frame.Function.Ref.(*runtime.LuaClosure)
+	if !ok || closure == nil || closure.Proto == nil {
+		// 损坏 Lua closure 无法可靠展示源码位置。
+		return "", false
+	}
+	source := strings.TrimPrefix(closure.Proto.Source, "@")
+	if source == "" {
+		// stripped 或缺失 source 时使用官方占位。
+		source = "=?"
+	}
+	line := -1
+	if frame.CurrentPC >= 0 && frame.CurrentPC < len(closure.Proto.LineInfo) {
+		// 行号表存在时使用当前 pc 的源码行号。
+		line = closure.Proto.LineInfo[frame.CurrentPC]
+	}
+	location := source
+	if line > 0 {
+		// 有行号时展示 source:line。
+		location = fmt.Sprintf("%s:%d", source, line)
+	}
+	if frame.Name != "" {
+		// 命名调用帧展示函数名来源。
+		nameWhat := frame.NameWhat
+		if nameWhat == "" {
+			// 缺失来源时按普通 function 展示。
+			nameWhat = "function"
+		}
+		return fmt.Sprintf("%s: in %s '%s'", location, nameWhat, frame.Name), true
+	}
+	if closure.Proto.LineDefined == 0 {
+		// 顶层 chunk 对齐官方 `in main chunk`。
+		return fmt.Sprintf("%s: in main chunk", location), true
+	}
+	return fmt.Sprintf("%s: in function <%s:%d>", location, source, closure.Proto.LineDefined), true
 }
 
 // writeSyntaxErrorDetails 输出语法错误的源码行与指针详情。
@@ -149,7 +309,7 @@ func writeSyntaxErrorDetails(stderr io.Writer, details lua.SyntaxErrorDetails) {
 // Run 解析参数并执行当前阶段已支持的 CLI 行为。
 //
 // ctx 必须非 nil；当前执行顺序为版本输出、打开标准库、加载 `-l` 模块、执行 `-e` 片段、
-// 执行脚本或 stdin、处理 `-i` 标记。
+// 执行脚本或 stdin、处理 `-i` 标记；无参数且 stdin 为终端时兼容官方 lua 进入 REPL。
 func Run(ctx context.Context, args []string, streams Streams) error {
 	if ctx == nil {
 		// nil context 无法表达取消语义，调用方应传入 context.Background 或可取消上下文。
@@ -168,6 +328,10 @@ func Run(ctx context.Context, args []string, streams Streams) error {
 	if options.ListBytecodePath != "" {
 		// 可选反汇编模式只做调试输出，不创建 State，也不执行脚本。
 		return runBytecodeList(options.ListBytecodePath, streams.Stdout, syntaxForOptions(options))
+	}
+	if options.FormatPath != "" {
+		// 格式化模式只读取并输出/写回源码，不执行脚本。
+		return runFormat(options.FormatPath, options.FormatWrite, streams.Stdout, syntaxForOptions(options))
 	}
 
 	// 创建带 context 的 State，保证后续加载和调用可观察取消。
@@ -231,8 +395,14 @@ func Run(ctx context.Context, args []string, streams Streams) error {
 		// 脚本或 stdin 执行失败时停止后续交互。
 		return err
 	}
-	if options.Interactive {
-		// -i 进入 REPL；REPL 内部错误写 stderr 并继续读取下一条输入。
+	enterInteractive := options.Interactive || shouldRunImplicitREPL(options, streams.Stdin)
+	if enterInteractive {
+		if !options.Version {
+			// 进入交互解释器前输出版本 banner，对齐官方 lua 裸启动和 -i 行为。
+			stdout := safeWriter(streams.Stdout)
+			_, _ = fmt.Fprintln(stdout, VersionText)
+		}
+		// -i 或裸终端启动进入 REPL；REPL 内部错误写 stderr 并继续读取下一条输入。
 		return runREPL(state, streams)
 	}
 	return nil
@@ -335,31 +505,55 @@ func ParseArgs(args []string) (Options, error) {
 			options.Libraries = append(options.Libraries, argument[2:])
 			continue
 		}
-		if argument == "--list-bytecode" {
-			// glua 的反汇编能力使用长选项，避免抢占官方 -l 加载模块语义。
+		if argument == "--glua-list-bytecode" {
+			// glua 的反汇编能力使用项目命名空间长选项，避免抢占官方 lua 参数语义。
 			index++
 			if index >= len(args) {
 				// 缺少输入路径时无法进行反汇编。
-				return Options{}, fmt.Errorf("option --list-bytecode requires an argument")
+				return Options{}, fmt.Errorf("option --glua-list-bytecode requires an argument")
 			}
 			options.ListBytecodePath = args[index]
 			continue
 		}
-		if strings.HasPrefix(argument, "--list-bytecode=") {
+		if strings.HasPrefix(argument, "--glua-list-bytecode=") {
 			// 等号形式便于脚本调用，同样不影响官方 -l。
-			options.ListBytecodePath = strings.TrimPrefix(argument, "--list-bytecode=")
+			options.ListBytecodePath = strings.TrimPrefix(argument, "--glua-list-bytecode=")
 			if options.ListBytecodePath == "" {
 				// 空路径没有可读取目标，直接返回参数错误。
-				return Options{}, fmt.Errorf("option --list-bytecode requires an argument")
+				return Options{}, fmt.Errorf("option --glua-list-bytecode requires an argument")
 			}
 			continue
 		}
-		if argument == "--syntax" {
-			// --syntax 必须消费后续模式名或扩展名列表。
+		if argument == "--glua-format" {
+			// --glua-format 支持 `--glua-format file` 与 `--glua-format -w file` 两种形式。
+			consumed, err := applyFormatOption(&options, args[index+1:])
+			if err != nil {
+				// 缺少路径或重复模式时返回明确参数错误。
+				return Options{}, err
+			}
+			index += consumed
+			continue
+		}
+		if strings.HasPrefix(argument, "--glua-format=") {
+			// 等号形式只指定输出到 stdout 的格式化目标。
+			formatPath := strings.TrimPrefix(argument, "--glua-format=")
+			if formatPath == "" {
+				// 空路径没有可读取目标，直接返回参数错误。
+				return Options{}, fmt.Errorf("option --glua-format requires an argument")
+			}
+			if options.FormatPath != "" {
+				// 单次命令只允许一个格式化目标。
+				return Options{}, fmt.Errorf("--glua-format can only be specified once")
+			}
+			options.FormatPath = formatPath
+			continue
+		}
+		if argument == "--glua-syntax" {
+			// --glua-syntax 必须消费后续模式名或扩展名列表。
 			index++
 			if index >= len(args) {
 				// 缺少语法模式时无法决定编译配置。
-				return Options{}, fmt.Errorf("option --syntax requires an argument")
+				return Options{}, fmt.Errorf("option --glua-syntax requires an argument")
 			}
 			if err := applySyntaxOption(&options, args[index]); err != nil {
 				// 语法扩展名称错误直接返回参数错误。
@@ -367,20 +561,20 @@ func ParseArgs(args []string) (Options, error) {
 			}
 			continue
 		}
-		if strings.HasPrefix(argument, "--syntax=") {
+		if strings.HasPrefix(argument, "--glua-syntax=") {
 			// 等号形式便于脚本和 IDE 配置传参。
-			if err := applySyntaxOption(&options, strings.TrimPrefix(argument, "--syntax=")); err != nil {
+			if err := applySyntaxOption(&options, strings.TrimPrefix(argument, "--glua-syntax=")); err != nil {
 				// 语法扩展名称错误直接返回参数错误。
 				return Options{}, err
 			}
 			continue
 		}
-		if argument == "--disable-syntax" {
-			// --disable-syntax 必须消费后续扩展名列表。
+		if argument == "--glua-disable-syntax" {
+			// --glua-disable-syntax 必须消费后续扩展名列表。
 			index++
 			if index >= len(args) {
 				// 缺少禁用列表时返回明确参数错误。
-				return Options{}, fmt.Errorf("option --disable-syntax requires an argument")
+				return Options{}, fmt.Errorf("option --glua-disable-syntax requires an argument")
 			}
 			if err := applyDisableSyntaxOption(&options, args[index]); err != nil {
 				// 禁用列表名称错误直接返回参数错误。
@@ -388,9 +582,9 @@ func ParseArgs(args []string) (Options, error) {
 			}
 			continue
 		}
-		if strings.HasPrefix(argument, "--disable-syntax=") {
-			// 等号形式与 --syntax 保持一致。
-			if err := applyDisableSyntaxOption(&options, strings.TrimPrefix(argument, "--disable-syntax=")); err != nil {
+		if strings.HasPrefix(argument, "--glua-disable-syntax=") {
+			// 等号形式与 --glua-syntax 保持一致。
+			if err := applyDisableSyntaxOption(&options, strings.TrimPrefix(argument, "--glua-disable-syntax=")); err != nil {
 				// 禁用列表名称错误直接返回参数错误。
 				return Options{}, err
 			}
@@ -429,7 +623,7 @@ func ParseArgs(args []string) (Options, error) {
 	return options, nil
 }
 
-// applySyntaxOption 将 --syntax 参数写入 Options。
+// applySyntaxOption 将 --glua-syntax 参数写入 Options。
 //
 // value 支持 lua53、extended、all 或逗号分隔扩展名；解析失败时返回可展示错误。
 func applySyntaxOption(options *Options, value string) error {
@@ -444,11 +638,11 @@ func applySyntaxOption(options *Options, value string) error {
 	return nil
 }
 
-// applyDisableSyntaxOption 将 --disable-syntax 参数追加到 Options。
+// applyDisableSyntaxOption 将 --glua-disable-syntax 参数追加到 Options。
 //
-// value 只接受逗号分隔扩展名；多个 --disable-syntax 会合并禁用集合。
+// value 只接受逗号分隔扩展名；多个 --glua-disable-syntax 会合并禁用集合。
 func applyDisableSyntaxOption(options *Options, value string) error {
-	// 禁用列表与显式 --syntax 可叠加，最终在 syntaxForOptions 中统一扣除。
+	// 禁用列表与显式 --glua-syntax 可叠加，最终在 syntaxForOptions 中统一扣除。
 	disabledSet, err := extensions.ParseDisabledSyntaxSet(value)
 	if err != nil {
 		// 参数非法时保留原始解析错误。
@@ -458,16 +652,46 @@ func applyDisableSyntaxOption(options *Options, value string) error {
 	return nil
 }
 
+// applyFormatOption 解析 --glua-format 后续参数。
+//
+// args 是 --glua-format 之后尚未消费的参数；返回值表示消费了几个后续参数。
+func applyFormatOption(options *Options, args []string) (int, error) {
+	if options.FormatPath != "" {
+		// 单次命令只允许一个格式化目标，避免多个输出顺序不明确。
+		return 0, fmt.Errorf("--glua-format can only be specified once")
+	}
+	if len(args) == 0 {
+		// 缺少文件路径时无法执行格式化。
+		return 0, fmt.Errorf("option --glua-format requires an argument")
+	}
+	if args[0] == "-w" {
+		// `--glua-format -w file` 表示原地写回。
+		if len(args) < 2 {
+			// -w 后必须跟待格式化文件路径。
+			return 0, fmt.Errorf("option --glua-format -w requires a file")
+		}
+		options.FormatWrite = true
+		options.FormatPath = args[1]
+		return 2, nil
+	}
+	if strings.HasPrefix(args[0], "-") {
+		// --glua-format 后除 -w 外不接受其他选项，避免把路径缺失误判为脚本参数。
+		return 0, fmt.Errorf("option --glua-format requires a file")
+	}
+	options.FormatPath = args[0]
+	return 1, nil
+}
+
 // syntaxForOptions 计算 glua 当前命令最终使用的语法扩展集合。
 func syntaxForOptions(options Options) extensions.SyntaxSet {
-	// 未显式指定 --syntax 时使用当前构建默认集合。
+	// 未显式指定 --glua-syntax 时使用当前构建默认集合。
 	syntaxSet := extensions.Default()
 	if options.SyntaxExtensionsSet {
-		// 显式 --syntax 覆盖默认集合。
+		// 显式 --glua-syntax 覆盖默认集合。
 		syntaxSet = options.SyntaxExtensions
 	}
 	if options.DisabledSyntaxExtensions != 0 {
-		// --disable-syntax 在最终集合上扣除指定扩展，允许 extended 默认开再局部关闭。
+		// --glua-disable-syntax 在最终集合上扣除指定扩展，允许 extended 默认开再局部关闭。
 		syntaxSet = syntaxSet.Without(options.DisabledSyntaxExtensions)
 	}
 	return syntaxSet & extensions.Compiled()
@@ -475,17 +699,24 @@ func syntaxForOptions(options Options) extensions.SyntaxSet {
 
 // validateListBytecodeOptions 校验 glua 可选反汇编模式不破坏官方 lua 参数语义。
 //
-// `--list-bytecode` 只能与 `-v` 共存；不能与官方 `-l` 模块加载、`-e`、脚本路径或 `-i`
+// `--glua-list-bytecode` 只能与 `-v` 共存；不能与官方 `-l` 模块加载、`-e`、脚本路径或 `-i`
 // 混用，避免用户把 Lua CLI 入口误当成 luac 入口。
 func validateListBytecodeOptions(options Options) error {
 	// 未启用反汇编模式时没有额外冲突。
-	if options.ListBytecodePath == "" {
+	if options.ListBytecodePath == "" && options.FormatPath == "" {
 		// 空路径表示普通 glua 执行路径。
 		return nil
 	}
+	if options.ListBytecodePath != "" && options.FormatPath != "" {
+		// 反汇编和格式化都是独立文件模式，不能同时执行。
+		return fmt.Errorf("--glua-list-bytecode cannot be combined with --glua-format")
+	}
 	if len(options.Libraries) > 0 || len(options.Expressions) > 0 || options.ScriptPath != "" || options.Interactive {
-		// 调试反汇编与官方执行参数混用会造成执行和查看的顺序歧义，直接拒绝。
-		return fmt.Errorf("--list-bytecode cannot be combined with -l, -e, -i, or script execution")
+		// 调试文件模式与官方执行参数混用会造成执行和查看的顺序歧义，直接拒绝。
+		if options.FormatPath != "" {
+			return fmt.Errorf("--glua-format cannot be combined with -l, -e, -i, or script execution")
+		}
+		return fmt.Errorf("--glua-list-bytecode cannot be combined with -l, -e, -i, or script execution")
 	}
 	return nil
 }
@@ -507,6 +738,46 @@ func runBytecodeList(path string, stdout io.Writer, syntax extensions.SyntaxSet)
 		return err
 	}
 	_, err = fmt.Fprint(safeWriter(stdout), bytecode.DisassembleProto(proto))
+	if err != nil {
+		// stdout 写入失败时向上传播，命令入口会返回失败退出码。
+		return err
+	}
+	return nil
+}
+
+// runFormat 格式化指定 Lua 源码文件。
+//
+// writeBack 为 true 时把结果写回原文件；否则写入 stdout。源码会先按 glua 当前语法扩展集合
+// 编译校验，确保 switch/continue 等扩展语法与实际运行模式一致。
+func runFormat(path string, writeBack bool, stdout io.Writer, syntax extensions.SyntaxSet) error {
+	inputBytes, err := os.ReadFile(path)
+	if err != nil {
+		// 文件读取失败保留 os.PathError，便于调用方定位权限和路径问题。
+		return err
+	}
+	source := lexer.StripInitialShebang(string(inputBytes))
+	options := lua.WithSyntaxExtensions(lua.DefaultOptions(), syntax)
+	state := lua.NewStateWithOptions(options)
+	defer state.Close()
+	if err := lua.LoadString(state, source, "@"+path); err != nil {
+		// 语法错误使用 lua.SyntaxError 结构返回，CLI 会输出源码指针诊断。
+		return err
+	}
+	formatted, err := formatter.Format(source, syntax)
+	if err != nil {
+		// 理论上前置校验已覆盖 parser 错误；这里保留防御式返回。
+		return err
+	}
+	if writeBack {
+		// 写回时尽量保留原文件权限。
+		info, statErr := os.Stat(path)
+		if statErr != nil {
+			// 无法读取权限时返回原始文件状态错误。
+			return statErr
+		}
+		return os.WriteFile(path, []byte(formatted), info.Mode().Perm())
+	}
+	_, err = fmt.Fprint(safeWriter(stdout), formatted)
 	if err != nil {
 		// stdout 写入失败时向上传播，命令入口会返回失败退出码。
 		return err
@@ -953,9 +1224,40 @@ func shouldExecuteImplicitStdin(options Options, stdin io.Reader) bool {
 	return true
 }
 
+// shouldRunImplicitREPL 判断无执行目标且 stdin 为终端时是否应进入 REPL。
+//
+// Lua 5.3 官方 CLI 在裸 `lua` 连接交互终端时进入交互解释器；但 `-v`、`-e`、`-l`、脚本、
+// 反汇编和管道 stdin 都有明确执行语义，不能被隐式 REPL 改写。
+func shouldRunImplicitREPL(options Options, stdin io.Reader) bool {
+	if options.ScriptPath != "" || options.Interactive || options.Version || options.ListBytecodePath != "" {
+		// 已有脚本、显式交互、版本专用输出或反汇编模式时，不启用裸命令 REPL。
+		return false
+	}
+	if len(options.Expressions) > 0 || len(options.Libraries) > 0 {
+		// -e 和 -l 代表已有启动执行目标，官方语义下不会因为终端 stdin 自动追加 REPL。
+		return false
+	}
+	file, ok := stdin.(*os.File)
+	if !ok {
+		// 非 os.File reader 通常是测试或管道输入，应交给隐式 stdin 脚本逻辑处理。
+		return false
+	}
+	stat, err := file.Stat()
+	if err != nil {
+		// 无法判断文件类型时保持非交互，避免在未知输入上阻塞。
+		return false
+	}
+	if stat.Mode()&os.ModeCharDevice == 0 {
+		// 普通文件或管道 stdin 应按脚本执行，不进入交互提示。
+		return false
+	}
+	return true
+}
+
 // runREPL 执行第一阶段交互式读取循环。
 //
-// stdin 按行读取；stdout 输出 `> ` 和 `>> ` 提示；stderr 输出语法或运行错误并继续下一条输入。
+// stdin 按行读取；真实终端会启用最小行编辑以支持左右方向键；stdout 输出 `> ` 和 `>> ` 提示；
+// stderr 输出语法或运行错误并继续下一条输入。
 func runREPL(state *lua.State, streams Streams) error {
 	if state == nil {
 		// nil State 无法执行 REPL 输入。
@@ -963,25 +1265,31 @@ func runREPL(state *lua.State, streams Streams) error {
 	}
 
 	// REPL 只依赖传入流，便于测试 stdout/stderr 分离。
-	reader := bufio.NewScanner(safeReader(streams.Stdin))
 	stdout := safeWriter(streams.Stdout)
 	stderr := safeWriter(streams.Stderr)
+	lineReader, restoreTerminal := newREPLLineReader(streams.Stdin, stdout)
+	defer restoreTerminal()
 	var pendingLines []string
 	for {
+		var prompt string
 		if len(pendingLines) == 0 {
 			// 新 chunk 使用主提示符。
-			_, _ = fmt.Fprint(stdout, replPrompt(state, "_PROMPT", "> "))
+			prompt = replPrompt(state, "_PROMPT", "> ")
 		} else {
 			// 已有未完成 chunk 时使用续行提示符。
-			_, _ = fmt.Fprint(stdout, replPrompt(state, "_PROMPT2", ">> "))
+			prompt = replPrompt(state, "_PROMPT2", ">> ")
 		}
-		if !reader.Scan() {
+		line, ok, err := lineReader.readLine(prompt)
+		if err != nil {
+			// 底层输入流错误需要返回给 Main 转换退出码。
+			return err
+		}
+		if !ok {
 			// 输入结束时退出 REPL，保留已经输出的最后一个提示符。
 			break
 		}
 
 		// 追加当前行并判断是否需要继续补全多行块。
-		line := reader.Text()
 		pendingLines = append(pendingLines, line)
 		source := strings.Join(pendingLines, "\n")
 		if isIncompleteREPLSource(source) {
@@ -990,18 +1298,279 @@ func runREPL(state *lua.State, streams Streams) error {
 		}
 
 		if err := executeREPLChunk(state, source); err != nil {
+			if _, ok := luaExitError(err); ok {
+				// os.exit 是用户明确请求结束解释器，交给 Main 映射退出码，不能被 REPL 错误恢复吞掉。
+				return err
+			}
 			// REPL 错误写 stderr 后恢复下一条输入，不中断进程。
-			_, _ = fmt.Fprintln(stderr, luaErrorText(err))
+			_, _ = fmt.Fprintln(stderr, replErrorText(state, err))
 		}
 		pendingLines = nil
-	}
-	if err := reader.Err(); err != nil {
-		// 底层输入流错误需要返回给 Main 转换退出码。
-		return err
 	}
 	if len(pendingLines) > 0 {
 		// EOF 时仍有未完成 chunk，按语法错误输出并成功结束 REPL。
 		_, _ = fmt.Fprintln(stderr, "incomplete input")
+	}
+	return nil
+}
+
+// replErrorText 返回 REPL 模式下的错误展示文本。
+//
+// Lua 5.3 交互解释器对运行时错误会打印 traceback；语法错误和普通宿主错误仍只打印主错误文本。
+func replErrorText(state *lua.State, err error) string {
+	message := luaErrorText(err)
+	if !lua.IsRuntimeError(err) {
+		// 非运行时错误不拼接 traceback，避免语法错误输出过度噪声。
+		return message
+	}
+	location := replErrorLocation(message)
+	if strings.HasPrefix(location, "stdin:") {
+		// 交互顶层 chunk 需要贴近官方 lua 文案，不能使用 runtime 的内部帧类型展示。
+		return fmt.Sprintf("%s\nstack traceback:\n\t%s: in main chunk\n\t[C]: in ?", message, location)
+	}
+	frames := state.TracebackFrames()
+	if len(frames) > 0 {
+		// 调用帧仍可见时使用 runtime 统一 traceback 格式。
+		return runtime.Traceback(message, frames)
+	}
+	// REPL 顶层 chunk 错误在返回到交互循环时通常已回滚调用帧，需合成官方最小 traceback。
+	return fmt.Sprintf("%s\nstack traceback:\n\t%s: in main chunk\n\t[C]: in ?", message, location)
+}
+
+// replErrorLocation 从错误消息中提取 REPL 顶层 chunk 位置。
+//
+// Lua 运行时错误通常以 `stdin:line:` 开头；提取失败时回退到官方交互模式的 stdin:1。
+func replErrorLocation(message string) string {
+	firstColon := strings.Index(message, ":")
+	if firstColon <= 0 {
+		// 缺少 source 前缀时只能回退到交互输入首行。
+		return "stdin:1"
+	}
+	rest := message[firstColon+1:]
+	secondColon := strings.Index(rest, ":")
+	if secondColon <= 0 {
+		// 缺少 line 前缀时只能回退到交互输入首行。
+		return "stdin:1"
+	}
+	lineText := rest[:secondColon]
+	for _, lineRune := range lineText {
+		if lineRune < '0' || lineRune > '9' {
+			// 非数字行号不是 Lua source:line 前缀。
+			return "stdin:1"
+		}
+	}
+	return message[:firstColon+1+secondColon]
+}
+
+// replLineReader 抽象 REPL 单行读取能力。
+//
+// scannerREPLLineReader 用于管道、测试 reader 和 raw mode 不可用的终端；terminalREPLLineReader 用于
+// 支持 ANSI 控制序列的真实终端输入。
+type replLineReader interface {
+	readLine(prompt string) (string, bool, error)
+}
+
+// newREPLLineReader 根据输入流选择 REPL 行读取器。
+//
+// stdin/stdout 都是终端且 raw mode 可用时启用最小行编辑；否则回退到 Scanner，保持非终端输入兼容。
+func newREPLLineReader(stdin io.Reader, stdout io.Writer) (replLineReader, func()) {
+	if file, ok := stdin.(*os.File); ok {
+		// 只有真实文件描述符才可能切换终端 raw mode。
+		restore, rawOK := makeRawTerminal(file)
+		if rawOK {
+			// raw mode 成功后按字节处理方向键、退格和插入。
+			return &terminalREPLLineReader{
+				reader: bufio.NewReader(file),
+				stdout: stdout,
+			}, restore
+		}
+	}
+	return &scannerREPLLineReader{
+		scanner: bufio.NewScanner(safeReader(stdin)),
+		stdout:  stdout,
+	}, func() {}
+}
+
+// scannerREPLLineReader 使用标准 Scanner 读取一行。
+//
+// 该路径用于非终端输入，保留原有测试和管道执行行为。
+type scannerREPLLineReader struct {
+	scanner *bufio.Scanner
+	stdout  io.Writer
+}
+
+// readLine 输出提示符并读取下一行。
+//
+// 返回 ok=false 表示 EOF；Scanner 内部错误通过 error 返回。
+func (reader *scannerREPLLineReader) readLine(prompt string) (string, bool, error) {
+	_, _ = fmt.Fprint(reader.stdout, prompt)
+	if !reader.scanner.Scan() {
+		// Scanner 到达 EOF 或遇到读取错误时结束当前 REPL。
+		if err := reader.scanner.Err(); err != nil {
+			// 读取错误需要返回给上层转成 CLI 失败。
+			return "", false, err
+		}
+		return "", false, nil
+	}
+	return reader.scanner.Text(), true, nil
+}
+
+// terminalREPLLineReader 在 raw mode 终端上实现最小行编辑。
+//
+// 当前支持左右方向键、Home/End、Delete、Backspace、Ctrl-D 和中间插入，覆盖官方 lua 常见交互输入。
+type terminalREPLLineReader struct {
+	reader *bufio.Reader
+	stdout io.Writer
+}
+
+// readLine 输出提示符并在 raw mode 中读取一行。
+//
+// 返回 ok=false 表示用户在空行按 Ctrl-D 或输入 EOF；错误仅表示底层读写失败。
+func (reader *terminalREPLLineReader) readLine(prompt string) (string, bool, error) {
+	_, _ = fmt.Fprint(reader.stdout, prompt)
+	var buffer []rune
+	cursor := 0
+	for {
+		inputRune, _, err := reader.reader.ReadRune()
+		if err != nil {
+			// EOF 代表终端输入结束；其他错误交给上层处理。
+			if errors.Is(err, io.EOF) {
+				return "", false, nil
+			}
+			return "", false, err
+		}
+		switch inputRune {
+		case '\r', '\n':
+			// 回车提交当前行，并显式换行以补偿 raw mode 不自动回显。
+			_, _ = fmt.Fprint(reader.stdout, "\r\n")
+			return string(buffer), true, nil
+		case '\x04':
+			// Ctrl-D 在空行退出 REPL；非空行保留当前编辑内容。
+			if len(buffer) == 0 {
+				return "", false, nil
+			}
+		case '\x03':
+			// Ctrl-C 在交互输入阶段直接停止 REPL，匹配官方解释器的中断体验。
+			_, _ = fmt.Fprint(reader.stdout, "\r\n")
+			return "", false, errCLIInterrupted
+		case '\x1b':
+			// ANSI escape 序列承载方向键等编辑命令。
+			nextCursor, nextBuffer, err := reader.consumeEscape(prompt, buffer, cursor)
+			if err != nil {
+				// escape 读取失败说明底层输入不可用。
+				return "", false, err
+			}
+			cursor = nextCursor
+			buffer = nextBuffer
+		case '\b', '\x7f':
+			if cursor > 0 {
+				// 删除光标左侧字符后重绘当前行。
+				copy(buffer[cursor-1:], buffer[cursor:])
+				buffer = buffer[:len(buffer)-1]
+				cursor--
+				if err := redrawREPLLine(reader.stdout, prompt, buffer, cursor); err != nil {
+					// 输出失败时停止 REPL。
+					return "", false, err
+				}
+			}
+		default:
+			if inputRune >= ' ' {
+				// 普通可打印字符插入到当前光标位置。
+				buffer = append(buffer, 0)
+				copy(buffer[cursor+1:], buffer[cursor:])
+				buffer[cursor] = inputRune
+				cursor++
+				if err := redrawREPLLine(reader.stdout, prompt, buffer, cursor); err != nil {
+					// 输出失败时停止 REPL。
+					return "", false, err
+				}
+			}
+		}
+	}
+}
+
+// consumeEscape 处理 ANSI escape 编辑序列。
+//
+// 只识别 REPL 需要的方向键和删除键；未知序列会被忽略，避免污染 Lua 源码输入。
+func (reader *terminalREPLLineReader) consumeEscape(prompt string, buffer []rune, cursor int) (int, []rune, error) {
+	prefix, _, err := reader.reader.ReadRune()
+	if err != nil {
+		// escape 后续字节读取失败时把错误返回给上层。
+		return cursor, buffer, err
+	}
+	if prefix != '[' {
+		// 非 CSI 序列不是当前行编辑支持范围，直接忽略。
+		return cursor, buffer, nil
+	}
+	command, _, err := reader.reader.ReadRune()
+	if err != nil {
+		// CSI 命令读取失败时把错误返回给上层。
+		return cursor, buffer, err
+	}
+	switch command {
+	case 'D':
+		if cursor > 0 {
+			// 左方向键只移动光标，不改变缓冲区。
+			cursor--
+			_, _ = fmt.Fprint(reader.stdout, "\x1b[D")
+		}
+	case 'C':
+		if cursor < len(buffer) {
+			// 右方向键只移动光标，不改变缓冲区。
+			cursor++
+			_, _ = fmt.Fprint(reader.stdout, "\x1b[C")
+		}
+	case 'H':
+		// Home 移动到行首，便于快速编辑当前 chunk。
+		cursor = 0
+		if err := redrawREPLLine(reader.stdout, prompt, buffer, cursor); err != nil {
+			// 重绘失败时返回错误。
+			return cursor, buffer, err
+		}
+	case 'F':
+		// End 移动到行尾，便于继续追加输入。
+		cursor = len(buffer)
+		if err := redrawREPLLine(reader.stdout, prompt, buffer, cursor); err != nil {
+			// 重绘失败时返回错误。
+			return cursor, buffer, err
+		}
+	case '3':
+		trailing, _, err := reader.reader.ReadRune()
+		if err != nil {
+			// Delete 序列未完整读取时返回底层错误。
+			return cursor, buffer, err
+		}
+		if trailing == '~' && cursor < len(buffer) {
+			// Delete 删除光标位置字符，并重绘当前行。
+			copy(buffer[cursor:], buffer[cursor+1:])
+			buffer = buffer[:len(buffer)-1]
+			if err := redrawREPLLine(reader.stdout, prompt, buffer, cursor); err != nil {
+				// 重绘失败时返回错误。
+				return cursor, buffer, err
+			}
+		}
+	default:
+		// 未识别 CSI 命令不改变输入缓冲。
+	}
+	return cursor, buffer, nil
+}
+
+// redrawREPLLine 重绘当前 REPL 输入行并恢复光标位置。
+//
+// raw mode 下终端不负责行编辑，因此中间插入、删除、Home/End 后需要显式刷新整行。
+func redrawREPLLine(stdout io.Writer, prompt string, buffer []rune, cursor int) error {
+	if _, err := fmt.Fprintf(stdout, "\r%s%s\x1b[K", prompt, string(buffer)); err != nil {
+		// 输出失败时上层应终止 REPL。
+		return err
+	}
+	rightDistance := len(buffer) - cursor
+	if rightDistance > 0 {
+		// 从行尾向左移动到逻辑光标位置。
+		_, err := fmt.Fprintf(stdout, "\x1b[%dD", rightDistance)
+		if err != nil {
+			// 光标移动失败时上层应终止 REPL。
+			return err
+		}
 	}
 	return nil
 }
@@ -1349,6 +1918,10 @@ func exitCodeForError(err error) int {
 	if err == nil {
 		// nil 错误表示成功。
 		return ExitOK
+	}
+	if errors.Is(err, errCLIInterrupted) {
+		// Ctrl-C 按常见 shell 约定映射为 130。
+		return ExitInterrupted
 	}
 	if exitErr, ok := luaExitError(err); ok {
 		// os.exit 携带的退出码优先级最高，保持官方 CLI 不打印错误文本的语义。

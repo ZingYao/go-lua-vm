@@ -14,6 +14,7 @@
 - 项目核心与默认构建保持纯 Go、无 CGO，目标是避免跨系统编译困难；这不禁止宿主程序或可选扩展调用外部 `lib`、`.so`、`.dylib` 或 Windows `.dll`。嵌入方可以通过 `lua.Options.PackageDynamicLibraryLoader` 或 `stdlib/package` 环境注入可选 loader，也可以继续覆盖 `package.loadlib`、写入 `package.preload` 或替换 `package.searchers` 接入。
 - 默认跨平台编译不需要额外 C 头文件、预装 `.so/.dylib/.dll`、Lua C API 开发包或系统动态库依赖；`package.cpath` 和动态库 loader 接入点只是运行期扩展协议，不进入默认构建链路。
 - 已补充无 CGO 测试，验证宿主覆盖 `package.loadlib`、通过 `lua.Options` 注入动态库 loader，以及 C searcher 按 `package.cpath` 候选返回 Lua 可调用 loader 的链路。
+- Go reflection 自动绑定支持显式 opt-in：`bridge.ReflectFunction`、`bridge.ReflectedFunctions` 可把支持签名的 Go 函数转为 Lua callable；`bridge.ReflectStruct` 可把非 nil struct 或 struct 指针扫描为 `ObjectBinding`，覆盖导出字段读写、导出方法调用、指针和值 receiver、嵌入字段和 `glua` tag 重命名。
 
 ## 已知限制
 
@@ -21,7 +22,7 @@
 - Go `fs.FS` 虚拟文件系统首版仅承诺只读路径；写入、删除、重命名、临时文件、进程管道和环境变量仍由宿主权限开关控制，不映射到 VFS。
 - 首版默认不内置 C 动态库加载器；未注入 loader 时，`package.loadlib`、C searcher 和 C root searcher 按纯 Go、无 CGO 策略返回明确不支持。注入 loader 后，Linux/macOS 候选覆盖 `.so`/`.dylib`，Windows 候选限定为运行期 `.dll`；`.lib`/import library 属于链接期产物，不作为 `require` 运行期候选。
 - 首版不承诺直接 `require` 普通 Lua C 模块；即使后续实现平台 `dlopen`/`LoadLibrary`，通用 Lua C 模块仍需要 Lua C ABI 兼容层。该能力若立项，应隔离为可选 build tag、宿主 shim 或独立适配包，不能增加默认跨平台构建依赖。
-- 不支持 Go reflection 自动绑定；首版只支持显式注册 Go 函数、显式 table/module/object 绑定和基于绑定信息的 Lua stub 生成。
+- Go reflection 自动绑定不做包级自动扫描，也不做任意 `map`/`slice`/struct/table 深拷贝。struct 字段只支持基础类型、`lua.Value`、`*runtime.Table` 和 `*runtime.Userdata`；循环引用和普通 struct 指针字段必须通过显式 `ObjectBinding` 暴露。
 - 只读 table 与常量字段通过 Lua 元方法保护普通写入；首版不承诺阻止宿主或 Lua debug/raw API 路径绕过元方法进行 raw 写入。
 - Lua stub 生成不是 Go 源码到 Lua 源码的语义翻译；它只生成 Lua 侧代理层。
 - 自定义加密 chunk 只提高通用工具直接反编译门槛，不承诺强 DRM、防破解、运行时防 dump 或可信执行。
@@ -31,6 +32,6 @@
 - 补充 VFS 使用文档和示例，说明路径清洗、宿主/VFS 优先级、只读边界和错误文本。
 - 建立跨平台 binary chunk 互通测试矩阵，再决定是否提升兼容承诺。
 - 补充官方文档级示例，展示宿主程序如何通过 `PackageDynamicLibraryLoader` 注册自定义 C loader 或替换 `package.loadlib`，同时保持本仓库 no-CGO。
-- 补充 Go 封装 API 的端到端示例，展示 `RegisterModulePreload`、只读 table、object proxy、常量/变量注入和错误传播的推荐用法。
+- 补充 Go 封装 API 的端到端示例，展示 `RegisterModulePreload`、只读 table、object proxy、reflection opt-in、常量/变量注入和错误传播的推荐用法。
 - 评估平台动态库 loader 示例包：要求默认 `CGO_ENABLED=0` 跨平台构建不受影响，平台相关实现必须隔离在显式 build tag、插件或宿主适配层中。
-- 如需 reflection 自动绑定，先设计字段/方法可见性、权限、命名、错误语义和性能边界。
+- 为 reflection 自动绑定补充 benchmark 和 stub 类型注释生成，明确与显式 binding 的开销差异。

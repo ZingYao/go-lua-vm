@@ -161,6 +161,26 @@ func TestVMLoadKCopiesConstantSlice(t *testing.T) {
 	}
 }
 
+// TestVMBorrowedPrototypeDataReusesConstantSlice 验证执行期 VM 会借用 Proto 常量表。
+//
+// Lua closure 执行路径传入的 constants/protos 来自不可变 Proto；借用切片可以避免每次函数调用复制
+// Proto 数据。该测试只覆盖专用构造函数，公开 NewVMWithConstants 仍保持复制语义。
+func TestVMBorrowedPrototypeDataReusesConstantSlice(t *testing.T) {
+	constants := []bytecode.Constant{bytecode.StringConstant("before")}
+	vm := NewVMWithBorrowedPrototypeData(1, constants, nil, nil, nil)
+	constants[0] = bytecode.StringConstant("after")
+
+	if err := vm.Step(bytecode.CreateABx(bytecode.OpLoadK, 0, 0)); err != nil {
+		// 借用常量表的 LOADK 仍应执行成功。
+		t.Fatalf("loadk borrowed constant failed: %v", err)
+	}
+	value, ok := vm.Register(0)
+	if !ok || !value.RawEqual(StringValue("after")) {
+		// 专用构造函数应读取借用切片的最新值，用于证明没有复制 Proto 常量表。
+		t.Fatalf("borrowed constant mismatch: value=%#v ok=%v", value, ok)
+	}
+}
+
 // TestVMLoadKOutOfRange 验证 LOADK 常量或寄存器越界会返回明确错误。
 //
 // 损坏 chunk 可能引用不存在的常量表索引，VM 必须拒绝执行并保留目标寄存器。

@@ -14,9 +14,15 @@
 
 ```go
 type Options struct {
-    MaxStackDepth      int
-    MaxCallDepth       int
-    MaxAllocationBudget int64
+    MaxStackDepth               int
+    MaxCallDepth                int
+    MaxAllocationBudget         int64
+    AllowHostFilesystem         bool
+    AllowEnvironment            bool
+    AllowProcess                bool
+    PackageDynamicLibraryLoader func(filename string, symbol string) (Value, error)
+    VirtualFilesystem           fs.FS
+    PreferHostFilesystem        bool
 }
 
 type State = runtime.State
@@ -27,7 +33,36 @@ type GoFunction func(args ...Value) (Value, error)
 type GoResultsFunction func(args ...Value) ([]Value, error)
 ```
 
-`Options` 使用零值表示默认限制。所有限制在 `runtime` 层执行，`lua` 包只负责把宿主配置转换为内部选项。`State` 和 `Value` 当前复用 runtime 的稳定值语义，外部调用方应只依赖 `lua` 包导出的别名、常量、构造函数和后续方法，不直接耦合内部包。
+`Options` 使用零值表示默认限制。资源限制、宿主权限、VFS 和动态库 loader 策略在 `runtime`/stdlib 层执行，`lua` 包只负责把宿主配置转换为内部选项。`State` 和 `Value` 当前复用 runtime 的稳定值语义，外部调用方应只依赖 `lua` 包导出的别名、常量、构造函数和后续方法，不直接耦合内部包。
+
+## VFS 与动态库 loader
+
+`VirtualFilesystem` 接收只读 `fs.FS`，覆盖 `loadfile`、`dofile`、`require` Lua 文件 loader、只读 `io.open/io.lines` 和 `file:read/file:lines`。默认读取优先命中 VFS；设置 `PreferHostFilesystem` 且开启 `AllowHostFilesystem` 后，同名路径优先使用宿主文件系统。
+
+```go
+state := lua.NewStateWithOptions(lua.Options{
+    VirtualFilesystem: fstest.MapFS{
+        "mod.lua": {Data: []byte(`return {name = "vfs"}`)},
+    },
+})
+state.OpenLibs()
+```
+
+动态库加载默认不启用。需要外部 `.so/.dylib/.dll` 时，宿主可以注入 `PackageDynamicLibraryLoader` 或覆盖 Lua 侧 `package.loadlib`；本仓库默认构建仍保持 `CGO_ENABLED=0`，不需要 C 头文件、Lua C API 开发包或系统动态库。
+
+```go
+var state *lua.State
+state = lua.NewStateWithOptions(lua.Options{
+    PackageDynamicLibraryLoader: func(filename, symbol string) (lua.Value, error) {
+        return bridge.ValueOf(state, runtime.GoResultsFunction(func(args ...lua.Value) ([]lua.Value, error) {
+            return []lua.Value{{Kind: lua.KindBoolean, Bool: true}}, nil
+        }))
+    },
+})
+state.OpenLibs()
+```
+
+跨平台注意事项：Linux/macOS 运行期候选是 `.so`/`.dylib`，Windows 运行期候选是 `.dll`；`.lib`/import library 属于链接期产物，不作为 `require` 运行期候选。普通 Lua C 模块还需要 Lua C ABI 兼容层，首版不承诺直接 `require`。
 
 ## 生命周期 API
 
@@ -82,7 +117,7 @@ func (state *State) GetGlobal(name string) error
 
 ## Go 封装 API
 
-显式 Go 封装能力位于 `bridge` 包，目标是让宿主以声明式方式把 Go 函数、模块、table、对象、常量和变量暴露给 Lua。该能力不使用 reflection 自动扫描，不引入 CGO，也不依赖 Lua C API。
+Go 封装能力位于 `bridge` 包，目标是让宿主以声明式方式把 Go 函数、模块、table、对象、常量和变量暴露给 Lua。默认推荐显式 binding；需要减少样板代码时，可以显式调用 reflection 入口生成 `bridge.Function` 或 `ObjectBinding`。该能力不引入 CGO，也不依赖 Lua C API。
 
 核心入口：
 
@@ -93,6 +128,9 @@ func RegisterModulePreload(state *lua.State, module bridge.ModuleBinding) error
 func BuildModule(state *lua.State, module bridge.ModuleBinding) (lua.Value, error)
 func BuildTable(state *lua.State, table bridge.TableBinding) (lua.Value, error)
 func ValueOf(state *lua.State, value any) (lua.Value, error)
+func ReflectFunction(fn any) (bridge.Function, error)
+func ReflectedFunctions(functions map[string]any) (map[string]bridge.Function, error)
+func ReflectStruct(object any) (bridge.ObjectBinding, error)
 ```
 
 `RegisterFunction` 写入全局环境。`RegisterModule` 构造模块 table，写入全局环境，并在 `package.loaded` 可用时写入同一模块实例。`RegisterModulePreload` 要求已打开 `package` 标准库，只写入 `package.preload`，让 Lua 侧 `require` 延迟加载模块。
@@ -108,6 +146,13 @@ func ValueOf(state *lua.State, value any) (lua.Value, error)
 - `Metatable`：table 级宿主元表字段。
 
 对象代理通过 `ObjectBinding` 显式声明可见方法、getter、setter 和可选 finalizer。Lua 侧看到的是 table，内部隐藏 userdata 保留 Go identity；`object:method(...)` 会自动剥离 self 并把剩余实参交给 `ObjectContext`。State 关闭时，已注册 userdata 的 finalizer 会统一执行。
+
+reflection 入口的当前边界：
+
+- `ReflectFunction` 支持 bool、整数、浮点、string、`lua.Value`、`*lua.State`、`context.Context` 参数；支持基础类型、`lua.Value`、`*runtime.Table`、`*runtime.Userdata`、bridge/runtime callable 返回；最后一位 `error` 会映射为 Lua error。
+- `ReflectedFunctions` 把函数 map 转为 `map[string]bridge.Function`，适合放入 `ModuleBinding.Functions` 或 `TableBinding.Functions`。
+- `ReflectStruct` 接收非 nil struct 或 struct 指针，扫描导出字段、导出方法、匿名嵌入 struct 字段和 `glua` tag；生成的 `ObjectBinding` 仍需通过 `BindStruct` 或模块/table binding 暴露给 Lua。
+- `ReflectStruct` 只支持可稳定转换的基础字段、`lua.Value`、`*runtime.Table` 和 `*runtime.Userdata`；slice、map、任意 struct 指针字段和循环引用不会被隐式递归代理。
 
 示例：
 
@@ -182,4 +227,4 @@ print(gomod.counter:inc())
 
 `lua` 包不承诺与 Lua C API 函数名一一对应。优先提供 Go 语义清晰、可测试的 API；必要时再提供 `auxlib` 风格 helper。
 
-Go 封装 API 不承诺自动 reflection 绑定、Go 源码到 Lua 源码翻译、C 动态库加载或绕过 raw table 写入的强只读沙箱。需要自动扫描或更强权限隔离时，应单独设计可见性、权限和错误边界。
+Go 封装 API 不承诺 Go 包级自动扫描、Go 源码到 Lua 源码翻译、默认 C 动态库加载或绕过 raw table 写入的强只读沙箱。reflection 自动绑定是显式 opt-in 能力，只覆盖当前文档列出的类型和错误语义。

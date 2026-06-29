@@ -773,7 +773,32 @@
 - [x] 文档更新完成。
 - [x] `git ls-files --others --exclude-standard | rg '\.go$|_test\.go$'` 无未 add Go 文件。
 
-## 28. 发布前待确认
+## 28. 性能优化专项：对齐官方 Lua 5.3.6
+
+目标：以本机官方 `lua`/`luac` 5.3.6 为基线，将各核心模块的稳定 benchmark 差距压缩到慢 1 倍以内，即 `glua/gluac` 耗时不超过官方基线的 2.0x。所有性能优化必须保持 Lua 5.3 兼容语义、扩展语法开关语义、无 CGO 默认构建和现有官方测试套件通过。
+
+- [ ] 建立稳定性能验收脚本：统一运行官方 `lua`、官方 `luac`、`glua`、`gluac`，输出 arith、table、function、concat、global、closure、coroutine、stdlib、compiler、binary chunk 编解码等模块的多轮中位数、p90、ratio 和 allocs/op。
+- [ ] 固化性能目标表：为每个模块记录当前 ratio、目标 ratio、主要热路径、对应 Go benchmark、对应 Lua wall-clock fixture 和回归门禁命令。
+- [ ] 将 benchmark 结果写入 `docs/BENCHMARK.md`，每轮优化必须记录优化前、优化后、测试命令、样本次数和是否存在明显噪声。
+- [ ] 为性能优化补回归门禁：`CGO_ENABLED=0 go test ./...`、`CGO_ENABLED=0 go test -tags lua53 ./...`、CLI golden 对比、官方 Lua 5.3 套件回归和 `./scripts/check-go-gates.sh` 必须全部通过。
+- [x] P0：优先完成 concat 性能优化，将连续字符串拼接场景从当前约 4x 到 5x 官方 Lua 差距压缩到 2.0x 以内；当前 `s = s .. "x"` 2000 次循环 wall-clock 对比约 1.31x 到 1.61x。
+- [x] P0：拆分 concat 热点 profile，分别确认 `OP_CONCAT` 指令、`Value` 字符串表示、短字符串驻留、长字符串分配、`strings.Builder`/直接拼接策略、GC sweep 触发和 codegen 自拼接优化的耗时占比。
+- [ ] P0：为 concat 建立专项 benchmark：已覆盖 `s = s .. "x"` 和多寄存器 `a..b..c..d`；待补 number-to-string 拼接、含 `__concat` 元方法、table/stdlib `table.concat` 和长字符串增长边界。
+- [x] P0：评估 concat 代码生成优化：识别安全的 `local s = ""; for ... do s = s .. literal end`、多段 literal 合并、常量折叠和不改变求值顺序的寄存器复用。
+- [x] P0：评估 concat 运行时优化：为纯 string/int/number 快路径减少 `Value` 转换、错误包装、切片构造和临时字符串分配；含元方法路径必须保持原语义。
+- [x] P0：评估 concat 内存策略：控制连续拼接的中间字符串和 GC 压力，必要时引入受限 builder 策略，但不得改变 Lua 字符串不可变语义和 `__concat` 调用顺序。
+- [x] P0：完成 concat 优化后重新跑官方 `strings.lua`、`constructs.lua`、CLI golden、API benchmark 和 wall-clock 对比，确认语义与性能同时达标。
+- [ ] P1：优化函数调用，将 Lua closure 普通调用、尾调用、Go closure 调用、元方法调用和 pcall/xpcall 路径分别压缩到 2.0x 以内。
+- [ ] P1：优化 table 访问，将 raw integer key、raw string key、普通 `GETTABLE/SETTABLE`、`GETTABUP/SETTABUP`、`SELF` 和 `pairs/ipairs` 热路径分别压缩到 2.0x 以内。
+- [ ] P1：优化 VM dispatch 与算术循环，重点评估 `Step` switch 分派、RK 读取、常量转换、寄存器边界检查和错误路径冷分支拆分。
+- [ ] P1：优化全局变量访问，重点评估 `_ENV` upvalue、无元表全局表 raw get/set、标准库函数名调试推断缓存和 table mutation version。
+- [ ] P2：优化 compiler/gluac，对 lexer、parser、codegen、Proto 构造、binary chunk dump 和 strip debug info 分别建立与官方 `luac` 的 2.0x 以内目标。
+- [ ] P2：优化 stdlib 热点，优先覆盖 `table.concat`、`table.sort`、`string.gsub`、`string.find/match`、`math.random`、`utf8` 迭代和 `io` 缓冲路径。
+- [ ] P2：优化 GC 与对象生命周期，明确自动 sweep 触发阈值、弱表扫描成本、finalizer 队列成本和 active VM root 扫描成本，避免用过度延迟 GC 换取错误性能数字。
+- [ ] P2：优化 binary chunk load/dump，将标准 chunk 读写、strip、反汇编和自定义 chunk decoder/encoder 的性能目标分别量化。
+- [ ] 每完成一个模块的 2.0x 目标，必须在 TODO 中标记完成并同步记录最终命令、ratio、关键改动和剩余风险。
+
+## 29. 发布前待确认
 
 - [x] 确认是否承诺官方 Lua 5.3 二进制 chunk 跨平台完全兼容。
 - [x] 确认 `io`、`os`、`package` 默认权限策略。
@@ -784,7 +809,7 @@
 - [x] 确认 Lua stub 生成是否满足“Go 实现转为 Lua 代码”的需求。
 - [x] 确认首个 release 的已知限制清单。
 
-## 29. 发布增强：VFS、动态库、反射绑定与 Go 封装 API
+## 30. 发布增强：VFS、动态库、反射绑定与 Go 封装 API
 
 - [x] 生成完整验证 TODO list：覆盖 Go 嵌入 API、CLI、VFS、require、动态库 loader、reflection 自动绑定、Go table/object 封装、常量变量注入、跨平台构建、官方兼容回归与发布文档；详见 `docs/RELEASE_VALIDATION_TODO.md`。
 - [x] 生成完整验证 TODO list：为每个验证项明确命令、输入夹具、期望输出、失败诊断口径和是否需要 Linux/macOS/Windows 分平台执行；详见 `docs/RELEASE_VALIDATION_TODO.md`。
@@ -798,10 +823,10 @@
 - [x] 实现 `package.loadlib` 可选动态库 loader：支持按 filename/symbol 返回 Lua 可调用 loader，并保持默认无 loader 时的兼容错误三返回。
 - [x] 实现 `package.searchers` 动态库搜索器可选接入：按 `package.cpath` 展开候选路径，Linux/macOS/Windows 分平台生成诊断文本。
 - [x] 为动态库 loader 补测试：默认无 CGO 构建下确认不启用；宿主覆盖 loader 可执行；平台候选扩展名和错误文本稳定。
-- [ ] 生成 Go reflection 自动绑定方案：定义可见性规则、命名规则、tag 规则、方法 receiver 支持、字段读写权限、错误语义和性能边界。
-- [ ] 实现 Go reflection 自动扫描函数：支持导出函数自动转 Lua callable，覆盖参数转换、多返回值、error 返回和 panic 恢复。
-- [ ] 实现 Go reflection 自动扫描 struct：支持导出字段读写、导出方法调用、指针和值 receiver、嵌入字段和 tag 重命名。
-- [ ] 为 Go reflection 自动绑定补测试：覆盖函数、struct 字段、方法、错误返回、panic 恢复、不可导出字段拒绝、nil receiver 和循环引用。
+- [x] 生成 Go reflection 自动绑定方案：定义可见性规则、命名规则、tag 规则、方法 receiver 支持、字段读写权限、错误语义和性能边界；详见 `docs/BRIDGE.md`。
+- [x] 实现 Go reflection 自动扫描函数：支持导出函数自动转 Lua callable，覆盖参数转换、多返回值、error 返回和 panic 恢复。
+- [x] 实现 Go reflection 自动扫描 struct：支持导出字段读写、导出方法调用、指针和值 receiver、嵌入字段和 tag 重命名。
+- [x] 为 Go reflection 自动绑定补测试：覆盖函数、struct 字段、方法、错误返回、panic 恢复、不可导出字段拒绝、nil receiver 和循环引用。
 - [x] 设计 Go 封装方法给 Lua 调用的统一 API：明确注册函数、注册 table、注册 object、注册常量、注册变量和覆盖策略。
 - [x] 实现 Go 函数封装 API：支持直接注册到全局、模块 table、package.loaded 和 package.preload。
 - [x] 实现 Go table 对象封装 API：支持构造 Lua table，注入字段、方法、嵌套 table、metatable 和只读 table。
@@ -809,5 +834,21 @@
 - [x] 实现常量与变量注入 API：支持 string、bool、integer、number、nil、table、function、userdata，并区分只读常量与可变变量。
 - [x] 为 Go 封装 API 补测试：覆盖 Lua 调 Go 函数、table 方法、object 方法、常量读取、变量更新、模块 require 和错误边界。
 - [x] 更新文档：补齐 Go 封装 API 的函数注册、模块 table、package.loaded、package.preload、只读 table、对象代理、常量变量注入、生命周期关闭和限制说明。
-- [ ] 更新文档：补齐 VFS、动态库 loader、reflection 自动绑定、Go 封装 API 的使用示例、限制说明和跨平台注意事项。
-- [ ] 完成前五项后重新输出发布限制清单，并同步更新 `docs/PLAN.md`、`docs/RELEASE_LIMITS.md`、`README.md` 与 benchmark/验证结论。
+- [x] 更新文档：补齐 VFS、动态库 loader、reflection 自动绑定、Go 封装 API 的使用示例、限制说明和跨平台注意事项。
+- [x] 完成前五项后重新输出发布限制清单，并同步更新 `docs/PLAN.md`、`docs/RELEASE_LIMITS.md`、`README.md` 与 benchmark/验证结论。
+
+## 31. 官方可执行文件兼容：glua/gluac
+
+目标：`glua` 和 `gluac` 必须优先完整覆盖官方 Lua 5.3.6 的 `lua` 与 `luac` 可执行文件参数、调用方式、stdin/REPL 行为、错误输出、退出码和标准库可见行为；本项目扩展能力只能作为附加参数或显式模式存在，不能抢占、改变或削弱官方参数语义。
+
+- [x] 建立官方 `lua` CLI 参数兼容矩阵：覆盖无参数、`-v`、`-E`、`-i`、`-e stat`、`-l mod`、`--`、`-`、脚本文件、脚本参数、stdin 管道、组合顺序和错误参数。
+- [x] 建立官方 `lua` REPL 兼容矩阵：覆盖启动 banner、主提示符 `> `、续行提示符 `>> `、表达式输入、语句输入、多行补全、错误恢复、光标左右移动、Ctrl-C 中断和 EOF 退出。
+- [x] 修复 `glua` REPL 与官方行为差异：启动信息应标明 `glua`/项目版本且说明 Lua 5.3.6 兼容；交互输入必须可执行 Lua 代码；输出后提示符不能因多余空格后移；`os.exit()` 必须退出交互进程。
+- [x] 修复 `glua` REPL 局部环境语义差异：确认官方 `lua` 中分行输入 `local a = 'hello'` 后下一行 `-a` 的可见性、错误文本和 traceback，并让 `glua` 与官方行为对齐。
+- [x] 修复 `glua` Ctrl-C 行为：终端交互时 Ctrl-C 应停止当前输入/执行并按官方语义退出或恢复提示符；非交互脚本中断应返回稳定退出码。
+- [x] 建立官方 `lua` 错误输出 golden：覆盖语法错误、运行时错误、traceback、`os.exit`、主线程 `coroutine.yield`、脚本文件路径、stdin chunk name 和 `-e` chunk name。
+- [x] 建立官方 `luac` 参数兼容矩阵：覆盖无参数、`-v`、`-l`、`-l -l`、`-o name`、`-p`、`-s`、`--`、`-`、单文件、多文件、错误参数和默认输出 `luac.out`。
+- [x] 修复 `gluac` 多输入文件行为：按官方 `luac` 组合多个 chunk 的语义处理，不能继续简单拒绝多输入文件，除非文档明确列为未完成且 release 阻塞。
+- [x] 建立 `glua`/`gluac` 与官方 `lua`/`luac` 的自动对比脚本：同一夹具分别运行官方工具和本项目工具，对比 stdout、stderr、退出码、输出文件是否存在和 binary chunk 可加载性。
+- [x] 将所有项目扩展参数迁移到不冲突命名空间：例如 `--syntax`、`--list-bytecode`、LSP/formatter/debug trace 等必须不改变官方短参数含义；冲突参数必须重命名或要求显式扩展模式。
+- [x] 更新 `docs/COMPATIBILITY.md`、`docs/LUAC.md` 和 README：明确 `glua`/`gluac` 对官方可执行文件的已兼容项、未兼容项、扩展项和 release 阻塞项。

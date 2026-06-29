@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -48,11 +49,11 @@ func TestParseArgs(t *testing.T) {
 
 // TestParseArgsSyntaxOptions 验证 glua 语法扩展参数解析。
 //
-// --syntax 设置基础集合，--disable-syntax 在基础集合上移除指定扩展。
+// --glua-syntax 设置基础集合，--glua-disable-syntax 在基础集合上移除指定扩展。
 func TestParseArgsSyntaxOptions(t *testing.T) {
 	if extensions.Compiled().Has(extensions.SyntaxContinue | extensions.SyntaxSwitch) {
 		// 只有当前构建包含两个扩展时，才验证 extended 后局部关闭 switch 的正向路径。
-		options, err := ParseArgs([]string{"--syntax=extended", "--disable-syntax", "switch", "-e", "while true do continue end"})
+		options, err := ParseArgs([]string{"--glua-syntax=extended", "--glua-disable-syntax", "switch", "-e", "while true do continue end"})
 		if err != nil {
 			// 合法语法扩展参数不应失败。
 			t.Fatalf("ParseArgs syntax failed: %v", err)
@@ -71,7 +72,7 @@ func TestParseArgsSyntaxOptions(t *testing.T) {
 		}
 	}
 
-	options, err := ParseArgs([]string{"--syntax", "lua53", "-e", "local continue = 1"})
+	options, err := ParseArgs([]string{"--glua-syntax", "lua53", "-e", "local continue = 1"})
 	if err != nil {
 		// lua53 模式是合法语法模式。
 		t.Fatalf("ParseArgs lua53 failed: %v", err)
@@ -90,6 +91,10 @@ func TestParseArgsRejectsInvalidInput(t *testing.T) {
 		{"-e"},
 		{"-l"},
 		{"-unknown"},
+		{"--syntax", "lua53", "-e", "return 1"},
+		{"--disable-syntax", "switch", "-e", "return 1"},
+		{"--list-bytecode", "chunk.lua"},
+		{"--format", "chunk.lua"},
 	}
 	for _, testCase := range testCases {
 		// 每个非法参数组合都必须失败。
@@ -140,24 +145,24 @@ func TestParseArgsScriptAndStopOptions(t *testing.T) {
 
 // TestParseArgsListBytecodeConflict 验证 glua 可选反汇编模式不会抢占官方 -l 语义。
 //
-// `--list-bytecode` 可以单独使用，但不能与官方 `-l` 模块加载、`-e`、脚本执行或 `-i` 混用。
+// `--glua-list-bytecode` 可以单独使用，但不能与官方 `-l` 模块加载、`-e`、脚本执行或 `-i` 混用。
 func TestParseArgsListBytecodeConflict(t *testing.T) {
 	// 单独使用长选项应记录反汇编路径。
-	options, err := ParseArgs([]string{"--list-bytecode", "script.lua"})
+	options, err := ParseArgs([]string{"--glua-list-bytecode", "script.lua"})
 	if err != nil {
 		// 合法反汇编参数不应失败。
 		t.Fatalf("ParseArgs list bytecode failed: %v", err)
 	}
 	if options.ListBytecodePath != "script.lua" || len(options.Libraries) != 0 {
-		// --list-bytecode 必须独立保存路径，且不写入官方 -l 模块列表。
+		// --glua-list-bytecode 必须独立保存路径，且不写入官方 -l 模块列表。
 		t.Fatalf("list bytecode options = %#v", options)
 	}
 
 	conflicts := [][]string{
-		{"--list-bytecode", "script.lua", "-l", "mod"},
-		{"--list-bytecode", "script.lua", "-e", "return 1"},
-		{"--list-bytecode", "script.lua", "-i"},
-		{"--list-bytecode", "script.lua", "--", "run.lua"},
+		{"--glua-list-bytecode", "script.lua", "-l", "mod"},
+		{"--glua-list-bytecode", "script.lua", "-e", "return 1"},
+		{"--glua-list-bytecode", "script.lua", "-i"},
+		{"--glua-list-bytecode", "script.lua", "--", "run.lua"},
 	}
 	for _, args := range conflicts {
 		// 每组冲突参数都必须在解析阶段失败。
@@ -170,7 +175,7 @@ func TestParseArgsListBytecodeConflict(t *testing.T) {
 
 // TestRunListBytecode 验证 glua 长选项可输出源码反汇编。
 //
-// 该能力使用 `--list-bytecode`，明确避开官方 `lua -l <module>` 参数。
+// 该能力使用 `--glua-list-bytecode`，明确避开官方 `lua -l <module>` 参数。
 func TestRunListBytecode(t *testing.T) {
 	// 写入最小源码文件作为反汇编输入。
 	tempDir := t.TempDir()
@@ -180,7 +185,7 @@ func TestRunListBytecode(t *testing.T) {
 		t.Fatalf("WriteFile failed: %v", err)
 	}
 	var stdout bytes.Buffer
-	if err := Run(context.Background(), []string{"--list-bytecode", scriptPath}, Streams{Stdout: &stdout}); err != nil {
+	if err := Run(context.Background(), []string{"--glua-list-bytecode", scriptPath}, Streams{Stdout: &stdout}); err != nil {
 		// 反汇编源码不应失败。
 		t.Fatalf("Run list bytecode failed: %v", err)
 	}
@@ -200,7 +205,7 @@ func TestRunListBytecodeHonorsSyntaxOptions(t *testing.T) {
 		t.Fatalf("WriteFile failed: %v", err)
 	}
 
-	if err := Run(context.Background(), []string{"--syntax=lua53", "--list-bytecode", scriptPath}, Streams{}); err == nil {
+	if err := Run(context.Background(), []string{"--glua-syntax=lua53", "--glua-list-bytecode", scriptPath}, Streams{}); err == nil {
 		// lua53 模式下 continue 语法糖应被拒绝。
 		t.Fatalf("Run list bytecode should reject disabled continue")
 	}
@@ -486,6 +491,65 @@ func TestShouldExecuteImplicitStdin(t *testing.T) {
 	}
 }
 
+// TestRunImplicitREPLForTerminalStdin 验证裸命令连接终端输入时进入 REPL。
+//
+// 官方 Lua 5.3 在无脚本、无 -e/-l 且 stdin 为终端时会输出交互提示；这里用系统字符设备
+// 模拟终端类型，读取到 EOF 后应正常退出。
+func TestRunImplicitREPLForTerminalStdin(t *testing.T) {
+	// os.DevNull 在本机是字符设备，可覆盖 CLI 对终端 stdin 的判定路径。
+	stdin, err := os.Open(os.DevNull)
+	if err != nil {
+		// 测试环境必须能打开系统空设备。
+		t.Fatalf("Open os.DevNull failed: %v", err)
+	}
+	defer stdin.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if err := Run(context.Background(), nil, Streams{
+		Stdin:  stdin,
+		Stdout: &stdout,
+		Stderr: &stderr,
+	}); err != nil {
+		// 裸终端启动进入 REPL，EOF 后应成功退出。
+		t.Fatalf("Run implicit REPL failed: %v", err)
+	}
+	if stdout.String() != VersionText+"\n> " {
+		// 裸交互启动必须先输出版本 banner，再输出主提示符。
+		t.Fatalf("stdout = %q, want prompt", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		// EOF 退出不应产生错误输出。
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+// TestRunVersionDoesNotEnterImplicitREPL 验证 -v 不触发裸命令 REPL。
+//
+// 官方 Lua 5.3 单独执行 -v 时只输出版本并退出；即使 stdin 是终端也不应追加交互提示。
+func TestRunVersionDoesNotEnterImplicitREPL(t *testing.T) {
+	// 使用字符设备覆盖终端 stdin 判定，确保 -v 能压制隐式 REPL。
+	stdin, err := os.Open(os.DevNull)
+	if err != nil {
+		// 测试环境必须能打开系统空设备。
+		t.Fatalf("Open os.DevNull failed: %v", err)
+	}
+	defer stdin.Close()
+
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), []string{"-v"}, Streams{
+		Stdin:  stdin,
+		Stdout: &stdout,
+	}); err != nil {
+		// -v 单独执行应正常退出。
+		t.Fatalf("Run -v failed: %v", err)
+	}
+	if stdout.String() != VersionText+"\n" {
+		// 输出必须只有版本文本，不能附加 REPL 提示符。
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
 // TestIsIncompleteREPLSourceIgnoresCommentEquals 验证 REPL 续行判断忽略短注释内容。
 //
 // 官方交互测试包含 `(6*2-6) -- ===`；注释中的等号不能被误判成赋值缺少右侧表达式。
@@ -563,13 +627,104 @@ func TestMainInteractiveMode(t *testing.T) {
 		// -i 占位模式不应返回失败退出码。
 		t.Fatalf("exit code = %d stderr=%q", exitCode, stderr.String())
 	}
-	if stdout.String() != "> > " {
-		// REPL 必须输出每次读取前的主提示符。
+	if stdout.String() != VersionText+"\n> > " {
+		// -i 必须先输出版本 banner，再输出每次读取前的主提示符。
 		t.Fatalf("stdout = %q", stdout.String())
 	}
 	if stderr.Len() != 0 {
 		// 合法输入成功执行后不应写入 stderr。
 		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+// TestMainInteractiveOSExit 验证 REPL 中的 os.exit 会结束解释器。
+//
+// 官方 Lua 5.3 在交互模式输入 os.exit() 会直接退出；不能被 REPL 当成普通错误恢复。
+func TestMainInteractiveOSExit(t *testing.T) {
+	// 通过 Main 验证 os.exit 错误会映射为真实退出码且不写 stderr。
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := Main(context.Background(), []string{"-i"}, Streams{
+		Stdin:  strings.NewReader("os.exit(7, true)\n"),
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+	if exitCode != 7 {
+		// os.exit(7) 必须成为 CLI 退出码。
+		t.Fatalf("exit code = %d, want 7", exitCode)
+	}
+	if stdout.String() != VersionText+"\n> " {
+		// os.exit 在第一条输入后结束，不应输出下一轮提示符。
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		// os.exit 不应作为普通 lua error 写入 stderr。
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+// TestTerminalREPLLineReaderCursorInsert 验证终端行编辑支持左右移动和中间插入。
+//
+// 用户在终端中输入 `ac` 后按左方向键插入 `b`，提交给 Lua 的源码必须是 `abc`。
+func TestTerminalREPLLineReaderCursorInsert(t *testing.T) {
+	// 构造 ANSI 左方向键输入，避免测试依赖真实 TTY。
+	var stdout bytes.Buffer
+	reader := &terminalREPLLineReader{
+		reader: bufio.NewReader(strings.NewReader("ac\x1b[Db\n")),
+		stdout: &stdout,
+	}
+	line, ok, err := reader.readLine("> ")
+	if err != nil {
+		// 模拟输入不应产生底层读取错误。
+		t.Fatalf("readLine failed: %v", err)
+	}
+	if !ok {
+		// 回车前已有内容，不能被当成 EOF。
+		t.Fatalf("readLine returned EOF")
+	}
+	if line != "abc" {
+		// 左移插入必须改变缓冲区中间位置。
+		t.Fatalf("line = %q, want abc", line)
+	}
+	if !strings.Contains(stdout.String(), "\x1b[D") {
+		// 行编辑需要向终端发送左移控制序列。
+		t.Fatalf("stdout missing cursor control: %q", stdout.String())
+	}
+}
+
+// TestTerminalREPLLineReaderCtrlC 验证终端行编辑遇到 Ctrl-C 会中断 REPL。
+//
+// 终端在非规范输入模式下可能把 Ctrl-C 作为字节交给进程；此时 glua 应直接停止交互解释器。
+func TestTerminalREPLLineReaderCtrlC(t *testing.T) {
+	// 构造 Ctrl-C 输入，避免测试依赖真实 TTY 信号。
+	var stdout bytes.Buffer
+	reader := &terminalREPLLineReader{
+		reader: bufio.NewReader(strings.NewReader("\x03")),
+		stdout: &stdout,
+	}
+	_, ok, err := reader.readLine("> ")
+	if !errors.Is(err, errCLIInterrupted) {
+		// Ctrl-C 必须返回专用中断错误，供 Main 映射 130 退出码。
+		t.Fatalf("readLine error = %v, want interrupted", err)
+	}
+	if ok {
+		// Ctrl-C 不应提交一行 Lua 源码。
+		t.Fatalf("readLine ok should be false")
+	}
+	if stdout.String() != "> \r\n" {
+		// 中断前应保留提示符并换行，让 shell 提示符回到新行。
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+// TestMainMapsInteractiveCtrlC 验证 Main 把 REPL Ctrl-C 映射为 130。
+//
+// 该测试覆盖非 TTY reader 下的专用错误映射，真实终端路径由行编辑器测试覆盖。
+func TestMainMapsInteractiveCtrlC(t *testing.T) {
+	// 直接调用 Main 的错误映射，避免测试向当前进程发送真实 SIGINT。
+	if exitCode := exitCodeForError(errCLIInterrupted); exitCode != ExitInterrupted {
+		// exitCodeForError 也应识别 Ctrl-C 中断。
+		t.Fatalf("exit code = %d, want %d", exitCode, ExitInterrupted)
 	}
 }
 
@@ -626,6 +781,38 @@ func TestREPLErrorRecovery(t *testing.T) {
 	if !strings.Contains(stderr.String(), "syntax error") {
 		// 第一条语法错误必须写入 stderr。
 		t.Fatalf("stderr missing syntax error: %q", stderr.String())
+	}
+}
+
+// TestREPLRuntimeErrorIncludesTraceback 验证 REPL 运行时错误包含 traceback。
+//
+// 官方 Lua 5.3 交互模式中 `local a='hello'` 后再输入 `-a` 会在主错误后追加 traceback。
+func TestREPLRuntimeErrorIncludesTraceback(t *testing.T) {
+	// 两行 REPL 输入是两个独立 chunk，第二行访问的是全局 a，错误应包含官方风格 traceback。
+	state := lua.NewState()
+	defer state.Close()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runREPL(state, Streams{
+		Stdin:  strings.NewReader("local a = 'hello'\n-a\n"),
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+	if err != nil {
+		// 运行时错误应由 REPL 恢复，不作为 runREPL 返回错误。
+		t.Fatalf("runREPL failed: %v", err)
+	}
+	errorText := stderr.String()
+	for _, want := range []string{
+		"stdin:1: attempt to perform arithmetic on a nil value (global 'a')",
+		"stack traceback:",
+		"stdin:1: in main chunk",
+		"[C]: in ?",
+	} {
+		// 每个官方 traceback 关键片段都必须出现。
+		if !strings.Contains(errorText, want) {
+			t.Fatalf("stderr = %q, missing %q", errorText, want)
+		}
 	}
 }
 
@@ -1023,7 +1210,7 @@ func TestMainInvalidOptionMessagesMatchLua(t *testing.T) {
 		{args: []string{"-h"}, want: "unrecognized option '-h'"},
 		{args: []string{"---"}, want: "unrecognized option '---'"},
 		{args: []string{"-e"}, want: "'-e' needs argument"},
-		{args: []string{"-e", "a"}, want: "syntax error"},
+		{args: []string{"-e", "a"}, want: "(string):1: syntax error near <eof>"},
 		{args: []string{"-l"}, want: "'-l' needs argument"},
 	}
 	for _, tt := range tests {
@@ -1057,11 +1244,201 @@ func TestMainScriptSyntaxErrorPrintsCompactSourceMessage(t *testing.T) {
 		// 脚本语法错误必须失败退出。
 		t.Fatalf("exit code = %d, want failure", exitCode)
 	}
-	want := path + ":3:2: syntax error near <eof>\n" +
-		"   3 | e\n" +
-		`       |  ^ expected assignment operator "=" or function call arguments` + "\n"
-	if stderr.String() != want {
+	wantSuffix := "/bad.lua:3: syntax error near <eof>\n"
+	if !strings.HasSuffix(stderr.String(), wantSuffix) {
 		// stderr 必须只包含可直接展示的主错误。
-		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+		t.Fatalf("stderr = %q, want suffix %q", stderr.String(), wantSuffix)
+	}
+}
+
+// TestMainOfficialLuaErrorOutputGolden 验证官方 lua 错误输出关键 golden。
+//
+// 该表覆盖脚本路径、显式 stdin、-e chunk name、运行时 traceback、os.exit 和主线程
+// coroutine.yield；这些场景是 glua CLI 与官方 lua 可执行文件对齐的发布阻塞项。
+func TestMainOfficialLuaErrorOutputGolden(t *testing.T) {
+	// 准备脚本文件夹，确保脚本路径类错误能验证真实文件名和行号。
+	tempDir := t.TempDir()
+	syntaxPath := filepath.Join(tempDir, "syntax.lua")
+	if err := os.WriteFile(syntaxPath, []byte("if\n"), 0o600); err != nil {
+		// 语法错误脚本夹具必须可写。
+		t.Fatalf("write syntax fixture failed: %v", err)
+	}
+	runtimePath := filepath.Join(tempDir, "runtime.lua")
+	if err := os.WriteFile(runtimePath, []byte("error(\"boom\")\n"), 0o600); err != nil {
+		// 运行时错误脚本夹具必须可写。
+		t.Fatalf("write runtime fixture failed: %v", err)
+	}
+	yieldPath := filepath.Join(tempDir, "yield.lua")
+	if err := os.WriteFile(yieldPath, []byte("coroutine.yield()\n"), 0o600); err != nil {
+		// 主线程 yield 脚本夹具必须可写。
+		t.Fatalf("write yield fixture failed: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		args       []string
+		stdin      string
+		wantCode   int
+		wantStderr []string
+	}{
+		{
+			name:     "script syntax path",
+			args:     []string{syntaxPath},
+			wantCode: ExitFailure,
+			wantStderr: []string{
+				"syntax.lua:2: unexpected symbol near <eof>",
+			},
+		},
+		{
+			name:     "stdin syntax chunk name",
+			args:     []string{"-"},
+			stdin:    "if\n",
+			wantCode: ExitFailure,
+			wantStderr: []string{
+				"stdin:2: unexpected symbol near <eof>",
+			},
+		},
+		{
+			name:     "-e syntax chunk name",
+			args:     []string{"-e", "if"},
+			wantCode: ExitFailure,
+			wantStderr: []string{
+				"(string):1: unexpected symbol near <eof>",
+			},
+		},
+		{
+			name:     "script runtime traceback",
+			args:     []string{runtimePath},
+			wantCode: ExitFailure,
+			wantStderr: []string{
+				"runtime.lua:1: boom",
+				"stack traceback:",
+				"[C]: in global 'error'",
+				"runtime.lua:1: in main chunk",
+				"[C]: in ?",
+			},
+		},
+		{
+			name:     "-e runtime chunk name",
+			args:     []string{"-e", "error(\"boom\")"},
+			wantCode: ExitFailure,
+			wantStderr: []string{
+				"(string):1: boom",
+				"stack traceback:",
+				"[C]: in global 'error'",
+				"(string):1: in main chunk",
+				"[C]: in ?",
+			},
+		},
+		{
+			name:     "main thread coroutine yield",
+			args:     []string{yieldPath},
+			wantCode: ExitFailure,
+			wantStderr: []string{
+				"attempt to yield from outside a coroutine",
+				"stack traceback:",
+				"[C]: in field 'yield'",
+				"yield.lua:1: in main chunk",
+				"[C]: in ?",
+			},
+		},
+		{
+			name:     "os exit has no stderr",
+			args:     []string{"-e", "os.exit(7, true)"},
+			wantCode: 7,
+		},
+	}
+	for _, tt := range tests {
+		// 每个 golden 场景独立运行，避免状态和 stderr 互相污染。
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			streams := Streams{Stdout: &stdout, Stderr: &stderr}
+			if tt.stdin != "" {
+				// 显式 stdin 场景使用字符串 reader，避免依赖真实终端。
+				streams.Stdin = strings.NewReader(tt.stdin)
+			}
+			exitCode := Main(context.Background(), tt.args, streams)
+			if exitCode != tt.wantCode {
+				// 退出码是官方 CLI golden 的一部分，必须稳定。
+				t.Fatalf("exit code = %d, want %d stderr=%q", exitCode, tt.wantCode, stderr.String())
+			}
+			for _, want := range tt.wantStderr {
+				// stderr 使用关键片段匹配，避免测试二进制路径和临时目录影响 golden 稳定性。
+				if !strings.Contains(stderr.String(), want) {
+					t.Fatalf("stderr = %q, missing %q", stderr.String(), want)
+				}
+			}
+			if len(tt.wantStderr) == 0 && stderr.Len() != 0 {
+				// os.exit 类主动退出不应写入错误输出。
+				t.Fatalf("stderr = %q, want empty", stderr.String())
+			}
+		})
+	}
+}
+
+// TestMainFormatOutputsFormattedSource 验证 --glua-format 会把格式化结果写入 stdout。
+func TestMainFormatOutputsFormattedSource(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "format.lua")
+	if err := os.WriteFile(path, []byte("local a={1,2}\nprint(a[1])\n"), 0o600); err != nil {
+		// 测试夹具必须可写入。
+		t.Fatalf("write fixture failed: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := Main(context.Background(), []string{"--glua-format", path}, Streams{Stdout: &stdout, Stderr: &stderr})
+	if exitCode != ExitOK {
+		// 合法文件格式化应成功退出。
+		t.Fatalf("exit code = %d stderr=%q", exitCode, stderr.String())
+	}
+	want := "local a = {1, 2}\nprint(a[1])\n"
+	if stdout.String() != want {
+		// stdout 应只包含格式化后的源码。
+		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+	}
+}
+
+// TestMainFormatWriteUpdatesFile 验证 --glua-format -w 会原地写回文件。
+func TestMainFormatWriteUpdatesFile(t *testing.T) {
+	if !extensions.Default().Has(extensions.SyntaxSwitch) {
+		// lua53 构建不包含 switch 扩展，扩展语法格式化写回用例在该模式下不执行。
+		t.Skip("switch syntax extension is not compiled")
+	}
+	path := filepath.Join(t.TempDir(), "format.lua")
+	if err := os.WriteFile(path, []byte("switch 1 do\ncase 1\nprint('x')\nend\n"), 0o600); err != nil {
+		// 测试夹具必须可写入。
+		t.Fatalf("write fixture failed: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	exitCode := Main(context.Background(), []string{"--glua-format", "-w", path}, Streams{Stderr: &stderr})
+	if exitCode != ExitOK {
+		// 合法文件格式化写回应成功退出。
+		t.Fatalf("exit code = %d stderr=%q", exitCode, stderr.String())
+	}
+	formattedBytes, err := os.ReadFile(path)
+	if err != nil {
+		// 写回后文件必须仍可读取。
+		t.Fatalf("read formatted file failed: %v", err)
+	}
+	want := "switch 1 do\n  case 1\n    print('x')\nend\n"
+	if string(formattedBytes) != want {
+		// 文件内容应被替换为格式化结果。
+		t.Fatalf("file = %q, want %q", string(formattedBytes), want)
+	}
+}
+
+// TestMainFormatRejectsExecutionOptions 验证 --glua-format 与执行参数互斥。
+func TestMainFormatRejectsExecutionOptions(t *testing.T) {
+	var stderr bytes.Buffer
+	exitCode := Main(context.Background(), []string{"--glua-format", "a.lua", "-e", "print(1)"}, Streams{Stderr: &stderr})
+	if exitCode != ExitFailure {
+		// 格式化模式与执行片段混用必须失败。
+		t.Fatalf("exit code = %d, want failure", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "--glua-format cannot be combined") {
+		// 错误信息应明确指出互斥参数。
+		t.Fatalf("stderr = %q", stderr.String())
 	}
 }

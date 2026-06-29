@@ -53,11 +53,13 @@ type FailureReporter interface {
 
 // Options 保存 gluac 参数解析结果。
 //
-// 输入文件当前只支持一个；ListLevel 对应 `-l` 出现次数；StripDebug 对应 `-s`；
+// 输入文件支持一个或多个；ListLevel 对应 `-l` 出现次数；StripDebug 对应 `-s`；
 // ParseOnly 对应 `-p`；输出路径由 `-o` 指定，未指定时使用 luac.out。
 type Options struct {
 	// InputPath 是待编译源码或待反汇编 binary chunk 路径。
 	InputPath string
+	// InputPaths 保存全部待编译源码或待反汇编 binary chunk 路径。
+	InputPaths []string
 	// OutputPath 是 binary chunk 输出路径。
 	OutputPath string
 	// ListLevel 是反汇编详细程度，0 表示不列出。
@@ -76,7 +78,7 @@ type Options struct {
 	MinimalDisassembly bool
 	// SyntaxExtensions 保存源码编译阶段启用的语法扩展集合。
 	SyntaxExtensions extensions.SyntaxSet
-	// SyntaxExtensionsSet 表示命令行是否显式指定过 --syntax。
+	// SyntaxExtensionsSet 表示命令行是否显式指定过 --gluac-syntax。
 	SyntaxExtensionsSet bool
 	// DisabledSyntaxExtensions 保存命令行显式关闭的语法扩展集合。
 	DisabledSyntaxExtensions extensions.SyntaxSet
@@ -85,7 +87,8 @@ type Options struct {
 // ParseArgs 解析 gluac 命令行参数。
 //
 // args 不包含程序名；支持 `-l`、重复 `-l`、`-o <file>`、`-p`、`-s`、`-v`、
-// `--opcode-trace`、`--step-trace` 和 `--minimal-disassembly`。当前只接受一个输入文件。
+// `--gluac-opcode-trace`、`--gluac-step-trace` 和 `--gluac-minimal-disassembly`。多个输入文件会按官方 luac
+// 语义组合成一个顶层 wrapper chunk，依次执行每个输入 chunk。
 func ParseArgs(args []string) (Options, error) {
 	// 从左到右解析参数，保持与 Lua 5.3 luac 参数覆盖顺序一致。
 	options := Options{OutputPath: DefaultOutputPath}
@@ -112,61 +115,60 @@ func ParseArgs(args []string) (Options, error) {
 		case "-v":
 			// -v 输出 Lua 5.3 兼容版本文本。
 			options.Version = true
-		case "--opcode-trace":
+		case "--gluac-opcode-trace":
 			// opcode trace 输出静态指令序列，便于观察 codegen 产物。
 			options.OpcodeTrace = true
-		case "--step-trace":
+		case "--gluac-step-trace":
 			// step trace 输出 VM 单步预览，实际执行接线后可扩展为动态 trace。
 			options.StepTrace = true
-		case "--minimal-disassembly":
+		case "--gluac-minimal-disassembly":
 			// 最小反汇编用于测试失败时输出较短上下文。
 			options.MinimalDisassembly = true
-		case "--syntax":
-			// --syntax 必须消费后续模式名或扩展名列表。
+		case "--gluac-syntax":
+			// --gluac-syntax 必须消费后续模式名或扩展名列表。
 			index++
 			if index >= len(args) {
 				// 缺少语法模式时无法决定编译配置。
-				return Options{}, fmt.Errorf("option --syntax requires an argument")
+				return Options{}, fmt.Errorf("option --gluac-syntax requires an argument")
 			}
 			if err := applySyntaxOption(&options, args[index]); err != nil {
 				// 语法扩展名称错误直接返回参数错误。
 				return Options{}, err
 			}
-		case "--disable-syntax":
-			// --disable-syntax 必须消费后续扩展名列表。
+		case "--gluac-disable-syntax":
+			// --gluac-disable-syntax 必须消费后续扩展名列表。
 			index++
 			if index >= len(args) {
 				// 缺少禁用列表时返回明确参数错误。
-				return Options{}, fmt.Errorf("option --disable-syntax requires an argument")
+				return Options{}, fmt.Errorf("option --gluac-disable-syntax requires an argument")
 			}
 			if err := applyDisableSyntaxOption(&options, args[index]); err != nil {
 				// 禁用列表名称错误直接返回参数错误。
 				return Options{}, err
 			}
 		case "--":
-			// -- 终止选项解析，后续必须正好提供一个输入路径。
+			// -- 终止选项解析，后续必须至少提供一个输入路径。
 			if index+1 >= len(args) {
 				// 没有输入文件时无法执行编译或反汇编。
 				return Options{}, fmt.Errorf("missing input file")
 			}
-			if index+2 < len(args) {
-				// 首版 gluac 只支持单输入文件，避免多文件合并语义含糊。
-				return Options{}, fmt.Errorf("multiple input files are not supported")
+			for _, inputPath := range args[index+1:] {
+				// -- 后所有参数都按输入路径处理，保持官方 luac 多文件语义。
+				options.addInputPath(inputPath)
 			}
-			options.InputPath = args[index+1]
 			return options, nil
 		default:
-			if strings.HasPrefix(argument, "--syntax=") {
+			if strings.HasPrefix(argument, "--gluac-syntax=") {
 				// 等号形式便于脚本和 IDE 配置传参。
-				if err := applySyntaxOption(&options, strings.TrimPrefix(argument, "--syntax=")); err != nil {
+				if err := applySyntaxOption(&options, strings.TrimPrefix(argument, "--gluac-syntax=")); err != nil {
 					// 语法扩展名称错误直接返回参数错误。
 					return Options{}, err
 				}
 				continue
 			}
-			if strings.HasPrefix(argument, "--disable-syntax=") {
-				// 等号形式与 --syntax 保持一致。
-				if err := applyDisableSyntaxOption(&options, strings.TrimPrefix(argument, "--disable-syntax=")); err != nil {
+			if strings.HasPrefix(argument, "--gluac-disable-syntax=") {
+				// 等号形式与 --gluac-syntax 保持一致。
+				if err := applyDisableSyntaxOption(&options, strings.TrimPrefix(argument, "--gluac-disable-syntax=")); err != nil {
 					// 禁用列表名称错误直接返回参数错误。
 					return Options{}, err
 				}
@@ -177,11 +179,7 @@ func ParseArgs(args []string) (Options, error) {
 				// 未支持选项不能静默忽略，避免输出与用户预期不一致。
 				return Options{}, fmt.Errorf("unknown option: %s", argument)
 			}
-			if options.InputPath != "" {
-				// 多输入文件当前没有合并 Proto 语义，直接拒绝。
-				return Options{}, fmt.Errorf("multiple input files are not supported")
-			}
-			options.InputPath = argument
+			options.addInputPath(argument)
 		}
 	}
 	if options.InputPath == "" && !options.Version {
@@ -191,7 +189,16 @@ func ParseArgs(args []string) (Options, error) {
 	return options, nil
 }
 
-// applySyntaxOption 将 --syntax 参数写入 Options。
+// addInputPath 追加一个输入路径并维护兼容旧调用方的 InputPath 字段。
+func (options *Options) addInputPath(inputPath string) {
+	// 第一个输入路径仍写入 InputPath，避免单文件调用方需要改动。
+	if options.InputPath == "" {
+		options.InputPath = inputPath
+	}
+	options.InputPaths = append(options.InputPaths, inputPath)
+}
+
+// applySyntaxOption 将 --gluac-syntax 参数写入 Options。
 //
 // value 支持 lua53、extended、all 或逗号分隔扩展名；解析失败时返回可展示错误。
 func applySyntaxOption(options *Options, value string) error {
@@ -206,11 +213,11 @@ func applySyntaxOption(options *Options, value string) error {
 	return nil
 }
 
-// applyDisableSyntaxOption 将 --disable-syntax 参数追加到 Options。
+// applyDisableSyntaxOption 将 --gluac-disable-syntax 参数追加到 Options。
 //
-// value 只接受逗号分隔扩展名；多个 --disable-syntax 会合并禁用集合。
+// value 只接受逗号分隔扩展名；多个 --gluac-disable-syntax 会合并禁用集合。
 func applyDisableSyntaxOption(options *Options, value string) error {
-	// 禁用列表与显式 --syntax 可叠加，最终在 syntaxForOptions 中统一扣除。
+	// 禁用列表与显式 --gluac-syntax 可叠加，最终在 syntaxForOptions 中统一扣除。
 	disabledSet, err := extensions.ParseDisabledSyntaxSet(value)
 	if err != nil {
 		// 参数非法时保留原始解析错误。
@@ -222,14 +229,14 @@ func applyDisableSyntaxOption(options *Options, value string) error {
 
 // syntaxForOptions 计算 gluac 当前命令最终使用的语法扩展集合。
 func syntaxForOptions(options Options) extensions.SyntaxSet {
-	// 未显式指定 --syntax 时使用当前构建默认集合。
+	// 未显式指定 --gluac-syntax 时使用当前构建默认集合。
 	syntaxSet := extensions.Default()
 	if options.SyntaxExtensionsSet {
-		// 显式 --syntax 覆盖默认集合。
+		// 显式 --gluac-syntax 覆盖默认集合。
 		syntaxSet = options.SyntaxExtensions
 	}
 	if options.DisabledSyntaxExtensions != 0 {
-		// --disable-syntax 在最终集合上扣除指定扩展，允许 extended 默认开再局部关闭。
+		// --gluac-disable-syntax 在最终集合上扣除指定扩展，允许 extended 默认开再局部关闭。
 		syntaxSet = syntaxSet.Without(options.DisabledSyntaxExtensions)
 	}
 	return syntaxSet & extensions.Compiled()
@@ -270,18 +277,13 @@ func Run(args []string, streams Streams) error {
 		}
 	}
 
-	inputBytes, err := os.ReadFile(options.InputPath)
-	if err != nil {
-		// 文件读取失败保留 os.PathError，调用方可识别权限或不存在。
-		return err
-	}
-	proto, sourceInput, err := ProtoFromBytesWithSyntax(inputBytes, "@"+options.InputPath, syntaxForOptions(options))
+	proto, sourceInput, inputBytes, chunkName, err := protoForOptions(options)
 	if err != nil {
 		// 源码编译或 binary chunk 加载失败时不写出文件。
 		return err
 	}
 
-	if err := writeRequestedReports(stdout, proto, sourceInput, inputBytes, "@"+options.InputPath, options); err != nil {
+	if err := writeRequestedReports(stdout, proto, sourceInput, inputBytes, chunkName, options); err != nil {
 		// 报告输出当前只可能来自 writer 错误，返回给调用方处理。
 		return err
 	}
@@ -298,6 +300,82 @@ func Run(args []string, streams Streams) error {
 		}
 	}
 	return nil
+}
+
+// protoForOptions 按命令行输入加载单个 Proto 或组合多个输入 Proto。
+func protoForOptions(options Options) (*bytecode.Proto, bool, []byte, string, error) {
+	// 单输入路径保留旧行为，让源码报告和最小反汇编继续使用原始输入字节。
+	if len(options.InputPaths) <= 1 {
+		inputBytes, err := os.ReadFile(options.InputPath)
+		if err != nil {
+			// 文件读取失败保留 os.PathError，调用方可识别权限或不存在。
+			return nil, false, nil, "", err
+		}
+		chunkName := "@" + options.InputPath
+		proto, sourceInput, err := ProtoFromBytesWithSyntax(inputBytes, chunkName, syntaxForOptions(options))
+		if err != nil {
+			// 源码编译或 binary chunk 加载失败时不写出文件。
+			return nil, false, nil, "", err
+		}
+		return proto, sourceInput, inputBytes, chunkName, nil
+	}
+
+	protos := make([]*bytecode.Proto, 0, len(options.InputPaths))
+	for _, inputPath := range options.InputPaths {
+		// 多输入文件逐个读取并编译/加载，任一失败时不写出组合 chunk。
+		inputBytes, err := os.ReadFile(inputPath)
+		if err != nil {
+			return nil, false, nil, "", err
+		}
+		proto, _, err := ProtoFromBytesWithSyntax(inputBytes, "@"+inputPath, syntaxForOptions(options))
+		if err != nil {
+			return nil, false, nil, "", err
+		}
+		protos = append(protos, proto)
+	}
+	return CombineProtos(protos, "=(luac)"), false, nil, "=(luac)", nil
+}
+
+// CombineProtos 构造官方 luac 多输入文件语义的顶层 wrapper Proto。
+//
+// wrapper 依次创建并调用每个输入 chunk 的 closure；输入 chunk 的 `_ENV` upvalue 会改为捕获
+// wrapper 的 `_ENV`，使多文件组合后共享同一个全局环境。
+func CombineProtos(protos []*bytecode.Proto, source string) *bytecode.Proto {
+	// 顶层 wrapper 自身只需要一个函数寄存器，并声明外部注入的 `_ENV` upvalue。
+	wrapper := bytecode.NewProto(source)
+	wrapper.MaxStackSize = 2
+	wrapper.Upvalues = []bytecode.UpvalueDesc{{Name: "_ENV", InStack: true, Index: 0}}
+	for _, child := range protos {
+		// nil 子 Proto 表示调用方传入损坏数据，跳过可避免 panic。
+		if child == nil {
+			continue
+		}
+		reparentTopLevelEnvironment(child)
+		childIndex := wrapper.AddChild(child)
+		wrapper.Code = append(wrapper.Code,
+			bytecode.CreateABx(bytecode.OpClosure, 0, childIndex),
+			bytecode.CreateABC(bytecode.OpCall, 0, 1, 1),
+		)
+	}
+	wrapper.Code = append(wrapper.Code, bytecode.CreateABC(bytecode.OpReturn, 0, 1, 0))
+	wrapper.LineInfo = make([]int, len(wrapper.Code))
+	return wrapper
+}
+
+// reparentTopLevelEnvironment 让被 luac wrapper 包裹的输入 chunk 捕获 wrapper 的 `_ENV`。
+func reparentTopLevelEnvironment(proto *bytecode.Proto) {
+	if proto == nil || len(proto.Upvalues) == 0 {
+		// 没有 upvalue 的 chunk 不需要环境重定向。
+		return
+	}
+	for index := range proto.Upvalues {
+		if proto.Upvalues[index].Name == "_ENV" || index == 0 {
+			// 顶层 chunk 的外部环境改为捕获 wrapper 的 upvalue 0，兼容 stripped chunk 名称为空的情况。
+			proto.Upvalues[index].InStack = false
+			proto.Upvalues[index].Index = 0
+			return
+		}
+	}
 }
 
 // CompileSource 将 Lua 源码编译为 Lua 5.3 Proto。

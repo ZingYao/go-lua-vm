@@ -5,11 +5,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/zing/go-lua-vm/bytecode"
 	"github.com/zing/go-lua-vm/extensions"
+	"github.com/zing/go-lua-vm/lua"
+	"github.com/zing/go-lua-vm/runtime"
 )
 
 // TestParseArgs 验证 gluac 参数解析覆盖 luac 兼容选项和开发 trace 选项。
@@ -23,17 +26,22 @@ func TestParseArgs(t *testing.T) {
 		{
 			name: "compile output",
 			args: []string{"-o", "out.luac", "input.lua"},
-			want: Options{InputPath: "input.lua", OutputPath: "out.luac"},
+			want: Options{InputPath: "input.lua", InputPaths: []string{"input.lua"}, OutputPath: "out.luac"},
 		},
 		{
 			name: "verbose list",
 			args: []string{"-l", "-l", "input.luac"},
-			want: Options{InputPath: "input.luac", OutputPath: DefaultOutputPath, ListLevel: 2},
+			want: Options{InputPath: "input.luac", InputPaths: []string{"input.luac"}, OutputPath: DefaultOutputPath, ListLevel: 2},
 		},
 		{
 			name: "developer trace",
-			args: []string{"--opcode-trace", "--step-trace", "--minimal-disassembly", "input.lua"},
-			want: Options{InputPath: "input.lua", OutputPath: DefaultOutputPath, OpcodeTrace: true, StepTrace: true, MinimalDisassembly: true},
+			args: []string{"--gluac-opcode-trace", "--gluac-step-trace", "--gluac-minimal-disassembly", "input.lua"},
+			want: Options{InputPath: "input.lua", InputPaths: []string{"input.lua"}, OutputPath: DefaultOutputPath, OpcodeTrace: true, StepTrace: true, MinimalDisassembly: true},
+		},
+		{
+			name: "multiple inputs",
+			args: []string{"one.lua", "two.lua"},
+			want: Options{InputPath: "one.lua", InputPaths: []string{"one.lua", "two.lua"}, OutputPath: DefaultOutputPath},
 		},
 	}
 	for _, test := range tests {
@@ -44,7 +52,7 @@ func TestParseArgs(t *testing.T) {
 				// 参数应合法，错误代表解析器回归。
 				t.Fatalf("ParseArgs error: %v", err)
 			}
-			if got != test.want {
+			if !reflect.DeepEqual(got, test.want) {
 				// Options 必须逐字段稳定，便于 CLI 行为可预测。
 				t.Fatalf("Options mismatch: got=%+v want=%+v", got, test.want)
 			}
@@ -56,7 +64,7 @@ func TestParseArgs(t *testing.T) {
 func TestParseArgsSyntaxOptions(t *testing.T) {
 	if extensions.Compiled().Has(extensions.SyntaxContinue | extensions.SyntaxSwitch) {
 		// 只有当前构建包含两个扩展时，才验证 extended 后局部关闭 switch 的正向路径。
-		options, err := ParseArgs([]string{"--syntax=extended", "--disable-syntax", "switch", "input.lua"})
+		options, err := ParseArgs([]string{"--gluac-syntax=extended", "--gluac-disable-syntax", "switch", "input.lua"})
 		if err != nil {
 			// 合法语法扩展参数不应失败。
 			t.Fatalf("ParseArgs syntax failed: %v", err)
@@ -71,7 +79,7 @@ func TestParseArgsSyntaxOptions(t *testing.T) {
 		}
 	}
 
-	options, err := ParseArgs([]string{"--syntax", "lua53", "input.lua"})
+	options, err := ParseArgs([]string{"--gluac-syntax", "lua53", "input.lua"})
 	if err != nil {
 		// lua53 是合法语法模式。
 		t.Fatalf("ParseArgs lua53 failed: %v", err)
@@ -100,7 +108,11 @@ func TestParseArgsRejectsInvalidInput(t *testing.T) {
 	invalidArgs := [][]string{
 		{"-o"},
 		{"--unknown", "input.lua"},
-		{"one.lua", "two.lua"},
+		{"--syntax", "lua53", "input.lua"},
+		{"--disable-syntax", "switch", "input.lua"},
+		{"--opcode-trace", "input.lua"},
+		{"--step-trace", "input.lua"},
+		{"--minimal-disassembly", "input.lua"},
 		{},
 	}
 	for _, args := range invalidArgs {
@@ -109,6 +121,61 @@ func TestParseArgsRejectsInvalidInput(t *testing.T) {
 			// 没有错误会导致 CLI 后续行为歧义。
 			t.Fatalf("ParseArgs(%v) succeeded unexpectedly", args)
 		}
+	}
+}
+
+// TestRunCombinesMultipleInputFiles 验证 gluac 多输入文件会生成可执行 wrapper chunk。
+func TestRunCombinesMultipleInputFiles(t *testing.T) {
+	// 使用两个文件共享全局变量，验证 wrapper 顺序执行且子 chunk 捕获同一个 _ENV。
+	dir := t.TempDir()
+	firstPath := filepath.Join(dir, "one.lua")
+	secondPath := filepath.Join(dir, "two.lua")
+	outputPath := filepath.Join(dir, "combined.luac")
+	if err := os.WriteFile(firstPath, []byte("x = 41\n"), 0o644); err != nil {
+		// 第一个输入文件必须可写。
+		t.Fatalf("write first source: %v", err)
+	}
+	if err := os.WriteFile(secondPath, []byte("x = x + 1\n"), 0o644); err != nil {
+		// 第二个输入文件必须可写。
+		t.Fatalf("write second source: %v", err)
+	}
+	if err := Run([]string{"-o", outputPath, firstPath, secondPath}, Streams{}); err != nil {
+		// 多输入文件应按官方 luac 语义合并，不再拒绝。
+		t.Fatalf("Run multiple input compile error: %v", err)
+	}
+	outputBytes, err := os.ReadFile(outputPath)
+	if err != nil {
+		// 输出文件必须存在。
+		t.Fatalf("read combined chunk: %v", err)
+	}
+	combinedProto, err := bytecode.LoadBinaryChunk(bytes.NewReader(outputBytes))
+	if err != nil {
+		// 组合 chunk 必须仍是合法 Lua 5.3 binary chunk。
+		t.Fatalf("load combined chunk: %v", err)
+	}
+	if len(combinedProto.Protos) != 2 || len(combinedProto.Code) != 5 {
+		// wrapper 应包含两个子 Proto，并按 CLOSURE/CALL/CLOSURE/CALL/RETURN 形态执行。
+		t.Fatalf("combined shape code=%d children=%d", len(combinedProto.Code), len(combinedProto.Protos))
+	}
+
+	state := lua.NewState()
+	defer state.Close()
+	if err := lua.OpenLibs(state); err != nil {
+		// 标准库打开不应失败。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+	if err := lua.DoFile(state, outputPath); err != nil {
+		// glua 必须能加载并执行 gluac 生成的组合 chunk。
+		t.Fatalf("DoFile combined chunk failed: %v", err)
+	}
+	value, err := lua.GetGlobal(state, "x")
+	if err != nil {
+		// 全局读取不应失败。
+		t.Fatalf("GetGlobal x failed: %v", err)
+	}
+	if value.Kind != runtime.KindInteger || value.Integer != 42 {
+		// 两个输入文件必须按顺序共享环境执行。
+		t.Fatalf("global x = %#v, want integer 42", value)
 	}
 }
 
