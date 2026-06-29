@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"fmt"
+	"io/fs"
 
 	"github.com/zing/go-lua-vm/extensions"
 )
@@ -36,6 +37,10 @@ type Options struct {
 	// 打开外部动态库并返回 Lua 可调用函数。该回调不要求也不引入 CGO，宿主可自行选择插件、
 	// 系统动态库、CGO 或纯 Go 适配层。
 	PackageDynamicLibraryLoader func(filename string, symbol string) (Value, error)
+	// VirtualFilesystem 保存只读 Go fs.FS 虚拟文件系统。
+	VirtualFilesystem fs.FS
+	// PreferHostFilesystem 表示只读路径查找时是否优先尝试宿主文件系统。
+	PreferHostFilesystem bool
 	// SyntaxExtensions 保存源码编译阶段启用的可选语法扩展集合。
 	SyntaxExtensions extensions.SyntaxSet
 	// SyntaxExtensionsSet 表示调用方是否显式设置过 SyntaxExtensions。

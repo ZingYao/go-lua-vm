@@ -1081,13 +1081,27 @@ func LoadFile(state *State, path string) error {
 		// nil State 没有栈，无法接收编译后的 closure。
 		return ErrNilState
 	}
-	sourceBytes, err := os.ReadFile(path)
+	sourceBytes, err := readAPIFile(state, path)
 	if err != nil {
 		// 文件读取失败时直接返回原始错误，保留 os.PathError 供调用方 errors.As。
 		return err
 	}
 	source := lexer.StripInitialShebang(string(sourceBytes))
 	return LoadString(state, source, "@"+path)
+}
+
+// readAPIFile 按 State 选项读取 Go API 指定的 Lua 文件。
+//
+// 配置 VirtualFilesystem 或 AllowHostFilesystem 时使用 Options 策略；普通 Go API 直接调用未配置
+// 文件策略的 State 时保持历史宿主读取行为，避免破坏显式 Go 宿主加载文件的嵌入用法。
+func readAPIFile(state *State, path string) ([]byte, error) {
+	// State 已由调用方校验，读取选项用于判断是否进入 VFS/权限路径。
+	options := state.Options()
+	if options.VirtualFilesystem != nil || options.AllowHostFilesystem {
+		// 显式配置文件策略后由 runtime 统一处理 VFS、宿主权限和优先级。
+		return runtime.ReadFileWithOptions(options, path)
+	}
+	return os.ReadFile(path)
 }
 
 // DoString 加载 Lua 源码字符串并在 protected call 边界内执行。
@@ -1600,8 +1614,7 @@ func packageLuaFileLoader(state *State) packagelib.LuaFileLoader {
 // state 必须非 nil；require 命中 package.preload 中的 Lua closure 时，通过当前 State 的 Call
 // 执行 loader，保持 loader 参数、错误传播和 package.loaded 写回语义与 Lua 5.3 一致。
 func openPackageWithStateCaller(state *State) error {
-	options := state.Options()
-	environment := packagelib.NewEnvironmentWithLoaders(packageLuaFileLoader(state), packagelib.DynamicLibraryLoader(options.PackageDynamicLibraryLoader))
+	environment := packagelib.NewEnvironmentWithOptions(packageLuaFileLoader(state), state.Options())
 	environment.SetLoaderCaller(func(loader runtime.Value, args ...runtime.Value) ([]runtime.Value, error) {
 		// Go 和 Lua closure loader 都复用 lua.Call，避免 package 包直接依赖执行循环。
 		return Call(state, loader, args...)

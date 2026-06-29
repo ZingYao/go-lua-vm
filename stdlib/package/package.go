@@ -57,6 +57,8 @@ type Environment struct {
 	loaderCaller LoaderCaller
 	// dynamicLibraryLoader 保存 package.loadlib 和 C searcher 使用的宿主动态库接入点。
 	dynamicLibraryLoader DynamicLibraryLoader
+	// options 保存当前 State 的文件系统与环境变量权限策略。
+	options runtime.Options
 }
 
 // LuaFileLoader 表示 Lua 文件 searcher 命中文件后生成 loader 的回调。
@@ -124,7 +126,7 @@ func OpenWithLuaFileLoader(state *runtime.State, luaFileLoader LuaFileLoader) er
 		return fmt.Errorf("package library unavailable: %w", runtime.ErrClosedState)
 	}
 
-	environment := NewEnvironmentWithLoaders(luaFileLoader, nil)
+	environment := NewEnvironmentWithOptions(luaFileLoader, state.Options())
 	// require 作为全局函数注册，符合 Lua 5.3 基础库可见性。
 	state.SetGlobal("require", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(environment.Require)))
 	state.SetGlobal("package", runtime.ReferenceValue(runtime.KindTable, environment.table))
@@ -145,8 +147,8 @@ func NewEnvironment() *Environment {
 // luaFileLoader 可以为 nil；nil 时 package.searchpath 仍会访问文件系统检查候选文件，但
 // LuaSearcher 不会返回可执行 loader，避免底层包自行依赖 lua API。
 func NewEnvironmentWithLuaFileLoader(luaFileLoader LuaFileLoader) *Environment {
-	// 兼容旧入口：只接入 Lua 文件 loader，不启用动态库 loader。
-	return NewEnvironmentWithLoaders(luaFileLoader, nil)
+	// 无 State 的环境保持历史测试行为，允许宿主文件系统参与 package.searchpath。
+	return NewEnvironmentWithOptions(luaFileLoader, runtime.Options{AllowHostFilesystem: true, AllowEnvironment: true})
 }
 
 // NewEnvironmentWithLoaders 创建带 Lua 文件和动态库 loader 扩展点的 package 标准库运行环境。
@@ -154,6 +156,19 @@ func NewEnvironmentWithLuaFileLoader(luaFileLoader LuaFileLoader) *Environment {
 // luaFileLoader 可以为 nil；dynamicLibraryLoader 为 nil 时 loadlib、C searcher 和 C root searcher
 // 保持默认 CGO-free 兼容错误。非 nil 动态库 loader 由宿主负责平台加载和符号解析。
 func NewEnvironmentWithLoaders(luaFileLoader LuaFileLoader, dynamicLibraryLoader DynamicLibraryLoader) *Environment {
+	// 兼容旧入口：在历史测试权限基础上接入动态库 loader。
+	return NewEnvironmentWithOptions(luaFileLoader, runtime.Options{
+		AllowHostFilesystem:         true,
+		AllowEnvironment:            true,
+		PackageDynamicLibraryLoader: dynamicLibraryLoader,
+	})
+}
+
+// NewEnvironmentWithOptions 创建带 Lua 文件 loader 与权限策略的 package 标准库运行环境。
+//
+// luaFileLoader 可以为 nil；options 控制 package.path 环境变量读取、Lua 文件候选可读性检查和
+// VFS/宿主文件系统优先级，并可通过 PackageDynamicLibraryLoader 接入可选动态库 loader。
+func NewEnvironmentWithOptions(luaFileLoader LuaFileLoader, options runtime.Options) *Environment {
 	// 初始化 package 表、loaded 缓存表和 searcher 相关表。
 	packageTable := runtime.NewTable()
 	loadedTable := runtime.NewTable()
@@ -166,13 +181,14 @@ func NewEnvironmentWithLoaders(luaFileLoader LuaFileLoader, dynamicLibraryLoader
 		searchers:            searchersTable,
 		luaFileLoader:        luaFileLoader,
 		loaderCaller:         callGoResults,
-		dynamicLibraryLoader: dynamicLibraryLoader,
+		dynamicLibraryLoader: DynamicLibraryLoader(options.PackageDynamicLibraryLoader),
+		options:              runtime.NormalizeOptions(options),
 	}
 	packageTable.RawSetString("config", runtime.StringValue(DefaultConfig))
-	packageTable.RawSetString("cpath", runtime.StringValue(resolveEnvironmentPath("LUA_CPATH_5_3", "LUA_CPATH", DefaultCPathForGOOS(goRuntime.GOOS))))
+	packageTable.RawSetString("cpath", runtime.StringValue(resolveConfiguredPath(environment.options, "LUA_CPATH_5_3", "LUA_CPATH", DefaultCPathForGOOS(goRuntime.GOOS))))
 	packageTable.RawSetString("loaded", runtime.ReferenceValue(runtime.KindTable, loadedTable))
 	packageTable.RawSetString("loadlib", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(environment.LoadLib)))
-	packageTable.RawSetString("path", runtime.StringValue(resolveEnvironmentPath("LUA_PATH_5_3", "LUA_PATH", DefaultPath)))
+	packageTable.RawSetString("path", runtime.StringValue(resolveConfiguredPath(environment.options, "LUA_PATH_5_3", "LUA_PATH", DefaultPath)))
 	packageTable.RawSetString("preload", runtime.ReferenceValue(runtime.KindTable, preloadTable))
 	packageTable.RawSetString("searchers", runtime.ReferenceValue(runtime.KindTable, searchersTable))
 	packageTable.RawSetString("searchpath", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(environment.SearchPath)))
@@ -181,6 +197,18 @@ func NewEnvironmentWithLoaders(luaFileLoader LuaFileLoader, dynamicLibraryLoader
 	searchersTable.RawSetInteger(3, runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(environment.CSearcher)))
 	searchersTable.RawSetInteger(4, runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(environment.CRootSearcher)))
 	return environment
+}
+
+// resolveConfiguredPath 按 State 权限解析 Lua 5.3 package.path/package.cpath。
+//
+// AllowEnvironment 为 false 时直接使用默认路径，避免嵌入模式泄漏宿主环境变量；授权后才读取
+// LUA_PATH/LUA_CPATH 等环境变量并展开默认路径标记。
+func resolveConfiguredPath(options runtime.Options, versionedName string, genericName string, defaultValue string) string {
+	// 环境变量访问需要宿主显式授权。
+	if !options.AllowEnvironment {
+		return defaultValue
+	}
+	return resolveEnvironmentPath(versionedName, genericName, defaultValue)
 }
 
 // SetLoaderCaller 设置 require 执行 loader 的回调。
@@ -493,7 +521,7 @@ func (environment *Environment) SearchPath(args ...runtime.Value) ([]runtime.Val
 	}
 
 	candidates := expandSearchPath(moduleName, path, separator, replacement)
-	if filename, ok := firstReadableFile(candidates); ok {
+	if filename, ok := firstReadableFileWithOptions(environment.options, candidates); ok {
 		// 命中第一个可读候选文件时直接返回文件名。
 		return []runtime.Value{runtime.StringValue(filename)}, nil
 	}
@@ -547,7 +575,7 @@ func (environment *Environment) LuaSearcher(args ...runtime.Value) ([]runtime.Va
 	path := pathValue.String
 
 	candidates := expandSearchPath(moduleName, path, defaultModuleSeparator, defaultDirectorySeparator)
-	filename, ok := firstReadableFile(candidates)
+	filename, ok := firstReadableFileWithOptions(environment.options, candidates)
 	if ok && environment.luaFileLoader != nil {
 		// 文件存在且执行器可用时返回 loader，require 会负责执行并缓存模块结果。
 		loader := environment.luaFileLoader(filename)
@@ -850,30 +878,23 @@ func expandSearchPath(moduleName string, path string, separator string, replacem
 //
 // candidates 必须按 package.path 顺序传入；目录、缺失路径和无法打开路径都会被视为未命中。
 func firstReadableFile(candidates []string) (string, bool) {
+	// 无权限参数版本保持历史行为：允许宿主文件系统参与检查。
+	return firstReadableFileWithOptions(runtime.Options{AllowHostFilesystem: true}, candidates)
+}
+
+// firstReadableFileWithOptions 返回候选列表中第一个按权限策略可读的普通文件。
+//
+// candidates 必须按 package.path 顺序传入；VFS 与宿主优先级由 options 控制。
+func firstReadableFileWithOptions(options runtime.Options, candidates []string) (string, bool) {
 	for _, candidate := range candidates {
 		// 空路径没有可读文件语义，直接跳过。
 		if candidate == "" {
 			continue
 		}
-		info, err := os.Stat(candidate)
-		if err != nil {
-			// 不存在或无权限读取元信息都按未命中处理，错误文本仍由 searchPathError 汇总候选。
-			continue
-		}
-		if info.IsDir() {
-			// 目录不是 Lua chunk 文件，继续检查后续模板。
-			continue
-		}
-		file, err := os.Open(candidate)
-		if err != nil {
-			// 元信息存在但不可打开时仍视为未命中。
-			continue
-		}
-		if closeErr := file.Close(); closeErr != nil {
-			// 关闭失败不影响“可被打开读取”的判断。
+		if runtime.CanReadFileWithOptions(options, candidate) {
+			// VFS 或宿主文件系统命中可读文件时返回候选原始名称，供错误文本和 chunk name 使用。
 			return candidate, true
 		}
-		return candidate, true
 	}
 
 	// 所有候选都不可读。

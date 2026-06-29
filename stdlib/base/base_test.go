@@ -771,7 +771,7 @@ func TestDofileReadBoundary(t *testing.T) {
 // 全局 dofile 必须捕获当前 State，复用 loadfile 绑定的 `_ENV`，并把文件 chunk 的多返回值返回给
 // 调用方；加载失败才抛 Lua error，而不是保留阶段性未接入错误。
 func TestOpenDofileExecutesFileChunk(t *testing.T) {
-	state := runtime.NewState()
+	state := runtime.NewStateWithOptions(runtime.Options{AllowHostFilesystem: true})
 	if err := Open(state); err != nil {
 		// base.Open 必须能注册捕获 State 的 dofile。
 		t.Fatalf("open base failed: %v", err)
@@ -804,7 +804,7 @@ func TestOpenDofileExecutesFileChunk(t *testing.T) {
 // string.gmatch 返回 *runtime.GoClosureWithUpvalues；官方 strings.lua 会在 dofile 执行路径中把
 // 该 iterator 作为 local 再调用，base 内部执行器必须识别这种 Go closure 负载。
 func TestOpenDofileExecutesGMatchIterator(t *testing.T) {
-	state := runtime.NewState()
+	state := runtime.NewStateWithOptions(runtime.Options{AllowHostFilesystem: true})
 	if err := Open(state); err != nil {
 		// base.Open 必须能注册捕获 State 的 dofile。
 		t.Fatalf("open base failed: %v", err)
@@ -1207,7 +1207,7 @@ func TestLoadFileCompilesFileChunk(t *testing.T) {
 //
 // loadfile 与 load 共享 chunk 识别逻辑；文件内容以 binary 签名开头时不应走源码 parser。
 func TestLoadFileAcceptsBinaryChunk(t *testing.T) {
-	state := runtime.NewState()
+	state := runtime.NewStateWithOptions(runtime.Options{AllowHostFilesystem: true})
 	if err := Open(state); err != nil {
 		// base.Open 必须能注册捕获 State 的 loadfile。
 		t.Fatalf("open base failed: %v", err)
@@ -1242,7 +1242,7 @@ func TestLoadFileAcceptsBinaryChunk(t *testing.T) {
 // Lua 5.3 files.lua 会把 `#comment\0\n` 与 string.dump 结果拼成文件；loadfile 必须跳过该
 // 文件头注释，再从 ESC 签名开始读取 binary chunk。
 func TestLoadFileAcceptsBinaryChunkAfterInitialComment(t *testing.T) {
-	state := runtime.NewState()
+	state := runtime.NewStateWithOptions(runtime.Options{AllowHostFilesystem: true})
 	if err := Open(state); err != nil {
 		// base.Open 必须能注册捕获 State 的 loadfile。
 		t.Fatalf("open base failed: %v", err)
@@ -1277,7 +1277,7 @@ func TestLoadFileAcceptsBinaryChunkAfterInitialComment(t *testing.T) {
 //
 // 第二参数 mode 控制 text/binary 接受范围；第三参数 env 必须原样绑定到顶层 `_ENV` upvalue。
 func TestLoadFileModeAndEnvironment(t *testing.T) {
-	state := runtime.NewState()
+	state := runtime.NewStateWithOptions(runtime.Options{AllowHostFilesystem: true})
 	if err := Open(state); err != nil {
 		// base.Open 必须能注册捕获 State 的 loadfile。
 		t.Fatalf("open base failed: %v", err)
@@ -1338,7 +1338,7 @@ func TestLoadFileModeAndEnvironment(t *testing.T) {
 // 官方测试通过 `assert(loadfile(n))()` 执行文件；返回 closure 必须携带 globals upvalue，
 // 否则文件内访问 print、os、io、package 等全局库会在运行期失败。
 func TestOpenLoadFileBindsGlobalEnvironment(t *testing.T) {
-	state := runtime.NewState()
+	state := runtime.NewStateWithOptions(runtime.Options{AllowHostFilesystem: true})
 	if err := Open(state); err != nil {
 		// base.Open 必须能注册捕获 State 的 loadfile。
 		t.Fatalf("open base failed: %v", err)

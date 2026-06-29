@@ -614,8 +614,26 @@ func Lines(args ...runtime.Value) ([]runtime.Value, error) {
 // 字符串路径需要 AllowHostFilesystem；无参数迭代当前默认输入不触发路径访问。
 func LinesWithOptions(options runtime.Options, args ...runtime.Value) ([]runtime.Value, error) {
 	// 字符串路径会打开宿主文件，默认必须拒绝。
-	if len(args) > 0 && args[0].Kind == runtime.KindString && !options.AllowHostFilesystem {
-		return nil, filesystemDisabledError("lines")
+	if len(args) > 0 && args[0].Kind == runtime.KindString {
+		values, err := OpenFileWithOptions(options, args[0], runtime.StringValue("r"))
+		if err != nil {
+			// 权限或参数错误直接传播，保持 io.lines(path) 的 Lua error 语义。
+			return nil, err
+		}
+		file, err := fileArgument(values, 1, "lines")
+		if err != nil {
+			// 打开失败时把 io.open 的第二返回值提升为 io.lines 错误。
+			if len(values) > 1 && values[1].Kind == runtime.KindString {
+				return nil, runtime.RaiseError(values[1])
+			}
+			return nil, err
+		}
+		iterator, err := makeLinesIterator(file, args[1:], true)
+		if err != nil {
+			// 格式参数错误在创建 iterator 时直接返回。
+			return nil, err
+		}
+		return []runtime.Value{runtime.ReferenceValue(runtime.KindGoClosure, iterator)}, nil
 	}
 	return Lines(args...)
 }
@@ -676,11 +694,61 @@ func OpenFileWithOptions(options runtime.Options, args ...runtime.Value) ([]runt
 		// mode 参数如果出现，必须是字符串。
 		return nil, badArgument("open", 2, "string expected")
 	}
+	mode := "r"
+	if len(args) > 1 && !args[1].IsNil() {
+		// 显式 mode 覆盖默认只读模式。
+		mode = args[1].String
+	}
+	if _, err := openFlags(mode); err != nil {
+		// 非法模式按参数错误处理，优先于权限策略。
+		return nil, err
+	}
+	readable, writable := openModeCapabilities(mode)
+	if readable && !writable {
+		// 纯读模式允许优先从 VFS 打开；宿主优先时仅在宿主授权后先尝试宿主。
+		if options.PreferHostFilesystem && options.AllowHostFilesystem {
+			hostValues, _ := OpenFile(args...)
+			if len(hostValues) > 0 && !hostValues[0].IsNil() {
+				// 宿主文件命中时直接返回，保持优先级承诺。
+				return hostValues, nil
+			}
+			if virtualValues, ok := openVirtualReadFile(options, args[0].String); ok {
+				// 宿主未命中后允许 VFS 兜底。
+				return virtualValues, nil
+			}
+			return hostValues, nil
+		}
+		if virtualValues, ok := openVirtualReadFile(options, args[0].String); ok {
+			// 默认 VFS 优先，命中或宿主禁用时都由 VFS 结果决定。
+			return virtualValues, nil
+		}
+	}
 	if !options.AllowHostFilesystem {
 		// 默认关闭宿主路径访问，避免脚本读取或写入调用方文件。
 		return nil, filesystemDisabledError("open")
 	}
 	return OpenFile(args...)
+}
+
+// openVirtualReadFile 按 VFS 策略打开只读 file userdata。
+//
+// 返回 ok=false 表示未配置 VFS 或 VFS 未命中且宿主仍可兜底；返回 ok=true 表示调用方应直接使用
+// 返回值，其中打开失败会以 io.open 的 nil/message/code 三元组表达。
+func openVirtualReadFile(options runtime.Options, filename string) ([]runtime.Value, bool) {
+	// 未配置 VFS 时调用方继续按宿主权限处理。
+	if options.VirtualFilesystem == nil {
+		return nil, false
+	}
+	file, err := runtime.OpenVirtualFile(options, filename)
+	if err == nil {
+		// VFS 文件只暴露读取和关闭能力，不提供写入能力。
+		return []runtime.Value{NewFileValue(nil, NewFile(filename, file, nil, nil, file))}, true
+	}
+	if options.AllowHostFilesystem {
+		// 宿主授权时，VFS 未命中或路径不适配可以继续交给宿主路径处理。
+		return nil, false
+	}
+	return []runtime.Value{runtime.NilValue(), runtime.StringValue(err.Error()), runtime.IntegerValue(1)}, true
 }
 
 // Output 实现 Lua 5.3 `io.output` 的基础路径与 file 切换语义。

@@ -10,13 +10,14 @@
 - binary chunk 首版承诺本项目 load/dump roundtrip、当前平台标准 chunk 读写和 Lua 5.3 语义字段兼容。
 - Go 嵌入 API 支持显式注册 Go 函数、显式对象代理和 Lua stub/代理代码生成。
 - 库模式默认关闭宿主文件系统、环境变量和进程访问；CLI 普通模式按官方 Lua 使用习惯开启宿主访问，`-E` 继续屏蔽环境变量读取。
+- Go `fs.FS` 只读虚拟文件系统可通过 `lua.Options.VirtualFilesystem` 接入，覆盖 `loadfile`、`dofile`、`require` Lua 文件 loader、只读 `io.open/io.lines` 以及对应 `file:read/file:lines`；默认 VFS 优先，`PreferHostFilesystem` 可在宿主文件系统授权后切换宿主优先。
 - 项目核心与默认构建保持纯 Go、无 CGO，目标是避免跨系统编译困难；这不禁止宿主程序或可选扩展调用外部 `lib`、`.so`、`.dylib` 或 Windows `.dll`。嵌入方可以通过 `lua.Options.PackageDynamicLibraryLoader` 或 `stdlib/package` 环境注入可选 loader，也可以继续覆盖 `package.loadlib`、写入 `package.preload` 或替换 `package.searchers` 接入。
 - 已补充无 CGO 测试，验证宿主覆盖 `package.loadlib`、通过 `lua.Options` 注入动态库 loader，以及 C searcher 按 `package.cpath` 候选返回 Lua 可调用 loader 的链路。
 
 ## 已知限制
 
 - 不承诺官方 Lua 5.3 binary chunk 跨端序、跨字长完全互通；跨架构互通需要独立测试矩阵后再承诺。
-- 当前尚未完整支持 Go `fs.FS` 虚拟文件系统；已有宿主文件系统权限开关和 `package` Lua 文件 loader 扩展点，但不能宣称首版已支持完整 VFS。
+- Go `fs.FS` 虚拟文件系统首版仅承诺只读路径；写入、删除、重命名、临时文件、进程管道和环境变量仍由宿主权限开关控制，不映射到 VFS。
 - 首版默认不内置 C 动态库加载器；未注入 loader 时，`package.loadlib`、C searcher 和 C root searcher 按纯 Go、无 CGO 策略返回明确不支持。注入 loader 后，Linux/macOS 候选覆盖 `.so`/`.dylib`，Windows 候选限定为运行期 `.dll`；`.lib`/import library 属于链接期产物，不作为 `require` 运行期候选。
 - 不支持 Go reflection 自动绑定；首版只支持显式注册 Go 函数、显式对象代理和基于绑定信息的 Lua stub 生成。
 - Lua stub 生成不是 Go 源码到 Lua 源码的语义翻译；它只生成 Lua 侧代理层。
@@ -24,7 +25,7 @@
 
 ## 后续增强建议
 
-- 为 Go `fs.FS` 设计只读虚拟文件系统入口，优先覆盖 `loadfile`、`dofile`、`require` 和只读 `io.open/io.lines`。
+- 补充 VFS 使用文档和示例，说明路径清洗、宿主/VFS 优先级、只读边界和错误文本。
 - 建立跨平台 binary chunk 互通测试矩阵，再决定是否提升兼容承诺。
 - 补充官方文档级示例，展示宿主程序如何通过 `PackageDynamicLibraryLoader` 注册自定义 C loader 或替换 `package.loadlib`，同时保持本仓库 no-CGO。
 - 评估平台动态库 loader 示例包：要求默认 `CGO_ENABLED=0` 跨平台构建不受影响，平台相关实现必须隔离在显式 build tag、插件或宿主适配层中。
