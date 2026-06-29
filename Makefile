@@ -21,15 +21,9 @@ TARGETS := \
 	windows-amd64 \
 	windows-386 \
 	windows-arm64 \
-	windows-armv6 \
-	windows-armv7 \
 	darwin-amd64 \
 	darwin-arm64 \
-	android-amd64 \
-	android-386 \
-	android-arm64 \
-	android-armv6 \
-	android-armv7
+	android-arm64
 
 .PHONY: all build build-ls dist $(TARGETS) package-vscode package-jetbrains package-extensions clean
 
