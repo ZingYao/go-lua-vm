@@ -802,11 +802,12 @@
 - [ ] 实现 Go reflection 自动扫描函数：支持导出函数自动转 Lua callable，覆盖参数转换、多返回值、error 返回和 panic 恢复。
 - [ ] 实现 Go reflection 自动扫描 struct：支持导出字段读写、导出方法调用、指针和值 receiver、嵌入字段和 tag 重命名。
 - [ ] 为 Go reflection 自动绑定补测试：覆盖函数、struct 字段、方法、错误返回、panic 恢复、不可导出字段拒绝、nil receiver 和循环引用。
-- [ ] 设计 Go 封装方法给 Lua 调用的统一 API：明确注册函数、注册 table、注册 object、注册常量、注册变量和覆盖策略。
-- [ ] 实现 Go 函数封装 API：支持直接注册到全局、模块 table、package.loaded 和 package.preload。
-- [ ] 实现 Go table 对象封装 API：支持构造 Lua table，注入字段、方法、嵌套 table、metatable 和只读 table。
-- [ ] 实现 Go object 方法封装 API：支持 userdata/object proxy、方法冒号调用、字段访问、生命周期关闭和错误传播。
-- [ ] 实现常量与变量注入 API：支持 string、bool、integer、number、nil、table、function、userdata，并区分只读常量与可变变量。
-- [ ] 为 Go 封装 API 补测试：覆盖 Lua 调 Go 函数、table 方法、object 方法、常量读取、变量更新、模块 require 和错误边界。
+- [x] 设计 Go 封装方法给 Lua 调用的统一 API：明确注册函数、注册 table、注册 object、注册常量、注册变量和覆盖策略。
+- [x] 实现 Go 函数封装 API：支持直接注册到全局、模块 table、package.loaded 和 package.preload。
+- [x] 实现 Go table 对象封装 API：支持构造 Lua table，注入字段、方法、嵌套 table、metatable 和只读 table。
+- [x] 实现 Go object 方法封装 API：支持 userdata/object proxy、方法冒号调用、字段访问、生命周期关闭和错误传播。
+- [x] 实现常量与变量注入 API：支持 string、bool、integer、number、nil、table、function、userdata，并区分只读常量与可变变量。
+- [x] 为 Go 封装 API 补测试：覆盖 Lua 调 Go 函数、table 方法、object 方法、常量读取、变量更新、模块 require 和错误边界。
+- [x] 更新文档：补齐 Go 封装 API 的函数注册、模块 table、package.loaded、package.preload、只读 table、对象代理、常量变量注入、生命周期关闭和限制说明。
 - [ ] 更新文档：补齐 VFS、动态库 loader、reflection 自动绑定、Go 封装 API 的使用示例、限制说明和跨平台注意事项。
 - [ ] 完成前五项后重新输出发布限制清单，并同步更新 `docs/PLAN.md`、`docs/RELEASE_LIMITS.md`、`README.md` 与 benchmark/验证结论。

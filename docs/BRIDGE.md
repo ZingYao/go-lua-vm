@@ -1,6 +1,6 @@
 # Go/Lua Bridge 设计
 
-本文记录 Go 与 Lua 双向回调、Go 对象代理和 Lua stub 生成的设计。Bridge 位于 `bridge` 包，稳定入口由 `lua` 包暴露。
+本文记录 Go 与 Lua 双向回调、Go 对象代理、Go 封装 API 和 Lua stub 生成的设计。Bridge 位于 `bridge` 包，运行时基础能力由 `lua` 包提供，显式绑定能力由 `bridge` 包提供。
 
 ## 目标
 
@@ -27,6 +27,14 @@ type GoFunction func(context.Context, *lua.State) (int, error)
 
 Go panic 必须在边界 recover，并包装为可追踪的 Lua runtime error。
 
+当前显式封装入口：
+
+- `bridge.RegisterFunction`：注册 Go 函数到全局环境。
+- `bridge.RegisterModule`：立即构造模块 table，写入全局环境，并在 `package.loaded` 可用时写入模块缓存。
+- `bridge.RegisterModulePreload`：把模块 loader 写入 `package.preload`，由 Lua 侧 `require` 首次加载。
+- `bridge.BuildTable`：按 `TableBinding` 构造 Lua table，可注入字段、函数、嵌套 table、对象代理、元表和只读策略。
+- `bridge.ValueOf`：把基础 Go 值、Lua value、Go closure、table 和 userdata 转为 Lua value。
+
 ## Go 调 Lua
 
 Go 调 Lua 需要支持：
@@ -48,11 +56,74 @@ Go 调 Lua 需要支持：
 - Go `bool` -> Lua boolean。
 - Go 整数 -> Lua integer。
 - Go 浮点 -> Lua number。
-- Go `string` / `[]byte` -> Lua string。
-- Go `map` / `slice` 可显式转换为 Lua table。
+- Go `string` -> Lua string。
+- `lua.Value` -> 原样复用。
+- `bridge.Function` / `runtime.GoResultsFunction` -> Lua Go closure。
+- `*runtime.Table` -> Lua table。
+- `*runtime.Userdata` -> Lua userdata，并在 State 可用时注册到关闭路径。
 - Go struct 默认通过代理暴露，不自动深拷贝。
 
 不做隐式反射绑定作为首版默认行为。自动绑定需要显式启用，并记录可见方法、字段、错误策略和性能风险。
+
+`ValueOf` 不隐式展开 `map`、`slice` 或任意 struct。需要暴露结构化数据时，应使用 `TableBinding` 显式声明 table 字段，或使用 `ObjectBinding` 显式声明对象 getter、setter 和 method。
+
+## Table 与模块封装
+
+`ModuleBinding` 和 `TableBinding` 是 Go 封装 API 的核心描述结构：
+
+- `Fields` 和 `Variables` 写入普通 Lua table 字段，Lua 侧可以覆盖。
+- `Constants` 通过元表 `__index` 暴露，Lua 侧写入同名字段会返回错误。
+- `Functions` 通过 `bridge.Wrap` 包装为 Lua callable，错误和 panic 会映射为 Lua error。
+- `Tables` 递归构造嵌套 table。
+- `Objects` 通过 `ObjectBinding` 构造 object proxy。
+- `Metatable` 允许宿主提供额外元表字段；当只读或常量保护启用时，会与内部 `__index` / `__newindex` 合并。
+- `ReadOnly` 启用整体只读 table；所有 Lua 侧写入都会失败。
+
+示例：
+
+```go
+moduleValue, err := bridge.RegisterModule(state, bridge.ModuleBinding{
+    Name: "gomod",
+    Constants: map[string]any{
+        "version": "1.0.0",
+    },
+    Variables: map[string]any{
+        "enabled": true,
+    },
+    Functions: map[string]bridge.Function{
+        "add": func(ctx *bridge.Context) error {
+            left, _ := ctx.ToInteger(1)
+            right, _ := ctx.ToInteger(2)
+            ctx.PushInteger(left + right)
+            return nil
+        },
+    },
+    Tables: map[string]bridge.TableBinding{
+        "config": {
+            ReadOnly: true,
+            Fields: map[string]any{
+                "name": "demo",
+            },
+        },
+    },
+})
+```
+
+注册到 `package.preload` 的延迟模块示例：
+
+```go
+err := bridge.RegisterModulePreload(state, bridge.ModuleBinding{
+    Name: "gomod.lazy",
+    Functions: map[string]bridge.Function{
+        "ping": func(ctx *bridge.Context) error {
+            ctx.PushString("pong")
+            return nil
+        },
+    },
+})
+```
+
+`RegisterModulePreload` 要求 `package` 标准库已打开。Lua 侧 `require("gomod.lazy")` 首次命中 loader 后，`require` 会按 Lua 5.3 语义把返回模块写入 `package.loaded`。
 
 ## 对象代理
 
@@ -63,6 +134,7 @@ Go 调 Lua 需要支持：
 - `__index` 按方法优先、getter 次之的顺序转发 string key；未命中返回 Lua nil。
 - `__newindex` 只允许写入显式 setter，未声明 setter 的属性返回 Lua error，避免 Lua 侧污染代理表。
 - 对象方法签名为 `bridge.ObjectMethod`，通过 `ObjectContext.Object()` 读取绑定对象，通过普通 `Context` helper 读取参数和压入返回值。
+- `ObjectBinding.Finalizer` 可在 State 关闭阶段释放宿主资源；该回调通过隐藏 userdata 的 finalizer 执行，错误或 panic 会被关闭流程隔离。
 - `__gc` 暂不承诺等同 C Lua userdata 析构语义，Go 生命周期以 Go GC 为准；State 关闭阶段只执行已注册 userdata 的显式 finalizer。
 - 代理对象必须保留 Go identity，避免 Lua table 拷贝破坏状态。
 
@@ -127,6 +199,7 @@ moduleValue, err := bridge.RegisterModule(state, bridge.ModuleBinding{
 - 全局 `gomod` 指向模块表。
 - `package.loaded.gomod` 在 package 库可用时指向同一个模块表。
 - Lua 侧 `require("gomod")` 返回同一模块实例。
+- 若使用 `RegisterModulePreload`，全局环境不会立即写入模块名；模块由 `require` 延迟构造并写入 `package.loaded`。
 
 对应 Lua stub 示例：
 

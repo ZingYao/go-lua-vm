@@ -685,6 +685,333 @@ func TestRegisterModuleWritesGlobalAndPackageLoaded(t *testing.T) {
 	}
 }
 
+// TestRegisterFunctionAndValueOfUserdata 验证统一封装 API 的全局函数和 userdata 注入。
+//
+// RegisterFunction 必须把 bridge.Function 注册到全局环境；ValueOf 注入 userdata 时必须纳入
+// State.Close 生命周期，保证宿主资源关闭路径可被统一触发。
+func TestRegisterFunctionAndValueOfUserdata(t *testing.T) {
+	// 创建独立 State，避免全局函数和 userdata 生命周期影响其他测试。
+	state := lua.NewState()
+	if err := RegisterFunction(state, "triple", func(context *Context) error {
+		// triple 读取整数参数并返回三倍结果。
+		value, ok := context.ToInteger(1)
+		if !ok {
+			// 参数不是整数时返回 Lua error。
+			return lua.RaiseError(runtime.StringValue("integer expected"))
+		}
+		context.PushInteger(value * 3)
+		return nil
+	}); err != nil {
+		// 有效全局函数注册不应失败。
+		t.Fatalf("RegisterFunction failed: %v", err)
+	}
+	results, err := CallGlobal(state, "triple", runtime.IntegerValue(14))
+	if err != nil {
+		// 全局函数调用不应失败。
+		t.Fatalf("CallGlobal triple failed: %v", err)
+	}
+	if len(results) != 1 || results[0].Kind != lua.KindInteger || results[0].Integer != 42 {
+		// 全局函数必须返回 Go 回调压入值。
+		t.Fatalf("triple results = %#v", results)
+	}
+
+	closed := false
+	userdata := runtime.NewUserdataWithFinalizer("resource", func(payload any) error {
+		// finalizer 必须在 State.Close 时被触发。
+		if payload != "resource" {
+			// payload 不匹配时返回错误；runtime 关闭路径会隔离该错误。
+			return errors.New("unexpected payload")
+		}
+		closed = true
+		return nil
+	})
+	userdataValue, err := ValueOf(state, userdata)
+	if err != nil {
+		// userdata 转换不应失败。
+		t.Fatalf("ValueOf userdata failed: %v", err)
+	}
+	if userdataValue.Kind != lua.KindUserdata || userdataValue.Ref != userdata {
+		// ValueOf 必须保留 userdata identity。
+		t.Fatalf("userdata value = %#v", userdataValue)
+	}
+	state.Close()
+	if !closed {
+		// ValueOf 注入的 userdata 必须被 State.Close 统一关闭。
+		t.Fatalf("userdata finalizer was not called")
+	}
+}
+
+// TestRegisterModulePreloadAndInjectedValues 验证统一封装 API 的 preload、常量、变量和嵌套 table。
+//
+// Go 模块通过 package.preload 延迟加载；模块 table 支持函数、常量、变量、嵌套 table 和 package.loaded
+// 缓存，常量写入必须失败，变量写入必须成功。
+func TestRegisterModulePreloadAndInjectedValues(t *testing.T) {
+	// 创建 State 并打开标准库，使 package.preload 和 require 可用。
+	state := lua.NewState()
+	defer state.Close()
+	if err := lua.OpenLibs(state); err != nil {
+		// 标准库打开不应失败。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+
+	if err := RegisterModulePreload(state, ModuleBinding{
+		Name: "gomod.preload",
+		Constants: map[string]any{
+			"version": "1.0.0",
+		},
+		Variables: map[string]any{
+			"enabled": true,
+		},
+		Functions: map[string]Function{
+			"add": func(context *Context) error {
+				// add 读取两个整数并返回求和结果。
+				left, leftOK := context.ToInteger(1)
+				if !leftOK {
+					// 左参数不是整数时返回 Lua error。
+					return lua.RaiseError(runtime.StringValue("left integer expected"))
+				}
+				right, rightOK := context.ToInteger(2)
+				if !rightOK {
+					// 右参数不是整数时返回 Lua error。
+					return lua.RaiseError(runtime.StringValue("right integer expected"))
+				}
+				context.PushInteger(left + right)
+				return nil
+			},
+		},
+		Tables: map[string]TableBinding{
+			"nested": {
+				Fields: map[string]any{
+					"name": "child",
+				},
+			},
+		},
+	}); err != nil {
+		// preload 注册不应失败。
+		t.Fatalf("RegisterModulePreload failed: %v", err)
+	}
+
+	packageValue, err := lua.GetGlobal(state, "package")
+	if err != nil {
+		// package 全局读取不应失败。
+		t.Fatalf("GetGlobal package failed: %v", err)
+	}
+	packageTable := packageValue.Ref.(*runtime.Table)
+	preloadTable := packageTable.RawGetString("preload").Ref.(*runtime.Table)
+	if got := preloadTable.RawGetString("gomod.preload"); got.Kind != lua.KindGoClosure {
+		// package.preload 必须保存 Go loader。
+		t.Fatalf("package.preload loader = %#v", got)
+	}
+
+	requireResults, err := CallGlobal(state, "require", runtime.StringValue("gomod.preload"))
+	if err != nil {
+		// require preload 模块不应失败。
+		t.Fatalf("require preload failed: %v", err)
+	}
+	if len(requireResults) != 1 || requireResults[0].Kind != lua.KindTable {
+		// require 必须返回模块 table。
+		t.Fatalf("require results = %#v", requireResults)
+	}
+	moduleTable := requireResults[0].Ref.(*runtime.Table)
+
+	versionValue, err := moduleTable.Get(runtime.StringValue("version"))
+	if err != nil {
+		// 常量读取不应失败。
+		t.Fatalf("get version failed: %v", err)
+	}
+	if versionValue.Kind != lua.KindString || versionValue.String != "1.0.0" {
+		// 常量值必须通过 __index 可见。
+		t.Fatalf("version value = %#v", versionValue)
+	}
+	if err := moduleTable.Set(runtime.StringValue("version"), runtime.StringValue("2.0.0")); err == nil {
+		// 常量字段必须拒绝 Lua 侧覆盖。
+		t.Fatalf("constant write should fail")
+	}
+	if err := moduleTable.Set(runtime.StringValue("enabled"), runtime.BooleanValue(false)); err != nil {
+		// 变量字段必须允许覆盖。
+		t.Fatalf("variable write failed: %v", err)
+	}
+	if enabledValue := moduleTable.RawGetString("enabled"); enabledValue.Kind != lua.KindBoolean || enabledValue.Bool {
+		// 变量覆盖后必须保存新值。
+		t.Fatalf("enabled value = %#v", enabledValue)
+	}
+
+	addValue := moduleTable.RawGetString("add")
+	addResults, err := lua.Call(state, addValue, runtime.IntegerValue(2), runtime.IntegerValue(5))
+	if err != nil {
+		// 模块函数调用不应失败。
+		t.Fatalf("add call failed: %v", err)
+	}
+	if len(addResults) != 1 || addResults[0].Integer != 7 {
+		// 函数返回值必须保留 Go 回调结果。
+		t.Fatalf("add results = %#v", addResults)
+	}
+
+	nestedValue := moduleTable.RawGetString("nested")
+	nestedTable := nestedValue.Ref.(*runtime.Table)
+	if nameValue := nestedTable.RawGetString("name"); nameValue.Kind != lua.KindString || nameValue.String != "child" {
+		// 嵌套 table 字段必须可读取。
+		t.Fatalf("nested name = %#v", nameValue)
+	}
+	loadedTable := packageTable.RawGetString("loaded").Ref.(*runtime.Table)
+	if loadedValue := loadedTable.RawGetString("gomod.preload"); loadedValue.Ref != requireResults[0].Ref {
+		// require 必须把 loader 返回值写入 package.loaded。
+		t.Fatalf("package.loaded module = %#v", loadedValue)
+	}
+}
+
+// TestBuildTableMetatableFallbackAndErrorBoundaries 验证 table 元表 fallback 与封装 API 错误边界。
+//
+// 常量保护应与宿主提供的 __index fallback 共存；非法注册输入和不支持的 Go 值类型必须返回错误。
+func TestBuildTableMetatableFallbackAndErrorBoundaries(t *testing.T) {
+	// 创建 State 和宿主 fallback table，用于验证 __index 合并策略。
+	state := lua.NewState()
+	defer state.Close()
+	fallbackTable := runtime.NewTable()
+	fallbackTable.RawSetString("fallback", runtime.StringValue("from-metatable"))
+
+	tableValue, err := BuildTable(state, TableBinding{
+		Name: "with-fallback",
+		Constants: map[string]any{
+			"answer": int64(42),
+		},
+		Metatable: map[string]any{
+			"__index": runtime.ReferenceValue(runtime.KindTable, fallbackTable),
+		},
+	})
+	if err != nil {
+		// 带 fallback 的 table 构造不应失败。
+		t.Fatalf("BuildTable fallback failed: %v", err)
+	}
+	tableObject := tableValue.Ref.(*runtime.Table)
+	answerValue, err := tableObject.Get(runtime.StringValue("answer"))
+	if err != nil {
+		// 常量读取不应失败。
+		t.Fatalf("get answer failed: %v", err)
+	}
+	if answerValue.Kind != lua.KindInteger || answerValue.Integer != 42 {
+		// 常量读取必须优先于 fallback。
+		t.Fatalf("answer value = %#v", answerValue)
+	}
+	fallbackValue, err := tableObject.Get(runtime.StringValue("fallback"))
+	if err != nil {
+		// fallback 读取不应失败。
+		t.Fatalf("get fallback failed: %v", err)
+	}
+	if fallbackValue.Kind != lua.KindString || fallbackValue.String != "from-metatable" {
+		// 未命中常量时必须继续走宿主 __index fallback。
+		t.Fatalf("fallback value = %#v", fallbackValue)
+	}
+
+	if err := RegisterFunction(state, "", func(context *Context) error {
+		// 该回调不会执行，仅用于构造非 nil 函数。
+		return nil
+	}); err == nil {
+		// 空全局函数名必须被拒绝。
+		t.Fatalf("RegisterFunction empty name should fail")
+	}
+	noPackageState := lua.NewState()
+	defer noPackageState.Close()
+	if err := RegisterModulePreload(noPackageState, ModuleBinding{Name: "no.package"}); err == nil {
+		// 未打开 package 库时不能注册 package.preload。
+		t.Fatalf("RegisterModulePreload without package should fail")
+	}
+	if _, err := ValueOf(state, struct{}{}); err == nil {
+		// 不支持的 Go 类型必须显式拒绝，避免隐式反射绑定扩散。
+		t.Fatalf("ValueOf unsupported type should fail")
+	}
+}
+
+// TestBuildReadOnlyTableAndObjectFinalizer 验证只读 table、对象冒号调用和 State.Close 生命周期关闭。
+//
+// 只读 table 的字段通过 __index 暴露，任何 Lua 侧写入都会失败；对象代理通过 hidden userdata 保留
+// identity，并在 State.Close 时执行显式 finalizer。
+func TestBuildReadOnlyTableAndObjectFinalizer(t *testing.T) {
+	// sampleObject 用于验证对象方法副作用和关闭回调。
+	type sampleObject struct {
+		// closed 标记 finalizer 是否已执行。
+		closed bool
+		// value 保存对象方法返回的数值。
+		value int64
+	}
+
+	state := lua.NewState()
+	object := &sampleObject{value: 9}
+	tableValue, err := BuildTable(state, TableBinding{
+		Name:     "readonly",
+		ReadOnly: true,
+		Fields: map[string]any{
+			"label": "locked",
+		},
+		Objects: map[string]ObjectBinding{
+			"counter": {
+				Object: object,
+				Methods: map[string]ObjectMethod{
+					"read": func(context *ObjectContext) error {
+						// read 返回绑定对象当前值，验证冒号调用 self 会被包装器移除。
+						context.PushInteger(context.Object().(*sampleObject).value)
+						return nil
+					},
+				},
+				Finalizer: func(object any) error {
+					// finalizer 在 State.Close 阶段标记对象已关闭。
+					object.(*sampleObject).closed = true
+					return nil
+				},
+			},
+		},
+	})
+	if err != nil {
+		// 只读 table 构造不应失败。
+		t.Fatalf("BuildTable failed: %v", err)
+	}
+	tableObject := tableValue.Ref.(*runtime.Table)
+	labelValue, err := tableObject.Get(runtime.StringValue("label"))
+	if err != nil {
+		// 只读 backing storage 读取不应失败。
+		t.Fatalf("get label failed: %v", err)
+	}
+	if labelValue.Kind != lua.KindString || labelValue.String != "locked" {
+		// 只读字段必须通过 __index 可见。
+		t.Fatalf("label value = %#v", labelValue)
+	}
+	if err := tableObject.Set(runtime.StringValue("label"), runtime.StringValue("open")); err == nil {
+		// 只读 table 必须拒绝覆盖已有字段。
+		t.Fatalf("readonly existing write should fail")
+	}
+	if err := tableObject.Set(runtime.StringValue("newField"), runtime.StringValue("open")); err == nil {
+		// 只读 table 必须拒绝新增字段。
+		t.Fatalf("readonly new field write should fail")
+	}
+
+	counterValue, err := tableObject.Get(runtime.StringValue("counter"))
+	if err != nil {
+		// 嵌套对象读取不应失败。
+		t.Fatalf("get counter failed: %v", err)
+	}
+	counterTable := counterValue.Ref.(*runtime.Table)
+	readValue, err := counterTable.Get(runtime.StringValue("read"))
+	if err != nil {
+		// 对象方法读取不应失败。
+		t.Fatalf("get read failed: %v", err)
+	}
+	readResults, err := lua.Call(state, readValue, counterValue)
+	if err != nil {
+		// 冒号调用形式的方法不应失败。
+		t.Fatalf("read call failed: %v", err)
+	}
+	if len(readResults) != 1 || readResults[0].Kind != lua.KindInteger || readResults[0].Integer != 9 {
+		// 对象方法必须返回绑定对象值。
+		t.Fatalf("read results = %#v", readResults)
+	}
+
+	state.Close()
+	if !object.closed {
+		// State.Close 必须触发对象 finalizer。
+		t.Fatalf("object finalizer was not called")
+	}
+}
+
 // TestGenerateLuaStub 验证 Lua stub 生成的代理结构。
 //
 // stub 必须包含模块函数、对象属性代理和对象方法代理，并保持函数名排序稳定。

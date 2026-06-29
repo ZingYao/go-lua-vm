@@ -34,6 +34,12 @@ type PropertyGetter func(object any) (lua.Value, error)
 // object 是 ObjectBinding.Object；value 是 Lua 侧写入值。
 type PropertySetter func(object any, value lua.Value) error
 
+// ObjectFinalizer 表示 Go 对象代理在 State.Close 阶段的关闭回调。
+//
+// object 是 ObjectBinding.Object；返回 error 或 panic 都会被 runtime userdata 关闭流程隔离，不会
+// 阻断其他 userdata 的关闭。该语义用于释放宿主资源，不等同于 Lua `__gc` 可见回调。
+type ObjectFinalizer func(object any) error
+
 // YieldPolicy 表示 Go/Lua 跨边界 yield 支持策略。
 //
 // 当前阶段尚未实现 coroutine 穿越 Go 回调的恢复协议，因此默认策略是禁止跨边界 yield。
@@ -72,6 +78,8 @@ type ObjectBinding struct {
 	Getters map[string]PropertyGetter
 	// Setters 保存允许 Lua 写入的属性。
 	Setters map[string]PropertySetter
+	// Finalizer 保存 State.Close 阶段执行的对象关闭回调；nil 表示对象无显式关闭资源。
+	Finalizer ObjectFinalizer
 }
 
 // ObjectProxy 表示 Go 对象的 Lua 代理。
@@ -102,10 +110,45 @@ type ObjectContext struct {
 type ModuleBinding struct {
 	// Name 是 Lua 侧模块名，同时用于 package.loaded 和全局环境写入。
 	Name string
+	// Fields 保存模块 table 上的普通可变字段。
+	Fields map[string]any
+	// Constants 保存模块 table 上只读常量；Lua 侧写入同名字段会返回错误。
+	Constants map[string]any
+	// Variables 保存模块 table 上可变变量；Lua 侧可直接覆盖。
+	Variables map[string]any
 	// Functions 保存模块级 Go 函数。
 	Functions map[string]Function
+	// Tables 保存模块级嵌套 table。
+	Tables map[string]TableBinding
 	// Objects 保存模块级 Go 对象代理。
 	Objects map[string]ObjectBinding
+	// ReadOnly 表示模块 table 是否整体只读；启用后 Lua 侧不能写入任何字段。
+	ReadOnly bool
+}
+
+// TableBinding 描述一个由 Go 构造并暴露给 Lua 的 table。
+//
+// Fields、Variables、Functions、Tables 和 Objects 会组成 Lua table 字段；Constants 通过元表保护
+// 为只读字段；ReadOnly=true 时所有字段都存放在内部 backing table，Lua 写入会统一失败。
+type TableBinding struct {
+	// Name 是 table 的调试名称，用于只读错误文本。
+	Name string
+	// Fields 保存普通可变字段。
+	Fields map[string]any
+	// Constants 保存只读常量字段。
+	Constants map[string]any
+	// Variables 保存可变变量字段。
+	Variables map[string]any
+	// Functions 保存 table 上的 Go 方法或函数字段。
+	Functions map[string]Function
+	// Tables 保存嵌套 table 字段。
+	Tables map[string]TableBinding
+	// Objects 保存嵌套对象代理字段。
+	Objects map[string]ObjectBinding
+	// Metatable 保存宿主提供的元表字段；保留字段会与只读/常量保护元方法合并。
+	Metatable map[string]any
+	// ReadOnly 表示 Lua 侧不能写入该 table 的任何字段。
+	ReadOnly bool
 }
 
 // Context 表示一次 Go bridge 调用的上下文。
@@ -354,6 +397,20 @@ func Register(state *lua.State, name string, fn Function) error {
 	return lua.Register(state, name, Wrap(state, fn))
 }
 
+// RegisterFunction 把 bridge.Function 注册到 Lua 全局环境。
+//
+// 该入口是统一封装 API 的命名化别名；state 必须非 nil，name 必须非空，fn 必须非 nil。错误语义
+// 与 Register 保持一致，注册后的函数可被 Lua 或 Go 侧 CallGlobal 调用。
+func RegisterFunction(state *lua.State, name string, fn Function) error {
+	if name == "" {
+		// 空名称无法形成稳定全局变量，提前返回 Lua error。
+		return lua.RaiseError(lua.Value{Kind: lua.KindString, String: "function name is empty"})
+	}
+
+	// 复用旧 Register，保持既有全局注册行为和错误链不变。
+	return Register(state, name, fn)
+}
+
 // RegisterModule 把一组 Go API 注册为 Lua 模块表。
 //
 // state 必须非 nil；module.Name 必须非空。成功后模块表会写入全局环境，并在 package.loaded
@@ -368,23 +425,12 @@ func RegisterModule(state *lua.State, module ModuleBinding) (lua.Value, error) {
 		return lua.Value{Kind: lua.KindNil}, lua.RaiseError(lua.Value{Kind: lua.KindString, String: "module name is empty"})
 	}
 
-	// 模块表只写入显式声明的函数和对象，保持 bridge 暴露面可审计。
-	moduleTable := runtime.NewTable()
-	for _, functionName := range sortedFunctionNames(module.Functions) {
-		// 每个函数都通过 Wrap 捕获当前 State，确保 context 取消和 panic/error 映射一致。
-		moduleTable.RawSetString(functionName, runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Wrap(state, module.Functions[functionName]))))
-	}
-	for _, objectName := range sortedObjectNames(module.Objects) {
-		// 对象绑定复用 BindStruct，确保 userdata 生命周期和元方法策略一致。
-		objectValue, err := BindStruct(state, module.Objects[objectName])
-		if err != nil {
-			// 任一对象绑定失败时停止注册，避免返回半初始化模块。
-			return lua.Value{Kind: lua.KindNil}, err
-		}
-		moduleTable.RawSetString(objectName, objectValue)
+	moduleValue, err := BuildModule(state, module)
+	if err != nil {
+		// 模块 table 构造失败时不写入全局或 package.loaded，避免半初始化模块泄漏。
+		return lua.Value{Kind: lua.KindNil}, err
 	}
 
-	moduleValue := runtime.ReferenceValue(runtime.KindTable, moduleTable)
 	if err := lua.SetGlobal(state, module.Name, moduleValue); err != nil {
 		// 全局写入失败时返回错误，调用方可决定是否回滚。
 		return lua.Value{Kind: lua.KindNil}, err
@@ -394,6 +440,205 @@ func RegisterModule(state *lua.State, module ModuleBinding) (lua.Value, error) {
 		loadedTable.RawSetString(module.Name, moduleValue)
 	}
 	return moduleValue, nil
+}
+
+// RegisterModulePreload 把 Go 模块注册到 package.preload。
+//
+// state 必须非 nil 且已打开 package 标准库；module.Name 必须非空。注册后 Lua 侧
+// `require(module.Name)` 会通过 package.searchers[1] 调用 loader，loader 构造模块 table 并由
+// require 写入 package.loaded。该路径不立即写全局环境，便于按需加载。
+func RegisterModulePreload(state *lua.State, module ModuleBinding) error {
+	if state == nil {
+		// nil State 没有 package 表，无法注册 preload。
+		return lua.ErrNilState
+	}
+	if module.Name == "" {
+		// 空模块名无法被 require 稳定索引。
+		return lua.RaiseError(lua.Value{Kind: lua.KindString, String: "module name is empty"})
+	}
+	preloadTable := packagePreloadTable(state)
+	if preloadTable == nil {
+		// package.preload 不可用说明 package 标准库尚未打开或被 Lua 侧破坏。
+		return lua.RaiseError(lua.Value{Kind: lua.KindString, String: "package.preload is not available"})
+	}
+
+	moduleSnapshot := copyModuleBinding(module)
+	preloadTable.RawSetString(module.Name, runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(func(args ...runtime.Value) ([]runtime.Value, error) {
+		// 每次 require 首次命中时构造模块表，随后 require 会写入 package.loaded 缓存。
+		moduleValue, err := BuildModule(state, moduleSnapshot)
+		if err != nil {
+			// 构造失败应作为 require loader 错误传播。
+			return nil, err
+		}
+		return []runtime.Value{moduleValue}, nil
+	})))
+	return nil
+}
+
+// BuildModule 根据 ModuleBinding 构造 Lua 模块 table。
+//
+// state 必须非 nil；module.Name 只用于错误文本和嵌套对象生命周期注册。返回值是 table；该函数
+// 不写全局环境、package.loaded 或 package.preload，调用方可自行决定注册位置。
+func BuildModule(state *lua.State, module ModuleBinding) (lua.Value, error) {
+	if state == nil {
+		// nil State 无法包装 Go 函数或注册对象 userdata。
+		return lua.Value{Kind: lua.KindNil}, lua.ErrNilState
+	}
+
+	// 模块本质也是 table binding，复用同一构造路径保证常量、变量和只读策略一致。
+	return BuildTable(state, TableBinding{
+		Name:      module.Name,
+		Fields:    module.Fields,
+		Constants: module.Constants,
+		Variables: module.Variables,
+		Functions: module.Functions,
+		Tables:    module.Tables,
+		Objects:   module.Objects,
+		ReadOnly:  module.ReadOnly,
+	})
+}
+
+// BuildTable 根据 TableBinding 构造 Lua table。
+//
+// state 必须非 nil；Fields/Variables 是可变字段，Constants 是只读字段，Functions 会包装为 Go
+// closure，Tables 和 Objects 会递归构造。ReadOnly=true 时 Lua 侧所有写入都返回错误。
+func BuildTable(state *lua.State, binding TableBinding) (lua.Value, error) {
+	if state == nil {
+		// nil State 无法包装 Go 函数或注册对象 userdata。
+		return lua.Value{Kind: lua.KindNil}, lua.ErrNilState
+	}
+
+	targetTable := runtime.NewTable()
+	storageTable := targetTable
+	if binding.ReadOnly {
+		// 只读 table 使用 backing storage，避免 Lua 写入已有 raw key 时绕过 __newindex。
+		storageTable = runtime.NewTable()
+	}
+	constantTable := storageTable
+	if !binding.ReadOnly && len(binding.Constants) > 0 {
+		// 非整体只读 table 的常量必须放入独立 storage，避免已有 raw key 覆盖绕过 __newindex。
+		constantTable = runtime.NewTable()
+	}
+
+	if err := fillTableStorage(state, storageTable, binding, binding.ReadOnly); err != nil {
+		// 任一字段转换失败都停止构造，避免返回部分可见 table。
+		return lua.Value{Kind: lua.KindNil}, err
+	}
+	if !binding.ReadOnly {
+		// 非整体只读 table 的常量通过 __index 暴露，不直接写入公开 table。
+		if err := writeAnyFields(state, constantTable, binding.Constants); err != nil {
+			// 常量 storage 构造失败时不返回半初始化 table。
+			return lua.Value{Kind: lua.KindNil}, err
+		}
+	}
+	if err := installTableMetatable(state, targetTable, storageTable, constantTable, binding); err != nil {
+		// 元表安装失败说明宿主提供的元表字段无法转换。
+		return lua.Value{Kind: lua.KindNil}, err
+	}
+	return runtime.ReferenceValue(runtime.KindTable, targetTable), nil
+}
+
+// ValueOf 把常见 Go 值转换为 Lua Value。
+//
+// state 用于包装 bridge.Function；value 支持 nil、bool、string、整数、浮点、lua.Value、
+// *runtime.Table、*runtime.Userdata、Function 和 runtime.GoResultsFunction。无法转换时返回 Lua error。
+func ValueOf(state *lua.State, value any) (lua.Value, error) {
+	switch typedValue := value.(type) {
+	case nil:
+		// nil 对应 Lua nil。
+		return runtime.NilValue(), nil
+	case lua.Value:
+		// 调用方已提供 Lua Value 时直接复用。
+		return typedValue, nil
+	case bool:
+		// Go bool 映射为 Lua boolean。
+		return runtime.BooleanValue(typedValue), nil
+	case string:
+		// Go string 按 Lua 字节字符串保存。
+		return runtime.StringValue(typedValue), nil
+	case int:
+		// Go int 按当前平台值转换为 Lua integer。
+		return runtime.IntegerValue(int64(typedValue)), nil
+	case int8:
+		// Go int8 转换为 Lua integer。
+		return runtime.IntegerValue(int64(typedValue)), nil
+	case int16:
+		// Go int16 转换为 Lua integer。
+		return runtime.IntegerValue(int64(typedValue)), nil
+	case int32:
+		// Go int32 转换为 Lua integer。
+		return runtime.IntegerValue(int64(typedValue)), nil
+	case int64:
+		// Go int64 与 Lua integer 语义一致。
+		return runtime.IntegerValue(typedValue), nil
+	case uint:
+		// Go uint 超出 int64 时不能安全表达为 Lua integer。
+		if uint64(typedValue) > uint64(^uint64(0)>>1) {
+			// 超出 Lua integer 范围时提前失败，避免符号回绕。
+			return lua.Value{Kind: lua.KindNil}, lua.RaiseError(runtime.StringValue("uint value overflows lua integer"))
+		}
+		return runtime.IntegerValue(int64(typedValue)), nil
+	case uint8:
+		// Go uint8 总能安全转换为 Lua integer。
+		return runtime.IntegerValue(int64(typedValue)), nil
+	case uint16:
+		// Go uint16 总能安全转换为 Lua integer。
+		return runtime.IntegerValue(int64(typedValue)), nil
+	case uint32:
+		// Go uint32 总能安全转换为 Lua integer。
+		return runtime.IntegerValue(int64(typedValue)), nil
+	case uint64:
+		// Go uint64 超出 int64 时不能安全表达为 Lua integer。
+		if typedValue > uint64(^uint64(0)>>1) {
+			// 超出 Lua integer 范围时提前失败，避免符号回绕。
+			return lua.Value{Kind: lua.KindNil}, lua.RaiseError(runtime.StringValue("uint64 value overflows lua integer"))
+		}
+		return runtime.IntegerValue(int64(typedValue)), nil
+	case float32:
+		// Go float32 扩展为 Lua number。
+		return runtime.NumberValue(float64(typedValue)), nil
+	case float64:
+		// Go float64 与 Lua number 语义一致。
+		return runtime.NumberValue(typedValue), nil
+	case Function:
+		// bridge.Function 需要绑定 State 才能获得 context、panic 和错误传播语义。
+		if state == nil {
+			// nil State 无法包装 bridge.Function。
+			return lua.Value{Kind: lua.KindNil}, lua.ErrNilState
+		}
+		return runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Wrap(state, typedValue))), nil
+	case runtime.GoResultsFunction:
+		// runtime.GoResultsFunction 已符合 Lua Go closure 调用约定。
+		if typedValue == nil {
+			// nil 函数不能作为 Lua callable。
+			return lua.Value{Kind: lua.KindNil}, lua.ErrExpectedCallable
+		}
+		return runtime.ReferenceValue(runtime.KindGoClosure, typedValue), nil
+	case *runtime.Table:
+		// runtime.Table 指针按 Lua table 引用暴露。
+		if typedValue == nil {
+			// nil table 指针没有可暴露对象。
+			return lua.Value{Kind: lua.KindNil}, lua.RaiseError(runtime.StringValue("nil table value"))
+		}
+		return runtime.ReferenceValue(runtime.KindTable, typedValue), nil
+	case *runtime.Userdata:
+		// runtime.Userdata 指针按 Lua userdata 引用暴露。
+		if typedValue == nil {
+			// nil userdata 指针没有可暴露对象。
+			return lua.Value{Kind: lua.KindNil}, lua.RaiseError(runtime.StringValue("nil userdata value"))
+		}
+		if state != nil {
+			// 有 State 时纳入关闭路径；重复注册由 runtime 去重。
+			if err := state.RegisterUserdata(typedValue); err != nil {
+				// userdata 注册失败时不能返回未纳入关闭路径的值。
+				return lua.Value{Kind: lua.KindNil}, err
+			}
+		}
+		return typedValue.Value(), nil
+	default:
+		// 未列入的 Go 类型必须显式转换或通过 ObjectBinding 暴露，避免隐式反射扩散。
+		return lua.Value{Kind: lua.KindNil}, lua.RaiseError(runtime.StringValue("unsupported bridge value type"))
+	}
 }
 
 // GenerateLuaStub 根据 Go 模块绑定生成 Lua 代理代码。
@@ -514,7 +759,20 @@ func BindStruct(state *lua.State, binding ObjectBinding) (lua.Value, error) {
 func newObjectProxy(binding ObjectBinding) *ObjectProxy {
 	// 先复制绑定配置，确保代理持有稳定的显式成员快照。
 	proxy := &ObjectProxy{binding: copyObjectBinding(binding)}
-	proxy.userdata = runtime.NewUserdata(proxy)
+	if proxy.binding.Finalizer != nil {
+		// 有显式关闭回调时，userdata 在 State.Close 阶段负责触发对象生命周期关闭。
+		proxy.userdata = runtime.NewUserdataWithFinalizer(proxy, func(payload any) error {
+			payloadProxy, ok := payload.(*ObjectProxy)
+			if !ok || payloadProxy == nil {
+				// payload 异常时没有可关闭对象，直接跳过避免关闭路径 panic。
+				return nil
+			}
+			return payloadProxy.binding.Finalizer(payloadProxy.binding.Object)
+		})
+	} else {
+		// 无关闭回调时只需要 userdata identity，不注册额外资源释放语义。
+		proxy.userdata = runtime.NewUserdata(proxy)
+	}
 	proxy.table = runtime.NewTable()
 	proxy.table.RawSetString("__userdata", proxy.userdata.Value())
 
@@ -707,8 +965,9 @@ func (proxy *ObjectProxy) wrapObjectMethod(method ObjectMethod) runtime.GoResult
 func copyObjectBinding(binding ObjectBinding) ObjectBinding {
 	// 复制基础字段，后续分别复制显式成员 map。
 	copiedBinding := ObjectBinding{
-		Name:   binding.Name,
-		Object: binding.Object,
+		Name:      binding.Name,
+		Object:    binding.Object,
+		Finalizer: binding.Finalizer,
 	}
 	if binding.Methods != nil {
 		// 复制方法表，避免调用方后续增删影响代理。
@@ -735,6 +994,106 @@ func copyObjectBinding(binding ObjectBinding) ObjectBinding {
 		}
 	}
 	return copiedBinding
+}
+
+// copyModuleBinding 复制模块绑定配置。
+//
+// map 字段会复制一层；函数、对象引用和字段值保持原始语义，用于 package.preload 延迟构造时避免
+// 调用方后续增删字段影响已注册 loader。
+func copyModuleBinding(binding ModuleBinding) ModuleBinding {
+	// 复制基础字段，后续分别复制显式成员 map。
+	return ModuleBinding{
+		Name:      binding.Name,
+		Fields:    copyAnyMap(binding.Fields),
+		Constants: copyAnyMap(binding.Constants),
+		Variables: copyAnyMap(binding.Variables),
+		Functions: copyFunctionMap(binding.Functions),
+		Tables:    copyTableBindingMap(binding.Tables),
+		Objects:   copyObjectBindingMap(binding.Objects),
+		ReadOnly:  binding.ReadOnly,
+	}
+}
+
+// copyTableBinding 复制 table 绑定配置。
+//
+// 嵌套 table 和对象绑定会继续复制一层，避免延迟构造或递归构造时读取被调用方改动的 map。
+func copyTableBinding(binding TableBinding) TableBinding {
+	// 复制基础字段，后续分别复制显式成员 map。
+	return TableBinding{
+		Name:      binding.Name,
+		Fields:    copyAnyMap(binding.Fields),
+		Constants: copyAnyMap(binding.Constants),
+		Variables: copyAnyMap(binding.Variables),
+		Functions: copyFunctionMap(binding.Functions),
+		Tables:    copyTableBindingMap(binding.Tables),
+		Objects:   copyObjectBindingMap(binding.Objects),
+		Metatable: copyAnyMap(binding.Metatable),
+		ReadOnly:  binding.ReadOnly,
+	}
+}
+
+// copyAnyMap 复制 string 到 any 的字段 map。
+//
+// value 本身保持引用语义；该 helper 只隔离 map 结构的后续增删。
+func copyAnyMap(values map[string]any) map[string]any {
+	if values == nil {
+		// nil map 保持 nil，避免无意义分配。
+		return nil
+	}
+	copiedValues := make(map[string]any, len(values))
+	for name, value := range values {
+		// 字段值按原样复制。
+		copiedValues[name] = value
+	}
+	return copiedValues
+}
+
+// copyFunctionMap 复制模块或 table 函数 map。
+//
+// 函数值保持原始引用语义；该 helper 只隔离 map 结构的后续增删。
+func copyFunctionMap(functions map[string]Function) map[string]Function {
+	if functions == nil {
+		// nil map 保持 nil，避免无意义分配。
+		return nil
+	}
+	copiedFunctions := make(map[string]Function, len(functions))
+	for name, function := range functions {
+		// 函数值按原样复制。
+		copiedFunctions[name] = function
+	}
+	return copiedFunctions
+}
+
+// copyTableBindingMap 复制嵌套 table 绑定 map。
+//
+// 每个 TableBinding 递归复制，避免 package.preload 延迟 loader 观察到调用方后续 map 改动。
+func copyTableBindingMap(tables map[string]TableBinding) map[string]TableBinding {
+	if tables == nil {
+		// nil map 保持 nil，避免无意义分配。
+		return nil
+	}
+	copiedTables := make(map[string]TableBinding, len(tables))
+	for name, tableBinding := range tables {
+		// 嵌套 table 需要递归复制。
+		copiedTables[name] = copyTableBinding(tableBinding)
+	}
+	return copiedTables
+}
+
+// copyObjectBindingMap 复制对象绑定 map。
+//
+// 每个 ObjectBinding 复制一层显式成员 map；Object 引用本身保持原始 identity。
+func copyObjectBindingMap(objects map[string]ObjectBinding) map[string]ObjectBinding {
+	if objects == nil {
+		// nil map 保持 nil，避免无意义分配。
+		return nil
+	}
+	copiedObjects := make(map[string]ObjectBinding, len(objects))
+	for name, objectBinding := range objects {
+		// 对象绑定需要复制成员 map，避免调用方后续增删影响代理。
+		copiedObjects[name] = copyObjectBinding(objectBinding)
+	}
+	return copiedObjects
 }
 
 // FromValue 把 Lua 函数值保存为 Go callable。
@@ -843,6 +1202,271 @@ func tableFromValue(value lua.Value) (*runtime.Table, error) {
 	return tableObject, nil
 }
 
+// fillTableStorage 把 TableBinding 的显式成员写入目标 storage table。
+//
+// storage 必须非 nil；该函数只做 raw 写入，不安装元表。includeConstants 控制常量是否写入同一
+// storage：整体只读 table 需要写入，普通 table 则必须把常量放在独立 storage。
+func fillTableStorage(state *lua.State, storage *runtime.Table, binding TableBinding, includeConstants bool) error {
+	if storage == nil {
+		// storage 缺失说明构造流程损坏，返回明确 Lua error。
+		return lua.RaiseError(runtime.StringValue("nil table storage"))
+	}
+
+	if err := writeAnyFields(state, storage, binding.Fields); err != nil {
+		// 普通字段转换失败时停止构造。
+		return err
+	}
+	if err := writeAnyFields(state, storage, binding.Variables); err != nil {
+		// 变量字段转换失败时停止构造。
+		return err
+	}
+	if includeConstants {
+		// 整体只读 table 的公开 table 没有 raw 字段，因此常量可以安全放入 backing storage。
+		if err := writeAnyFields(state, storage, binding.Constants); err != nil {
+			// 常量字段转换失败时停止构造。
+			return err
+		}
+	}
+	for _, functionName := range sortedFunctionNames(binding.Functions) {
+		// 每个函数都通过 Wrap 捕获当前 State，确保 context 取消和 panic/error 映射一致。
+		storage.RawSetString(functionName, runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Wrap(state, binding.Functions[functionName]))))
+	}
+	for _, tableName := range sortedTableNames(binding.Tables) {
+		// 嵌套 table 递归构造，继承统一字段、常量和只读策略。
+		tableValue, err := BuildTable(state, binding.Tables[tableName])
+		if err != nil {
+			// 任一嵌套 table 构造失败时停止构造。
+			return err
+		}
+		storage.RawSetString(tableName, tableValue)
+	}
+	for _, objectName := range sortedObjectNames(binding.Objects) {
+		// 对象绑定复用 BindStruct，确保 userdata 生命周期和元方法策略一致。
+		objectValue, err := BindStruct(state, binding.Objects[objectName])
+		if err != nil {
+			// 任一对象绑定失败时停止注册，避免返回半初始化 table。
+			return err
+		}
+		storage.RawSetString(objectName, objectValue)
+	}
+	return nil
+}
+
+// writeAnyFields 把 map 字段按稳定 key 顺序转换并写入 table。
+//
+// fields 的 value 支持 ValueOf 认可的类型；nil map 表示无字段。
+func writeAnyFields(state *lua.State, table *runtime.Table, fields map[string]any) error {
+	for _, fieldName := range sortedAnyNames(fields) {
+		// 字段值先转换为 Lua Value，再写入 raw table。
+		fieldValue, err := ValueOf(state, fields[fieldName])
+		if err != nil {
+			// 转换失败时返回底层错误，调用方负责附加上下文。
+			return err
+		}
+		table.RawSetString(fieldName, fieldValue)
+	}
+	return nil
+}
+
+// installTableMetatable 为构造出的 table 合并宿主元表、常量保护和只读保护。
+//
+// target 是 Lua 侧公开 table；storage 是只读 backing storage；constants 是常量 backing storage。
+// ReadOnly=true 时 target 与 storage 不同，所有读取通过 __index 到 storage，所有写入被拒绝。
+func installTableMetatable(state *lua.State, target *runtime.Table, storage *runtime.Table, constants *runtime.Table, binding TableBinding) error {
+	if target == nil || storage == nil || constants == nil {
+		// 缺少 table 说明构造流程损坏，返回明确错误。
+		return lua.RaiseError(runtime.StringValue("nil table metatable target"))
+	}
+
+	metatable := runtime.NewTable()
+	if err := writeAnyFields(state, metatable, binding.Metatable); err != nil {
+		// 宿主元表字段转换失败时停止构造。
+		return err
+	}
+	originalIndex := metatable.RawGetString("__index")
+	originalNewIndex := metatable.RawGetString("__newindex")
+	if binding.ReadOnly || len(binding.Constants) > 0 {
+		// 只读或常量 table 需要通过元方法拦截普通 Lua 读写。
+		metatable.RawSetString("__index", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(func(args ...runtime.Value) ([]runtime.Value, error) {
+			return tableIndexWithStorage(state, storage, constants, binding, originalIndex, args...)
+		})))
+		metatable.RawSetString("__newindex", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(func(args ...runtime.Value) ([]runtime.Value, error) {
+			return tableNewIndexWithGuards(state, binding, originalNewIndex, args...)
+		})))
+		metatable.RawSetString("__metatable", runtime.StringValue("protected bridge table"))
+	}
+	if len(binding.Metatable) > 0 || metatableHasFields(metatable) {
+		// 只有存在宿主元表字段或保护元方法时才安装元表。
+		target.SetMetatable(metatable)
+	}
+	return nil
+}
+
+// tableIndexWithStorage 实现只读 table 和常量字段的 __index。
+//
+// storage 保存只读 table 的真实字段；constants 保存常量字段；originalIndex 是宿主提供的原始
+// __index，未命中 bridge storage 时会作为 fallback 使用。
+func tableIndexWithStorage(state *lua.State, storage *runtime.Table, constants *runtime.Table, binding TableBinding, originalIndex lua.Value, args ...lua.Value) ([]lua.Value, error) {
+	if len(args) < 2 {
+		// 缺少 key 时按 Lua 未命中读取处理。
+		return []lua.Value{runtime.NilValue()}, nil
+	}
+
+	constantValue, err := constants.RawGet(args[1])
+	if err != nil {
+		// 常量 storage 读取失败通常来自非法 key，直接传播。
+		return nil, err
+	}
+	if !constantValue.IsNil() {
+		// 命中常量 storage 时返回字段值。
+		return []lua.Value{constantValue}, nil
+	}
+	if binding.ReadOnly {
+		// 整体只读 table 的所有字段都存放在 backing storage 中。
+		storedValue, err := storage.RawGet(args[1])
+		if err != nil {
+			// storage 读取失败通常来自非法 key，直接传播。
+			return nil, err
+		}
+		if !storedValue.IsNil() {
+			// 命中 storage 时返回字段值。
+			return []lua.Value{storedValue}, nil
+		}
+	}
+	// 未命中 bridge storage 时继续走宿主 fallback。
+	return callIndexFallback(state, originalIndex, args...)
+}
+
+// tableNewIndexWithGuards 实现只读 table 和常量字段的 __newindex。
+//
+// binding.ReadOnly 为 true 时所有写入失败；否则仅 Constants 中声明的 string key 被拒绝，其余写入
+// 交给宿主原始 __newindex 或 raw 写入 receiver table。
+func tableNewIndexWithGuards(state *lua.State, binding TableBinding, originalNewIndex lua.Value, args ...lua.Value) ([]lua.Value, error) {
+	if len(args) < 3 {
+		// __newindex 缺少 key/value 时返回明确错误，避免静默忽略写入。
+		return nil, lua.RaiseError(runtime.StringValue("table write expects self, key and value"))
+	}
+	if binding.ReadOnly {
+		// 只读 table 拒绝所有 Lua 侧写入。
+		return nil, lua.RaiseError(runtime.StringValue(readOnlyTableMessage(binding.Name)))
+	}
+	if args[1].Kind == lua.KindString {
+		// string key 才能匹配 Constants 声明的只读字段。
+		if _, ok := binding.Constants[args[1].String]; ok {
+			// 常量字段拒绝覆盖，变量字段仍允许普通写入。
+			return nil, lua.RaiseError(runtime.StringValue("cannot modify constant: " + args[1].String))
+		}
+	}
+	if !originalNewIndex.IsNil() {
+		// 宿主提供 __newindex 时优先保持宿主元方法语义。
+		return callNewIndexFallback(state, originalNewIndex, args...)
+	}
+
+	receiverTable, err := tableFromValue(args[0])
+	if err != nil {
+		// receiver 不是 table 时无法 raw 写入。
+		return nil, err
+	}
+	if err := receiverTable.RawSet(args[1], args[2]); err != nil {
+		// raw 写入失败时向 Lua 侧传播 table key 错误。
+		return nil, err
+	}
+	return nil, nil
+}
+
+// callIndexFallback 执行宿主提供的 __index fallback。
+//
+// fallback 可以是 nil、table 或 Go/Lua closure；closure 会按 `(self, key)` 参数执行。
+func callIndexFallback(state *lua.State, fallback lua.Value, args ...lua.Value) ([]lua.Value, error) {
+	if fallback.IsNil() {
+		// 没有 fallback 时按 Lua 未命中返回 nil。
+		return []lua.Value{runtime.NilValue()}, nil
+	}
+	if fallback.Kind == lua.KindTable {
+		// table fallback 按 raw get 读取 key。
+		fallbackTable, err := tableFromValue(fallback)
+		if err != nil {
+			// fallback table 引用损坏时传播错误。
+			return nil, err
+		}
+		if len(args) < 2 {
+			// 缺少 key 时 fallback 也只能返回 nil。
+			return []lua.Value{runtime.NilValue()}, nil
+		}
+		value, err := fallbackTable.RawGet(args[1])
+		if err != nil {
+			// fallback table raw get 失败时传播错误。
+			return nil, err
+		}
+		return []lua.Value{value}, nil
+	}
+	if fallback.Kind == lua.KindGoClosure || fallback.Kind == lua.KindLuaClosure {
+		// 函数 fallback 按 Lua __index 调用约定执行。
+		return lua.Call(state, fallback, args...)
+	}
+
+	// 不支持的 fallback 类型按未命中处理，避免破坏已有 table 构造。
+	return []lua.Value{runtime.NilValue()}, nil
+}
+
+// callNewIndexFallback 执行宿主提供的 __newindex fallback。
+//
+// fallback 可以是 table 或 Go/Lua closure；table fallback 使用 raw set，closure 按 `(self,key,value)` 执行。
+func callNewIndexFallback(state *lua.State, fallback lua.Value, args ...lua.Value) ([]lua.Value, error) {
+	if fallback.Kind == lua.KindTable {
+		// table fallback 按 raw set 写入 key/value。
+		fallbackTable, err := tableFromValue(fallback)
+		if err != nil {
+			// fallback table 引用损坏时传播错误。
+			return nil, err
+		}
+		if err := fallbackTable.RawSet(args[1], args[2]); err != nil {
+			// raw set 失败时传播 key 错误。
+			return nil, err
+		}
+		return nil, nil
+	}
+	if fallback.Kind == lua.KindGoClosure || fallback.Kind == lua.KindLuaClosure {
+		// 函数 fallback 按 Lua __newindex 调用约定执行。
+		return lua.Call(state, fallback, args...)
+	}
+	return nil, lua.RaiseError(runtime.StringValue("unsupported __newindex fallback"))
+}
+
+// metatableHasFields 判断元表是否需要安装。
+//
+// 当前 Table 没有公开长度 API，这里通过检查常用保护字段和宿主传入 map 是否为空来决定。
+func metatableHasFields(metatable *runtime.Table) bool {
+	if metatable == nil {
+		// nil 元表没有字段。
+		return false
+	}
+	if !metatable.RawGetString("__index").IsNil() {
+		// 存在 __index 时需要安装元表。
+		return true
+	}
+	if !metatable.RawGetString("__newindex").IsNil() {
+		// 存在 __newindex 时需要安装元表。
+		return true
+	}
+	if !metatable.RawGetString("__metatable").IsNil() {
+		// 存在 __metatable 保护字段时需要安装元表。
+		return true
+	}
+	return false
+}
+
+// readOnlyTableMessage 返回只读 table 写入错误文本。
+//
+// name 为空时使用通用 table 名称，避免错误信息出现空对象名。
+func readOnlyTableMessage(name string) string {
+	if name == "" {
+		// 无调试名称时返回通用错误。
+		return "cannot modify read-only table"
+	}
+	return "cannot modify read-only table: " + name
+}
+
 // packageLoadedTable 从 State 中读取 package.loaded 表。
 //
 // package 标准库未打开或 package.loaded 类型不匹配时返回 nil；调用方应把它视为可选加速路径。
@@ -870,6 +1494,34 @@ func packageLoadedTable(state *lua.State) *runtime.Table {
 	return loadedTable
 }
 
+// packagePreloadTable 从 State 中读取 package.preload 表。
+//
+// package 标准库未打开或 package.preload 类型不匹配时返回 nil；RegisterModulePreload 使用该 helper
+// 与 package.loaded 的可选写入策略保持一致。
+func packagePreloadTable(state *lua.State) *runtime.Table {
+	if state == nil {
+		// nil State 没有全局环境，无法读取 package.preload。
+		return nil
+	}
+	packageValue, err := lua.GetGlobal(state, "package")
+	if err != nil {
+		// 全局读取错误表示当前状态不可用，按无 package 处理。
+		return nil
+	}
+	packageTable, err := tableFromValue(packageValue)
+	if err != nil {
+		// package 不是 table 时说明标准库未打开或被覆盖。
+		return nil
+	}
+	preloadValue := packageTable.RawGetString("preload")
+	preloadTable, err := tableFromValue(preloadValue)
+	if err != nil {
+		// package.preload 不是 table 时不能安全写入预加载模块。
+		return nil
+	}
+	return preloadTable
+}
+
 // sortedFunctionNames 返回模块函数名的稳定排序。
 //
 // nil map 返回空切片；排序只影响注册和 stub 输出顺序，不改变函数语义。
@@ -892,6 +1544,34 @@ func sortedObjectNames(objects map[string]ObjectBinding) []string {
 	names := make([]string, 0, len(objects))
 	for name := range objects {
 		// 收集显式声明对象名。
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// sortedTableNames 返回嵌套 table 名称的稳定排序。
+//
+// nil map 返回空切片；排序只影响注册和测试输出稳定性，不改变 table 语义。
+func sortedTableNames(tables map[string]TableBinding) []string {
+	// 预分配名称切片，避免输出顺序依赖 Go map 遍历。
+	names := make([]string, 0, len(tables))
+	for name := range tables {
+		// 收集显式声明 table 名。
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// sortedAnyNames 返回 any 字段 map 的稳定 key 顺序。
+//
+// nil map 返回空切片；该 helper 用于字段、变量、常量和元表字段写入。
+func sortedAnyNames(fields map[string]any) []string {
+	// 预分配名称切片，避免输出顺序依赖 Go map 遍历。
+	names := make([]string, 0, len(fields))
+	for name := range fields {
+		// 收集显式声明字段名。
 		names = append(names, name)
 	}
 	sort.Strings(names)
