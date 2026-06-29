@@ -2571,7 +2571,7 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 			}
 			// CALL/TAILCALL/TFORCALL 产生的请求由 API 层递归消费并写回结果。
 			coroutineThread := currentCoroutineThread(state)
-			if err := executeLuaCallRequest(state, vm, proto, pc, callRequest); err != nil {
+			if err := executeLuaCallRequest(state, vm, proto, pc, callRequest, hooksEnabled); err != nil {
 				if errors.Is(err, runtime.ErrCoroutineYield) && coroutineThread != nil {
 					// coroutine.yield 中断当前 Lua CALL 时保存当前 VM 现场；已有内层现场会作为链式 continuation 先恢复。
 					saveLuaContinuation(&luaCoroutineContinuation{
@@ -3028,7 +3028,7 @@ func isSameLuaClosure(function Value, current *runtime.LuaClosure) bool {
 // executeLuaCallRequest 消费 VM 执行中产生的调用请求。
 //
 // callRequest 必须来自同一个 vm 最近一次 Step；调用结果会按请求写回 vm 寄存器窗口。
-func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, callPC int, callRequest *runtime.CallRequest) error {
+func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, callPC int, callRequest *runtime.CallRequest, hooksEnabled bool) error {
 	if callRequest.ArgumentCount < 0 {
 		// 开放参数需要真实栈顶，当前执行循环暂不支持。
 		return runtime.ErrUnsupportedInstruction
@@ -3041,7 +3041,7 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 	directCall := canExecuteLuaCallRequestDirect(state, functionValue, callRequest)
 	debugName := ""
 	debugNameWhat := ""
-	if !directCall || luaCallRequestNeedsDebugName(state) {
+	if !directCall || hooksEnabled {
 		// 通用调用和可被 hook 观察的 direct 调用需要推断调试名称；普通 direct 叶子调用跳过该成本。
 		debugName, debugNameWhat = luaCallDebugNameAtCall(state, functionValue, callRequest.GenericFor, proto, vm, callPC)
 	}
@@ -3110,19 +3110,6 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 		((*runtime.State)(state)).ReturnLuaVMToPool(directCallVM)
 	}
 	return writeErr
-}
-
-// luaCallRequestNeedsDebugName 判断当前 CALL 是否需要立即推断调试名称。
-//
-// active hook 会通过 debug.getinfo 观察被调帧名称，必须保留 Lua 5.3 调试语义；没有 active hook
-// 的 direct 叶子函数热路径可以延后错误场景处理，避免每次调用扫描前置指令和 local 表。
-func luaCallRequestNeedsDebugName(state *State) bool {
-	debugEnvironment, hasDebugEnvironment := debuglib.EnvironmentForState((*runtime.State)(state))
-	if !hasDebugEnvironment {
-		// 未打开 debug 库时没有 hook 可观察调用名。
-		return false
-	}
-	return debugEnvironment.HasActiveHook()
 }
 
 // canExecuteLuaCallRequestDirect 判断 CALL 请求是否可使用 Lua closure direct 路径。
