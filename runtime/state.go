@@ -325,6 +325,8 @@ type State struct {
 	options Options
 	// ctx 保存宿主注入的取消信号，供 VM 指令循环和 Go/Lua 回调边界检查。
 	ctx context.Context
+	// ctxCanCancel 表示 ctx 可能产生取消错误；默认 background 路径可跳过 ctx.Err 热点调用。
+	ctxCanCancel bool
 	// interruptCount 保存宿主请求的 Lua 级中断次数；每次 CheckContext 消费一次。
 	interruptCount atomic.Int64
 	// closed 标记 State 是否已经关闭。
@@ -651,6 +653,7 @@ func (state *State) SetContext(ctx context.Context) error {
 
 	// 保存宿主上下文；调用方负责控制 context 生命周期。
 	state.ctx = ctx
+	state.ctxCanCancel = true
 	return nil
 }
 
@@ -709,6 +712,10 @@ func (state *State) CheckContext() error {
 		}
 	}
 
+	if !state.ctxCanCancel {
+		// 默认 background context 不会取消，跳过每条指令的 ctx.Err 接口调用。
+		return nil
+	}
 	ctxErr := state.ctx.Err()
 	if ctxErr != nil {
 		// 取消或超时需要转换为可传播到 Lua 层的运行时错误对象。
