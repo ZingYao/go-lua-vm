@@ -32,6 +32,7 @@
 - 错误文本首版不要求逐字符匹配官方 Lua，但错误类别、行号和 traceback 必须可对齐。
 - `io`、`os`、`package` 标准库在宿主权限、路径和平台差异上允许有 Go 运行时约束。
 - `package.loadlib` 默认不内置动态 C 库打开逻辑；无 CGO 约束下未注入 loader 时返回明确不支持。宿主可通过 `lua.Options.PackageDynamicLibraryLoader`、`stdlib/package` 环境注入或覆盖 `package.loadlib` 接入自己的动态库加载层。
+- 默认跨平台构建不依赖 C 头文件、系统动态库或 Lua C API 开发包；`require` 不直接加载普通 Lua C 模块。普通 Lua C 模块需要 `lua_State*` 和 Lua C ABI 兼容层，该能力不属于首版默认纯 Go 构建承诺。
 
 ## 验收方式
 
