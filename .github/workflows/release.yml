@@ -143,7 +143,19 @@ jobs:
           gradle-version: "9.0.0"
 
       - name: Package JetBrains extension
-        run: make package-jetbrains
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if make package-jetbrains; then
+              exit 0
+            fi
+            if [ "${attempt}" = "3" ]; then
+              exit 1
+            fi
+            rm -rf jetbrains/extensions/glua-lsp/.gradle jetbrains/extensions/glua-lsp/build
+            sleep $((attempt * 10))
+          done
 
       - name: Upload JetBrains extension artifact
         uses: actions/upload-artifact@v4
