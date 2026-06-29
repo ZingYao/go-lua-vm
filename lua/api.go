@@ -9,6 +9,7 @@
 package lua
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -38,9 +39,9 @@ import (
 // 字段用于命令行之外的 Go 宿主展示更丰富的错误详情；Error() 只返回 Message，
 // 这些字段不会自动拼入主错误文本。
 type SyntaxErrorDetails struct {
-	// SourceName 保存原始 chunk name，例如 `@test.lua` 或 `=(string)`。
+	// SourceName 保存原始 chunk name，例如 `@test.glua` 或 `=(string)`。
 	SourceName string
-	// SourceID 保存用户可见 source 标识，例如 `test.lua` 或 `(string)`。
+	// SourceID 保存用户可见 source 标识，例如 `test.glua` 或 `(string)`。
 	SourceID string
 	// Line 保存错误所在行号，起始值为 1。
 	Line int
@@ -652,6 +653,10 @@ func finishXPCallCall(state *State, handler Value, callResults []Value, callErr 
 	state.EnterErrorHandler()
 	handlerResults, handlerErr := callWithDebugName(state, handler, "", "", runtime.ErrorObject(callErr))
 	state.ExitErrorHandler()
+	if handlerErr != nil {
+		// handler 失败也属于 xpcall 捕获范围，返回前必须裁剪 handler 留下的错误帧。
+		popCallFramesAbove(state, baseCallDepth)
+	}
 	if errors.Is(handlerErr, runtime.ErrCoroutineYield) {
 		// handler 也允许 yield；恢复后需要按 handler 的最终结果生成 false/errorObject。
 		saveProtectedCallContinuation(state, func(resumeArgs []Value, resumeErr error) ([]Value, error) {
@@ -1064,7 +1069,7 @@ func LoadString(state *State, source string, chunkName string) error {
 		// 空 chunk 名称使用稳定占位，便于 debug.getinfo 和错误信息展示。
 		chunkName = "=(string)"
 	}
-	closure, err := compileString(state, source, chunkName)
+	closure, err := loadStringOrBinaryChunk(state, []byte(source), chunkName)
 	if err != nil {
 		// 解析或 codegen 失败时不修改 State 栈。
 		return err
@@ -1086,8 +1091,40 @@ func LoadFile(state *State, path string) error {
 		// 文件读取失败时直接返回原始错误，保留 os.PathError 供调用方 errors.As。
 		return err
 	}
-	source := lexer.StripInitialShebang(string(sourceBytes))
-	return LoadString(state, source, "@"+path)
+	return loadFileChunk(state, sourceBytes, "@"+path)
+}
+
+// loadFileChunk 按 Lua 文件入口规则加载源码或 binary chunk。
+//
+// state 必须非 nil；chunkBytes 来自文件系统，首字节为 ESC 时按 Lua 5.3 binary chunk 读取，
+// 否则剥离首行 shebang 后按源码编译。成功后把 closure 压入 State 栈顶。
+func loadFileChunk(state *State, chunkBytes []byte, chunkName string) error {
+	closure, err := loadStringOrBinaryChunk(state, chunkBytes, chunkName)
+	if err != nil {
+		// 文件加载失败时不修改 State 栈。
+		return err
+	}
+	return state.Push(closure)
+}
+
+// loadStringOrBinaryChunk 将源码文本或 Lua 5.3 binary chunk 转成 Lua closure。
+//
+// state 必须非 nil；chunkBytes 首字节为 ESC 时必须走 binary loader，即使签名损坏也不能按源码解析。
+// 非 binary 输入会先剥离 shebang，再按当前 State 语法扩展编译。
+func loadStringOrBinaryChunk(state *State, chunkBytes []byte, chunkName string) (Value, error) {
+	if len(chunkBytes) > 0 && chunkBytes[0] == byte(bytecode.ChunkSignature[0]) {
+		// Lua 5.3 文件入口遇到 ESC 开头必须按预编译 chunk 处理。
+		proto, err := bytecode.LoadBinaryChunk(bytes.NewReader(chunkBytes))
+		if err != nil {
+			// binary chunk 损坏时返回 loader 错误，避免误报源码语法错误。
+			return runtime.NilValue(), err
+		}
+		upvalues := bindTopLevelUpvalues(state, proto)
+		closure := &runtime.LuaClosure{Proto: proto, Upvalues: upvalues, UpvalueCells: closedUpvalueCells(upvalues)}
+		return runtime.ReferenceValue(runtime.KindLuaClosure, closure), nil
+	}
+	source := lexer.StripInitialShebang(string(chunkBytes))
+	return compileString(state, source, chunkName)
 }
 
 // readAPIFile 按 State 选项读取 Go API 指定的 Lua 文件。
@@ -1207,7 +1244,7 @@ func Call(state *State, function Value, args ...Value) ([]Value, error) {
 // 提供名称，此时行为与 Call 一致；Lua closure 会把名称写入调用帧供 debug.getinfo 读取。
 func callWithDebugName(state *State, function Value, name string, nameWhat string, args ...Value) ([]Value, error) {
 	// 默认命名调用不是 tail call，保留普通 call hook 和调试帧语义。
-	return callWithDebugNameTail(state, function, name, nameWhat, false, args...)
+	return callWithDebugNameTailArgs(state, function, name, nameWhat, false, args)
 }
 
 // callWithDebugNameTail 按调用点推断名称执行函数，并可标记 tail call。
@@ -1215,6 +1252,22 @@ func callWithDebugName(state *State, function Value, name string, nameWhat strin
 // state 必须非 nil；function 必须是 Go 或 Lua closure。tailCall=true 表示该函数由 TAILCALL
 // 进入，调用帧需要暴露 istailcall=true，并通过 `tail call` hook 通知 debug 库。
 func callWithDebugNameTail(state *State, function Value, name string, nameWhat string, tailCall bool, args ...Value) ([]Value, error) {
+	// 变参入口保留给公开 API 和低频调用；VM 内部 CALL 使用 slice 版避免参数逃逸。
+	return callWithDebugNameTailArgs(state, function, name, nameWhat, tailCall, args)
+}
+
+// callWithDebugNameArgs 按调用点推断名称执行函数。
+//
+// args 只在本次调用期间读取；调用方可传入栈上小数组切片，避免 VM 内部 CALL 为 Go 变参额外分配。
+func callWithDebugNameArgs(state *State, function Value, name string, nameWhat string, args []Value) ([]Value, error) {
+	// 默认命名调用不是 tail call，保留普通 call hook 和调试帧语义。
+	return callWithDebugNameTailArgs(state, function, name, nameWhat, false, args)
+}
+
+// callWithDebugNameTailArgs 按调用点推断名称执行函数，并可标记 tail call。
+//
+// args 只在本次调用期间读取；Lua closure 路径不会保留该切片，vararg 会在需要时自行复制。
+func callWithDebugNameTailArgs(state *State, function Value, name string, nameWhat string, tailCall bool, args []Value) ([]Value, error) {
 	// 先复用公开调用入口的 State 生命周期校验，避免命名调用绕过取消和关闭检查。
 	if state == nil {
 		// nil State 没有调用栈，无法执行任何函数。
@@ -1231,7 +1284,7 @@ func callWithDebugNameTail(state *State, function Value, name string, nameWhat s
 		return callGoClosureWithDebugFrame(state, function, name, nameWhat, tailCall, args...)
 	case KindLuaClosure:
 		// Lua closure 需要把调用点名称写入帧，供 debug.getinfo("n") 读取。
-		return executeLuaClosureWithDebugNameTail(state, function, name, nameWhat, tailCall, args...)
+		return executeLuaClosureWithDebugNameTailArgs(state, function, name, nameWhat, tailCall, args)
 	default:
 		// 非函数值调用必须按 Lua 运行期错误分类返回。
 		return nil, runtime.NewRuntimeError(runtime.StringValue(ErrExpectedCallable.Error()), ErrExpectedCallable)
@@ -1932,6 +1985,14 @@ func saveInstructionContinuation(state *State, coroutineThread *runtime.Thread, 
 // continuation 为 nil 时创建新 VM；非 nil 时复用保存 VM，确保 yield 后的寄存器、upvalue 和
 // openTop 状态不丢失。
 func prepareLuaExecutionState(state *State, function Value, continuation *luaCoroutineContinuation, args ...Value) (*runtime.LuaClosure, *bytecode.Proto, *runtime.VM, int, []Value, error) {
+	// 变参入口保留给外部调用，内部热路径使用 slice 版。
+	return prepareLuaExecutionStateArgs(state, function, continuation, args)
+}
+
+// prepareLuaExecutionStateArgs 准备 Lua closure 执行所需的 closure、Proto 和 VM。
+//
+// args 只在初始化固定参数寄存器时读取；vararg 函数会自行复制多余参数，避免持有调用方切片。
+func prepareLuaExecutionStateArgs(state *State, function Value, continuation *luaCoroutineContinuation, args []Value) (*runtime.LuaClosure, *bytecode.Proto, *runtime.VM, int, []Value, error) {
 	if continuation != nil {
 		// continuation 必须携带完整 VM 现场，否则不能安全恢复。
 		if continuation.closure == nil || continuation.proto == nil || continuation.vm == nil {
@@ -1949,17 +2010,10 @@ func prepareLuaExecutionState(state *State, function Value, continuation *luaCor
 	proto := closure.Proto
 	varargs := luaClosureVarargs(proto, args)
 	registerCount := luaClosureRegisterCount(proto, len(args), len(varargs))
-	vm := runtime.NewVMWithPrototypeData(registerCount, proto.Constants, closure.Upvalues, proto.Protos, varargs)
+	vm := ((*runtime.State)(state)).BorrowLuaVMAfterReset(registerCount, proto.Constants, closure.Upvalues, proto.Protos, varargs)
 	vm.BindPrototype(proto)
 	vm.BindUpvalueCells(closure.UpvalueCells)
-	vm.BindLuaMetamethodRunner(func(method Value, name string, args ...Value) ([]Value, error) {
-		// VM 指令执行期间触发 Lua closure 元方法时，复用当前 State 的命名调用通道。
-		if name != "" {
-			// 元方法调试帧按 Lua 5.3 暴露为 metamethod 来源。
-			return callWithDebugName(state, method, name, "metamethod", args...)
-		}
-		return callWithDebugName(state, method, "", "", args...)
-	})
+	vm.BindLuaMetamethodRunner(((*runtime.State)(state)).LuaMetamethodRunner())
 	return closure, proto, vm, registerCount, varargs, nil
 }
 
@@ -2157,7 +2211,7 @@ func currentCoroutineThread(state *State) *runtime.Thread {
 // RETURN 退出，开放调用栈语义后续继续补齐。
 func executeLuaClosureWithDebugName(state *State, function Value, name string, nameWhat string, args ...Value) (results []Value, err error) {
 	// 普通命名调用不带 tail call 标记，保持历史 call hook 语义。
-	return executeLuaClosureWithDebugNameTail(state, function, name, nameWhat, false, args...)
+	return executeLuaClosureWithDebugNameTailArgs(state, function, name, nameWhat, false, args)
 }
 
 // executeLuaClosureWithDebugNameTail 执行 Lua closure 并可标记 tail call 调试语义。
@@ -2167,7 +2221,15 @@ func executeLuaClosureWithDebugName(state *State, function Value, name string, n
 // 事件名需要使用 Lua 5.3 的 `tail call`。
 func executeLuaClosureWithDebugNameTail(state *State, function Value, name string, nameWhat string, tailCall bool, args ...Value) (results []Value, err error) {
 	// 普通 Lua closure 调用没有 coroutine continuation，从函数入口完整执行。
-	return executeLuaClosureWithDebugNameTailFrom(state, function, name, nameWhat, tailCall, nil, args...)
+	return executeLuaClosureWithDebugNameTailFromArgs(state, function, name, nameWhat, tailCall, nil, args)
+}
+
+// executeLuaClosureWithDebugNameTailArgs 执行 Lua closure 并可标记 tail call 调试语义。
+//
+// args 只在本次调用期间读取；固定参数会立即写入寄存器，vararg 会在需要时复制到 VM。
+func executeLuaClosureWithDebugNameTailArgs(state *State, function Value, name string, nameWhat string, tailCall bool, args []Value) (results []Value, err error) {
+	// slice 入口避免 VM 内部 CALL 为 Go 变参构造临时堆对象。
+	return executeLuaClosureWithDebugNameTailFromArgs(state, function, name, nameWhat, tailCall, nil, args)
 }
 
 // executeLuaClosureWithDebugNameTailFrom 执行 Lua closure，并可从 coroutine continuation 恢复。
@@ -2175,14 +2237,20 @@ func executeLuaClosureWithDebugNameTail(state *State, function Value, name strin
 // continuation 为 nil 时从函数入口创建 VM；非 nil 时复用保存的 VM、frame 和 PC，并把 args
 // 写作上次 coroutine.yield 的返回值后继续执行。
 func executeLuaClosureWithDebugNameTailFrom(state *State, function Value, name string, nameWhat string, tailCall bool, continuation *luaCoroutineContinuation, args ...Value) (results []Value, err error) {
+	// 变参恢复入口转到 slice 实现，保持外部调用兼容。
+	return executeLuaClosureWithDebugNameTailFromArgs(state, function, name, nameWhat, tailCall, continuation, args)
+}
+
+// executeLuaClosureWithDebugNameTailFromArgs 执行 Lua closure，并可从 coroutine continuation 恢复。
+//
+// continuation 为 nil 时从函数入口创建 VM；非 nil 时复用保存 VM。args 只在本次调用期间读取。
+func executeLuaClosureWithDebugNameTailFromArgs(state *State, function Value, name string, nameWhat string, tailCall bool, continuation *luaCoroutineContinuation, args []Value) (results []Value, err error) {
 	// 先解析 closure 和 Proto，确保后续调试帧可绑定真实函数对象。
-	closure, proto, vm, registerCount, varargs, prepareErr := prepareLuaExecutionState(state, function, continuation, args...)
+	closure, proto, vm, registerCount, varargs, prepareErr := prepareLuaExecutionStateArgs(state, function, continuation, args)
 	if prepareErr != nil {
 		// Lua closure 引用负载异常或 continuation 损坏时停止执行。
 		return nil, prepareErr
 	}
-	state.PushActiveVM(vm)
-	defer state.PopActiveVM(vm)
 	if continuation == nil {
 		// 首次执行需要把 resume 参数写入固定形参寄存器。
 		fixedArgumentCount := luaClosureFixedArgumentCount(proto, len(args))
@@ -2198,6 +2266,22 @@ func executeLuaClosureWithDebugNameTailFrom(state *State, function Value, name s
 			}
 		}
 	}
+	releaseVM := continuation == nil && vm != nil
+	results, err = executePreparedLuaClosureWithDebugNameTailFromArgs(state, function, name, nameWhat, tailCall, continuation, closure, proto, vm, registerCount, varargs, args)
+	if releaseVM && !errors.Is(err, runtime.ErrCoroutineYield) {
+		((*runtime.State)(state)).ReturnLuaVMToPool(vm)
+	}
+	return results, err
+}
+
+// executePreparedLuaClosureWithDebugNameTailFromArgs 执行已经准备好 VM 的 Lua closure。
+//
+// 调用方必须确保 closure/proto/vm/registerCount/varargs 彼此匹配；首次调用时固定参数寄存器也必须已写入。
+// 该函数承载真实 VM 执行循环，供普通调用和 direct CALL 共享。
+func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function Value, name string, nameWhat string, tailCall bool, continuation *luaCoroutineContinuation, closure *runtime.LuaClosure, proto *bytecode.Proto, vm *runtime.VM, registerCount int, varargs []Value, args []Value) (results []Value, err error) {
+	state.PushActiveVM(vm)
+	defer state.PopActiveVM(vm)
+	runtimeState := ((*runtime.State)(state))
 	frame := luaExecutionFrame(state, function, name, nameWhat, tailCall, continuation, varargs)
 	restoredOuterFrameCount := 0
 	if continuation != nil {
@@ -2213,14 +2297,25 @@ func executeLuaClosureWithDebugNameTailFrom(state *State, function Value, name s
 		popContinuationOuterFrames(state, restoredOuterFrameCount)
 		return nil, err
 	}
-	debugEnvironment, hasDebugEnvironment := debuglib.EnvironmentForState((*runtime.State)(state))
-	if hasDebugEnvironment && continuation == nil {
+	debugEnvironment, hasDebugEnvironment := debuglib.EnvironmentForState(runtimeState)
+	hooksEnabled := hasDebugEnvironment && debugEnvironment.HasActiveHook()
+	preciseFrameSync := hasDebugEnvironment || continuation != nil || runtimeState.HasCreatedCoroutines()
+	refreshHookState := func() {
+		if !hasDebugEnvironment {
+			// 未打开 debug 库时仍需刷新 coroutine 创建状态。
+			preciseFrameSync = continuation != nil || runtimeState.HasCreatedCoroutines()
+			return
+		}
+		hooksEnabled = debugEnvironment.HasActiveHook()
+		preciseFrameSync = true
+	}
+	if hooksEnabled && continuation == nil {
 		// call/tail call hook 在目标调用帧入栈后触发，使 hook 中 debug.getinfo(2, "f") 指向被调 closure。
 		hookErr := error(nil)
-		if tailCall {
+		if tailCall && debugEnvironment.HookEnabledFor(debuglib.HookEventTailCall) {
 			// 尾调用进入目标帧时，Lua 5.3 使用 tail call 事件而不是普通 call 事件。
 			hookErr = triggerLuaTailCallHook(state, debugEnvironment)
-		} else {
+		} else if !tailCall && debugEnvironment.HookEnabledFor(debuglib.HookEventCall) {
 			// 普通调用保持 call 事件，兼容既有 hook 序列。
 			hookErr = triggerLuaCallHook(state, debugEnvironment)
 		}
@@ -2232,12 +2327,16 @@ func executeLuaClosureWithDebugNameTailFrom(state *State, function Value, name s
 	returnHookTriggered := false
 	triggerReturnHook := func() error {
 		// return hook 只在成功离开当前帧前触发一次，避免多个 return 出口重复派发。
-		if !hasDebugEnvironment || returnHookTriggered {
+		if !hooksEnabled || returnHookTriggered {
 			// 没有 debug 环境或已触发过时保持无副作用。
 			return nil
 		}
 		if debugEnvironment.HookActive() {
 			// hook 回调自身返回时不再派发 return hook，避免用户 hook 观察到 hook 函数而漏掉真实返回帧。
+			return nil
+		}
+		if !debugEnvironment.HookEnabledFor(debuglib.HookEventReturn) {
+			// 当前没有 return hook 时不进入派发路径，避免无 hook 场景产生临时状态。
 			return nil
 		}
 		if currentFrame, ok := state.CurrentCallFrame(); ok && currentFrame.NameWhat == "hook" {
@@ -2258,6 +2357,20 @@ func executeLuaClosureWithDebugNameTailFrom(state *State, function Value, name s
 	previousPC := -1
 	previousPreviousPC := -1
 	pc := 0
+	lastSyncedFramePC := -2
+	syncCurrentFrame := func(currentPC int) error {
+		if lastSyncedFramePC == currentPC {
+			// 当前帧已同步到该 PC，无需重复写回调用帧栈。
+			return nil
+		}
+		frame.CurrentPC = currentPC
+		if err := state.UpdateCurrentFramePC(currentPC); err != nil {
+			// 当前帧缺失说明调用栈边界被破坏，停止执行避免 debug 信息错配。
+			return err
+		}
+		lastSyncedFramePC = currentPC
+		return nil
+	}
 	if continuation != nil {
 		resumeNextPC := continuation.nextPC
 		if continuation.callRequest != nil && continuation.thread.HasLocalRegisterSnapshotUpdates() {
@@ -2302,16 +2415,24 @@ func executeLuaClosureWithDebugNameTailFrom(state *State, function Value, name s
 	for pc >= 0 && pc < len(proto.Code) {
 		// 先同步当前 PC，供 collectgarbage 执行时按 local 生命周期裁剪活动寄存器根。
 		vm.SetCurrentPC(pc)
-		// 每条指令前检查 context，支持宿主取消长脚本。
+		// 每条指令前检查 context，支持宿主取消长脚本和协程测试中的中断语义。
 		if err := state.CheckContext(); err != nil {
+			if syncErr := syncCurrentFrame(pc); syncErr != nil {
+				return nil, syncErr
+			}
 			return nil, err
 		}
-		frame.CurrentPC = pc
-		if err := state.ReplaceCurrentCallFrame(frame); err != nil {
-			// 当前帧缺失说明调用栈边界被破坏，停止执行避免 debug 信息错配。
-			return nil, err
+		if preciseFrameSync {
+			if err := syncCurrentFrame(pc); err != nil {
+				// debug、hook、coroutine 和 continuation 路径需要逐指令同步调用帧 PC。
+				return nil, err
+			}
 		}
-		if hasDebugEnvironment {
+		if hooksEnabled && debugEnvironment.HookEnabledFor(debuglib.HookEventLine) {
+			if err := syncCurrentFrame(pc); err != nil {
+				// line hook 需要当前调用帧 PC 与即将执行指令一致。
+				return nil, err
+			}
 			// line hook 需要在指令执行前触发，确保 hook 观察到即将执行的源码行。
 			if err := triggerLuaLineHook(state, debugEnvironment, proto, pc, previousPC, previousPreviousPC, &lastHookLine); err != nil {
 				// hook 内抛错必须中断当前 VM，交给 protected call 边界包装 traceback。
@@ -2321,6 +2442,9 @@ func executeLuaClosureWithDebugNameTailFrom(state *State, function Value, name s
 		instruction := proto.Code[pc]
 		coroutineThread := currentCoroutineThread(state)
 		if err := vm.Step(instruction); err != nil {
+			if syncErr := syncCurrentFrame(pc); syncErr != nil {
+				return nil, syncErr
+			}
 			if errors.Is(err, runtime.ErrExpectedCallable) {
 				// CALL/TAILCALL 在 VM 阶段发现非函数值时，执行循环仍持有调用点上下文，可补齐 Lua 风格错误名。
 				err = luaCallErrorAtInstruction(state, proto, vm, pc, instruction, err)
@@ -2341,7 +2465,11 @@ func executeLuaClosureWithDebugNameTailFrom(state *State, function Value, name s
 			// VM 单步错误或 yield 交给 protected call / coroutine 边界处理。
 			return nil, err
 		}
-		if hasDebugEnvironment && shouldTriggerLuaCountHook(proto, pc) {
+		if hooksEnabled && debugEnvironment.HookEnabledFor(debuglib.HookEventCount) && shouldTriggerLuaCountHook(proto, pc) {
+			if err := syncCurrentFrame(pc); err != nil {
+				// count hook 需要当前调用帧 PC 与刚执行指令一致。
+				return nil, err
+			}
 			// count hook 在当前指令执行后触发，避免 hook 修改影响同一表达式正在读取的值。
 			if err := triggerLuaCountHook(state, debugEnvironment); err != nil {
 				// count hook 内抛错同样中断当前 VM，保持 hook 可作为调试中断点。
@@ -2356,7 +2484,11 @@ func executeLuaClosureWithDebugNameTailFrom(state *State, function Value, name s
 			// 分配压力指令后给自动 GC 一次推进机会，覆盖 table、closure 和字符串拼接。
 			((*runtime.State)(state)).NoteTableAllocation()
 		}
-		if returnValues := vm.ReturnValues(); returnValues != nil {
+		if returnValues := vm.BorrowReturnValues(); returnValues != nil {
+			if err := syncCurrentFrame(pc); err != nil {
+				// return hook 与 traceback 需要看到返回指令所在 PC。
+				return nil, err
+			}
 			// RETURN 指令结束当前 closure，并返回快照。
 			if err := triggerReturnHook(); err != nil {
 				// return hook 错误需要覆盖正常返回，保持 Lua hook 可中断调用。
@@ -2365,6 +2497,10 @@ func executeLuaClosureWithDebugNameTailFrom(state *State, function Value, name s
 			return returnValues, nil
 		}
 		if callRequest := vm.LastCallRequest(); callRequest != nil {
+			if err := syncCurrentFrame(pc); err != nil {
+				// CALL 路径可能进入 debug 库或触发错误，调用帧必须同步到调用点。
+				return nil, err
+			}
 			if callRequest.Tail {
 				// TAILCALL 会让被调函数替换当前 caller 的调试可见帧，并把结果作为本 closure 结果返回。
 				arguments, err := luaCallArguments(vm, callRequest)
@@ -2409,7 +2545,7 @@ func executeLuaClosureWithDebugNameTailFrom(state *State, function Value, name s
 						// 当前帧缺失说明调用栈边界被破坏，停止执行避免 debug 信息错配。
 						return nil, err
 					}
-					if hasDebugEnvironment {
+					if hooksEnabled && debugEnvironment.HookEnabledFor(debuglib.HookEventTailCall) {
 						// 自尾调用仍需要派发 tail call hook，事件由 call mask 控制。
 						if err := triggerLuaTailCallHook(state, debugEnvironment); err != nil {
 							// hook 错误必须中断当前调用，并保留帧交由 protected call 边界恢复。
@@ -2457,6 +2593,7 @@ func executeLuaClosureWithDebugNameTailFrom(state *State, function Value, name s
 				}
 				return nil, err
 			}
+			refreshHookState()
 		}
 		previousPreviousPC = previousPC
 		previousPC = pc
@@ -2494,10 +2631,10 @@ func callGoClosureWithDebugFrame(state *State, function Value, name string, name
 	if hasDebugEnvironment {
 		// call/tail call hook 在 Go closure 帧入栈后触发，对齐 Lua 5.3 的被调函数可见性。
 		hookErr := error(nil)
-		if tailCall {
+		if tailCall && debugEnvironment.HookEnabledFor(debuglib.HookEventTailCall) {
 			// Go closure 也可能由 TAILCALL 进入，debug hook 需要看到 tail call 事件。
 			hookErr = triggerLuaTailCallHook(state, debugEnvironment)
-		} else {
+		} else if !tailCall && debugEnvironment.HookEnabledFor(debuglib.HookEventCall) {
 			// 普通 Go closure 调用保持 call 事件。
 			hookErr = triggerLuaCallHook(state, debugEnvironment)
 		}
@@ -2519,7 +2656,7 @@ func callGoClosureWithDebugFrame(state *State, function Value, name string, name
 		// Go 回调错误返回后，调用帧保留给上层错误边界。
 		return nil, err
 	}
-	if hasDebugEnvironment {
+	if hasDebugEnvironment && debugEnvironment.HookEnabledFor(debuglib.HookEventReturn) {
 		// return hook 在 Go closure 帧仍可见时触发。
 		if err := triggerLuaReturnHook(state, debugEnvironment); err != nil {
 			return nil, err
@@ -2892,18 +3029,49 @@ func isSameLuaClosure(function Value, current *runtime.LuaClosure) bool {
 //
 // callRequest 必须来自同一个 vm 最近一次 Step；调用结果会按请求写回 vm 寄存器窗口。
 func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, callPC int, callRequest *runtime.CallRequest) error {
-	arguments, err := luaCallArguments(vm, callRequest)
-	if err != nil {
-		// 参数区间读取失败时停止当前调用。
-		return err
+	if callRequest.ArgumentCount < 0 {
+		// 开放参数需要真实栈顶，当前执行循环暂不支持。
+		return runtime.ErrUnsupportedInstruction
 	}
 	functionValue, ok := vm.Register(callRequest.FunctionIndex)
 	if !ok {
 		// 函数寄存器缺失说明 codegen 或 VM 状态异常。
 		return runtime.ErrRegisterOutOfRange
 	}
-	debugName, debugNameWhat := luaCallDebugNameAtCall(state, functionValue, callRequest.GenericFor, proto, vm, callPC)
-	results, err := callWithDebugName(state, functionValue, debugName, debugNameWhat, arguments...)
+	directCall := canExecuteLuaCallRequestDirect(state, functionValue, callRequest)
+	debugName := ""
+	debugNameWhat := ""
+	if !directCall || luaCallRequestNeedsDebugName(state) {
+		// 通用调用和可被 hook 观察的 direct 调用需要推断调试名称；普通 direct 叶子调用跳过该成本。
+		debugName, debugNameWhat = luaCallDebugNameAtCall(state, functionValue, callRequest.GenericFor, proto, vm, callPC)
+	}
+	var results []Value
+	var directCallVM *runtime.VM
+	var err error
+	if directCall {
+		// 固定参数/固定返回的 Lua closure 走 direct CALL，避免构造参数切片。
+		results, directCallVM, err = executeLuaCallRequestDirect(state, vm, functionValue, debugName, debugNameWhat, callRequest)
+	} else {
+		var arguments []Value
+		if functionValue.Kind == runtime.KindLuaClosure {
+			// Lua closure 只在进入前读取参数并写入寄存器，可复用 State scratch 降低 CALL 小切片分配。
+			arguments = ((*runtime.State)(state)).BorrowCallArgumentScratch(callRequest.ArgumentCount)
+		} else {
+			var inlineArguments [4]Value
+			if callRequest.ArgumentCount > len(inlineArguments) {
+				// 超过常见小参数数量时才分配切片，普通函数调用避免每次 CALL 分配参数数组。
+				arguments = make([]Value, callRequest.ArgumentCount)
+			} else {
+				// 小参数调用使用栈上数组作为临时快照。
+				arguments = inlineArguments[:callRequest.ArgumentCount]
+			}
+		}
+		if !vm.CopyRegisters(callRequest.FunctionIndex+1, arguments) {
+			// 参数区间读取失败时停止当前调用。
+			return runtime.ErrRegisterOutOfRange
+		}
+		results, err = callWithDebugNameArgs(state, functionValue, debugName, debugNameWhat, arguments)
+	}
 	if err != nil {
 		if isDefaultAssertError(err) {
 			// assert(false) 的默认错误消息由 Go closure 产生，需按调用点补 source:line。
@@ -2936,7 +3104,175 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 		}
 		return err
 	}
-	return writeLuaCallResults(vm, callRequest, results)
+	writeErr := writeLuaCallResults(vm, callRequest, results)
+	if directCallVM != nil {
+		// direct CALL 的结果切片可能指向 callee VM 内部数组，必须在 caller 写回后再归还 VM。
+		((*runtime.State)(state)).ReturnLuaVMToPool(directCallVM)
+	}
+	return writeErr
+}
+
+// luaCallRequestNeedsDebugName 判断当前 CALL 是否需要立即推断调试名称。
+//
+// active hook 会通过 debug.getinfo 观察被调帧名称，必须保留 Lua 5.3 调试语义；没有 active hook
+// 的 direct 叶子函数热路径可以延后错误场景处理，避免每次调用扫描前置指令和 local 表。
+func luaCallRequestNeedsDebugName(state *State) bool {
+	debugEnvironment, hasDebugEnvironment := debuglib.EnvironmentForState((*runtime.State)(state))
+	if !hasDebugEnvironment {
+		// 未打开 debug 库时没有 hook 可观察调用名。
+		return false
+	}
+	return debugEnvironment.HasActiveHook()
+}
+
+// canExecuteLuaCallRequestDirect 判断 CALL 请求是否可使用 Lua closure direct 路径。
+//
+// direct 路径只覆盖固定参数、固定返回、非泛型 for 的普通 Lua closure；复杂开放调用仍走通用路径。
+func canExecuteLuaCallRequestDirect(state *State, functionValue Value, callRequest *runtime.CallRequest) bool {
+	if state == nil || callRequest == nil || callRequest.GenericFor || callRequest.ReturnCount < 0 || callRequest.ArgumentCount < 0 {
+		// 缺少 State 或调用请求时不能进入 direct CALL。
+		return false
+	}
+	if functionValue.Kind != runtime.KindLuaClosure {
+		// 非 Lua closure 仍走通用调用路径。
+		return false
+	}
+	if ((*runtime.State)(state)).HasCreatedCoroutines() {
+		// 已创建 coroutine 后，调用现场可能被 continuation 持有，保留完整通用路径。
+		return false
+	}
+	closure, ok := functionValue.Ref.(*runtime.LuaClosure)
+	if !ok || closure == nil || closure.Proto == nil {
+		// 损坏 closure 交给通用路径生成原有错误。
+		return false
+	}
+	if closure.Proto.IsVararg || len(closure.Proto.Protos) > 0 {
+		// vararg 和子函数都需要完整调用现场。
+		return false
+	}
+	if !luaProtoDirectCallSafe(closure.Proto) {
+		// 只允许无嵌套调用的叶子函数走 direct CALL。
+		return false
+	}
+	return true
+}
+
+// luaProtoDirectCallSafe 判断 Proto 是否适合 direct CALL 热路径。
+//
+// direct CALL 当前仅覆盖纯叶子函数，避免嵌套调用、闭包创建和 yield 现场裁剪破坏 coroutine。
+func luaProtoDirectCallSafe(proto *bytecode.Proto) bool {
+	if proto == nil {
+		// 缺少 Proto 时不能进入 direct CALL。
+		return false
+	}
+	for instructionIndex := range proto.Code {
+		switch proto.Code[instructionIndex].OpCode() {
+		case bytecode.OpCall, bytecode.OpTailCall, bytecode.OpTForCall, bytecode.OpClosure:
+			// 任何嵌套调用或闭包创建都交给通用路径。
+			return false
+		}
+	}
+	return true
+}
+
+// executeLuaCallRequestDirect 执行固定参数/固定返回的 Lua closure CALL。
+//
+// callerVM 是当前调用方 VM；functionValue 必须是合法 Lua closure。该路径直接把 caller 参数寄存器
+// 写入 callee R0..，避免为 CALL 构造参数切片。
+func executeLuaCallRequestDirect(state *State, callerVM *runtime.VM, functionValue Value, debugName string, debugNameWhat string, callRequest *runtime.CallRequest) ([]Value, *runtime.VM, error) {
+	closure, ok := functionValue.Ref.(*runtime.LuaClosure)
+	if !ok || closure == nil || closure.Proto == nil {
+		// 防御损坏 closure，保持不可调用错误语义。
+		return nil, nil, runtime.NewRuntimeError(runtime.StringValue(ErrExpectedCallable.Error()), ErrExpectedCallable)
+	}
+	if err := state.CheckContext(); err != nil {
+		// State 已关闭或 context 已取消时不进入 callee VM。
+		return nil, nil, err
+	}
+	proto := closure.Proto
+	registerCount := luaClosureRegisterCount(proto, callRequest.ArgumentCount, 0)
+	calleeVM := ((*runtime.State)(state)).BorrowLuaVMAfterReset(registerCount, proto.Constants, closure.Upvalues, proto.Protos, nil)
+	calleeVM.BindPrototype(proto)
+	calleeVM.BindUpvalueCells(closure.UpvalueCells)
+	calleeVM.BindLuaMetamethodRunner(((*runtime.State)(state)).LuaMetamethodRunner())
+	fixedArgumentCount := luaClosureFixedArgumentCount(proto, callRequest.ArgumentCount)
+	if !callerVM.CopyRegistersTo(callRequest.FunctionIndex+1, calleeVM, 0, fixedArgumentCount) {
+		// caller 或 callee 固定参数窗口异常时返回寄存器错误。
+		((*runtime.State)(state)).ReturnLuaVMToPool(calleeVM)
+		return nil, nil, runtime.ErrRegisterOutOfRange
+	}
+	var results []Value
+	var err error
+	if debugName == "" && debugNameWhat == "" {
+		// 无 active hook 的 direct 叶子函数使用最小执行循环，避免每次 CALL 都构造完整调试帧。
+		results, err = executeLuaLeafClosureFast(state, proto, calleeVM)
+	} else {
+		// 可被 hook/debug 观察的调用保留完整执行器。
+		results, err = executePreparedLuaClosureWithDebugNameTailFromArgs(state, functionValue, debugName, debugNameWhat, false, nil, closure, proto, calleeVM, registerCount, nil, nil)
+	}
+	if err != nil {
+		if errors.Is(err, runtime.ErrCoroutineYield) && currentCoroutineThread(state) != nil {
+			// yield 会保存 callee VM 到 continuation，不能归还到池。
+			return nil, nil, err
+		}
+		((*runtime.State)(state)).ReturnLuaVMToPool(calleeVM)
+		return nil, nil, err
+	}
+	return results, calleeVM, nil
+}
+
+// executeLuaLeafClosureFast 执行 direct CALL 已判定安全的叶子 Lua closure。
+//
+// proto 必须不包含 CALL、TAILCALL、TFORCALL 和 CLOSURE；vm 已绑定常量、upvalue 和寄存器窗口。
+// 该路径不压入 Lua 调试帧，只用于没有 active hook 的热路径。返回值切片可能引用 vm 内部数组，
+// 调用方必须在写回 caller 后再归还 vm。
+func executeLuaLeafClosureFast(state *State, proto *bytecode.Proto, vm *runtime.VM) ([]Value, error) {
+	pc := 0
+	for pc >= 0 && pc < len(proto.Code) {
+		// 叶子 fast path 仍维护 VM 当前 PC，供错误装饰和 GC root 裁剪使用。
+		vm.SetCurrentPC(pc)
+		if err := state.CheckContext(); err != nil {
+			// 宿主取消或中断必须尽快停止当前 Lua 执行。
+			return nil, err
+		}
+		instruction := proto.Code[pc]
+		if err := vm.Step(instruction); err != nil {
+			if errors.Is(err, runtime.ErrExpectedCallable) {
+				// 理论上 direct leaf 不应产生 CALL 请求；保留调用错误装饰用于防御异常字节码。
+				err = luaCallErrorAtInstruction(state, proto, vm, pc, instruction, err)
+			} else if errors.Is(err, runtime.ErrExpectedTable) {
+				// table 访问错误仍按当前指令补齐 Lua 风格名称。
+				err = luaIndexErrorAtInstruction(proto, vm, pc, instruction, err)
+			} else if errors.Is(err, runtime.ErrArithmeticOperand) || errors.Is(err, runtime.ErrIntegerOperand) {
+				// 算术和位运算错误继续复用完整执行器的错误文本推断。
+				err = luaOperationErrorAtInstruction(proto, vm, pc, instruction, err)
+			}
+			return nil, decorateLuaRuntimeErrorAtPC(proto, pc, err)
+		}
+		if closeFrom, ok := vm.CloseFrom(); ok {
+			// 离开局部作用域时仍需闭合 open upvalue。
+			vm.CloseUpvaluesFrom(closeFrom)
+		}
+		if instruction.OpCode() == bytecode.OpNewTable || instruction.OpCode() == bytecode.OpConcat {
+			// 分配压力指令后推进自动 GC，保持与完整执行器一致。
+			((*runtime.State)(state)).NoteTableAllocation()
+		}
+		if returnValues := vm.BorrowReturnValues(); returnValues != nil {
+			// RETURN 指令结束当前 leaf closure。
+			return returnValues, nil
+		}
+		if callRequest := vm.LastCallRequest(); callRequest != nil {
+			// direct leaf 预检应排除所有 CALL 类指令，命中说明字节码或预检条件不一致。
+			return nil, decorateLuaRuntimeErrorAtPC(proto, pc, runtime.NewRuntimeError(runtime.StringValue("unexpected call in direct leaf"), runtime.ErrExpectedCallable))
+		}
+		pc++
+		if vm.SkipNext() {
+			// 测试类指令要求跳过下一条指令。
+			pc++
+		}
+		pc += vm.PCOffset()
+	}
+	return nil, nil
 }
 
 // luaCallErrorAtInstruction 按 CALL 指令上下文重写非函数调用错误。
@@ -3838,14 +4174,10 @@ func luaCallArguments(vm *runtime.VM, callRequest *runtime.CallRequest) ([]Value
 		// 开放参数需要真实栈顶，当前执行循环暂不支持。
 		return nil, runtime.ErrUnsupportedInstruction
 	}
-	arguments := make([]Value, 0, callRequest.ArgumentCount)
-	for argumentIndex := 0; argumentIndex < callRequest.ArgumentCount; argumentIndex++ {
-		// 实参紧跟函数寄存器之后连续保存。
-		value, ok := vm.Register(callRequest.FunctionIndex + argumentIndex + 1)
-		if !ok {
-			return nil, runtime.ErrRegisterOutOfRange
-		}
-		arguments = append(arguments, value)
+	arguments := make([]Value, callRequest.ArgumentCount)
+	if !vm.CopyRegisters(callRequest.FunctionIndex+1, arguments) {
+		// 实参紧跟函数寄存器之后连续保存，区间越界说明 codegen 或 VM 状态异常。
+		return nil, runtime.ErrRegisterOutOfRange
 	}
 
 	// 返回调用实参数组。

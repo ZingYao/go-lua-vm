@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"sync/atomic"
+
+	"github.com/zing/go-lua-vm/bytecode"
 )
 
 const (
@@ -91,6 +93,8 @@ type RuntimeError struct {
 	Object Value
 	// Cause 保存 Go 侧原始错误。
 	Cause error
+	// TracebackFrames 保存错误发生现场的调用帧快照，顺序为当前帧到最早帧。
+	TracebackFrames []CallFrame
 }
 
 // NewRuntimeError 创建带 Lua error object 的运行时错误。
@@ -140,6 +144,28 @@ func (runtimeErr *RuntimeError) Unwrap() error {
 
 	// errors.Is 和 errors.As 会沿用该 cause 继续匹配。
 	return runtimeErr.Cause
+}
+
+// WithTracebackFrames 返回携带失败现场调用帧的运行时错误。
+//
+// frames 必须按 TracebackFrames 返回的当前帧到最早帧顺序传入；非 RuntimeError 错误会原样返回。
+// 已有 traceback 或空 frames 不会覆盖，避免更外层 protected call 污染更内层失败现场。
+func WithTracebackFrames(err error, frames []CallFrame) error {
+	if err == nil || len(frames) == 0 {
+		// 没有错误或没有现场帧时无需修改错误链。
+		return err
+	}
+	var runtimeErr *RuntimeError
+	if !errors.As(err, &runtimeErr) || runtimeErr == nil {
+		// 非 RuntimeError 不强行包装，避免改变调用方原本错误分类。
+		return err
+	}
+	if len(runtimeErr.TracebackFrames) > 0 {
+		// 已保存更内层现场时保持原值。
+		return err
+	}
+	runtimeErr.TracebackFrames = append([]CallFrame(nil), frames...)
+	return err
 }
 
 // ErrorObject 从错误链中提取 Lua error object。
@@ -250,6 +276,12 @@ type State struct {
 	threads []*Thread
 	// activeVMs 保存当前正在执行的 Lua VM 寄存器窗口，用于 GC 扫描活动 local。
 	activeVMs []*VM
+	// pooledLuaVMCached 按寄存器窗口大小缓存可复用的 Lua VM。
+	pooledLuaVMCached map[int][]*VM
+	// pooledLuaVMFast 保存最近归还的 VM，命中同窗口热调用时绕过 map 池。
+	pooledLuaVMFast *VM
+	// callArgumentScratch 保存 Lua closure 调用参数临时区，避免热路径每次 CALL 分配小切片。
+	callArgumentScratch []Value
 	// userdatas 保存当前 State 注册的 userdata 实例，Close 时触发显式 finalizer。
 	userdatas []*Userdata
 	// finalizableTables 保存已登记 `__gc` 元方法的 table，完整 GC 时按逆序尝试终结。
@@ -270,6 +302,8 @@ type State struct {
 	luaMetamethodRunner LuaMetamethodRunner
 	// autoGCAllocations 记录自动 GC 运行态下的分配节拍，用于模拟分配压力触发 finalizer。
 	autoGCAllocations int64
+	// hasWeakTables 标记当前 State 曾经登记过弱表；为 true 时自动 GC 才需要周期性 weak sweep。
+	hasWeakTables bool
 	// gcRunning 标记 Lua 视角的自动 GC 是否运行。
 	gcRunning bool
 	// gcPause 保存 collectgarbage("setpause") 最近配置的暂停比例。
@@ -333,6 +367,91 @@ func NewStateWithOptions(options Options) *State {
 	return state
 }
 
+// BorrowLuaVMAfterReset 返回一个可复用的 Lua closure VM，优先命中 state 内部缓存。
+//
+// 缓存条目按寄存器窗口长度命中；无可用缓存时按借用 Proto 数据创建新 VM。返回值始终可直接
+// 复用于当前函数调用，调用方无需再执行二次构造。
+func (state *State) BorrowLuaVMAfterReset(registerCount int, constants []bytecode.Constant, upvalues []Value, protos []*bytecode.Proto, varargs []Value) *VM {
+	if state == nil || state.closed {
+		// state 未初始化或关闭时不复用缓存，直接按纯构造语义返回新 VM。
+		return NewVMWithBorrowedPrototypeData(registerCount, constants, upvalues, protos, varargs)
+	}
+
+	if fastVM := state.pooledLuaVMFast; fastVM != nil && len(fastVM.registers) == registerCount {
+		// 最近归还的同窗口 VM 优先复用，避开热路径 map 查询。
+		state.pooledLuaVMFast = nil
+		if fastVM.ResetForBorrowedPrototypeData(registerCount, constants, upvalues, protos, varargs) {
+			return fastVM
+		}
+	}
+
+	if state.pooledLuaVMCached != nil {
+		if pooledVMSlice, ok := state.pooledLuaVMCached[registerCount]; ok && len(pooledVMSlice) > 0 {
+			vm := pooledVMSlice[len(pooledVMSlice)-1]
+			state.pooledLuaVMCached[registerCount] = pooledVMSlice[:len(pooledVMSlice)-1]
+			if vm == nil {
+				// 污染条目直接丢弃并兜底创建新 VM，避免 nil deref。
+				return NewVMWithBorrowedPrototypeData(registerCount, constants, upvalues, protos, varargs)
+			}
+			if vm.ResetForBorrowedPrototypeData(registerCount, constants, upvalues, protos, varargs) {
+				return vm
+			}
+		}
+	}
+
+	// 兜底返回新 VM，确保异常恢复时不改变调用路径。
+	return NewVMWithBorrowedPrototypeData(registerCount, constants, upvalues, protos, varargs)
+}
+
+// ReturnLuaVMToPool 归还 VM 到 state 缓存，供后续同寄存器窗口大小复用。
+//
+// 返回 nil 或已关闭 State 时不参与缓存。当前实现不跨 State 共享缓存，避免协程与
+// 生命周期状态混用。
+func (state *State) ReturnLuaVMToPool(vm *VM) {
+	if state == nil || state.closed || vm == nil {
+		// 关闭或无效 State 不复用 VM，交给 GC 回收。
+		return
+	}
+
+	registerCount := len(vm.registers)
+	if registerCount <= 0 {
+		// 空寄存器 VM 无复用价值，避免将异常长度对象放入固定池。
+		return
+	}
+	if state.pooledLuaVMFast == nil {
+		// 单槽缓存优先承接最近 VM，优化同一函数反复 direct CALL 的场景。
+		state.pooledLuaVMFast = vm
+		return
+	}
+	if state.pooledLuaVMCached == nil {
+		state.pooledLuaVMCached = make(map[int][]*VM)
+	}
+	// 限制池容量避免异常调用场景将少见的极大窗口长期持有。
+	const maxPooledVMSPerBucket = 8
+	pooledVMSlice := state.pooledLuaVMCached[registerCount]
+	if len(pooledVMSlice) >= maxPooledVMSPerBucket {
+		// 超过配额的条目直接丢弃，保持内存上限。
+		return
+	}
+	state.pooledLuaVMCached[registerCount] = append(pooledVMSlice, vm)
+}
+
+// BorrowCallArgumentScratch 返回 State 级 Lua closure 调用参数临时区。
+//
+// 返回切片只允许调用方在进入被调 Lua closure 前短暂使用；被调 closure 初始化寄存器后不得继续持有。
+// 该方法不适用于 Go closure，因为 Go 回调可能在调用期间保留参数切片。
+func (state *State) BorrowCallArgumentScratch(count int) []Value {
+	if state == nil || state.closed || count <= 0 {
+		// 无效 State 或空参数时不需要临时区。
+		return nil
+	}
+	if cap(state.callArgumentScratch) < count {
+		// 参数数量超过已有容量时扩容一次，后续同等或更小调用复用。
+		state.callArgumentScratch = make([]Value, count)
+	}
+	return state.callArgumentScratch[:count]
+}
+
 // Close 关闭当前 Lua State 并释放可达根引用。
 //
 // 当前阶段引入显式 userdata 关闭协议，Close 会触发注册表内的 userdata finalizer，
@@ -352,6 +471,8 @@ func (state *State) Close() {
 	state.globals = nil
 	state.stack = nil
 	state.callFrames = nil
+	state.pooledLuaVMCached = nil
+	state.callArgumentScratch = nil
 	state.mainThread = nil
 	state.threads = nil
 	state.userdatas = nil
@@ -469,6 +590,18 @@ func (state *State) Running() (*Thread, bool) {
 
 	// 判断当前运行对象是否主线程。
 	return state.runningThread, state.runningThread.isMain
+}
+
+// HasCreatedCoroutines 返回当前 State 是否创建过主线程之外的 coroutine。
+//
+// 返回 true 表示调用现场可能需要保留 coroutine continuation 链，Lua 调用热路径应避免使用会裁剪
+// 调用现场的优化路径。State 关闭或 nil 时返回 false。
+func (state *State) HasCreatedCoroutines() bool {
+	if state == nil || state.closed {
+		// 无效或关闭 State 没有可恢复的 coroutine 图。
+		return false
+	}
+	return len(state.threads) > 1
 }
 
 // IsYieldable 返回当前运行上下文是否允许 coroutine.yield。
@@ -900,6 +1033,26 @@ func (state *State) ReplaceCurrentCallFrame(frame CallFrame) error {
 	return nil
 }
 
+// UpdateCurrentFramePC 仅更新当前调用帧的执行 PC。
+//
+// pc 是当前 Lua Proto.Code 的 0-based 指令下标。该方法用于 VM 热路径同步 debug/traceback
+// 可见的当前位置，避免每条指令替换完整 CallFrame。State 已关闭返回 ErrClosedState，当前
+// 没有调用帧返回 ErrCallFrameUnderflow。
+func (state *State) UpdateCurrentFramePC(pc int) error {
+	if state.closed {
+		// 关闭后的 State 不允许继续修改调用帧栈。
+		return ErrClosedState
+	}
+	if len(state.callFrames) == 0 {
+		// 空调用帧栈没有可更新的当前帧。
+		return ErrCallFrameUnderflow
+	}
+
+	// 只写入 PC 字段，保留 Name、NameWhat、TailCall、Varargs 等帧元数据。
+	state.callFrames[len(state.callFrames)-1].CurrentPC = pc
+	return nil
+}
+
 // PushActiveVM 记录正在执行的 Lua VM。
 //
 // vm 必须来自当前 State 的 Lua closure 执行循环；该记录让 collectgarbage 能扫描活动寄存器中的 local。
@@ -992,8 +1145,9 @@ func (state *State) ProtectedCall(call ProtectedCallFunc) (err error) {
 
 	if callErr := call(state); callErr != nil {
 		// 回调显式返回错误时恢复进入前边界，把错误交给调用方继续包装或传播。
+		tracebackFrames := state.TracebackFrames()
 		state.restoreProtectedCallBoundary(stackTop, callDepth)
-		return ensureRuntimeError(callErr)
+		return WithTracebackFrames(ensureRuntimeError(callErr), tracebackFrames)
 	}
 
 	// 成功路径保留回调产生的栈和调用帧变化，供后续调用收尾逻辑处理返回值。
