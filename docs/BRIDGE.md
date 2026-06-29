@@ -63,7 +63,22 @@ Go 调 Lua 需要支持：
 - `*runtime.Userdata` -> Lua userdata，并在 State 可用时注册到关闭路径。
 - Go struct 默认通过代理暴露，不自动深拷贝。
 
-不做隐式反射绑定作为首版默认行为。自动绑定需要显式启用，并记录可见方法、字段、错误策略和性能风险。
+不做隐式反射绑定作为默认行为。自动绑定需要显式调用 `bridge.BindReflectFunction`、`bridge.RegisterReflectFunction` 或 `bridge.BindReflectStruct`，并记录可见方法、字段、错误策略和性能风险。
+
+## Reflection 自动绑定
+
+reflection 自动绑定是显式启用能力，不会替代 `ObjectBinding` 的可审计显式绑定路径：
+
+- `bridge.BindReflectFunction` 将 Go 函数包装为 Lua callable，支持 bool、整数、浮点、string、`[]byte`、`lua.Value`、对象代理参数和对应返回值转换。
+- 函数和方法返回的非 nil `error` 会转换为 Lua error object；nil `error` 不进入 Lua 多返回值。
+- Go panic 会在 bridge 边界 recover，并按现有 panic-to-error 规则转换为 Lua runtime error。
+- `bridge.BindReflectStruct` 只接受非 nil struct 或 struct 指针；nil receiver 会在绑定阶段拒绝。
+- 字段只暴露导出字段，支持嵌入字段提升；不可导出字段不会生成 getter 或 setter。
+- 字段 tag 默认读取 `lua`：`lua:"name"` 重命名，`lua:"-"` 跳过，`lua:"name,readonly"` 只读。
+- struct 指针可写回可设置字段；非指针 struct 或不可设置字段按只读处理。
+- 方法只暴露导出方法；struct 指针绑定可同时暴露值 receiver 与指针 receiver 方法。
+- struct、struct 指针和方法返回对象会转换为 Lua 对象代理，并用 Go 指针 identity 缓存代理，避免 self 引用和循环引用造成递归展开。
+- 反射转换只覆盖明确支持的基础类型和对象代理；slice 当前只支持 `[]byte` 与 Lua string 互转，map/table 深拷贝不作为自动绑定默认能力。
 
 `ValueOf` 不隐式展开 `map`、`slice` 或任意 struct。需要暴露结构化数据时，应使用 `TableBinding` 显式声明 table 字段，或使用 `ObjectBinding` 显式声明对象 getter、setter 和 method。
 
@@ -129,7 +144,7 @@ err := bridge.RegisterModulePreload(state, bridge.ModuleBinding{
 
 对象代理使用 table 或 userdata 表示：
 
-- 首版使用显式 `bridge.ObjectBinding`，不通过反射默认暴露 Go struct 字段或方法。
+- 默认推荐使用显式 `bridge.ObjectBinding`；需要快速暴露 Go struct/function 时可显式启用 reflection 自动绑定。
 - 对 Lua 侧公开的值是 table，隐藏字段 `__userdata` 保存 `*runtime.Userdata`，userdata 负载指回 `*bridge.ObjectProxy`。
 - `__index` 按方法优先、getter 次之的顺序转发 string key；未命中返回 Lua nil。
 - `__newindex` 只允许写入显式 setter，未声明 setter 的属性返回 Lua error，避免 Lua 侧污染代理表。

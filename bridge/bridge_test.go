@@ -9,6 +9,48 @@ import (
 	"github.com/zing/go-lua-vm/runtime"
 )
 
+// reflectEmbeddedSample 用于验证 reflection 绑定会提升嵌入字段。
+type reflectEmbeddedSample struct {
+	// Code 表示通过 tag 重命名后暴露给 Lua 的嵌入字段。
+	Code string `lua:"code"`
+}
+
+// reflectBindingSample 用于验证 reflection 自动绑定字段、方法和循环引用。
+type reflectBindingSample struct {
+	reflectEmbeddedSample
+	// Name 表示可通过 tag 重命名读写的导出字段。
+	Name string `lua:"display_name"`
+	// Count 表示按 Go 字段名暴露的导出整数字段。
+	Count int64
+	// ReadOnly 表示只读导出字段，Lua 侧不能写回。
+	ReadOnly string `lua:"readonly,readonly"`
+	// Hidden 表示被 tag 显式跳过的导出字段。
+	Hidden string `lua:"-"`
+	// Next 表示自引用字段，用于验证循环引用缓存。
+	Next *reflectBindingSample `lua:"next"`
+	// secret 表示不可导出字段，reflection 自动绑定必须拒绝暴露。
+	secret string
+}
+
+// Label 使用值 receiver 验证 value receiver 方法会暴露给 Lua。
+func (sample reflectBindingSample) Label(prefix string) string {
+	// 拼接当前名称，便于测试确认参数转换和 receiver 读取。
+	return prefix + ":" + sample.Name
+}
+
+// Add 使用指针 receiver 验证 pointer receiver 方法会暴露给 Lua 并可修改对象。
+func (sample *reflectBindingSample) Add(delta int64) (int64, error) {
+	// 修改 Count 字段并返回新值，验证方法副作用和多返回错误语义。
+	sample.Count += delta
+	return sample.Count, nil
+}
+
+// Fail 返回 error，用于验证反射方法错误会转换为 Lua error。
+func (sample *reflectBindingSample) Fail() error {
+	// 返回普通 Go error，bridge 应保留错误链和 Lua error object。
+	return errors.New("reflect method failure")
+}
+
 // TestRegisterFunctionReadsArgsAndPushesReturns 验证 Go bridge 函数注册、参数读取和返回值压入。
 //
 // bridge.Register 必须把 Go 回调注册为 Lua callable；回调通过 Context 读取参数并压入多返回值。
@@ -574,6 +616,232 @@ func TestBindStructRejectsInvalidInput(t *testing.T) {
 	if _, err := BindStruct(state, ObjectBinding{}); err == nil {
 		// nil Object 必须被拒绝。
 		t.Fatalf("BindStruct nil object should fail")
+	}
+}
+
+// TestBindReflectFunctionConvertsValuesErrorsAndPanic 验证 reflection 函数绑定的转换、error 和 panic 边界。
+//
+// 自动绑定函数必须支持参数转换、多返回值、error 返回和 panic 恢复，并且可注册为 Lua callable。
+func TestBindReflectFunctionConvertsValuesErrorsAndPanic(t *testing.T) {
+	// 创建独立 State，避免全局注册影响其他测试。
+	state := lua.NewState()
+	defer state.Close()
+	sentinel := errors.New("reflect failure")
+
+	if err := RegisterReflectFunction(state, "join", func(prefix string, count int64) (string, int64, error) {
+		// 返回 string、integer 和 nil error，验证多返回值转换。
+		return prefix + ":", count + 1, nil
+	}); err != nil {
+		// 有效反射函数注册不应失败。
+		t.Fatalf("RegisterReflectFunction join failed: %v", err)
+	}
+	joinValue, err := lua.GetGlobal(state, "join")
+	if err != nil {
+		// 注册后的全局函数必须可读取。
+		t.Fatalf("GetGlobal join failed: %v", err)
+	}
+	joinResults, err := lua.Call(state, joinValue, runtime.StringValue("n"), runtime.IntegerValue(6))
+	if err != nil {
+		// 参数和返回值可转换时调用不应失败。
+		t.Fatalf("join call failed: %v", err)
+	}
+	if len(joinResults) != 2 || joinResults[0].String != "n:" || joinResults[1].Integer != 7 {
+		// 多返回值必须保留顺序和类型。
+		t.Fatalf("join results = %#v", joinResults)
+	}
+
+	errorValue, err := BindReflectFunction(state, func() (string, error) {
+		// 返回非 nil error，验证错误链路。
+		return "", sentinel
+	})
+	if err != nil {
+		// 有效 error 返回签名不应包装失败。
+		t.Fatalf("BindReflectFunction error failed: %v", err)
+	}
+	_, err = lua.Call(state, errorValue)
+	if !errors.Is(err, sentinel) {
+		// error 返回值必须转换为 Lua error 并保留原始错误链。
+		t.Fatalf("error call = %v, want sentinel", err)
+	}
+
+	panicValue, err := BindReflectFunction(state, func() {
+		// panic 用于验证反射调用边界 recover。
+		panic("reflect boom")
+	})
+	if err != nil {
+		// 有效 panic 函数包装不应失败。
+		t.Fatalf("BindReflectFunction panic failed: %v", err)
+	}
+	_, err = lua.Call(state, panicValue)
+	if err == nil || lua.ErrorObject(err).String != "reflect boom" {
+		// panic 必须转换为 Lua error object。
+		t.Fatalf("panic call error = %v object=%#v", err, lua.ErrorObject(err))
+	}
+}
+
+// TestBindReflectStructFieldsMethodsAndCycles 验证 reflection struct 自动绑定的字段、方法和循环引用。
+//
+// 自动绑定必须支持导出字段读写、tag 重命名、嵌入字段、值和指针 receiver 方法以及 self 引用缓存。
+func TestBindReflectStructFieldsMethodsAndCycles(t *testing.T) {
+	// 创建独立 State 和自引用对象，覆盖循环引用读取。
+	state := lua.NewState()
+	defer state.Close()
+	object := &reflectBindingSample{
+		reflectEmbeddedSample: reflectEmbeddedSample{Code: "A1"},
+		Name:                  "lua",
+		Count:                 2,
+		ReadOnly:              "locked",
+		Hidden:                "hidden",
+		secret:                "secret",
+	}
+	object.Next = object
+
+	proxyValue, err := BindReflectStruct(state, object)
+	if err != nil {
+		// 有效 struct 指针绑定不应失败。
+		t.Fatalf("BindReflectStruct failed: %v", err)
+	}
+	proxyTable := proxyValue.Ref.(*runtime.Table)
+
+	nameValue, err := proxyTable.Get(runtime.StringValue("display_name"))
+	if err != nil {
+		// tag 重命名字段读取不应失败。
+		t.Fatalf("get display_name failed: %v", err)
+	}
+	if nameValue.Kind != lua.KindString || nameValue.String != "lua" {
+		// 读取结果必须来自 Go 字段当前值。
+		t.Fatalf("display_name = %#v", nameValue)
+	}
+	if err := proxyTable.Set(runtime.StringValue("display_name"), runtime.StringValue("go")); err != nil {
+		// 可写导出字段必须能从 Lua 写回 Go 对象。
+		t.Fatalf("set display_name failed: %v", err)
+	}
+	if object.Name != "go" {
+		// setter 必须修改原始 Go 对象，而不是代理副本。
+		t.Fatalf("object.Name = %q", object.Name)
+	}
+
+	codeValue, err := proxyTable.Get(runtime.StringValue("code"))
+	if err != nil {
+		// 嵌入字段读取不应失败。
+		t.Fatalf("get embedded code failed: %v", err)
+	}
+	if codeValue.Kind != lua.KindString || codeValue.String != "A1" {
+		// 嵌入字段必须按 tag 名暴露。
+		t.Fatalf("code = %#v", codeValue)
+	}
+
+	labelValue, err := proxyTable.Get(runtime.StringValue("Label"))
+	if err != nil {
+		// 值 receiver 方法读取不应失败。
+		t.Fatalf("get Label failed: %v", err)
+	}
+	labelResults, err := lua.Call(state, labelValue, proxyValue, runtime.StringValue("prefix"))
+	if err != nil {
+		// 值 receiver 方法调用不应失败。
+		t.Fatalf("Label call failed: %v", err)
+	}
+	if len(labelResults) != 1 || labelResults[0].String != "prefix:go" {
+		// 方法返回值必须完成参数和返回值转换。
+		t.Fatalf("Label results = %#v", labelResults)
+	}
+
+	addValue, err := proxyTable.Get(runtime.StringValue("Add"))
+	if err != nil {
+		// 指针 receiver 方法读取不应失败。
+		t.Fatalf("get Add failed: %v", err)
+	}
+	addResults, err := lua.Call(state, addValue, proxyValue, runtime.IntegerValue(5))
+	if err != nil {
+		// 指针 receiver 方法调用不应失败。
+		t.Fatalf("Add call failed: %v", err)
+	}
+	if len(addResults) != 1 || addResults[0].Integer != 7 || object.Count != 7 {
+		// 指针 receiver 方法必须能修改原始对象并返回新值。
+		t.Fatalf("Add results=%#v count=%d", addResults, object.Count)
+	}
+	failValue, err := proxyTable.Get(runtime.StringValue("Fail"))
+	if err != nil {
+		// error 返回方法读取不应失败。
+		t.Fatalf("get Fail failed: %v", err)
+	}
+	_, err = lua.Call(state, failValue, proxyValue)
+	if err == nil || lua.ErrorObject(err).String != "reflect method failure" {
+		// 方法返回的 Go error 必须转换为 Lua error object。
+		t.Fatalf("Fail call error=%v object=%#v", err, lua.ErrorObject(err))
+	}
+
+	nextValue, err := proxyTable.Get(runtime.StringValue("next"))
+	if err != nil {
+		// 自引用字段读取不应失败。
+		t.Fatalf("get next failed: %v", err)
+	}
+	if nextValue.Kind != lua.KindTable || nextValue.Ref != proxyValue.Ref {
+		// 循环引用必须返回同一个代理表，避免无限递归和 identity 丢失。
+		t.Fatalf("next value = %#v proxy=%#v", nextValue, proxyValue)
+	}
+
+	nameOfValue, err := BindReflectFunction(state, func(sample *reflectBindingSample) string {
+		// 接收对象代理恢复出的 Go 指针，验证 struct 参数转换。
+		return sample.Name
+	})
+	if err != nil {
+		// 接收 struct 指针的函数应可自动绑定。
+		t.Fatalf("BindReflectFunction object arg failed: %v", err)
+	}
+	nameOfResults, err := lua.Call(state, nameOfValue, proxyValue)
+	if err != nil {
+		// 对象代理参数应能转换回原始 Go 指针。
+		t.Fatalf("object arg call failed: %v", err)
+	}
+	if len(nameOfResults) != 1 || nameOfResults[0].String != "go" {
+		// 对象参数转换后函数必须读取到当前 Go 对象状态。
+		t.Fatalf("object arg results = %#v", nameOfResults)
+	}
+}
+
+// TestBindReflectStructRejectsHiddenNilAndReadOnly 验证反射绑定的权限拒绝和 nil receiver 边界。
+//
+// 不可导出字段、tag 跳过字段、只读字段和 nil receiver 都必须返回稳定错误或不可见结果。
+func TestBindReflectStructRejectsHiddenNilAndReadOnly(t *testing.T) {
+	// 创建独立 State 和对象，专注验证拒绝路径。
+	state := lua.NewState()
+	defer state.Close()
+	object := &reflectBindingSample{Name: "lua", ReadOnly: "locked", Hidden: "hidden", secret: "secret"}
+	proxyValue, err := BindReflectStruct(state, object)
+	if err != nil {
+		// 有效对象绑定不应失败。
+		t.Fatalf("BindReflectStruct failed: %v", err)
+	}
+	proxyTable := proxyValue.Ref.(*runtime.Table)
+
+	secretValue, err := proxyTable.Get(runtime.StringValue("secret"))
+	if err != nil {
+		// 读取不存在字段不应触发错误。
+		t.Fatalf("get secret failed: %v", err)
+	}
+	if !secretValue.IsNil() {
+		// 不可导出字段必须不可见。
+		t.Fatalf("secret should be nil, got %#v", secretValue)
+	}
+	hiddenValue, err := proxyTable.Get(runtime.StringValue("Hidden"))
+	if err != nil {
+		// 读取 tag 跳过字段不应触发错误。
+		t.Fatalf("get Hidden failed: %v", err)
+	}
+	if !hiddenValue.IsNil() {
+		// tag 跳过字段必须不可见。
+		t.Fatalf("Hidden should be nil, got %#v", hiddenValue)
+	}
+	if err := proxyTable.Set(runtime.StringValue("readonly"), runtime.StringValue("open")); err == nil {
+		// readonly 字段不能生成 setter，写入必须被代理拒绝。
+		t.Fatalf("readonly set should fail")
+	}
+
+	var nilObject *reflectBindingSample
+	if _, err := BindReflectStruct(state, nilObject); err == nil {
+		// nil receiver 必须被拒绝，避免后续字段或方法访问 panic。
+		t.Fatalf("nil reflect object should fail")
 	}
 }
 
