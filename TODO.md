@@ -793,11 +793,11 @@
 - [ ] 实现 Go `fs.FS` 虚拟文件系统接入：支持 `loadfile`、`dofile`、`require` Lua 文件 loader 读取虚拟文件。
 - [ ] 实现 Go `fs.FS` 虚拟文件系统接入：支持只读 `io.open`、`io.lines`、`file:read`、`file:lines` 的虚拟文件读取路径。
 - [ ] 为 Go `fs.FS` 虚拟文件系统补测试：覆盖嵌入 FS、子目录模块、路径穿越拒绝、宿主权限关闭、虚拟文件优先级和错误文本。
-- [ ] 设计 `require` 动态库 loader 跨平台策略：Linux/macOS 支持 `.so`/`.dylib` 候选，Windows 明确 `.dll` 运行期加载与 `.lib` 链接期/import library 的支持边界。
-- [ ] 实现可选动态库 loader 接入点：默认 `CGO_ENABLED=0` 构建不绑定外部动态库，平台相关实现必须通过显式 build tag、插件或宿主适配层启用。
-- [ ] 实现 `package.loadlib` 可选动态库 loader：支持按 filename/symbol 返回 Lua 可调用 loader，并保持默认无 loader 时的兼容错误三返回。
-- [ ] 实现 `package.searchers` 动态库搜索器可选接入：按 `package.cpath` 展开候选路径，Linux/macOS/Windows 分平台生成诊断文本。
-- [ ] 为动态库 loader 补测试：默认无 CGO 构建下确认不启用；宿主覆盖 loader 可执行；平台候选扩展名和错误文本稳定。
+- [x] 设计 `require` 动态库 loader 跨平台策略：Linux/macOS 支持 `.so`/`.dylib` 候选，Windows 明确 `.dll` 运行期加载与 `.lib` 链接期/import library 的支持边界。
+- [x] 实现可选动态库 loader 接入点：默认 `CGO_ENABLED=0` 构建不绑定外部动态库，平台相关实现必须通过显式 build tag、插件或宿主适配层启用。
+- [x] 实现 `package.loadlib` 可选动态库 loader：支持按 filename/symbol 返回 Lua 可调用 loader，并保持默认无 loader 时的兼容错误三返回。
+- [x] 实现 `package.searchers` 动态库搜索器可选接入：按 `package.cpath` 展开候选路径，Linux/macOS/Windows 分平台生成诊断文本。
+- [x] 为动态库 loader 补测试：默认无 CGO 构建下确认不启用；宿主覆盖 loader 可执行；平台候选扩展名和错误文本稳定。
 - [ ] 生成 Go reflection 自动绑定方案：定义可见性规则、命名规则、tag 规则、方法 receiver 支持、字段读写权限、错误语义和性能边界。
 - [ ] 实现 Go reflection 自动扫描函数：支持导出函数自动转 Lua callable，覆盖参数转换、多返回值、error 返回和 panic 恢复。
 - [ ] 实现 Go reflection 自动扫描 struct：支持导出字段读写、导出方法调用、指针和值 receiver、嵌入字段和 tag 重命名。

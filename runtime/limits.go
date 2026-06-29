@@ -30,6 +30,12 @@ type Options struct {
 	AllowEnvironment bool
 	// AllowProcess 表示 io.popen 和 os.execute 是否允许启动宿主进程。
 	AllowProcess bool
+	// PackageDynamicLibraryLoader 保存 package.loadlib 使用的可选动态库 loader。
+	//
+	// nil 表示默认 CGO-free 构建不启用动态库加载；非 nil 时由宿主负责按 filename 和 symbol
+	// 打开外部动态库并返回 Lua 可调用函数。该回调不要求也不引入 CGO，宿主可自行选择插件、
+	// 系统动态库、CGO 或纯 Go 适配层。
+	PackageDynamicLibraryLoader func(filename string, symbol string) (Value, error)
 	// SyntaxExtensions 保存源码编译阶段启用的可选语法扩展集合。
 	SyntaxExtensions extensions.SyntaxSet
 	// SyntaxExtensionsSet 表示调用方是否显式设置过 SyntaxExtensions。

@@ -1600,7 +1600,8 @@ func packageLuaFileLoader(state *State) packagelib.LuaFileLoader {
 // state 必须非 nil；require 命中 package.preload 中的 Lua closure 时，通过当前 State 的 Call
 // 执行 loader，保持 loader 参数、错误传播和 package.loaded 写回语义与 Lua 5.3 一致。
 func openPackageWithStateCaller(state *State) error {
-	environment := packagelib.NewEnvironmentWithLuaFileLoader(packageLuaFileLoader(state))
+	options := state.Options()
+	environment := packagelib.NewEnvironmentWithLoaders(packageLuaFileLoader(state), packagelib.DynamicLibraryLoader(options.PackageDynamicLibraryLoader))
 	environment.SetLoaderCaller(func(loader runtime.Value, args ...runtime.Value) ([]runtime.Value, error) {
 		// Go 和 Lua closure loader 都复用 lua.Call，避免 package 包直接依赖执行循环。
 		return Call(state, loader, args...)

@@ -376,6 +376,65 @@ func TestLoadLibDisabled(t *testing.T) {
 	}
 }
 
+// TestLoadLibUsesDynamicLibraryLoader 验证 package.loadlib 可通过宿主 loader 返回 Lua 可调用函数。
+//
+// 默认构建仍不引入 CGO；该用例用纯 Go closure 模拟宿主已经完成动态库打开和符号解析。
+func TestLoadLibUsesDynamicLibraryLoader(t *testing.T) {
+	// 构造带宿主动态库 loader 的 package 环境。
+	callCount := 0
+	environment := NewEnvironmentWithLoaders(nil, func(filename string, symbol string) (runtime.Value, error) {
+		if filename != "libdemo.dylib" || symbol != "luaopen_demo" {
+			// 参数不符合预期时返回带 init 分类的兼容错误。
+			return runtime.NilValue(), DynamicLibraryError{Category: "init", Message: "unexpected dynamic library request"}
+		}
+		callCount++
+		loader := runtime.GoResultsFunction(func(args ...runtime.Value) ([]runtime.Value, error) {
+			// 模拟 luaopen_demo 返回模块值。
+			return []runtime.Value{runtime.StringValue("dynamic-demo")}, nil
+		})
+		return runtime.ReferenceValue(runtime.KindGoClosure, loader), nil
+	})
+
+	values, err := environment.LoadLib(runtime.StringValue("libdemo.dylib"), runtime.StringValue("luaopen_demo"))
+	if err != nil {
+		// 宿主 loader 成功时 loadlib 不应返回 Go error。
+		t.Fatalf("LoadLib dynamic loader failed: %v", err)
+	}
+	if len(values) != 1 || values[0].Kind != runtime.KindGoClosure {
+		// 成功路径必须只返回 Lua callable。
+		t.Fatalf("LoadLib dynamic values = %#v", values)
+	}
+	results, err := callGoResults(values[0])
+	if err != nil {
+		// 返回的 loader 必须可执行。
+		t.Fatalf("dynamic loader callable failed: %v", err)
+	}
+	if len(results) != 1 || results[0].String != "dynamic-demo" || callCount != 1 {
+		// loader 结果和调用次数必须稳定。
+		t.Fatalf("dynamic loader results=%#v callCount=%d", results, callCount)
+	}
+}
+
+// TestLoadLibKeepsTripleReturnForDynamicLoaderFailure 验证宿主 loader 失败时保持兼容三返回。
+//
+// DynamicLibraryError 允许宿主明确 absent/open/init 分类；普通 error 会被归类为 open。
+func TestLoadLibKeepsTripleReturnForDynamicLoaderFailure(t *testing.T) {
+	environment := NewEnvironmentWithLoaders(nil, func(filename string, symbol string) (runtime.Value, error) {
+		// 模拟符号存在但初始化失败。
+		return runtime.NilValue(), DynamicLibraryError{Category: "init", Message: "missing symbol " + symbol}
+	})
+
+	values, err := environment.LoadLib(runtime.StringValue("libdemo.so"), runtime.StringValue("luaopen_demo"))
+	if err != nil {
+		// 动态库加载失败应通过返回值表达，不应抛出 Lua error。
+		t.Fatalf("LoadLib dynamic failure returned error: %v", err)
+	}
+	if len(values) != 3 || !values[0].IsNil() || values[1].String != "missing symbol luaopen_demo" || values[2].String != "init" {
+		// 失败路径必须保持 nil,error,where 三返回。
+		t.Fatalf("LoadLib dynamic failure values = %#v", values)
+	}
+}
+
 // TestCLoadingPolicyDocumentsUnsupportedDynamicLibraries 验证内置 C 动态库 loader 的固定策略。
 //
 // 本项目默认构建纯 Go 且禁用 CGO，因此默认 loadlib、C searcher 和 C root searcher 都必须明确不支持。
@@ -408,6 +467,34 @@ func TestCLoadingPolicyDocumentsUnsupportedDynamicLibraries(t *testing.T) {
 	if len(rootResults) != 1 || !strings.Contains(rootResults[0].String, CLoadingPolicy()) {
 		// C root searcher 必须返回集中策略文本。
 		t.Fatalf("CRootSearcher result = %#v", rootResults)
+	}
+}
+
+// TestDefaultCPathDocumentsPlatformCandidates 验证动态库默认候选和 Windows .lib 边界。
+//
+// Linux/macOS 默认候选包含 .so 与 .dylib；Windows 只把 .dll 作为运行期加载候选，并明确 .lib
+// 是链接期/import library，不是 require 运行期路径。
+func TestDefaultCPathDocumentsPlatformCandidates(t *testing.T) {
+	// Unix 默认 cpath 必须同时覆盖 .so 和 .dylib。
+	unixCPath := DefaultCPathForGOOS("linux")
+	if !strings.Contains(unixCPath, "?.so") || !strings.Contains(unixCPath, "?.dylib") {
+		// Linux/macOS 候选必须包含两类常见动态库后缀。
+		t.Fatalf("unix cpath = %q", unixCPath)
+	}
+	darwinCPath := DefaultCPathForGOOS("darwin")
+	if !strings.Contains(darwinCPath, "?.so") || !strings.Contains(darwinCPath, "?.dylib") {
+		// macOS 也必须保留 .so 兼容候选和 .dylib 原生候选。
+		t.Fatalf("darwin cpath = %q", darwinCPath)
+	}
+	windowsCPath := DefaultCPathForGOOS("windows")
+	if !strings.Contains(windowsCPath, "?.dll") || strings.Contains(windowsCPath, "?.lib") {
+		// Windows 运行期 require 只搜索 .dll，不搜索 .lib。
+		t.Fatalf("windows cpath = %q", windowsCPath)
+	}
+	windowsNote := DynamicLibraryPlatformNote("windows")
+	if !strings.Contains(windowsNote, ".dll") || !strings.Contains(windowsNote, ".lib/import library") {
+		// Windows 诊断必须明确运行期和链接期边界。
+		t.Fatalf("windows note = %q", windowsNote)
 	}
 }
 
@@ -500,6 +587,95 @@ func TestCSearcherReportsCPathCandidates(t *testing.T) {
 	if !strings.Contains(values[0].String, "C loader disabled") {
 		// 诊断文本仍需明确当前纯 Go 禁用动态 C loader。
 		t.Fatalf("CSearcher message missing disabled policy: %q", values[0].String)
+	}
+}
+
+// TestCSearcherUsesDynamicLibraryLoader 验证 C searcher 会按 package.cpath 候选调用宿主 loader。
+//
+// searcher 需要生成 luaopen_* 符号，返回 loader 和命中文件名 loader data，供 require 后续执行。
+func TestCSearcherUsesDynamicLibraryLoader(t *testing.T) {
+	tempDir := t.TempDir()
+	modulePath := filepath.Join(tempDir, "demo", "mod.dylib")
+	if err := os.MkdirAll(filepath.Dir(modulePath), 0o700); err != nil {
+		// 测试目录创建不应失败。
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+	if err := os.WriteFile(modulePath, []byte("not a real dylib\n"), 0o600); err != nil {
+		// 候选文件只用于验证路径展开，宿主 loader 不会真实打开。
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	var requests []string
+	environment := NewEnvironmentWithLoaders(nil, func(filename string, symbol string) (runtime.Value, error) {
+		// 记录 searcher 传入的候选和符号。
+		requests = append(requests, filename+":"+symbol)
+		if filename != modulePath || symbol != "luaopen_demo_mod" {
+			// 非命中候选按 open 失败处理，searcher 应继续尝试。
+			return runtime.NilValue(), DynamicLibraryError{Category: "open", Message: "candidate not found"}
+		}
+		loader := runtime.GoResultsFunction(func(args ...runtime.Value) ([]runtime.Value, error) {
+			// 模拟动态库模块入口返回模块值。
+			return []runtime.Value{runtime.StringValue("loaded from " + filename)}, nil
+		})
+		return runtime.ReferenceValue(runtime.KindGoClosure, loader), nil
+	})
+	environment.Table().RawSetString("cpath", runtime.StringValue(filepath.Join(tempDir, "missing", "?.so")+";"+filepath.Join(tempDir, "?.dylib")))
+
+	values, err := environment.CSearcher(runtime.StringValue("demo.mod"))
+	if err != nil {
+		// 合法模块名不应失败。
+		t.Fatalf("CSearcher dynamic failed: %v", err)
+	}
+	if len(values) != 2 || values[0].Kind != runtime.KindGoClosure || values[1].String != modulePath {
+		// searcher 成功路径必须返回 loader 和命中文件名。
+		t.Fatalf("CSearcher dynamic values = %#v", values)
+	}
+	results, err := callGoResults(values[0], runtime.StringValue("demo.mod"), values[1])
+	if err != nil {
+		// 返回的 loader 必须可执行。
+		t.Fatalf("CSearcher loader failed: %v", err)
+	}
+	if len(results) != 1 || results[0].String != "loaded from "+modulePath {
+		// loader 结果必须来自命中候选。
+		t.Fatalf("CSearcher loader results = %#v", results)
+	}
+	if len(requests) != 2 || requests[1] != modulePath+":luaopen_demo_mod" {
+		// searcher 必须按 cpath 顺序尝试候选并生成稳定符号。
+		t.Fatalf("dynamic requests = %#v", requests)
+	}
+}
+
+// TestCRootSearcherUsesRootCandidateAndFullSymbol 验证 C root searcher 的候选和符号规则。
+//
+// 对 demo.mod，候选路径使用 demo，符号仍使用完整模块名 luaopen_demo_mod。
+func TestCRootSearcherUsesRootCandidateAndFullSymbol(t *testing.T) {
+	tempDir := t.TempDir()
+	rootPath := filepath.Join(tempDir, "demo.so")
+	if err := os.WriteFile(rootPath, []byte("not a real so\n"), 0o600); err != nil {
+		// 测试文件写入不应失败。
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	environment := NewEnvironmentWithLoaders(nil, func(filename string, symbol string) (runtime.Value, error) {
+		if filename != rootPath || symbol != "luaopen_demo_mod" {
+			// root searcher 必须用根模块找文件，用完整模块名找符号。
+			return runtime.NilValue(), DynamicLibraryError{Category: "open", Message: "unexpected root request"}
+		}
+		loader := runtime.GoResultsFunction(func(args ...runtime.Value) ([]runtime.Value, error) {
+			return []runtime.Value{runtime.StringValue(symbol)}, nil
+		})
+		return runtime.ReferenceValue(runtime.KindGoClosure, loader), nil
+	})
+	environment.Table().RawSetString("cpath", runtime.StringValue(filepath.Join(tempDir, "?.so")))
+
+	values, err := environment.CRootSearcher(runtime.StringValue("demo.mod"))
+	if err != nil {
+		// 合法模块名不应失败。
+		t.Fatalf("CRootSearcher dynamic failed: %v", err)
+	}
+	if len(values) != 2 || values[0].Kind != runtime.KindGoClosure || values[1].String != rootPath {
+		// C root searcher 成功路径必须返回 root 文件名。
+		t.Fatalf("CRootSearcher dynamic values = %#v", values)
 	}
 }
 

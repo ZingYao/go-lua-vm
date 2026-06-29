@@ -1037,6 +1037,46 @@ func TestPackageLoadLibCanBeOverriddenByHostLoader(t *testing.T) {
 	}
 }
 
+// TestPackageDynamicLibraryLoaderOption 验证 lua.Options 可为 OpenLibs 注入动态库 loader。
+//
+// 该入口保持默认构建无 CGO；宿主通过纯 Go 回调接管 package.loadlib 的 filename/symbol 解析。
+func TestPackageDynamicLibraryLoaderOption(t *testing.T) {
+	// 创建带动态库 loader 的 State，模拟宿主程序接入平台相关加载层。
+	loadCount := 0
+	state := NewStateWithOptions(Options{
+		PackageDynamicLibraryLoader: func(filename string, symbol string) (runtime.Value, error) {
+			if filename != "libdemo.dylib" || symbol != "luaopen_demo" {
+				// 参数不符合预期时返回普通错误，loadlib 会转换为 nil,error,open。
+				return runtime.NilValue(), fmt.Errorf("unexpected dynamic library request")
+			}
+			loadCount++
+			loader := runtime.GoResultsFunction(func(args ...runtime.Value) ([]runtime.Value, error) {
+				// 模拟动态库入口返回模块值。
+				return []runtime.Value{runtime.StringValue("options-dynamic-loader")}, nil
+			})
+			return runtime.ReferenceValue(runtime.KindGoClosure, loader), nil
+		},
+	})
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库注册失败时无法验证 Options 注入链路。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+
+	err := DoString(state, `
+		local loader = assert(package.loadlib("libdemo.dylib", "luaopen_demo"))
+		assert(loader() == "options-dynamic-loader")
+	`)
+	if err != nil {
+		// Lua 侧必须能通过 Options 注入的 loader 获取动态库入口。
+		t.Fatalf("DoString options dynamic loader failed: %v", err)
+	}
+	if loadCount != 1 {
+		// loader 必须只被 package.loadlib 调用一次。
+		t.Fatalf("options dynamic loader call count = %d, want 1", loadCount)
+	}
+}
+
 // TestPushAndToWrappers 验证 lua 包栈压入和类型转换 API。
 //
 // Push 系列必须把值写入 State 栈；To 系列必须按 Lua 5.3 基础类型语义读取栈值。

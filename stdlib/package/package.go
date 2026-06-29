@@ -7,8 +7,10 @@
 package packagelib
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	goRuntime "runtime"
 	"strings"
 
 	"github.com/zing/go-lua-vm/runtime"
@@ -19,8 +21,10 @@ const (
 	DefaultConfig = "/\n;\n?\n!\n-\n"
 	// DefaultPath 是当前纯 Go package.path 默认模板。
 	DefaultPath = "./?.lua;./?/init.lua"
-	// DefaultCPath 是当前无 CGO 策略下保留的 Lua 5.3 兼容 C 模块搜索模板。
-	DefaultCPath = "./?.so;./lua/?.so"
+	// DefaultCPath 是当前无 CGO 策略下保留的 Unix 风格 C 模块搜索模板。
+	DefaultCPath = "./?.so;./?.dylib;./lua/?.so;./lua/?.dylib"
+	// DefaultWindowsCPath 是 Windows 运行期动态库搜索模板。
+	DefaultWindowsCPath = "./?.dll;./lua/?.dll"
 	// CLoadingPolicyText 说明当前项目默认 Lua C 动态库 loader 的固定策略。
 	CLoadingPolicyText = "built-in dynamic C library loading is disabled in the default CGO-free build to keep cross-system builds simple; embedding programs may register their own loader"
 	// defaultPathSeparator 是 package.path 多模板之间的分隔符。
@@ -51,6 +55,8 @@ type Environment struct {
 	luaFileLoader LuaFileLoader
 	// loaderCaller 执行 require 找到的 loader，宿主可用它接入 Lua closure 调用。
 	loaderCaller LoaderCaller
+	// dynamicLibraryLoader 保存 package.loadlib 和 C searcher 使用的宿主动态库接入点。
+	dynamicLibraryLoader DynamicLibraryLoader
 }
 
 // LuaFileLoader 表示 Lua 文件 searcher 命中文件后生成 loader 的回调。
@@ -64,6 +70,35 @@ type LuaFileLoader func(filename string) runtime.GoResultsFunction
 // loader 可以是 Go closure 或 Lua closure；args 是 require 按 Lua 5.3 传入的模块名和可选
 // loader data。默认实现只支持 Go closure，lua 包会注入可执行 Lua closure 的实现。
 type LoaderCaller func(loader runtime.Value, args ...runtime.Value) ([]runtime.Value, error)
+
+// DynamicLibraryLoader 表示宿主提供的可选动态库 loader。
+//
+// filename 是 package.loadlib 参数或 package.cpath 命中的候选文件；symbol 是 Lua 5.3 规则生成的
+// luaopen_* 符号。返回值必须是 Lua 可调用函数；错误会转换为 package.loadlib 的 nil,error,where
+// 三返回而不是破坏默认 CGO-free 构建。
+type DynamicLibraryLoader func(filename string, symbol string) (runtime.Value, error)
+
+// DynamicLibraryError 表示动态库 loader 的兼容失败分类。
+//
+// Category 对齐 package.loadlib 第三个返回值，常见值包括 absent、open 和 init；Message 是第二个
+// 返回值。宿主返回普通 error 时会被归类为 open。
+type DynamicLibraryError struct {
+	// Category 保存 package.loadlib 第三个返回值分类。
+	Category string
+	// Message 保存面向 Lua 的动态库加载错误文本。
+	Message string
+}
+
+// Error 返回动态库加载错误文本。
+//
+// Message 为空时回退到 CLoadingPolicy，避免 package.loadlib 返回空错误字符串。
+func (err DynamicLibraryError) Error() string {
+	// 空 Message 使用集中策略文本兜底。
+	if err.Message == "" {
+		return CLoadingPolicy()
+	}
+	return err.Message
+}
 
 // Open 将 Lua 5.3 package 标准库注册到 State 全局环境。
 //
@@ -89,7 +124,7 @@ func OpenWithLuaFileLoader(state *runtime.State, luaFileLoader LuaFileLoader) er
 		return fmt.Errorf("package library unavailable: %w", runtime.ErrClosedState)
 	}
 
-	environment := NewEnvironmentWithLuaFileLoader(luaFileLoader)
+	environment := NewEnvironmentWithLoaders(luaFileLoader, nil)
 	// require 作为全局函数注册，符合 Lua 5.3 基础库可见性。
 	state.SetGlobal("require", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(environment.Require)))
 	state.SetGlobal("package", runtime.ReferenceValue(runtime.KindTable, environment.table))
@@ -110,21 +145,31 @@ func NewEnvironment() *Environment {
 // luaFileLoader 可以为 nil；nil 时 package.searchpath 仍会访问文件系统检查候选文件，但
 // LuaSearcher 不会返回可执行 loader，避免底层包自行依赖 lua API。
 func NewEnvironmentWithLuaFileLoader(luaFileLoader LuaFileLoader) *Environment {
+	// 兼容旧入口：只接入 Lua 文件 loader，不启用动态库 loader。
+	return NewEnvironmentWithLoaders(luaFileLoader, nil)
+}
+
+// NewEnvironmentWithLoaders 创建带 Lua 文件和动态库 loader 扩展点的 package 标准库运行环境。
+//
+// luaFileLoader 可以为 nil；dynamicLibraryLoader 为 nil 时 loadlib、C searcher 和 C root searcher
+// 保持默认 CGO-free 兼容错误。非 nil 动态库 loader 由宿主负责平台加载和符号解析。
+func NewEnvironmentWithLoaders(luaFileLoader LuaFileLoader, dynamicLibraryLoader DynamicLibraryLoader) *Environment {
 	// 初始化 package 表、loaded 缓存表和 searcher 相关表。
 	packageTable := runtime.NewTable()
 	loadedTable := runtime.NewTable()
 	preloadTable := runtime.NewTable()
 	searchersTable := runtime.NewTable()
 	environment := &Environment{
-		table:         packageTable,
-		loaded:        loadedTable,
-		preload:       preloadTable,
-		searchers:     searchersTable,
-		luaFileLoader: luaFileLoader,
-		loaderCaller:  callGoResults,
+		table:                packageTable,
+		loaded:               loadedTable,
+		preload:              preloadTable,
+		searchers:            searchersTable,
+		luaFileLoader:        luaFileLoader,
+		loaderCaller:         callGoResults,
+		dynamicLibraryLoader: dynamicLibraryLoader,
 	}
 	packageTable.RawSetString("config", runtime.StringValue(DefaultConfig))
-	packageTable.RawSetString("cpath", runtime.StringValue(resolveEnvironmentPath("LUA_CPATH_5_3", "LUA_CPATH", DefaultCPath)))
+	packageTable.RawSetString("cpath", runtime.StringValue(resolveEnvironmentPath("LUA_CPATH_5_3", "LUA_CPATH", DefaultCPathForGOOS(goRuntime.GOOS))))
 	packageTable.RawSetString("loaded", runtime.ReferenceValue(runtime.KindTable, loadedTable))
 	packageTable.RawSetString("loadlib", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(environment.LoadLib)))
 	packageTable.RawSetString("path", runtime.StringValue(resolveEnvironmentPath("LUA_PATH_5_3", "LUA_PATH", DefaultPath)))
@@ -152,6 +197,17 @@ func (environment *Environment) SetLoaderCaller(caller LoaderCaller) {
 		return
 	}
 	environment.loaderCaller = caller
+}
+
+// SetDynamicLibraryLoader 设置 package.loadlib 和 C searcher 使用的动态库 loader。
+//
+// loader 为 nil 时恢复默认 CGO-free 禁用行为；非 nil loader 只保存回调，不会主动打开任何动态库。
+func (environment *Environment) SetDynamicLibraryLoader(loader DynamicLibraryLoader) {
+	// nil 环境没有可设置的动态库 loader。
+	if environment == nil {
+		return
+	}
+	environment.dynamicLibraryLoader = loader
 }
 
 // resolveEnvironmentPath 解析 Lua 5.3 package.path/package.cpath 的环境变量覆盖。
@@ -275,6 +331,32 @@ func CLoadingPolicy() string {
 	return CLoadingPolicyText
 }
 
+// DefaultCPathForGOOS 返回指定平台的默认动态库搜索模板。
+//
+// goos 必须使用 Go 的 GOOS 名称；Windows 只返回 .dll 运行期候选，.lib/import library 属于链接期
+// 产物，不作为 require 的运行期加载路径。Linux/macOS 默认包含 .so 与 .dylib 候选，便于宿主跨
+// Unix 系统复用 package.cpath。
+func DefaultCPathForGOOS(goos string) string {
+	// Windows 运行期动态库加载只使用 .dll 候选。
+	if goos == "windows" {
+		return DefaultWindowsCPath
+	}
+	return DefaultCPath
+}
+
+// DynamicLibraryPlatformNote 返回动态库 loader 的平台边界说明。
+//
+// goos 必须使用 Go 的 GOOS 名称；返回文本用于 C searcher 诊断和测试，明确默认构建不自动打开
+// 动态库，以及 Windows 下 .dll 与 .lib/import library 的边界。
+func DynamicLibraryPlatformNote(goos string) string {
+	// Windows 需要明确 .dll 运行期加载和 .lib 链接期/import library 的支持边界。
+	if goos == "windows" {
+		return "Windows dynamic loader candidates use .dll for runtime loading; .lib/import library files are link-time artifacts and are not runtime require candidates"
+	}
+	// Unix 风格平台保留 .so 与 .dylib 候选，具体打开方式由宿主 loader 决定。
+	return "Unix dynamic loader candidates include .so and .dylib; actual loading is enabled only when the embedding program registers a loader"
+}
+
 // Require 实现 Lua 5.3 `require` 的阶段性语义。
 //
 // 第一个参数必须是模块名 string。当前先查询 package.loaded；命中 truthy 值时直接返回。
@@ -346,18 +428,30 @@ func (environment *Environment) Require(args ...runtime.Value) ([]runtime.Value,
 // 返回 nil 与错误文本；宿主程序可通过覆盖 package.loadlib 提供自定义实现。
 func (environment *Environment) LoadLib(args ...runtime.Value) ([]runtime.Value, error) {
 	// filename 必须是 string。
-	if _, err := stringArgument(args, 1, "loadlib"); err != nil {
+	filename, err := stringArgument(args, 1, "loadlib")
+	if err != nil {
 		// 第一个参数错误直接返回。
 		return nil, err
 	}
-	if _, err := stringArgument(args, 2, "loadlib"); err != nil {
+	symbol, err := stringArgument(args, 2, "loadlib")
+	if err != nil {
 		// 第二个参数错误直接返回。
 		return nil, err
 	}
+	loader, loadErr := environment.loadDynamicLibrary(filename, symbol)
+	if loadErr == nil && (loader.Kind == runtime.KindGoClosure || loader.Kind == runtime.KindLuaClosure) {
+		// 宿主 loader 返回 Lua 可调用函数时，package.loadlib 成功。
+		return []runtime.Value{loader}, nil
+	}
+	if loadErr == nil {
+		// nil 错误但返回值不可调用时视为符号初始化失败，避免 require 后续调用崩溃。
+		loadErr = DynamicLibraryError{Category: "init", Message: "dynamic library loader did not return a callable Lua function"}
+	}
+	message, category := dynamicLibraryFailure(loadErr)
 	return []runtime.Value{
 		runtime.NilValue(),
-		runtime.StringValue(CLoadingPolicy()),
-		runtime.StringValue("absent"),
+		runtime.StringValue(message),
+		runtime.StringValue(category),
 	}, nil
 }
 
@@ -467,7 +561,8 @@ func (environment *Environment) LuaSearcher(args ...runtime.Value) ([]runtime.Va
 
 // CSearcher 实现 package.searchers[3] 的 C 动态库搜索器。
 //
-// 本项目禁止 CGO，因此该搜索器始终返回禁用文本，不尝试读取 package.cpath。
+// 默认 CGO-free 构建没有内置 loader；宿主注册动态库 loader 后，会按 package.cpath 命中候选并
+// 返回 luaopen_* 符号对应的 Lua 可调用 loader。
 func (environment *Environment) CSearcher(args ...runtime.Value) ([]runtime.Value, error) {
 	// C searcher 只需要校验模块名，保证参数错误与 Lua searcher 一致。
 	moduleName, err := stringArgument(args, 1, "C searcher")
@@ -476,14 +571,13 @@ func (environment *Environment) CSearcher(args ...runtime.Value) ([]runtime.Valu
 		return nil, err
 	}
 	candidates := environment.cpathCandidates(moduleName)
-	message := searchPathError(candidates)
-	message += fmt.Sprintf("\n\tC loader disabled for module '%s': %s", moduleName, CLoadingPolicy())
-	return []runtime.Value{runtime.StringValue(message)}, nil
+	return environment.searchDynamicLibrary(moduleName, moduleName, candidates, "C loader")
 }
 
 // CRootSearcher 实现 package.searchers[4] 的 C root 动态库搜索器。
 //
-// 本项目禁止 CGO，因此该搜索器始终返回禁用文本，保留 Lua 5.3 searchers 形态。
+// 默认 CGO-free 构建没有内置 loader；对 a.b 这类模块名，root searcher 按 a 展开 cpath 候选，
+// 但仍使用完整模块名生成 luaopen_a_b 符号。
 func (environment *Environment) CRootSearcher(args ...runtime.Value) ([]runtime.Value, error) {
 	// C root searcher 只需要校验模块名，保证参数错误与 Lua searcher 一致。
 	moduleName, err := stringArgument(args, 1, "C root searcher")
@@ -491,10 +585,124 @@ func (environment *Environment) CRootSearcher(args ...runtime.Value) ([]runtime.
 		// 模块名错误直接返回 Lua 参数错误。
 		return nil, err
 	}
-	candidates := environment.cpathCandidates(moduleName)
-	message := searchPathError(candidates)
-	message += fmt.Sprintf("\n\tC root loader disabled for module '%s': %s", moduleName, CLoadingPolicy())
+	rootName := cRootModuleName(moduleName)
+	if rootName == "" {
+		// 没有 root 模块时保留 searcher 未命中文本，由 require 继续汇总。
+		return []runtime.Value{runtime.StringValue(fmt.Sprintf("\n\tno C root module for '%s'", moduleName))}, nil
+	}
+	candidates := environment.cpathCandidates(rootName)
+	return environment.searchDynamicLibrary(moduleName, rootName, candidates, "C root loader")
+}
+
+// loadDynamicLibrary 调用宿主注册的动态库 loader。
+//
+// filename 和 symbol 必须来自 package.loadlib 参数或 C searcher 候选；无宿主 loader 时返回 absent
+// 分类错误，保持默认 CGO-free 构建的兼容三返回语义。
+func (environment *Environment) loadDynamicLibrary(filename string, symbol string) (runtime.Value, error) {
+	// nil 环境或 nil loader 都表示默认构建未启用动态库加载。
+	if environment == nil || environment.dynamicLibraryLoader == nil {
+		return runtime.NilValue(), DynamicLibraryError{Category: "absent", Message: CLoadingPolicy()}
+	}
+	loader, err := environment.dynamicLibraryLoader(filename, symbol)
+	if err != nil {
+		// 宿主 loader 错误转交给上层统一转换为 loadlib 三返回。
+		return runtime.NilValue(), err
+	}
+	return loader, nil
+}
+
+// searchDynamicLibrary 按 package.cpath 候选查找并加载动态库 loader。
+//
+// moduleName 用于生成 luaopen_* 符号；searchName 是 cpath 展开使用的模块名。返回 loader 时第二
+// 返回值为命中文件名，未命中时返回可被 require 汇总的诊断文本。
+func (environment *Environment) searchDynamicLibrary(moduleName string, searchName string, candidates []string, loaderKind string) ([]runtime.Value, error) {
+	symbol := dynamicLibrarySymbol(moduleName)
+	if environment == nil || environment.dynamicLibraryLoader == nil {
+		// 默认 CGO-free 构建不尝试打开候选文件，只报告候选和平台边界。
+		return []runtime.Value{runtime.StringValue(dynamicLibrarySearchMessage(moduleName, searchName, candidates, loaderKind, DynamicLibraryError{Category: "absent", Message: CLoadingPolicy()}))}, nil
+	}
+	var lastLoadErr error
+	for _, candidate := range candidates {
+		// C searcher 按 package.cpath 候选顺序逐个交给宿主 loader。
+		loader, err := environment.loadDynamicLibrary(candidate, symbol)
+		if err != nil {
+			// 单个候选失败时继续尝试后续候选，最终诊断会汇总候选与最后错误。
+			lastLoadErr = err
+			continue
+		}
+		if loader.Kind == runtime.KindGoClosure || loader.Kind == runtime.KindLuaClosure {
+			// 命中可调用 loader 时返回 loader 与文件名 loader data。
+			return []runtime.Value{loader, runtime.StringValue(candidate)}, nil
+		}
+		// 宿主 loader 成功返回但不可调用，记录 init 分类并继续尝试后续候选。
+		lastLoadErr = DynamicLibraryError{Category: "init", Message: "dynamic library loader did not return a callable Lua function"}
+	}
+	if lastLoadErr == nil {
+		// 没有候选或没有 loader 结果时按打开失败给出稳定诊断。
+		lastLoadErr = DynamicLibraryError{Category: "open", Message: "dynamic library loader did not return a callable Lua function"}
+	}
+	message := dynamicLibrarySearchMessage(moduleName, searchName, candidates, loaderKind, lastLoadErr)
 	return []runtime.Value{runtime.StringValue(message)}, nil
+}
+
+// dynamicLibrarySearchMessage 构造 C searcher 的未命中诊断文本。
+//
+// moduleName 是 require 模块名；searchName 是 cpath 展开名；failure 表示当前 loader 失败分类。
+// 返回文本包含候选路径、平台说明和 loadlib 兼容错误信息。
+func dynamicLibrarySearchMessage(moduleName string, searchName string, candidates []string, loaderKind string, failure error) string {
+	message := searchPathError(candidates)
+	failureMessage, category := dynamicLibraryFailure(failure)
+	status := "failed"
+	if category == "absent" {
+		// absent 表示默认构建未启用动态库 loader，保留旧诊断里的 disabled 关键词。
+		status = "disabled"
+	}
+	message += fmt.Sprintf("\n\t%s %s for module '%s' using '%s' (%s): %s", loaderKind, status, moduleName, searchName, category, failureMessage)
+	message += "\n\t" + DynamicLibraryPlatformNote(goRuntime.GOOS)
+	return message
+}
+
+// dynamicLibraryFailure 把宿主 loader 错误转换为 package.loadlib 兼容三返回中的文本和分类。
+//
+// nil 错误表示成功路径，不应调用该函数；普通 error 默认归类为 open，DynamicLibraryError 可覆盖
+// absent/open/init 等 Lua 5.3 兼容分类。
+func dynamicLibraryFailure(err error) (string, string) {
+	// nil 错误没有失败信息，使用策略文本兜底。
+	if err == nil {
+		return CLoadingPolicy(), "absent"
+	}
+	var dynamicErr DynamicLibraryError
+	if errors.As(err, &dynamicErr) {
+		// 宿主显式分类时使用其 Message 和 Category。
+		category := dynamicErr.Category
+		if category == "" {
+			// 空分类按打开失败处理，避免第三返回值为空。
+			category = "open"
+		}
+		return dynamicErr.Error(), category
+	}
+	return err.Error(), "open"
+}
+
+// dynamicLibrarySymbol 按 Lua 5.3 C loader 规则生成 luaopen_* 符号名。
+//
+// moduleName 是 require 模块名；点号和连字符会映射为下划线，保持 Go 侧可测试的稳定符号。
+func dynamicLibrarySymbol(moduleName string) string {
+	// luaopen_ 前缀是 Lua 5.3 C 模块入口约定。
+	replacer := strings.NewReplacer(".", "_", "-", "_")
+	return "luaopen_" + replacer.Replace(moduleName)
+}
+
+// cRootModuleName 返回 C root searcher 使用的根模块名。
+//
+// moduleName 必须是 require 模块名；没有点号时返回空字符串，表示 C root searcher 不适用。
+func cRootModuleName(moduleName string) string {
+	dotIndex := strings.Index(moduleName, ".")
+	if dotIndex <= 0 {
+		// 没有 root 前缀时不能生成 C root 候选。
+		return ""
+	}
+	return moduleName[:dotIndex]
 }
 
 // cpathCandidates 按当前 package.cpath 展开 C loader 候选路径。

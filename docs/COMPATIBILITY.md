@@ -31,7 +31,7 @@
 - binary chunk 首版只承诺本项目 load/dump roundtrip 和 Lua 5.3 语义字段一致，跨端序、跨字长完全互通需单独验收。
 - 错误文本首版不要求逐字符匹配官方 Lua，但错误类别、行号和 traceback 必须可对齐。
 - `io`、`os`、`package` 标准库在宿主权限、路径和平台差异上允许有 Go 运行时约束。
-- `package.loadlib` 不通过动态 C 库实现；无 CGO 约束下会提供明确不支持或纯 Go 替代策略。
+- `package.loadlib` 默认不内置动态 C 库打开逻辑；无 CGO 约束下未注入 loader 时返回明确不支持。宿主可通过 `lua.Options.PackageDynamicLibraryLoader`、`stdlib/package` 环境注入或覆盖 `package.loadlib` 接入自己的动态库加载层。
 
 ## 验收方式
 
