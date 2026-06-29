@@ -43,37 +43,15 @@ jobs:
           - target: windows-arm64
             goos: windows
             goarch: arm64
-          - target: windows-armv6
-            goos: windows
-            goarch: arm
-            goarm: "6"
-          - target: windows-armv7
-            goos: windows
-            goarch: arm
-            goarm: "7"
           - target: darwin-amd64
             goos: darwin
             goarch: amd64
           - target: darwin-arm64
             goos: darwin
             goarch: arm64
-          - target: android-amd64
-            goos: android
-            goarch: amd64
-          - target: android-386
-            goos: android
-            goarch: "386"
           - target: android-arm64
             goos: android
             goarch: arm64
-          - target: android-armv6
-            goos: android
-            goarch: arm
-            goarm: "6"
-          - target: android-armv7
-            goos: android
-            goarch: arm
-            goarm: "7"
     env:
       CGO_ENABLED: "0"
     steps:
