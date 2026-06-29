@@ -73,7 +73,7 @@ package-vscode:
 	@cd "$(VSCODE_EXTENSION_DIR)" && "$(NPX)" @vscode/vsce package --out "../../../$(DIST_DIR)/glua-lsp-vscode.vsix"
 
 package-jetbrains:
-	@cd "$(JETBRAINS_EXTENSION_DIR)" && if [ -x ./gradlew ]; then ./gradlew --no-daemon buildPlugin; else "$(GRADLE)" --no-daemon buildPlugin; fi
+	@cd "$(JETBRAINS_EXTENSION_DIR)" && if [ -x ./gradlew ]; then ./gradlew --no-daemon --no-configuration-cache buildPlugin; else "$(GRADLE)" --no-daemon --no-configuration-cache buildPlugin; fi
 	@mkdir -p "$(DIST_DIR)"
 	@cp "$(JETBRAINS_EXTENSION_DIR)"/build/distributions/*.zip "$(DIST_DIR)/"
 
