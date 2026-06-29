@@ -700,8 +700,8 @@ func (vm *VM) Step(instruction bytecode.Instruction) error {
 		// SELF 为冒号调用准备方法和接收者寄存器。
 		return vm.executeSelf(instruction)
 	case bytecode.OpAdd:
-		// ADD 执行 Lua 5.3 加法，优先保留 integer 结果。
-		return vm.executeBinaryArithmetic(instruction, binaryArithmeticAdd, metamethodAdd)
+		// ADD 是数值循环和函数调用基准的高频指令，使用专用路径减少通用函数分发开销。
+		return vm.executeAdd(instruction)
 	case bytecode.OpSub:
 		// SUB 执行 Lua 5.3 减法，优先保留 integer 结果。
 		return vm.executeBinaryArithmetic(instruction, binaryArithmeticSub, metamethodSub)
@@ -1168,6 +1168,54 @@ func (vm *VM) executeBinaryArithmetic(instruction bytecode.Instruction, operatio
 	// 算术成功后才覆盖目标寄存器，保证错误路径无副作用。
 	vm.registers[targetIndex] = result
 	return nil
+}
+
+// executeAdd 执行 Lua 5.3 OP_ADD 指令。
+//
+// instruction 的 A 是目标寄存器，B/C 使用 RK 编码读取操作数。普通 integer/number 加法
+// 直接在本函数完成，转换失败时仍按 Lua 5.3 规则尝试 `__add` 元方法。
+func (vm *VM) executeAdd(instruction bytecode.Instruction) error {
+	targetIndex := instruction.A()
+	if targetIndex < 0 || targetIndex >= len(vm.registers) {
+		// 目标寄存器越界时不能写入，避免破坏寄存器窗口。
+		return ErrRegisterOutOfRange
+	}
+
+	leftValue, err := vm.rkValue(instruction.B())
+	if err != nil {
+		// 左操作数读取失败时不能继续计算，目标寄存器保持原值。
+		return err
+	}
+	rightValue, err := vm.rkValue(instruction.C())
+	if err != nil {
+		// 右操作数读取失败时不能继续计算，目标寄存器保持原值。
+		return err
+	}
+
+	if leftValue.Kind == KindInteger && rightValue.Kind == KindInteger {
+		// 双 integer 加法保留 integer 结果，并按 64 位补码自然回绕。
+		vm.registers[targetIndex] = IntegerValue(leftValue.Integer + rightValue.Integer)
+		return nil
+	}
+	leftNumber, leftOK := valueToLuaNumber(leftValue)
+	rightNumber, rightOK := valueToLuaNumber(rightValue)
+	if leftOK && rightOK {
+		// 任一侧为 float 或可转数字字符串时，按 Lua 5.3 number 语义计算。
+		vm.registers[targetIndex] = NumberValue(leftNumber + rightNumber)
+		return nil
+	}
+
+	metamethodResult, found, metamethodErr := vm.callBinaryMetamethod(leftValue, rightValue, metamethodAdd)
+	if metamethodErr != nil {
+		// 元方法被找到但调用失败时，返回调用错误并保持目标寄存器原值。
+		return metamethodErr
+	}
+	if found {
+		// 元方法返回值就是 Lua 运算结果，不再强制转换成 number。
+		vm.registers[targetIndex] = metamethodResult
+		return nil
+	}
+	return ErrArithmeticOperand
 }
 
 // executeBinaryBitwise 执行 Lua 5.3 二元位运算指令。
