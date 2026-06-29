@@ -2282,8 +2282,8 @@ func typeIndexedValue(receiver Value, key Value) (Value, error) {
 	}
 	indexValue := metatable.RawGetString(tableIndexMetamethodKey)
 	if indexValue.IsNil() {
-		// 元表没有 __index 时，字段读取结果为 nil。
-		return NilValue(), nil
+		// 基础类型即使存在空元表，缺少 __index 时仍不可被索引，必须在当前访问点报错。
+		return NilValue(), ErrExpectedTable
 	}
 	if indexValue.Kind == KindTable {
 		// table 型 __index 复用普通 table 读取语义。
@@ -2311,8 +2311,8 @@ func (vm *VM) typeIndexedValue(receiver Value, key Value) (Value, error) {
 	}
 	indexValue := metatable.RawGetString(tableIndexMetamethodKey)
 	if indexValue.IsNil() {
-		// 元表没有 __index 时，字段读取结果为 nil。
-		return NilValue(), nil
+		// 基础类型即使存在空元表，缺少 __index 时仍不可被索引，必须在当前访问点报错。
+		return NilValue(), ErrExpectedTable
 	}
 	if indexValue.Kind == KindTable {
 		// table 型 __index 复用普通 table 读取语义。

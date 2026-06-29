@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/zing/go-lua-vm/compiler/lexer"
+	"github.com/zing/go-lua-vm/extensions"
 )
 
 const (
@@ -23,6 +24,8 @@ type Parser struct {
 	lexer *lexer.Lexer
 	// current 保存当前前瞻 token。
 	current lexer.Token
+	// syntax 保存当前 parser 启用的扩展语法集合。
+	syntax extensions.SyntaxSet
 	// syntaxDepth 保存当前 parser 递归层级，用于模拟 Lua 5.3 的 C 调用深度限制。
 	syntaxDepth int
 }
@@ -31,9 +34,18 @@ type Parser struct {
 //
 // input 是完整 Lua 源码文本；Parser 会立即读取第一个 token 作为前瞻。
 func New(input string) *Parser {
+	// 默认 parser 使用当前构建产物启用的语法扩展集合。
+	return NewWithSyntax(input, extensions.Default())
+}
+
+// NewWithSyntax 创建带指定语法扩展集合的 Parser。
+//
+// input 是完整 Lua 源码文本；syntax 会裁剪到当前构建产物已编译的扩展集合，未编译扩展不会生效。
+// Parser 会立即读取第一个 token 作为前瞻。
+func NewWithSyntax(input string, syntax extensions.SyntaxSet) *Parser {
 	// 初始化 lexer 并读取首个 token，后续 parse 方法只消费 current。
 	tokenLexer := lexer.New(input)
-	return &Parser{input: input, lexer: tokenLexer, current: tokenLexer.NextToken()}
+	return &Parser{input: input, lexer: tokenLexer, current: tokenLexer.NextToken(), syntax: syntax & extensions.Compiled()}
 }
 
 // ParseChunk 解析完整 Lua chunk。
@@ -134,10 +146,6 @@ func (parser *Parser) parseStatement() (Statement, error) {
 		// break 关键字开启循环跳出语句。
 		return parser.parseBreakStatement()
 	}
-	if parser.current.Kind == lexer.TokenKeyword && parser.current.Text == "continue" {
-		// continue 关键字开启扩展循环续迭代语句。
-		return parser.parseContinueStatement()
-	}
 	if parser.current.Kind == lexer.TokenKeyword && parser.current.Text == "goto" {
 		// goto 关键字开启标签跳转语句。
 		return parser.parseGotoStatement()
@@ -158,13 +166,13 @@ func (parser *Parser) parseStatement() (Statement, error) {
 		// while 关键字开启前置条件循环语句。
 		return parser.parseWhileStatement()
 	}
-	if parser.current.Kind == lexer.TokenKeyword && parser.current.Text == "switch" {
-		// switch 关键字开启扩展多分支匹配语句。
-		return parser.parseSwitchStatement()
-	}
 	if parser.current.Kind == lexer.TokenKeyword && parser.current.Text == "repeat" {
 		// repeat 关键字开启后置条件循环语句。
 		return parser.parseRepeatUntilStatement()
+	}
+	if statement, matched, err := parser.parseExtensionStatement(); matched || err != nil {
+		// 已编译进当前产物的扩展语句在普通标识符语句前解析。
+		return statement, err
 	}
 	if parser.current.Kind == lexer.TokenIdentifier {
 		// 普通标识符开头可能是赋值语句，也可能是函数调用语句。
@@ -705,120 +713,6 @@ func (parser *Parser) parseBreakStatement() (Statement, error) {
 
 	// 返回 break 语句节点。
 	return &BreakStatement{Position: position}, nil
-}
-
-// parseContinueStatement 解析 continue 语句。
-//
-// 当前阶段只构造 AST，是否位于循环内部由语义阶段统一检查。
-func (parser *Parser) parseContinueStatement() (Statement, error) {
-	position := parser.current.Position
-	if err := parser.expectKeyword("continue"); err != nil {
-		// 调用方已经判断 continue，该错误只作为防御。
-		return nil, err
-	}
-
-	// 返回 continue 语句节点。
-	return &ContinueStatement{Position: position}, nil
-}
-
-// parseSwitchStatement 解析扩展 switch/case/default 语句。
-//
-// case/default 作为 switch 内的上下文关键字解析，不进入 lexer 全局保留字表，避免破坏普通变量名。
-func (parser *Parser) parseSwitchStatement() (Statement, error) {
-	startPosition := parser.current.Position
-	if err := parser.expectKeyword("switch"); err != nil {
-		// 调用方已经判断 switch，该错误只作为防御。
-		return nil, err
-	}
-	switchExpression, err := parser.parseExpression()
-	if err != nil {
-		// switch 后必须有主表达式。
-		return nil, err
-	}
-	if err := parser.expectKeyword("do"); err != nil {
-		// switch 主表达式后必须跟 do。
-		return nil, err
-	}
-
-	var cases []SwitchCase
-	var defaultBlock *Block
-	var defaultPosition lexer.Position
-	for !(parser.current.Kind == lexer.TokenKeyword && parser.current.Text == "end") {
-		if parser.isContextKeyword("case") {
-			// case 分支按顺序解析，允许多个匹配表达式。
-			if defaultBlock != nil {
-				// 第一阶段要求 default 位于最后，避免 default 后 case 的可读性和跳转语义歧义。
-				return nil, parser.errorf(parser.current, "case after default")
-			}
-			switchCase, err := parser.parseSwitchCase()
-			if err != nil {
-				// 任一 case 解析失败都会终止整个 switch。
-				return nil, err
-			}
-			cases = append(cases, switchCase)
-			continue
-		}
-		if parser.isContextKeyword("default") {
-			// default 分支最多出现一次，且必须位于最后。
-			if defaultBlock != nil {
-				// 重复 default 会让兜底路径不唯一，直接报错。
-				return nil, parser.errorf(parser.current, "duplicate default")
-			}
-			defaultPosition = parser.current.Position
-			parser.advance()
-			thenPosition := parser.current.Position
-			if err := parser.expectKeyword("then"); err != nil {
-				// default 后必须跟 then，保持和 case 分支形态一致。
-				return nil, err
-			}
-			defaultBlock, err = parser.parseBlockUntil(parser.isSwitchBlockEnd)
-			if err != nil {
-				// default block 内语句解析失败时返回错误。
-				return nil, err
-			}
-			_ = thenPosition
-			continue
-		}
-		if parser.current.Kind == lexer.TokenEOF {
-			// switch 必须由 end 关闭，EOF 表示缺少结束关键字。
-			return nil, parser.errorf(parser.current, "expected keyword %q", "end")
-		}
-		return nil, parser.errorf(parser.current, "expected case, default or end")
-	}
-	endPosition := parser.current.Position
-	if err := parser.expectKeyword("end"); err != nil {
-		// switch 语句必须以 end 结束。
-		return nil, err
-	}
-
-	// 返回完整 switch 语句节点。
-	return &SwitchStatement{Expression: switchExpression, Cases: cases, DefaultBlock: defaultBlock, Position: startPosition, DefaultPosition: defaultPosition, EndPosition: endPosition}, nil
-}
-
-// parseSwitchCase 解析 switch 内的单个 case 分支。
-//
-// case 后至少包含一个表达式，多个表达式用逗号分隔，then 后的 block 解析到下一 case/default/end。
-func (parser *Parser) parseSwitchCase() (SwitchCase, error) {
-	position := parser.current.Position
-	parser.advance()
-	values, err := parser.parseExpressionList()
-	if err != nil {
-		// case 后必须至少有一个匹配表达式。
-		return SwitchCase{}, err
-	}
-	thenPosition := parser.current.Position
-	if err := parser.expectKeyword("then"); err != nil {
-		// case 表达式列表后必须跟 then。
-		return SwitchCase{}, err
-	}
-	body, err := parser.parseBlockUntil(parser.isSwitchBlockEnd)
-	if err != nil {
-		// case body 内语句解析失败时返回错误。
-		return SwitchCase{}, err
-	}
-
-	// 返回 case 分支节点。
-	return SwitchCase{Values: values, Body: body, Position: position, ThenPosition: thenPosition}, nil
 }
 
 // parseGotoStatement 解析 goto 语句。
@@ -1605,6 +1499,21 @@ func (parser *Parser) expectKeyword(text string) error {
 	parser.advance()
 
 	// 关键字匹配成功。
+	return nil
+}
+
+// expectContextKeyword 消费指定上下文关键字。
+//
+// 当前 token 必须是指定文本的 identifier；该 helper 用于扩展语法，避免扩展词污染 Lua 5.3
+// 全局保留字表。
+func (parser *Parser) expectContextKeyword(text string) error {
+	if !parser.isContextKeyword(text) {
+		// 当前 token 与期望上下文关键字不一致。
+		return parser.errorf(parser.current, "expected keyword %q", text)
+	}
+	parser.advance()
+
+	// 上下文关键字匹配成功。
 	return nil
 }
 

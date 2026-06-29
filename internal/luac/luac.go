@@ -15,6 +15,7 @@ import (
 	"github.com/zing/go-lua-vm/compiler/codegen"
 	"github.com/zing/go-lua-vm/compiler/lexer"
 	"github.com/zing/go-lua-vm/compiler/parser"
+	"github.com/zing/go-lua-vm/extensions"
 	"github.com/zing/go-lua-vm/internal/cli"
 )
 
@@ -73,6 +74,12 @@ type Options struct {
 	StepTrace bool
 	// MinimalDisassembly 表示只输出测试失败定位用的最小反汇编。
 	MinimalDisassembly bool
+	// SyntaxExtensions 保存源码编译阶段启用的语法扩展集合。
+	SyntaxExtensions extensions.SyntaxSet
+	// SyntaxExtensionsSet 表示命令行是否显式指定过 --syntax。
+	SyntaxExtensionsSet bool
+	// DisabledSyntaxExtensions 保存命令行显式关闭的语法扩展集合。
+	DisabledSyntaxExtensions extensions.SyntaxSet
 }
 
 // ParseArgs 解析 gluac 命令行参数。
@@ -114,6 +121,28 @@ func ParseArgs(args []string) (Options, error) {
 		case "--minimal-disassembly":
 			// 最小反汇编用于测试失败时输出较短上下文。
 			options.MinimalDisassembly = true
+		case "--syntax":
+			// --syntax 必须消费后续模式名或扩展名列表。
+			index++
+			if index >= len(args) {
+				// 缺少语法模式时无法决定编译配置。
+				return Options{}, fmt.Errorf("option --syntax requires an argument")
+			}
+			if err := applySyntaxOption(&options, args[index]); err != nil {
+				// 语法扩展名称错误直接返回参数错误。
+				return Options{}, err
+			}
+		case "--disable-syntax":
+			// --disable-syntax 必须消费后续扩展名列表。
+			index++
+			if index >= len(args) {
+				// 缺少禁用列表时返回明确参数错误。
+				return Options{}, fmt.Errorf("option --disable-syntax requires an argument")
+			}
+			if err := applyDisableSyntaxOption(&options, args[index]); err != nil {
+				// 禁用列表名称错误直接返回参数错误。
+				return Options{}, err
+			}
 		case "--":
 			// -- 终止选项解析，后续必须正好提供一个输入路径。
 			if index+1 >= len(args) {
@@ -127,6 +156,22 @@ func ParseArgs(args []string) (Options, error) {
 			options.InputPath = args[index+1]
 			return options, nil
 		default:
+			if strings.HasPrefix(argument, "--syntax=") {
+				// 等号形式便于脚本和 IDE 配置传参。
+				if err := applySyntaxOption(&options, strings.TrimPrefix(argument, "--syntax=")); err != nil {
+					// 语法扩展名称错误直接返回参数错误。
+					return Options{}, err
+				}
+				continue
+			}
+			if strings.HasPrefix(argument, "--disable-syntax=") {
+				// 等号形式与 --syntax 保持一致。
+				if err := applyDisableSyntaxOption(&options, strings.TrimPrefix(argument, "--disable-syntax=")); err != nil {
+					// 禁用列表名称错误直接返回参数错误。
+					return Options{}, err
+				}
+				continue
+			}
 			// 非选项参数按输入文件处理，未知选项直接报错。
 			if strings.HasPrefix(argument, "-") {
 				// 未支持选项不能静默忽略，避免输出与用户预期不一致。
@@ -144,6 +189,50 @@ func ParseArgs(args []string) (Options, error) {
 		return Options{}, fmt.Errorf("missing input file")
 	}
 	return options, nil
+}
+
+// applySyntaxOption 将 --syntax 参数写入 Options。
+//
+// value 支持 lua53、extended、all 或逗号分隔扩展名；解析失败时返回可展示错误。
+func applySyntaxOption(options *Options, value string) error {
+	// 复用 extensions 注册表，避免 gluac 维护第二份扩展名称。
+	syntaxSet, err := extensions.ParseSyntaxSet(value)
+	if err != nil {
+		// 参数非法时保留原始解析错误。
+		return err
+	}
+	options.SyntaxExtensions = syntaxSet
+	options.SyntaxExtensionsSet = true
+	return nil
+}
+
+// applyDisableSyntaxOption 将 --disable-syntax 参数追加到 Options。
+//
+// value 只接受逗号分隔扩展名；多个 --disable-syntax 会合并禁用集合。
+func applyDisableSyntaxOption(options *Options, value string) error {
+	// 禁用列表与显式 --syntax 可叠加，最终在 syntaxForOptions 中统一扣除。
+	disabledSet, err := extensions.ParseDisabledSyntaxSet(value)
+	if err != nil {
+		// 参数非法时保留原始解析错误。
+		return err
+	}
+	options.DisabledSyntaxExtensions = options.DisabledSyntaxExtensions.With(disabledSet)
+	return nil
+}
+
+// syntaxForOptions 计算 gluac 当前命令最终使用的语法扩展集合。
+func syntaxForOptions(options Options) extensions.SyntaxSet {
+	// 未显式指定 --syntax 时使用当前构建默认集合。
+	syntaxSet := extensions.Default()
+	if options.SyntaxExtensionsSet {
+		// 显式 --syntax 覆盖默认集合。
+		syntaxSet = options.SyntaxExtensions
+	}
+	if options.DisabledSyntaxExtensions != 0 {
+		// --disable-syntax 在最终集合上扣除指定扩展，允许 extended 默认开再局部关闭。
+		syntaxSet = syntaxSet.Without(options.DisabledSyntaxExtensions)
+	}
+	return syntaxSet & extensions.Compiled()
 }
 
 // Main 执行 gluac 命令并返回进程退出码。
@@ -186,7 +275,7 @@ func Run(args []string, streams Streams) error {
 		// 文件读取失败保留 os.PathError，调用方可识别权限或不存在。
 		return err
 	}
-	proto, sourceInput, err := ProtoFromBytes(inputBytes, "@"+options.InputPath)
+	proto, sourceInput, err := ProtoFromBytesWithSyntax(inputBytes, "@"+options.InputPath, syntaxForOptions(options))
 	if err != nil {
 		// 源码编译或 binary chunk 加载失败时不写出文件。
 		return err
@@ -216,8 +305,16 @@ func Run(args []string, streams Streams) error {
 // source 是完整 Lua chunk；chunkName 写入 Proto.Source，建议源码文件使用 `@path`。返回错误
 // 保留 parser 或 codegen 的原始语义，便于 CLI 与嵌入方定位。
 func CompileSource(source string, chunkName string) (*bytecode.Proto, error) {
+	// 默认入口使用当前构建产物的默认语法扩展集合。
+	return CompileSourceWithSyntax(source, chunkName, extensions.Default())
+}
+
+// CompileSourceWithSyntax 将 Lua 源码按指定语法集合编译为 Lua 5.3 Proto。
+//
+// source 是完整 Lua chunk；chunkName 写入 Proto.Source；syntax 会裁剪到当前二进制已编译集合。
+func CompileSourceWithSyntax(source string, chunkName string, syntax extensions.SyntaxSet) (*bytecode.Proto, error) {
 	// 先解析源码为 AST，再交给 codegen 生成 Proto。
-	chunkParser := parser.New(source)
+	chunkParser := parser.NewWithSyntax(source, syntax)
 	chunk, err := chunkParser.ParseChunk()
 	if err != nil {
 		// 语法或基础语义错误直接返回，不进入 codegen。
@@ -254,6 +351,14 @@ func DumpSource(source string, chunkName string, stripDebug bool) ([]byte, error
 // 输入以 Lua chunk 签名开头时按 binary chunk 读取，否则按源码编译。返回值 sourceInput
 // 表示是否按源码处理，调用方可据此决定最小反汇编是否需要重新展示源码编译错误。
 func ProtoFromBytes(input []byte, chunkName string) (*bytecode.Proto, bool, error) {
+	// 默认入口使用当前构建产物的默认语法扩展集合。
+	return ProtoFromBytesWithSyntax(input, chunkName, extensions.Default())
+}
+
+// ProtoFromBytesWithSyntax 从输入字节按指定语法集合加载或编译 Proto。
+//
+// 输入以 Lua chunk 签名开头时按 binary chunk 读取，否则按源码编译；syntax 只影响源码路径。
+func ProtoFromBytesWithSyntax(input []byte, chunkName string, syntax extensions.SyntaxSet) (*bytecode.Proto, bool, error) {
 	// 通过签名判断输入形态，避免为 CLI 额外增加模式参数。
 	if bytes.HasPrefix(input, []byte(bytecode.ChunkSignature)) {
 		// binary chunk 直接走 loader，不重新编译源码。
@@ -261,7 +366,7 @@ func ProtoFromBytes(input []byte, chunkName string) (*bytecode.Proto, bool, erro
 		return proto, false, err
 	}
 	source := lexer.StripInitialShebang(string(input))
-	proto, err := CompileSource(source, chunkName)
+	proto, err := CompileSourceWithSyntax(source, chunkName, syntax)
 	return proto, true, err
 }
 

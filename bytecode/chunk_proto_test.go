@@ -197,6 +197,83 @@ func TestLoadProtoRebuildsAssignedClosureRegisterFromPreviousInstruction(t *test
 	}
 }
 
+// TestLoadProtoDoesNotStealSharedStartPCClosureRegister 验证成组 local 不会误用下一条 CLOSURE 寄存器。
+//
+// closure.lua 中 `local A,B = ...` 的生命周期起点正好落在后续全局函数声明的 CLOSURE 上；
+// binary chunk 读回时若直接采用该 CLOSURE A，会把 A/B 都还原到错误槽位并破坏弱表 GC 可达性。
+func TestLoadProtoDoesNotStealSharedStartPCClosureRegister(t *testing.T) {
+	child := NewProto("@locals.lua")
+	child.MaxStackSize = 2
+	child.Code = []Instruction{CreateABC(OpReturn, 0, 1, 0)}
+
+	proto := NewProto("@locals.lua")
+	proto.Code = make([]Instruction, 18)
+	proto.Code[7] = CreateABx(OpClosure, 2, 0)
+	proto.Code[17] = CreateABC(OpReturn, 0, 1, 0)
+	proto.MaxStackSize = 6
+	proto.Protos = []*Proto{child}
+	proto.LocalVars = []LocalVar{
+		{Name: "A", Register: 0, StartPC: 7, EndPC: 17},
+		{Name: "B", Register: 1, StartPC: 7, EndPC: 17},
+		{Name: "a", Register: 2, StartPC: 12, EndPC: 17},
+		{Name: "x", Register: 3, StartPC: 16, EndPC: 17},
+	}
+
+	loadedProto, err := LoadProto(bytes.NewReader(AppendProto(nil, proto)))
+	if err != nil {
+		// 合法 Proto 不应返回错误。
+		t.Fatalf("load proto failed: %v", err)
+	}
+	if loadedProto.LocalVars[0].Register != 0 ||
+		loadedProto.LocalVars[1].Register != 1 ||
+		loadedProto.LocalVars[2].Register != 2 ||
+		loadedProto.LocalVars[3].Register != 3 {
+		// 共享 StartPC 的 A/B 必须走生命周期低槽重建，不能被后续 CLOSURE A=2 抢占。
+		t.Fatalf("shared start local registers mismatch: %#v", loadedProto.LocalVars)
+	}
+}
+
+// TestLoadProtoRebuildsLocalRegistersFromInitializerLine 验证初始化表达式可恢复高位 local 槽。
+//
+// `local C = {}` 与 `local x = coroutine.wrap(function() end)` 的 LocVar StartPC 位于初始化表达式
+// 之后；loader 需要借助同一源码行的写 A 指令恢复真实结果槽，避免 weak table GC 把错误寄存器当根。
+func TestLoadProtoRebuildsLocalRegistersFromInitializerLine(t *testing.T) {
+	child := NewProto("@locals.lua")
+	child.MaxStackSize = 2
+	child.Code = []Instruction{CreateABC(OpReturn, 0, 1, 0)}
+
+	proto := NewProto("@locals.lua")
+	proto.Code = make([]Instruction, 12)
+	proto.Code[0] = CreateABC(OpLoadNil, 0, 0, 0)
+	proto.Code[1] = CreateABC(OpNewTable, 3, 0, 0)
+	proto.Code[2] = CreateABC(OpLoadK, 4, 0, 0)
+	proto.Code[3] = CreateABC(OpNewTable, 5, 0, 0)
+	proto.Code[4] = CreateABC(OpSetTable, 3, 4, 5)
+	proto.Code[5] = CreateABC(OpGetTabUp, 4, 0, 0)
+	proto.Code[6] = CreateABC(OpGetTable, 4, 4, 0)
+	proto.Code[7] = CreateABx(OpClosure, 5, 0)
+	proto.Code[8] = CreateABC(OpCall, 4, 2, 2)
+	proto.Code[11] = CreateABC(OpReturn, 0, 1, 0)
+	proto.LineInfo = []int{1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4}
+	proto.MaxStackSize = 8
+	proto.Protos = []*Proto{child}
+	proto.LocalVars = []LocalVar{
+		{Name: "prefix", Register: 0, StartPC: 1, EndPC: 11},
+		{Name: "C", Register: 3, StartPC: 5, EndPC: 11},
+		{Name: "x", Register: 4, StartPC: 9, EndPC: 11},
+	}
+
+	loadedProto, err := LoadProto(bytes.NewReader(AppendProto(nil, proto)))
+	if err != nil {
+		// 合法 Proto 不应返回错误。
+		t.Fatalf("load proto failed: %v", err)
+	}
+	if loadedProto.LocalVars[1].Register != 3 || loadedProto.LocalVars[2].Register != 4 {
+		// C/x 必须分别从声明初始化行恢复到 R3/R4，而不是落回低位空闲槽。
+		t.Fatalf("initializer local registers mismatch: %#v", loadedProto.LocalVars)
+	}
+}
+
 // TestLoadProtoRejectsTruncatedCode 验证截断指令数组会被拒绝。
 //
 // 指令数量字段声明了更多指令但数据不足时，loader 不能返回半成品 Proto。

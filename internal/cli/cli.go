@@ -18,6 +18,7 @@ import (
 	"github.com/zing/go-lua-vm/bytecode"
 	"github.com/zing/go-lua-vm/compiler/codegen"
 	"github.com/zing/go-lua-vm/compiler/parser"
+	"github.com/zing/go-lua-vm/extensions"
 	"github.com/zing/go-lua-vm/lua"
 	"github.com/zing/go-lua-vm/runtime"
 	oslib "github.com/zing/go-lua-vm/stdlib/os"
@@ -66,6 +67,12 @@ type Options struct {
 	ArgPrefix []string
 	// ListBytecodePath 保存可选 glua 反汇编输入路径；该选项不能与官方执行参数混用。
 	ListBytecodePath string
+	// SyntaxExtensions 保存源码编译阶段启用的语法扩展集合。
+	SyntaxExtensions extensions.SyntaxSet
+	// SyntaxExtensionsSet 表示命令行是否显式指定过 --syntax。
+	SyntaxExtensionsSet bool
+	// DisabledSyntaxExtensions 保存命令行显式关闭的语法扩展集合。
+	DisabledSyntaxExtensions extensions.SyntaxSet
 }
 
 // Main 执行 glua 命令行并返回进程退出码。
@@ -160,11 +167,12 @@ func Run(ctx context.Context, args []string, streams Streams) error {
 	}
 	if options.ListBytecodePath != "" {
 		// 可选反汇编模式只做调试输出，不创建 State，也不执行脚本。
-		return runBytecodeList(options.ListBytecodePath, streams.Stdout)
+		return runBytecodeList(options.ListBytecodePath, streams.Stdout, syntaxForOptions(options))
 	}
 
 	// 创建带 context 的 State，保证后续加载和调用可观察取消。
 	stateOptions := lua.DefaultOptions()
+	stateOptions = lua.WithSyntaxExtensions(stateOptions, syntaxForOptions(options))
 	stateOptions.AllowHostFilesystem = true
 	stateOptions.AllowProcess = true
 	if !options.IgnoreEnvironment {
@@ -346,6 +354,48 @@ func ParseArgs(args []string) (Options, error) {
 			}
 			continue
 		}
+		if argument == "--syntax" {
+			// --syntax 必须消费后续模式名或扩展名列表。
+			index++
+			if index >= len(args) {
+				// 缺少语法模式时无法决定编译配置。
+				return Options{}, fmt.Errorf("option --syntax requires an argument")
+			}
+			if err := applySyntaxOption(&options, args[index]); err != nil {
+				// 语法扩展名称错误直接返回参数错误。
+				return Options{}, err
+			}
+			continue
+		}
+		if strings.HasPrefix(argument, "--syntax=") {
+			// 等号形式便于脚本和 IDE 配置传参。
+			if err := applySyntaxOption(&options, strings.TrimPrefix(argument, "--syntax=")); err != nil {
+				// 语法扩展名称错误直接返回参数错误。
+				return Options{}, err
+			}
+			continue
+		}
+		if argument == "--disable-syntax" {
+			// --disable-syntax 必须消费后续扩展名列表。
+			index++
+			if index >= len(args) {
+				// 缺少禁用列表时返回明确参数错误。
+				return Options{}, fmt.Errorf("option --disable-syntax requires an argument")
+			}
+			if err := applyDisableSyntaxOption(&options, args[index]); err != nil {
+				// 禁用列表名称错误直接返回参数错误。
+				return Options{}, err
+			}
+			continue
+		}
+		if strings.HasPrefix(argument, "--disable-syntax=") {
+			// 等号形式与 --syntax 保持一致。
+			if err := applyDisableSyntaxOption(&options, strings.TrimPrefix(argument, "--disable-syntax=")); err != nil {
+				// 禁用列表名称错误直接返回参数错误。
+				return Options{}, err
+			}
+			continue
+		}
 		if argument == "-" {
 			// 单独 - 表示从 stdin 读取脚本，后续参数写入 arg 表。
 			options.ScriptPath = "-"
@@ -379,6 +429,50 @@ func ParseArgs(args []string) (Options, error) {
 	return options, nil
 }
 
+// applySyntaxOption 将 --syntax 参数写入 Options。
+//
+// value 支持 lua53、extended、all 或逗号分隔扩展名；解析失败时返回可展示错误。
+func applySyntaxOption(options *Options, value string) error {
+	// 复用 extensions 注册表，避免 CLI 维护第二份扩展名称。
+	syntaxSet, err := extensions.ParseSyntaxSet(value)
+	if err != nil {
+		// 参数非法时保留原始解析错误。
+		return err
+	}
+	options.SyntaxExtensions = syntaxSet
+	options.SyntaxExtensionsSet = true
+	return nil
+}
+
+// applyDisableSyntaxOption 将 --disable-syntax 参数追加到 Options。
+//
+// value 只接受逗号分隔扩展名；多个 --disable-syntax 会合并禁用集合。
+func applyDisableSyntaxOption(options *Options, value string) error {
+	// 禁用列表与显式 --syntax 可叠加，最终在 syntaxForOptions 中统一扣除。
+	disabledSet, err := extensions.ParseDisabledSyntaxSet(value)
+	if err != nil {
+		// 参数非法时保留原始解析错误。
+		return err
+	}
+	options.DisabledSyntaxExtensions = options.DisabledSyntaxExtensions.With(disabledSet)
+	return nil
+}
+
+// syntaxForOptions 计算 glua 当前命令最终使用的语法扩展集合。
+func syntaxForOptions(options Options) extensions.SyntaxSet {
+	// 未显式指定 --syntax 时使用当前构建默认集合。
+	syntaxSet := extensions.Default()
+	if options.SyntaxExtensionsSet {
+		// 显式 --syntax 覆盖默认集合。
+		syntaxSet = options.SyntaxExtensions
+	}
+	if options.DisabledSyntaxExtensions != 0 {
+		// --disable-syntax 在最终集合上扣除指定扩展，允许 extended 默认开再局部关闭。
+		syntaxSet = syntaxSet.Without(options.DisabledSyntaxExtensions)
+	}
+	return syntaxSet & extensions.Compiled()
+}
+
 // validateListBytecodeOptions 校验 glua 可选反汇编模式不破坏官方 lua 参数语义。
 //
 // `--list-bytecode` 只能与 `-v` 共存；不能与官方 `-l` 模块加载、`-e`、脚本路径或 `-i`
@@ -400,14 +494,14 @@ func validateListBytecodeOptions(options Options) error {
 //
 // path 可指向 Lua 源码或 Lua 5.3 binary chunk；输出使用 bytecode.DisassembleProto 的项目内
 // 稳定格式，不承诺与官方 luac -l 完全一致。
-func runBytecodeList(path string, stdout io.Writer) error {
+func runBytecodeList(path string, stdout io.Writer, syntax extensions.SyntaxSet) error {
 	// 先读取输入文件，再根据 Lua chunk 签名决定加载或编译。
 	inputBytes, err := os.ReadFile(path)
 	if err != nil {
 		// 文件读取失败保留 os.PathError，便于调用方定位权限和路径问题。
 		return err
 	}
-	proto, err := protoFromListInput(inputBytes, "@"+path)
+	proto, err := protoFromListInput(inputBytes, "@"+path, syntax)
 	if err != nil {
 		// 编译或加载失败时不输出部分反汇编。
 		return err
@@ -423,13 +517,13 @@ func runBytecodeList(path string, stdout io.Writer) error {
 // protoFromListInput 从 glua 反汇编输入中取得 Proto。
 //
 // input 以 Lua binary chunk 签名开头时使用 bytecode loader；否则按 Lua 源码解析和 codegen。
-func protoFromListInput(input []byte, chunkName string) (*bytecode.Proto, error) {
+func protoFromListInput(input []byte, chunkName string, syntax extensions.SyntaxSet) (*bytecode.Proto, error) {
 	// 通过固定签名区分 binary chunk 和源码，避免新增用户模式参数。
 	if bytes.HasPrefix(input, []byte(bytecode.ChunkSignature)) {
 		// binary chunk 直接加载 Proto。
 		return bytecode.LoadBinaryChunk(bytes.NewReader(input))
 	}
-	chunkParser := parser.New(string(input))
+	chunkParser := parser.NewWithSyntax(string(input), syntax)
 	chunk, err := chunkParser.ParseChunk()
 	if err != nil {
 		// 源码解析失败时返回 parser 错误。

@@ -20,6 +20,7 @@ import (
 	"github.com/zing/go-lua-vm/compiler/codegen"
 	"github.com/zing/go-lua-vm/compiler/lexer"
 	"github.com/zing/go-lua-vm/compiler/parser"
+	"github.com/zing/go-lua-vm/extensions"
 	"github.com/zing/go-lua-vm/runtime"
 	baselib "github.com/zing/go-lua-vm/stdlib/base"
 	debuglib "github.com/zing/go-lua-vm/stdlib/debug"
@@ -236,6 +237,11 @@ type ValueKind = runtime.ValueKind
 // 约束资源上限并通过 State 创建注入，后续与 lauxlib 风格 API 对齐。
 type Options = runtime.Options
 
+// SyntaxSet 表示一组可选语法扩展。
+//
+// 嵌入方可通过 WithSyntaxExtensions 或 WithoutSyntaxExtensions 写入 Options。
+type SyntaxSet = extensions.SyntaxSet
+
 // GoFunction 表示 Go 回调函数。
 //
 // 入参是 Lua 调用参数列表，返回单值和错误。错误会进入 protected call。
@@ -330,6 +336,11 @@ const (
 	ResourceLimitCall = runtime.ResourceLimitCall
 	// ResourceLimitAllocation 表示分配预算超过限制。
 	ResourceLimitAllocation = runtime.ResourceLimitAllocation
+
+	// SyntaxContinue 表示 continue 语句语法糖扩展。
+	SyntaxContinue = extensions.SyntaxContinue
+	// SyntaxSwitch 表示 switch/case/default 语句语法糖扩展。
+	SyntaxSwitch = extensions.SyntaxSwitch
 )
 
 // 与 runtime 对齐的错误对象。
@@ -435,6 +446,28 @@ func DefaultOptions() Options {
 func NormalizeOptions(options Options) Options {
 	// 直接复用 runtime 的规范化逻辑，保证 lua 包与 VM 实际限制一致。
 	return runtime.NormalizeOptions(options)
+}
+
+// WithSyntaxExtensions 返回启用指定语法集合后的 Options 副本。
+//
+// syntax 为 0 时表示 Lua 5.3 兼容模式；未编译进当前二进制的扩展会被自动裁剪。
+func WithSyntaxExtensions(options Options, syntax SyntaxSet) Options {
+	// 委托 runtime.Options 保持 lua 包和 runtime 实际配置一致。
+	return options.WithSyntaxExtensions(syntax)
+}
+
+// WithoutSyntaxExtensions 返回关闭指定语法扩展后的 Options 副本。
+//
+// options 未显式配置语法集合时会先使用默认扩展集合，再移除 disabled 指定项。
+func WithoutSyntaxExtensions(options Options, disabled SyntaxSet) Options {
+	// 委托 runtime.Options 统一处理默认集合与裁剪规则。
+	return options.WithoutSyntaxExtensions(disabled)
+}
+
+// DefaultSyntaxExtensions 返回当前构建产物默认启用的语法扩展集合。
+func DefaultSyntaxExtensions() SyntaxSet {
+	// 默认集合等于当前二进制已经编译的扩展集合。
+	return extensions.Default()
 }
 
 // Close 关闭 Lua State。
@@ -1618,7 +1651,7 @@ func registerLoadedLibrary(state *State, name string) error {
 // State 栈的 KindLuaClosure。解析或 codegen 失败时返回错误且不产生 closure。
 func compileString(state *State, source string, chunkName string) (Value, error) {
 	// 先解析源码为 AST，确保语法和基础语义通过。
-	chunkParser := parser.New(source)
+	chunkParser := parser.NewWithSyntax(source, state.Options().SyntaxExtensions)
 	chunk, err := chunkParser.ParseChunk()
 	if err != nil {
 		// parser 错误包装成 Go API 可读的结构化语法错误，同时保留原始错误链。

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/zing/go-lua-vm/compiler/lexer"
+	"github.com/zing/go-lua-vm/extensions"
 )
 
 // TestParserParseChunkAndBlock 验证 chunk 和 block 会保留顺序语句。
@@ -335,48 +336,26 @@ func TestParserForBreakGotoAndLabelStatements(t *testing.T) {
 	}
 }
 
-// TestParserContinueSwitchStatements 验证扩展 continue 与 switch/case/default 语法。
+// TestParserLua53SyntaxKeepsExtensionWordsAsIdentifiers 验证关闭扩展后词法兼容 Lua 5.3。
 //
-// case/default 在 switch 内按上下文关键字解析；普通 Lua 代码中 case 仍可作为变量名使用。
-func TestParserContinueSwitchStatements(t *testing.T) {
-	parser := New("local case = 1 local out = 0 while case < 4 do case = case + 1 continue end switch case do case 1, 2 then out = 5 default then out = 6 end")
+// continue 和 switch 在扩展关闭时必须仍可作为普通变量名，避免语法糖污染 Lua 5.3 保留字表。
+func TestParserLua53SyntaxKeepsExtensionWordsAsIdentifiers(t *testing.T) {
+	parser := NewWithSyntax("local continue = 1 local switch = continue + 1", extensions.None())
 
 	chunk, err := parser.ParseChunk()
 	if err != nil {
-		// continue 和 switch 扩展语法应能完成解析。
-		t.Fatalf("parse continue/switch failed: %v", err)
+		// 关闭扩展后同名变量仍是合法 Lua 5.3 代码。
+		t.Fatalf("parse lua53 identifiers failed: %v", err)
 	}
-	if len(chunk.Block.Statements) != 4 {
-		// 顶层应包含两个 local、while 和 switch 四条语句。
+	if len(chunk.Block.Statements) != 2 {
+		// 两条 local 语句必须都被保留下来。
 		t.Fatalf("unexpected statement count=%d", len(chunk.Block.Statements))
 	}
-	whileStatement, ok := chunk.Block.Statements[2].(*WhileStatement)
-	if !ok {
-		// 第三条语句应为 while。
-		t.Fatalf("third statement should be while")
-	}
-	if _, ok := whileStatement.Body.Statements[1].(*ContinueStatement); !ok {
-		// while body 中应解析出 continue。
-		t.Fatalf("while body should contain continue")
-	}
-	switchStatement, ok := chunk.Block.Statements[3].(*SwitchStatement)
-	if !ok {
-		// 第四条语句应为 switch。
-		t.Fatalf("fourth statement should be switch")
-	}
-	if len(switchStatement.Cases) != 1 || len(switchStatement.Cases[0].Values) != 2 || switchStatement.DefaultBlock == nil {
-		// switch 应保留多值 case 和 default block。
-		t.Fatalf("unexpected switch statement=%+v", switchStatement)
-	}
-}
 
-// TestParserRejectsContinueOutsideLoop 验证循环外 continue 会被语义阶段拒绝。
-func TestParserRejectsContinueOutsideLoop(t *testing.T) {
-	parser := New("continue")
-
-	if _, err := parser.ParseChunk(); err == nil || !strings.Contains(err.Error(), "continue outside loop") {
-		// 循环外 continue 没有续迭代目标，必须返回明确错误。
-		t.Fatalf("expected continue outside loop error, got %v", err)
+	parser = NewWithSyntax("continue", extensions.None())
+	if _, err := parser.ParseChunk(); err == nil || !strings.Contains(err.Error(), "expected operator \"=\"") {
+		// 关闭扩展后裸 continue 应按普通标识符语句失败，而不是解析成 continue 控制流。
+		t.Fatalf("expected identifier statement error, got %v", err)
 	}
 }
 

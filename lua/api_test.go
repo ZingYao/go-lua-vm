@@ -982,6 +982,61 @@ func TestCallAndRegisterGoFunctions(t *testing.T) {
 	}
 }
 
+// TestPackageLoadLibCanBeOverriddenByHostLoader 验证宿主可接入第三方 C 动态库加载链路。
+//
+// 本仓库默认构建不引入 CGO，也不内置动态库打开逻辑；嵌入方可以在宿主程序或可选扩展中
+// 实现自己的 C loader，再覆盖 package.loadlib。该测试用纯 Go loader 模拟第三方动态库入口，
+// 验证 Lua 侧调用形态可用。
+func TestPackageLoadLibCanBeOverriddenByHostLoader(t *testing.T) {
+	// 创建完整标准库环境，确保 package 表和 Lua assert/type 等基础函数都可用。
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库打开失败时无法验证 package.loadlib 覆盖链路。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+
+	packageValue, err := GetGlobal(state, "package")
+	if err != nil {
+		// package 全局读取失败表示 State 封装不可用。
+		t.Fatalf("GetGlobal package failed: %v", err)
+	}
+	packageTable, ok := packageValue.Ref.(*runtime.Table)
+	if packageValue.Kind != runtime.KindTable || !ok || packageTable == nil {
+		// package 必须是 table，宿主才能覆盖 loadlib 字段。
+		t.Fatalf("package global = %#v, want table", packageValue)
+	}
+
+	loadCount := 0
+	packageTable.RawSetString("loadlib", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(func(args ...Value) ([]Value, error) {
+		// 宿主自定义 loader 接收官方 loadlib 形态的 filename 和 symbol 参数。
+		if len(args) != 2 || args[0].String != "third_party/libdemo.so" || args[1].String != "luaopen_demo" {
+			// 参数不符合预期时返回 Lua error，避免测试误判默认 loader。
+			return nil, RaiseError(runtime.StringValue("unexpected dynamic library request"))
+		}
+		loadCount++
+		loader := runtime.GoResultsFunction(func(args ...Value) ([]Value, error) {
+			// 模拟第三方 C 模块 luaopen_* 返回模块值；真实宿主可在这里桥接 C 动态库。
+			return []Value{runtime.StringValue("third-party-c-loader:luaopen_demo")}, nil
+		})
+		return []Value{runtime.ReferenceValue(runtime.KindGoClosure, loader)}, nil
+	})))
+
+	err = DoString(state, `
+		local loader = assert(package.loadlib("third_party/libdemo.so", "luaopen_demo"))
+		assert(type(loader) == "function")
+		assert(loader() == "third-party-c-loader:luaopen_demo")
+	`)
+	if err != nil {
+		// Lua 侧必须能通过覆盖后的 package.loadlib 获取并执行宿主 loader。
+		t.Fatalf("DoString host loadlib override failed: %v", err)
+	}
+	if loadCount != 1 {
+		// 自定义 loader 必须被调用一次，证明链路没有落回默认禁用策略。
+		t.Fatalf("host loader call count = %d, want 1", loadCount)
+	}
+}
+
 // TestPushAndToWrappers 验证 lua 包栈压入和类型转换 API。
 //
 // Push 系列必须把值写入 State 栈；To 系列必须按 Lua 5.3 基础类型语义读取栈值。
@@ -1226,6 +1281,10 @@ assert(not ok and string.find(message, "too many results"))
 //
 // 该测试覆盖 while 内 continue、switch 多值 case、default 分支，以及 case 作为普通变量名的兼容性。
 func TestDoStringContinueAndSwitchExtensions(t *testing.T) {
+	if !DefaultSyntaxExtensions().Has(SyntaxContinue | SyntaxSwitch) {
+		// 当前构建未编译控制流扩展时跳过正向运行期用例。
+		t.Skip("control-flow syntax extensions are not compiled")
+	}
 	state := NewState()
 	defer state.Close()
 	if err := OpenLibs(state); err != nil {
@@ -1243,9 +1302,9 @@ while i < 5 do
     continue
   end
   switch i do
-  case 1, 3 then
+  case 1, 3
     out = out + i
-  default then
+  default
     out = out + 10
   end
 end
@@ -1255,6 +1314,32 @@ assert(out == 24)
 	if err := DoString(state, source); err != nil {
 		// continue 和 switch 扩展语法必须按预期执行。
 		t.Fatalf("DoString continue/switch extensions failed: %v", err)
+	}
+}
+
+// TestDoStringLua53SyntaxDisablesExtensions 验证 Go API 可关闭扩展语法。
+//
+// 关闭扩展后 continue 和 switch 应按普通标识符处理，语法糖语句不再被接受。
+func TestDoStringLua53SyntaxDisablesExtensions(t *testing.T) {
+	options := WithSyntaxExtensions(DefaultOptions(), 0)
+	state := NewStateWithOptions(options)
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// assert 来自 base 标准库。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+
+	if err := DoString(state, "local continue = 1 local switch = continue + 1 assert(switch == 2)"); err != nil {
+		// 关闭扩展后同名变量应保持 Lua 5.3 标识符语义。
+		t.Fatalf("DoString lua53 identifiers failed: %v", err)
+	}
+	if err := DoString(state, "while true do continue end"); err == nil {
+		// 关闭扩展后 continue 语句不能再通过解析。
+		t.Fatalf("DoString should reject disabled continue syntax")
+	}
+	if err := DoString(state, "switch 1 do default end"); err == nil {
+		// 关闭扩展后 switch 语句不能再通过解析。
+		t.Fatalf("DoString should reject disabled switch syntax")
 	}
 }
 
@@ -3666,6 +3751,39 @@ assert(not string.find(message, "'aaa'", 1, true), message)
 	if err := DoString(state, source); err != nil {
 		// 错误文本必须包含官方断言需要的关键片段。
 		t.Fatalf("DoString better error messages failed: %v", err)
+	}
+}
+
+// TestDoStringNilEmptyMetatableStillReportsIndexReceiver 验证 nil 空元表不会吞掉索引错误。
+//
+// 官方 all.lua 会在 events.lua 末尾留下 `debug.setmetatable(nil, {})`；随后 errors.lua 仍要求
+// `aaa.bbb:ddd(9)` 在访问 nil 全局 `aaa` 时立即报错，并在错误文本中包含 `global 'aaa'`。
+func TestDoStringNilEmptyMetatableStillReportsIndexReceiver(t *testing.T) {
+	// 清理基础类型全局元表，避免当前测试失败时污染后续用例。
+	defer runtime.SetBasicTypeMetatable(runtime.NilValue(), nil)
+
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库打开失败时无法执行 debug.setmetatable 和 pcall。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+
+	source := `
+local debug = require "debug"
+debug.setmetatable(nil, {})
+local function doit (s)
+  local f = assert(load(s))
+  local ok, message = pcall(f)
+  return (not ok) and tostring(message)
+end
+aaa = nil
+local message = doit("aaa.bbb:ddd(9)")
+assert(string.find(message, "global 'aaa'", 1, true), message)
+`
+	if err := DoString(state, source); err != nil {
+		// nil 空元表不能把索引错误延后到 method 调用点。
+		t.Fatalf("DoString nil empty metatable index error failed: %v", err)
 	}
 }
 

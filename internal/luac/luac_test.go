@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/zing/go-lua-vm/bytecode"
+	"github.com/zing/go-lua-vm/extensions"
 )
 
 // TestParseArgs 验证 gluac 参数解析覆盖 luac 兼容选项和开发 trace 选项。
@@ -48,6 +49,48 @@ func TestParseArgs(t *testing.T) {
 				t.Fatalf("Options mismatch: got=%+v want=%+v", got, test.want)
 			}
 		})
+	}
+}
+
+// TestParseArgsSyntaxOptions 验证 gluac 语法扩展参数解析。
+func TestParseArgsSyntaxOptions(t *testing.T) {
+	if extensions.Compiled().Has(extensions.SyntaxContinue | extensions.SyntaxSwitch) {
+		// 只有当前构建包含两个扩展时，才验证 extended 后局部关闭 switch 的正向路径。
+		options, err := ParseArgs([]string{"--syntax=extended", "--disable-syntax", "switch", "input.lua"})
+		if err != nil {
+			// 合法语法扩展参数不应失败。
+			t.Fatalf("ParseArgs syntax failed: %v", err)
+		}
+		if !options.SyntaxExtensionsSet || !options.SyntaxExtensions.Has(extensions.SyntaxContinue) || !options.SyntaxExtensions.Has(extensions.SyntaxSwitch) {
+			// extended 必须映射到当前构建内所有扩展。
+			t.Fatalf("syntax extensions = %#v set=%v", options.SyntaxExtensions, options.SyntaxExtensionsSet)
+		}
+		if finalSyntax := syntaxForOptions(options); finalSyntax.Has(extensions.SyntaxSwitch) || !finalSyntax.Has(extensions.SyntaxContinue) {
+			// 最终集合应只保留 continue。
+			t.Fatalf("final syntax = %#v", finalSyntax)
+		}
+	}
+
+	options, err := ParseArgs([]string{"--syntax", "lua53", "input.lua"})
+	if err != nil {
+		// lua53 是合法语法模式。
+		t.Fatalf("ParseArgs lua53 failed: %v", err)
+	}
+	if syntaxForOptions(options) != extensions.None() {
+		// lua53 模式必须关闭全部扩展。
+		t.Fatalf("lua53 syntax = %#v", syntaxForOptions(options))
+	}
+}
+
+// TestCompileSourceWithSyntaxDisablesExtensions 验证 gluac 源码编译入口遵守语法开关。
+func TestCompileSourceWithSyntaxDisablesExtensions(t *testing.T) {
+	if _, err := CompileSourceWithSyntax("local continue = 1\nreturn continue\n", "@lua53.lua", extensions.None()); err != nil {
+		// 关闭扩展后同名变量仍是合法 Lua 5.3 代码。
+		t.Fatalf("CompileSourceWithSyntax lua53 identifiers failed: %v", err)
+	}
+	if _, err := CompileSourceWithSyntax("while true do continue end\n", "@lua53.lua", extensions.None()); err == nil {
+		// 关闭扩展后 continue 语句必须被 parser 拒绝。
+		t.Fatalf("CompileSourceWithSyntax should reject disabled continue")
 	}
 }
 

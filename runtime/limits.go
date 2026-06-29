@@ -1,6 +1,10 @@
 package runtime
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/zing/go-lua-vm/extensions"
+)
 
 const (
 	// DefaultMaxStackDepth 对齐 Lua 5.3 在 32 位以上 int 环境下的 LUAI_MAXSTACK 默认值。
@@ -26,6 +30,10 @@ type Options struct {
 	AllowEnvironment bool
 	// AllowProcess 表示 io.popen 和 os.execute 是否允许启动宿主进程。
 	AllowProcess bool
+	// SyntaxExtensions 保存源码编译阶段启用的可选语法扩展集合。
+	SyntaxExtensions extensions.SyntaxSet
+	// SyntaxExtensionsSet 表示调用方是否显式设置过 SyntaxExtensions。
+	SyntaxExtensionsSet bool
 }
 
 // NormalizeOptions 规范化 State 资源限制选项。
@@ -44,9 +52,38 @@ func NormalizeOptions(options Options) Options {
 	if options.MaxAllocationBudget < 0 {
 		options.MaxAllocationBudget = 0
 	}
+	if !options.SyntaxExtensionsSet {
+		// 未显式配置语法时，默认启用当前构建产物包含的扩展。
+		options.SyntaxExtensions = extensions.Default()
+	} else {
+		// 显式配置时裁剪未编译扩展，保证 runtime 选项不会绕过 build tag。
+		options.SyntaxExtensions &= extensions.Compiled()
+	}
 
 	// 返回已经填充默认值的选项。
 	return options
+}
+
+// WithSyntaxExtensions 返回启用指定语法集合后的 Options 副本。
+//
+// syntax 会裁剪到当前构建产物已编译集合；该方法适合嵌入方从 DefaultOptions 开始切换
+// lua53、extended 或自定义扩展组合。
+func (options Options) WithSyntaxExtensions(syntax extensions.SyntaxSet) Options {
+	// 显式标记语法配置，允许调用方传入 0 表示关闭所有扩展。
+	options.SyntaxExtensions = syntax & extensions.Compiled()
+	options.SyntaxExtensionsSet = true
+	return options
+}
+
+// WithoutSyntaxExtensions 返回关闭指定语法扩展后的 Options 副本。
+//
+// 未显式配置过语法集合时先使用默认集合，再移除 disabled 指定的扩展。
+func (options Options) WithoutSyntaxExtensions(disabled extensions.SyntaxSet) Options {
+	// 先规范化，确保零值 options 也有默认语法集合可供裁剪。
+	normalized := NormalizeOptions(options)
+	normalized.SyntaxExtensions = normalized.SyntaxExtensions.Without(disabled)
+	normalized.SyntaxExtensionsSet = true
+	return normalized
 }
 
 // ResourceLimitKind 表示触发的资源限制类型。

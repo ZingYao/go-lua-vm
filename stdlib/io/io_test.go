@@ -919,6 +919,11 @@ func TestReadWriteClosedDefaultFileText(t *testing.T) {
 		// 关闭默认输出后 io.write 必须返回官方可匹配文本。
 		t.Fatalf("Write closed default output error = %v", err)
 	}
+	_, err := Write(runtime.ReferenceValue(runtime.KindTable, runtime.NewTable()))
+	if err == nil || !strings.Contains(runtime.ErrorObject(err).String, "bad argument #1 to 'write'") {
+		// 参数类型错误优先于关闭输出句柄，便于 Lua 调用边界把函数名改写为 io.write。
+		t.Fatalf("Write invalid argument with closed output error = %v", err)
+	}
 }
 
 // TestLinesReadsDefaultInput 验证 io.lines 从当前默认输入逐行读取。

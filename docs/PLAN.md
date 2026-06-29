@@ -13,7 +13,7 @@
 
 执行测试与构建时应优先使用 `go.mod` 的 `toolchain` 机制解析版本，不通过临时设置 `GOROOT`、`GOPATH`、`GOTOOLCHAIN` 或在项目脚本中硬编码绝对路径切换 Go 版本。若本机 PATH 未指向可用 Go，应先修正开发环境配置，再执行项目命令。
 
-项目必须使用纯 Go 实现，禁止引入 CGO。任何 Go 文件不得出现 `import "C"`，所有构建、测试与基准测试默认使用 `CGO_ENABLED=0`。允许在 `third_party/lua-5.3.6/` 保存 Lua 5.3.6 官方源码作为对照迁移参考，但该源码不得进入 Go 构建链路。
+项目核心与默认构建必须使用纯 Go 实现，禁止在核心代码中引入 CGO。任何默认构建参与的 Go 文件不得出现 `import "C"`，所有构建、测试与基准测试默认使用 `CGO_ENABLED=0`。该规则的目标是避免跨系统编译困难，而不是禁止宿主程序或可选扩展调用外部 `lib`、`.so`、`.dylib`。允许在默认构建保持简单跨平台的前提下，通过显式可选 loader、宿主注册或平台适配层接入外部动态库。允许在 `third_party/lua-5.3.6/` 保存 Lua 5.3.6 官方源码作为对照迁移参考，但该源码不得进入 Go 构建链路。
 
 Lua 迁移基线建议锁定为 Lua 5.3 最新补丁版本 `lua-5.3.6`，后续所有行为测试都以该版本官方源码与手册为准。用户原文中的 “Cpp 源码” 按 Lua 5.3 官方 C 源码理解；若另有 C++ 分支或二次开发源码，需要在实现前补充来源。
 
@@ -162,7 +162,7 @@ Lua 调 Go 需要支持：
 - 数据库、Redis、MQ、外部 HTTP 服务。
 - go-zero HTTP 服务结构。
 - Redis SCAN、Lua 脚本缓存、线上中间件。
-- CGO、Lua C API 绑定、C 动态库接入核心 VM。
+- 默认构建中的 CGO、Lua C API 绑定、C 动态库接入核心 VM。
 
 ## 9. 实施阶段
 
@@ -212,9 +212,13 @@ Lua 调 Go 需要支持：
 
 ## 10. 待确认问题
 
-- Go module 路径与最终二进制名称是否使用 `glua`。
-- Lua 5.3 基线是否锁定 `lua-5.3.6`。
-- 是否要求二进制 chunk 与官方 Lua 在不同端序/字长平台完全互通。
-- `io`、`os`、`package` 标准库默认不允许访问宿主文件系统；CLI 普通模式显式开启宿主文件系统、进程与环境变量访问，`-E` 继续屏蔽环境变量读取。
-- Go 对象暴露给 Lua 时，是否需要 reflection 自动绑定，还是只支持显式注册。
-- “Go 实现转为 Lua 代码”是否接受 Lua stub/代理层方案。
+以下问题是发布前仍需用户确认的策略项。推荐先按保守首版发布口径确认，后续再按版本演进扩展。
+
+| 待确认项 | 推荐首版口径 | 原因与影响 |
+| --- | --- | --- |
+| 是否承诺官方 Lua 5.3 二进制 chunk 跨平台完全兼容 | 根据当前测试结果，首版不承诺跨端序、跨字长完全互通；承诺本项目 load/dump roundtrip、当前平台标准 chunk 读写和 Lua 5.3 语义字段兼容 | 现有测试已覆盖 roundtrip、反汇编和官方套件，但未做跨架构矩阵验证 |
+| `io`、`os`、`package` 默认权限策略 | Go 嵌入模式默认关闭宿主文件系统、环境变量和进程访问；CLI 普通模式开启，`-E` 继续屏蔽环境变量读取；Go `fs.FS` 虚拟文件系统是期望能力，但当前实现尚未完整接入，首版不能宣称已支持 | 代码已实现 `AllowHostFilesystem`、`AllowEnvironment`、`AllowProcess`；`fs.FS` 需要后续补 Options、io/base/package 读取链路和测试 |
+| C 动态库加载是否支持 | 默认构建不绑定外部动态库，首版内置 `package.loadlib`、C searcher 和 C root searcher 不直接打开动态库；但允许嵌入方在自己的程序中通过 CGO、插件、系统动态库机制或后续可选 loader 接入外部 `lib`、`.so`、`.dylib`，并覆盖 `package.loadlib` 或写入 `package.preload/searchers` 接入 | no-CGO 规则的原意是保持默认构建易跨系统编译；只要默认 `CGO_ENABLED=0` 构建和测试不受影响，外部动态库加载可作为宿主或可选扩展能力存在 |
+| Go reflection 自动绑定是否进入首版 | 不进入首版；reflection 自动绑定指“自动扫描 Go struct/function 并暴露字段、方法到 Lua”，当前只承诺显式注册 Go 函数、对象代理和 stub 生成 | 显式绑定已实现并可测试；自动反射会扩大可见 API、权限和错误边界 |
+| Lua stub 生成是否满足“Go 实现转为 Lua 代码”的需求 | 根据当前 bridge 实现，首版只承诺 Lua stub/代理层生成满足该需求，不承诺 Go 源码到 Lua 源码的语义翻译 | `bridge.GenerateLuaStub` 已实现并有测试；源码翻译属于独立编译器问题 |
+| 首个 release 的已知限制清单 | 已知限制包括：跨平台 binary chunk 完全互通未承诺、Go `fs.FS` VFS 未完整接入、默认内置 C 动态库加载器不提供、reflection 自动绑定不支持、强 DRM/防破解不承诺 | 明确首版能力边界，避免发布说明过度承诺 |

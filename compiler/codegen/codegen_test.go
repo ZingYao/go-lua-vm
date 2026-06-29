@@ -9,6 +9,7 @@ import (
 
 	"github.com/zing/go-lua-vm/bytecode"
 	"github.com/zing/go-lua-vm/compiler/parser"
+	"github.com/zing/go-lua-vm/extensions"
 )
 
 // TestCompileChunkDeduplicatesConstantsAndRegisters 验证常量去重、寄存器分配和临时寄存器释放。
@@ -144,7 +145,11 @@ func TestCompileChunkWhileStatement(t *testing.T) {
 //
 // continue 应降级为 JMP；switch 多值 case 应生成 EQ/JMP 匹配检查，不新增 VM opcode。
 func TestCompileChunkContinueAndSwitch(t *testing.T) {
-	chunk := parseChunkForCodegenTest(t, "local i = 0 local out = 0 while i < 5 do i = i + 1 if i == 2 then continue end switch i do case 1, 3 then out = out + i default then out = out + 10 end end return out")
+	if !extensions.Compiled().Has(extensions.SyntaxContinue | extensions.SyntaxSwitch) {
+		// 当前构建未编译控制流扩展时跳过正向 codegen 用例。
+		t.Skip("control-flow syntax extensions are not compiled")
+	}
+	chunk := parseChunkForCodegenTest(t, "local i = 0 local out = 0 while i < 5 do i = i + 1 if i == 2 then continue end switch i do case 1, 3 out = out + i default out = out + 10 end end return out")
 
 	proto, err := CompileChunk(chunk, "continue-switch")
 	if err != nil {
@@ -409,6 +414,29 @@ func TestCompileChunkLocalDebugInfo(t *testing.T) {
 	if proto.LocalVars[0].EndPC != len(proto.Code) || proto.LocalVars[1].EndPC != len(proto.Code) {
 		// 当前最小生命周期模型把 local 保持到函数结尾。
 		t.Fatalf("unexpected local end pc=%+v code=%d", proto.LocalVars, len(proto.Code))
+	}
+}
+
+// TestCompileChunkClosesSameScopeShadowedLocal 验证同作用域重名 local 会关闭旧调试生命周期。
+func TestCompileChunkClosesSameScopeShadowedLocal(t *testing.T) {
+	chunk := parseChunkForCodegenTest(t, "local a = 1 local b = 2 local a = 3 return a + b")
+
+	proto, err := CompileChunk(chunk, "shadow")
+	if err != nil {
+		// 合法同名 local 遮蔽样例不应编译失败。
+		t.Fatalf("compile shadowed local failed: %v", err)
+	}
+	if len(proto.LocalVars) != 3 {
+		// 三个声明都必须保留独立 LocVar，便于 dump/load 后按生命周期还原寄存器。
+		t.Fatalf("unexpected local vars=%+v", proto.LocalVars)
+	}
+	if proto.LocalVars[0].Name != "a" || proto.LocalVars[0].EndPC != proto.LocalVars[2].StartPC {
+		// 同作用域第二个 a 生效时，第一个 a 已不可见，EndPC 必须落在新声明 StartPC。
+		t.Fatalf("shadowed local lifetime mismatch: %+v", proto.LocalVars)
+	}
+	if proto.LocalVars[1].Name != "b" || proto.LocalVars[1].EndPC != len(proto.Code) {
+		// 未被遮蔽的 b 仍应活到 chunk 结束。
+		t.Fatalf("neighbor local lifetime mismatch: %+v", proto.LocalVars)
 	}
 }
 

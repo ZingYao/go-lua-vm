@@ -229,7 +229,7 @@ func (lexer *Lexer) matchOperator(operatorText string) bool {
 // 关键字表对齐 Lua 5.3 手册的 reserved words。
 func isLuaKeyword(text string) bool {
 	switch text {
-	case "and", "break", "continue", "do", "else", "elseif", "end", "false", "for", "function", "goto", "if", "in", "local", "nil", "not", "or", "repeat", "return", "switch", "then", "true", "until", "while":
+	case "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto", "if", "in", "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while":
 		// 命中保留字表时按 keyword token 输出。
 		return true
 	default:

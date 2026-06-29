@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/zing/go-lua-vm/extensions"
 	"github.com/zing/go-lua-vm/lua"
 	"github.com/zing/go-lua-vm/runtime"
 )
@@ -42,6 +43,42 @@ func TestParseArgs(t *testing.T) {
 	if !options.IgnoreEnvironment {
 		// -E 必须设置忽略环境变量标记。
 		t.Fatalf("ignore environment should be true")
+	}
+}
+
+// TestParseArgsSyntaxOptions 验证 glua 语法扩展参数解析。
+//
+// --syntax 设置基础集合，--disable-syntax 在基础集合上移除指定扩展。
+func TestParseArgsSyntaxOptions(t *testing.T) {
+	if extensions.Compiled().Has(extensions.SyntaxContinue | extensions.SyntaxSwitch) {
+		// 只有当前构建包含两个扩展时，才验证 extended 后局部关闭 switch 的正向路径。
+		options, err := ParseArgs([]string{"--syntax=extended", "--disable-syntax", "switch", "-e", "while true do continue end"})
+		if err != nil {
+			// 合法语法扩展参数不应失败。
+			t.Fatalf("ParseArgs syntax failed: %v", err)
+		}
+		if !options.SyntaxExtensionsSet || !options.SyntaxExtensions.Has(extensions.SyntaxContinue) || !options.SyntaxExtensions.Has(extensions.SyntaxSwitch) {
+			// extended 必须映射到当前构建内所有扩展。
+			t.Fatalf("syntax extensions = %#v set=%v", options.SyntaxExtensions, options.SyntaxExtensionsSet)
+		}
+		if options.DisabledSyntaxExtensions != extensions.SyntaxSwitch {
+			// disable-syntax 必须记录待关闭的 switch 位。
+			t.Fatalf("disabled syntax = %#v", options.DisabledSyntaxExtensions)
+		}
+		if finalSyntax := syntaxForOptions(options); finalSyntax.Has(extensions.SyntaxSwitch) || !finalSyntax.Has(extensions.SyntaxContinue) {
+			// 最终集合应只保留 continue。
+			t.Fatalf("final syntax = %#v", finalSyntax)
+		}
+	}
+
+	options, err := ParseArgs([]string{"--syntax", "lua53", "-e", "local continue = 1"})
+	if err != nil {
+		// lua53 模式是合法语法模式。
+		t.Fatalf("ParseArgs lua53 failed: %v", err)
+	}
+	if syntaxForOptions(options) != extensions.None() {
+		// lua53 模式必须关闭全部扩展。
+		t.Fatalf("lua53 syntax = %#v", syntaxForOptions(options))
 	}
 }
 
@@ -150,6 +187,22 @@ func TestRunListBytecode(t *testing.T) {
 	if !strings.Contains(stdout.String(), "LOADK") || !strings.Contains(stdout.String(), "RETURN") {
 		// 输出必须包含源码对应的核心指令。
 		t.Fatalf("list bytecode output = %q", stdout.String())
+	}
+}
+
+// TestRunListBytecodeHonorsSyntaxOptions 验证 glua 反汇编源码输入遵守语法开关。
+func TestRunListBytecodeHonorsSyntaxOptions(t *testing.T) {
+	// 写入使用扩展语法的源码文件。
+	tempDir := t.TempDir()
+	scriptPath := filepath.Join(tempDir, "script.lua")
+	if err := os.WriteFile(scriptPath, []byte("while true do continue end\n"), 0o600); err != nil {
+		// 测试脚本写入不应失败。
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	if err := Run(context.Background(), []string{"--syntax=lua53", "--list-bytecode", scriptPath}, Streams{}); err == nil {
+		// lua53 模式下 continue 语法糖应被拒绝。
+		t.Fatalf("Run list bytecode should reject disabled continue")
 	}
 }
 

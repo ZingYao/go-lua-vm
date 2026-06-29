@@ -89,6 +89,8 @@ type localBinding struct {
 	register int
 	// localVarIndex 保存调试局部变量表下标。
 	localVarIndex int
+	// scopeID 保存声明该局部变量的 parser 作用域编号，用于区分同作用域重名和内层遮蔽。
+	scopeID int
 }
 
 // pendingGoto 描述 codegen 阶段尚未确定目标 PC 的 goto 跳转。
@@ -306,9 +308,6 @@ func (generator *generator) compileStatement(statement parser.Statement) error {
 	case *parser.BreakStatement:
 		// break 生成待当前循环结束位置回填的 JMP。
 		return generator.compileBreakStatement()
-	case *parser.ContinueStatement:
-		// continue 生成待当前循环续迭代位置回填的 JMP。
-		return generator.compileContinueStatement()
 	case *parser.FunctionCallStatement:
 		// 函数调用语句会生成 CALL 并丢弃返回值。
 		return generator.compileFunctionCallStatement(typedStatement)
@@ -318,9 +317,6 @@ func (generator *generator) compileStatement(statement parser.Statement) error {
 	case *parser.GenericForStatement:
 		// 泛型 for 使用 TFORCALL/TFORLOOP 和迭代器寄存器区间。
 		return generator.compileGenericFor(typedStatement)
-	case *parser.SwitchStatement:
-		// switch 使用现有 EQ/JMP 组合生成非贯穿多分支。
-		return generator.compileSwitchStatement(typedStatement)
 	case *parser.LabelStatement:
 		// label 不生成指令，只记录当前位置供 goto 回填。
 		return generator.compileLabelStatement(typedStatement)
@@ -331,6 +327,10 @@ func (generator *generator) compileStatement(statement parser.Statement) error {
 		// 空语句不产生运行时指令。
 		return nil
 	default:
+		if handled, err := generator.compileExtensionStatement(statement); handled || err != nil {
+			// 当前语句已由编译进来的扩展 codegen 处理。
+			return err
+		}
 		return fmt.Errorf("codegen unsupported statement %T", statement)
 	}
 }
@@ -1144,21 +1144,6 @@ func (generator *generator) compileBreakStatement() error {
 	return nil
 }
 
-// compileContinueStatement 编译扩展 continue 语句。
-//
-// continue 只能出现在循环体内；当前生成一条待回填 JMP，由各循环在续迭代位置确定后统一回填。
-func (generator *generator) compileContinueStatement() error {
-	if len(generator.continueJumps) == 0 {
-		// parser 语义通常会拦截循环外 continue；这里保留防御式错误。
-		return fmt.Errorf("codegen continue outside loop")
-	}
-
-	continuePC := generator.emitJump(0)
-	lastLoopIndex := len(generator.continueJumps) - 1
-	generator.continueJumps[lastLoopIndex] = append(generator.continueJumps[lastLoopIndex], continuePC)
-	return nil
-}
-
 // compileFunctionCallStatement 编译函数调用语句。
 //
 // Lua 调用语句会丢弃全部返回值，因此 CALL 的 C 字段使用 1。
@@ -1400,76 +1385,6 @@ func (generator *generator) compileGenericFor(statement *parser.GenericForStatem
 	return nil
 }
 
-// compileSwitchStatement 编译扩展 switch/case/default 语句。
-//
-// switch 主表达式只求值一次；每个 case 通过 EQ/JMP 测试匹配，命中分支执行后跳到 switch 结束。
-func (generator *generator) compileSwitchStatement(statement *parser.SwitchStatement) error {
-	switchRegister := generator.allocateRegister()
-	if err := generator.compileExpressionTo(statement.Expression, switchRegister); err != nil {
-		// 主表达式编译失败时释放临时寄存器并返回。
-		generator.releaseRegister(switchRegister)
-		return err
-	}
-
-	var endJumpPCs []int
-	for caseIndex := range statement.Cases {
-		// 每个 case 按源码顺序生成匹配检查，未命中则落到下一分支检查。
-		switchCase := statement.Cases[caseIndex]
-		var matchJumpPCs []int
-		for _, valueExpression := range switchCase.Values {
-			caseRegister := generator.allocateRegister()
-			if err := generator.compileExpressionTo(valueExpression, caseRegister); err != nil {
-				// case 表达式编译失败时释放寄存器并返回。
-				generator.releaseRegister(caseRegister)
-				generator.releaseRegister(switchRegister)
-				return err
-			}
-			if err := generator.withSourceLine(switchCase.ThenPosition, func() error {
-				// EQ A=1 时匹配成功会执行下一条 JMP；匹配失败会跳过该 JMP 继续检查后续 case 值。
-				generator.emitABC(bytecode.OpEq, 1, switchRegister, caseRegister)
-				return nil
-			}); err != nil {
-				// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
-				generator.releaseRegister(caseRegister)
-				generator.releaseRegister(switchRegister)
-				return err
-			}
-			matchJumpPCs = append(matchJumpPCs, generator.emitJump(0))
-			generator.releaseRegister(caseRegister)
-		}
-		nextCaseJumpPC := generator.emitJump(0)
-		bodyStartPC := len(generator.proto.Code)
-		for _, matchJumpPC := range matchJumpPCs {
-			// 所有命中的 case 值都跳到同一个 case body 入口。
-			generator.patchJump(matchJumpPC, bodyStartPC)
-		}
-		if err := generator.compileScopedBlock(switchCase.Body); err != nil {
-			// case body 编译失败时释放 switch 临时寄存器并返回。
-			generator.releaseRegister(switchRegister)
-			return err
-		}
-		endJumpPCs = append(endJumpPCs, generator.emitJump(0))
-		generator.patchJump(nextCaseJumpPC, len(generator.proto.Code))
-	}
-
-	if statement.DefaultBlock != nil {
-		// default 位于所有 case 未命中路径之后，无需额外匹配检查。
-		if err := generator.compileScopedBlock(statement.DefaultBlock); err != nil {
-			// default body 编译失败时释放 switch 临时寄存器并返回。
-			generator.releaseRegister(switchRegister)
-			return err
-		}
-	}
-	for _, endJumpPC := range endJumpPCs {
-		// 所有已执行 case 分支统一跳过后续分支到 switch 结束位置。
-		generator.patchJump(endJumpPC, len(generator.proto.Code))
-	}
-	generator.releaseRegister(switchRegister)
-
-	// switch 语句编译完成。
-	return nil
-}
-
 // compileChildProto 编译嵌套函数体并追加到当前 Proto。
 //
 // 函数参数会作为子函数局部变量写入连续寄存器，返回值是当前 Proto.p 的子原型索引。
@@ -1676,26 +1591,12 @@ func statementContainsFunction(statement parser.Statement) bool {
 			}
 		}
 		return blockContainsFunction(typedStatement.Body)
-	case *parser.SwitchStatement:
-		if expressionContainsFunction(typedStatement.Expression) {
-			// switch 主表达式中的匿名函数需要保守处理。
-			return true
-		}
-		for _, switchCase := range typedStatement.Cases {
-			for _, value := range switchCase.Values {
-				if expressionContainsFunction(value) {
-					// case 匹配表达式中的匿名函数需要保守处理。
-					return true
-				}
-			}
-			if blockContainsFunction(switchCase.Body) {
-				// case body 中出现函数时返回 true。
-				return true
-			}
-		}
-		return blockContainsFunction(typedStatement.DefaultBlock)
 	case *parser.FunctionCallStatement:
 		return expressionContainsFunction(typedStatement.Call)
+	}
+	if contains, handled := extensionStatementContainsFunction(statement); handled {
+		// 当前语句已由编译进来的扩展函数子树检测器处理。
+		return contains
 	}
 	return false
 }
@@ -2591,10 +2492,29 @@ func (generator *generator) releaseRegistersFrom(startRegister int) {
 //
 // name 是 Lua 局部变量名；register 是对应寄存器；position 当前保留给后续行号映射扩展。
 func (generator *generator) defineLocal(name string, register int, position lexer.Position) {
+	currentScopeID := generator.currentScopeID()
+	if previousBinding, exists := generator.locals[name]; exists && previousBinding.scopeID == currentScopeID {
+		// 同一词法作用域内重新声明同名 local 时，旧 local 从新声明生效处开始不可见。
+		generator.proto.LocalVars[previousBinding.localVarIndex].EndPC = len(generator.proto.Code)
+	}
 	localVar := bytecode.LocalVar{Name: name, Register: register, StartPC: len(generator.proto.Code), EndPC: len(generator.proto.Code)}
 	index := len(generator.proto.LocalVars)
 	generator.proto.LocalVars = append(generator.proto.LocalVars, localVar)
-	generator.locals[name] = localBinding{register: register, localVarIndex: index}
+	generator.locals[name] = localBinding{register: register, localVarIndex: index, scopeID: currentScopeID}
+}
+
+// currentScopeID 返回当前 parser 作用域编号。
+//
+// 没有 parser 作用域时返回 -1，调用方可用该值作为保守的函数级作用域标识。
+func (generator *generator) currentScopeID() int {
+	currentScope := generator.currentScope()
+	if currentScope == nil {
+		// 缺少作用域信息时使用 -1，避免空指针并保持同一无作用域上下文可比较。
+		return -1
+	}
+
+	// 返回 parser 语义阶段分配的稳定作用域编号。
+	return currentScope.ID
 }
 
 // beginScope 保存进入嵌套 block 前的 codegen 可见局部状态。

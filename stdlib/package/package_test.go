@@ -351,9 +351,9 @@ func TestRequireErrorsWhenSearchersIsNotTable(t *testing.T) {
 	}
 }
 
-// TestLoadLibDisabled 验证 package.loadlib 的无 CGO 策略。
+// TestLoadLibDisabled 验证内置 package.loadlib 的无 CGO 策略。
 //
-// 合法参数下返回 nil 和错误文本，表示 C 动态库加载被明确禁用。
+// 合法参数下返回 nil 和错误文本，表示默认 C 动态库加载器未内置；宿主程序可覆盖该函数。
 func TestLoadLibDisabled(t *testing.T) {
 	// 构造独立环境并调用 loadlib。
 	environment := NewEnvironment()
@@ -376,13 +376,13 @@ func TestLoadLibDisabled(t *testing.T) {
 	}
 }
 
-// TestCLoadingPolicyDocumentsUnsupportedDynamicLibraries 验证 C 动态库 loader 的固定策略。
+// TestCLoadingPolicyDocumentsUnsupportedDynamicLibraries 验证内置 C 动态库 loader 的固定策略。
 //
-// 本项目纯 Go 且禁用 CGO，因此 loadlib、C searcher 和 C root searcher 都必须明确不支持。
+// 本项目默认构建纯 Go 且禁用 CGO，因此默认 loadlib、C searcher 和 C root searcher 都必须明确不支持。
 func TestCLoadingPolicyDocumentsUnsupportedDynamicLibraries(t *testing.T) {
-	// C 动态库支持状态必须固定为 false。
+	// 内置 C 动态库支持状态必须固定为 false。
 	if CLoadingSupported() {
-		// 启用 C loader 会违反项目无 CGO 规则。
+		// 启用默认内置 C loader 会破坏默认跨系统编译边界。
 		t.Fatalf("CLoadingSupported = true, want false")
 	}
 	if !strings.Contains(CLoadingPolicy(), "CGO-free") {

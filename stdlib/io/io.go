@@ -479,6 +479,17 @@ func Type(args ...runtime.Value) ([]runtime.Value, error) {
 // 当前写入默认输出；参数必须是 string、integer 或 number。成功时返回当前输出 file，底层写入错误
 // 转换为 Lua error。无参数时只校验默认输出可写并返回当前输出 file。
 func Write(args ...runtime.Value) ([]runtime.Value, error) {
+	argumentTexts := make([]string, 0, len(args))
+	for index, value := range args {
+		// 每个参数都必须先转换为 Lua io.write 文本；参数错误优先于默认输出句柄状态。
+		text, err := writeArgument(value, index+1, "write")
+		if err != nil {
+			// 参数类型不兼容时立即返回 Lua 参数错误，供调用边界补齐 io.write 名称。
+			return nil, err
+		}
+		argumentTexts = append(argumentTexts, text)
+	}
+
 	// 默认输出必须存在且具备写入能力。
 	if defaultOutput != nil && defaultOutput.closed {
 		// Lua 5.3 对当前默认输出关闭后的 io.write 使用专门错误文本。
@@ -488,13 +499,8 @@ func Write(args ...runtime.Value) ([]runtime.Value, error) {
 		// 没有可写默认输出时返回 Lua 错误。
 		return nil, runtime.RaiseError(runtime.StringValue("default output is not writable"))
 	}
-	for index, value := range args {
-		// 每个参数都必须可转换为 Lua io.write 文本。
-		text, err := writeArgument(value, index+1, "write")
-		if err != nil {
-			// 参数类型不兼容时立即返回 Lua 参数错误。
-			return nil, err
-		}
+	for _, text := range argumentTexts {
+		// 参数文本已经完成校验，开始按顺序写入默认输出。
 		if _, err := defaultOutput.writer.Write([]byte(text)); err != nil {
 			// 底层写入失败转换为 Lua 运行期错误。
 			return nil, runtime.RaiseError(runtime.StringValue(err.Error()))

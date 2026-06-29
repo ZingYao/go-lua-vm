@@ -2,7 +2,8 @@
 //
 // 本包当前提供 package 表、require 的 loaded/searchers 路径、package.config/path/cpath/loaded、
 // package.preload、package.searchers、package.searchpath、Lua 文件 loader 和 package.loadlib 的
-// 无 CGO 禁用策略。
+// 内置无 CGO 策略。该策略用于保持默认构建易跨系统编译；宿主程序仍可自行注册纯 Go、
+// 自带 CGO 或系统动态库适配的 loader 覆盖默认行为。
 package packagelib
 
 import (
@@ -20,8 +21,8 @@ const (
 	DefaultPath = "./?.lua;./?/init.lua"
 	// DefaultCPath 是当前无 CGO 策略下保留的 Lua 5.3 兼容 C 模块搜索模板。
 	DefaultCPath = "./?.so;./lua/?.so"
-	// CLoadingPolicyText 说明当前项目对 Lua C 动态库 loader 的固定策略。
-	CLoadingPolicyText = "dynamic C libraries are disabled because this VM is pure Go and CGO-free"
+	// CLoadingPolicyText 说明当前项目默认 Lua C 动态库 loader 的固定策略。
+	CLoadingPolicyText = "built-in dynamic C library loading is disabled in the default CGO-free build to keep cross-system builds simple; embedding programs may register their own loader"
 	// defaultPathSeparator 是 package.path 多模板之间的分隔符。
 	defaultPathSeparator = ";"
 	// defaultTemplateMark 是 package.path 中用于替换模块路径的占位符。
@@ -257,17 +258,18 @@ func (environment *Environment) RegisterGoModule(moduleName string, loader runti
 	return environment.RegisterPreload(moduleName, loader)
 }
 
-// CLoadingSupported 返回当前 package 库是否支持 C 动态库 loader。
+// CLoadingSupported 返回当前 package 库是否内置支持 C 动态库 loader。
 //
-// 本项目禁止 CGO，并且不接入 Lua C API，因此该方法固定返回 false。
+// 本项目默认构建禁止 CGO，并且内置 package 库不接入 Lua C API，因此该方法固定返回 false。
+// 嵌入方可以在自己的宿主程序中注册自定义 loader 或覆盖 package.loadlib，这不改变默认内置状态。
 func CLoadingSupported() bool {
-	// 无 CGO 策略是项目级硬约束，不能按运行时环境切换。
+	// 默认无 CGO 策略是跨系统编译边界，不能按运行时环境隐式切换。
 	return false
 }
 
 // CLoadingPolicy 返回当前 package 库的 C 动态库 loader 策略说明。
 //
-// 返回文本用于测试、文档和错误消息，说明 loadlib、C searcher 与 C root searcher 均不启用。
+// 返回文本用于测试、文档和错误消息，说明内置 loadlib、C searcher 与 C root searcher 均不启用。
 func CLoadingPolicy() string {
 	// 策略文本集中维护，避免多个 loader 分支产生不一致说明。
 	return CLoadingPolicyText
@@ -340,8 +342,8 @@ func (environment *Environment) Require(args ...runtime.Value) ([]runtime.Value,
 
 // LoadLib 实现 Lua 5.3 `package.loadlib` 的无 CGO 策略。
 //
-// filename 和 symbol 参数都必须是 string。当前项目禁止 CGO 和 C 动态库加载，因此返回
-// nil 与错误文本，而不是尝试打开宿主动态库。
+// filename 和 symbol 参数都必须是 string。当前默认构建不绑定外部动态库，内置 loadlib
+// 返回 nil 与错误文本；宿主程序可通过覆盖 package.loadlib 提供自定义实现。
 func (environment *Environment) LoadLib(args ...runtime.Value) ([]runtime.Value, error) {
 	// filename 必须是 string。
 	if _, err := stringArgument(args, 1, "loadlib"); err != nil {

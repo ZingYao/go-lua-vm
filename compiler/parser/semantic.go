@@ -243,14 +243,6 @@ func (analyzer *semanticAnalyzer) analyzeStatement(block *Block, scope *ScopeInf
 		analyzer.loopDepth++
 		analyzer.analyzeBlock(typedStatement.Body, scope, statementIndex, depth+1, declarations, false, namespace)
 		analyzer.loopDepth--
-	case *ContinueStatement:
-		if analyzer.loopDepth == 0 {
-			// continue 只能续迭代最近一层循环；循环外没有合法目标。
-			analyzer.addError(typedStatement.Position, "continue outside loop")
-		}
-	case *SwitchStatement:
-		// switch 自身不创建循环层级；case/default block 创建独立子作用域。
-		analyzer.analyzeSwitchStatement(scope, depth, statementIndex, typedStatement, namespace)
 	case *LabelStatement:
 		// label 声明记录到当前函数命名空间，并检查重复声明。
 		analyzer.addLabel(block, scope, statementIndex, typedStatement, namespace)
@@ -260,6 +252,10 @@ func (analyzer *semanticAnalyzer) analyzeStatement(block *Block, scope *ScopeInf
 		scope.Gotos = append(scope.Gotos, gotoInfo)
 		namespace.gotos = append(namespace.gotos, gotoRecord{block: block, scope: scope, gotoInfo: gotoInfo})
 	default:
+		if analyzer.analyzeExtensionStatement(block, scope, depth, statementIndex, statement, namespace) {
+			// 当前语句已由编译进来的扩展语义分析器处理。
+			return
+		}
 		// 其他语句当前不会声明局部变量或 label/goto，无需处理。
 		return
 	}
@@ -289,21 +285,6 @@ func (analyzer *semanticAnalyzer) analyzeIfStatement(parent *ScopeInfo, depth in
 	if statement.ElseBlock != nil {
 		// else 分支存在时同样创建独立子作用域。
 		analyzer.analyzeBlock(statement.ElseBlock, parent, parentStatementIndex, depth+1, nil, false, namespace)
-	}
-}
-
-// analyzeSwitchStatement 分析扩展 switch/case/default 的子 block。
-//
-// switch 不改变循环深度；因此 loop 内 switch 的 continue 仍绑定外层最近循环，函数内 switch 外
-// continue 仍会被拒绝。
-func (analyzer *semanticAnalyzer) analyzeSwitchStatement(parent *ScopeInfo, depth int, parentStatementIndex int, statement *SwitchStatement, namespace *functionNamespace) {
-	for caseIndex := range statement.Cases {
-		// 每个 case 分支都创建独立子作用域，避免 case 内 local 泄漏到后续分支。
-		analyzer.analyzeBlock(statement.Cases[caseIndex].Body, parent, parentStatementIndex, depth+1, nil, false, namespace)
-	}
-	if statement.DefaultBlock != nil {
-		// default 分支存在时同样创建独立子作用域。
-		analyzer.analyzeBlock(statement.DefaultBlock, parent, parentStatementIndex, depth+1, nil, false, namespace)
 	}
 }
 

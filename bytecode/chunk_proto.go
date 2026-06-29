@@ -235,7 +235,7 @@ func loadDebug(reader io.Reader, proto *Proto) error {
 	}
 	proto.LineInfo = lineInfo
 
-	localVars, err := loadLocalVars(reader, proto.Code)
+	localVars, err := loadLocalVars(reader, proto.Code, proto.LineInfo)
 	if err != nil {
 		// 局部变量表损坏会影响 debug.getlocal。
 		return err
@@ -300,7 +300,7 @@ func loadIntSlice(reader io.Reader, fieldName string) ([]int, error) {
 // loadLocalVars 读取 Lua 5.3 Proto.locvars 局部变量调试表。
 //
 // 每个局部变量包含名称、startpc 和 endpc。
-func loadLocalVars(reader io.Reader, code []Instruction) ([]LocalVar, error) {
+func loadLocalVars(reader io.Reader, code []Instruction, lineInfo []int) ([]LocalVar, error) {
 	// 先读取局部变量数量，再逐项读取名称和生命周期范围。
 	localVarCount, err := readInt(reader, "local var count")
 	if err != nil {
@@ -332,7 +332,7 @@ func loadLocalVars(reader io.Reader, code []Instruction) ([]LocalVar, error) {
 		localVars[localVarIndex] = LocalVar{Name: name, StartPC: startPC, EndPC: endPC}
 	}
 
-	assignLoadedLocalRegisters(localVars, code)
+	assignLoadedLocalRegisters(localVars, code, lineInfo)
 
 	// 返回按 Debug 表顺序排列的局部变量。
 	return localVars, nil
@@ -343,7 +343,12 @@ func loadLocalVars(reader io.Reader, code []Instruction) ([]LocalVar, error) {
 // Lua 5.3 binary chunk 的 locvar 只保存 name/startpc/endpc，不保存寄存器号；官方调试表顺序
 // 按局部变量入栈顺序排列。加载外部 chunk 时需要按生命周期复用已结束局部变量的低槽位，
 // 让 debug.getinfo("n") 和 debug.getlocal 能在 dump/load 后继续反查 local 名称。
-func assignLoadedLocalRegisters(localVars []LocalVar, code []Instruction) {
+func assignLoadedLocalRegisters(localVars []LocalVar, code []Instruction, lineInfo []int) {
+	startPCCounts := make(map[int]int)
+	for localVarIndex := range localVars {
+		// 同一条 PC 可对应 `local a,b = ...` 的一组局部变量，后续 CLOSURE 反推必须避开这种成组声明。
+		startPCCounts[localVars[localVarIndex].StartPC]++
+	}
 	// activeEndByRegister 记录每个重建寄存器当前占用到哪条 PC。
 	activeEndByRegister := make(map[int]int)
 	for localVarIndex := range localVars {
@@ -355,8 +360,14 @@ func assignLoadedLocalRegisters(localVars []LocalVar, code []Instruction) {
 			}
 		}
 
-		if register, ok := loadedLocalRegisterFromStartInstruction(localVars[localVarIndex], code); ok {
+		if register, ok := loadedLocalRegisterFromStartInstruction(localVars[localVarIndex], code, startPCCounts[startPC] > 1); ok {
 			// local function 的 CLOSURE A 会显式暴露真实局部寄存器，优先保留该槽位以维持 Debug 名称反查。
+			localVars[localVarIndex].Register = register
+			activeEndByRegister[register] = localVars[localVarIndex].EndPC
+			continue
+		}
+		if register, ok := loadedLocalRegisterFromInitializerLine(localVars[localVarIndex], code, lineInfo, activeEndByRegister); ok {
+			// 普通 local 初始化表达式常在 StartPC 前同一源码行写入真实目标寄存器，优先保留该槽位。
 			localVars[localVarIndex].Register = register
 			activeEndByRegister[register] = localVars[localVarIndex].EndPC
 			continue
@@ -375,15 +386,67 @@ func assignLoadedLocalRegisters(localVars []LocalVar, code []Instruction) {
 	}
 }
 
+// loadedLocalRegisterFromInitializerLine 尝试从 local 生效前同源码行的初始化指令恢复寄存器。
+//
+// Lua 5.3 locvar 不保存寄存器号；当声明包含 table constructor、函数调用或其它会占用临时寄存器
+// 的初始化表达式时，仅按生命周期低槽重建会把长期 local 错放到低位槽。StartPC 前一条指令通常仍
+// 属于声明初始化表达式，扫描同源码行的写 A 指令并选择未占用的最低 A，可恢复 `local x = {...}`、
+// `local x = f()` 等常见声明的真实结果槽。
+func loadedLocalRegisterFromInitializerLine(localVar LocalVar, code []Instruction, lineInfo []int, activeEndByRegister map[int]int) (int, bool) {
+	previousPC := localVar.StartPC - 1
+	if previousPC < 0 || previousPC >= len(code) || previousPC >= len(lineInfo) {
+		// 缺少前序指令或行号信息时，无法安全判断初始化表达式范围。
+		return 0, false
+	}
+	sourceLine := lineInfo[previousPC]
+	if sourceLine <= 0 {
+		// stripped 或无效行号无法限定扫描范围，避免跨语句误判。
+		return 0, false
+	}
+	bestRegister := -1
+	for candidatePC := previousPC; candidatePC >= 0 && candidatePC < len(lineInfo); candidatePC-- {
+		if lineInfo[candidatePC] != sourceLine {
+			// 只扫描同一源码行，遇到上一行即停止，避免吸收前一语句的写寄存器。
+			break
+		}
+		instruction := code[candidatePC]
+		opCode := instruction.OpCode()
+		if !opCode.SetsA() {
+			// 不写 A 的指令不能表达初始化结果槽。
+			continue
+		}
+		register := instruction.A()
+		if _, occupied := activeEndByRegister[register]; occupied {
+			// 已有活动 local 占用的寄存器不能分配给当前 local。
+			continue
+		}
+		if bestRegister < 0 || register < bestRegister {
+			// 初始化目标通常是本行未占用写寄存器中的最低槽，临时值位于其后。
+			bestRegister = register
+		}
+	}
+	if bestRegister < 0 {
+		// 没有可用写 A 候选时交回生命周期低槽算法。
+		return 0, false
+	}
+
+	// 返回从初始化行反推出的寄存器。
+	return bestRegister, true
+}
+
 // loadedLocalRegisterFromStartInstruction 尝试从局部变量起始指令恢复真实寄存器。
 //
-// Lua 5.3 binary chunk 的 locvar 不保存寄存器号，但 local function 声明通常在 StartPC
+// Lua 5.3 binary chunk 的 locvar 不保存寄存器号，但单个 local function 声明通常在 StartPC
 // 处通过 CLOSURE A 创建闭包；`local f = function()` 赋值式闭包则常在 StartPC-1 创建。
-// 此时 A 就是真实 local 槽位。优先使用该槽位可避免 dump/load 后同作用域多个局部函数
-// 被低槽重建，导致 debug.getinfo("n") 调用名错配。
-func loadedLocalRegisterFromStartInstruction(localVar LocalVar, code []Instruction) (int, bool) {
-	// 先尝试 StartPC，再尝试 StartPC-1，覆盖 local function 与赋值式闭包两类调试生命周期边界。
-	for _, candidatePC := range []int{localVar.StartPC, localVar.StartPC - 1} {
+// 此时 A 就是真实 local 槽位。若多个 local 共享同一 StartPC，StartPC 处的 CLOSURE 更可能属于
+// 下一条语句或初始化表达式的临时槽，不能用于整组 local 的寄存器反推。
+func loadedLocalRegisterFromStartInstruction(localVar LocalVar, code []Instruction, sharedStartPC bool) (int, bool) {
+	candidatePCs := []int{localVar.StartPC - 1}
+	if !sharedStartPC {
+		// 只有单个 local 独占 StartPC 时，才允许从 StartPC 指令反推 local function 寄存器。
+		candidatePCs = append([]int{localVar.StartPC}, candidatePCs...)
+	}
+	for _, candidatePC := range candidatePCs {
 		if candidatePC < 0 || candidatePC >= len(code) {
 			// 越界候选不能参与指令反推，继续检查下一个候选。
 			continue

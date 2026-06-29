@@ -14,6 +14,9 @@
 make test
 make fmt
 make gate
+go build -tags lua53 ./cmd/glua
+go build -tags with_switch ./cmd/glua
+go build -tags with_continue ./cmd/glua
 ```
 
 ## 目录
@@ -34,3 +37,7 @@ make gate
 ## 自定义加密 chunk 接入规划
 
 自定义加密 chunk 的 encoder/decoder 接入方式、最小可执行 Demo 与避坑点见 [docs/CUSTOM_CHUNK.md](docs/CUSTOM_CHUNK.md)。
+
+## 语法扩展开关
+
+`continue` 与 `switch/case/default` 的语义、build tag 裁剪方式、glua/gluac 参数和 Go API 接入方式见 [docs/CONTROL_FLOW_EXTENSIONS.md](docs/CONTROL_FLOW_EXTENSIONS.md)。

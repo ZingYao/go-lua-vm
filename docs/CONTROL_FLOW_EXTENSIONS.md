@@ -2,6 +2,35 @@
 
 本文档记录本项目在 Lua 5.3 基线之上新增 `continue` 与 `switch/case/default` 的设计。该扩展只改 lexer/parser/codegen 层，不新增 VM opcode，最终仍生成标准 Lua 5.3 VM 指令。
 
+## 启用与关闭
+
+语法扩展通过 `extensions.SyntaxSet` 注册表统一管理。parser 只在语句起点做位图检查，VM 执行阶段不感知语法糖开关。
+
+- 默认构建会编译并启用当前已实现扩展。
+- 使用 `-tags lua53` 可编译出不包含任何语法扩展的二进制。
+- 使用 `-tags with_continue` 可只编译 `continue` 扩展。
+- 使用 `-tags with_switch` 可只编译 `switch` 扩展。
+- 使用 `-tags "with_continue with_switch"` 可只编译这两个扩展。
+- 使用 `-tags with_all` 可显式编译全部扩展。
+
+命令行可在已编译扩展范围内关闭功能：
+
+```bash
+glua --syntax=lua53 script.lua
+glua --syntax=extended --disable-syntax=switch script.lua
+gluac --syntax=lua53 -o out.luac script.lua
+gluac --syntax=extended --disable-syntax=continue script.lua
+```
+
+Go 嵌入 API 可通过 State options 控制源码编译语法：
+
+```go
+options := lua.WithSyntaxExtensions(lua.DefaultOptions(), 0) // Lua 5.3 兼容模式
+state := lua.NewStateWithOptions(options)
+```
+
+`continue`、`switch`、`case` 和 `default` 均不进入 Lua 5.3 全局保留字表。扩展开启时，`continue` 和 `switch` 只在语句起点按上下文关键字识别；扩展关闭时它们可作为普通标识符使用。
+
 ## continue
 
 `continue` 用于跳过当前循环剩余语句，继续最近一层循环的下一轮。
@@ -44,11 +73,11 @@ end
 
 ```lua
 switch value do
-case 1 then
+case 1
     print("one")
-case 2, 3 then
+case 2, 3
     print("two or three")
-default then
+default
     print("other")
 end
 ```
@@ -61,6 +90,7 @@ end
 - 匹配使用 Lua `==` 语义。
 - `default` 最多出现一次，第一阶段要求放在最后。
 - 每个 `case/default` 块不贯穿执行；块结束后自动跳到 `switch` 结束位置。
+- `case/default` 后不使用 `then`，因为分支由下一条 `case/default/end` 关闭，而不是由每个分支自己的 `end` 关闭。
 - `break` 仍表示跳出最近循环，不表示跳出 `switch`。
 - 循环内的 `switch` 中可以使用 `continue`，继续最近一层循环。
 - `case/default` 不加入全局保留字表，普通 Lua 代码中仍可作为变量名；但在 `switch` 分支块的语句起点会被当作分支边界，不能无歧义地写成 `case = ...` 或 `default = ...`。
@@ -77,8 +107,10 @@ end
 ## 测试验收
 
 - parser 能解析 `continue`、`switch`、多值 `case` 和 `default`。
+- parser 在关闭扩展后允许 `continue` 与 `switch` 作为普通变量名。
 - codegen 不新增 opcode，仅产生现有跳转和比较指令。
 - runtime 覆盖四种循环中的 `continue`。
 - runtime 覆盖 `switch` 首个 case、后续 case、多值 case、default 和未匹配无 default。
 - runtime 覆盖 loop 内 switch + continue。
 - parser 拒绝循环外 `continue`、重复 `default`、非末尾 `default`。
+- glua/gluac 覆盖 `--syntax=lua53` 与 `--disable-syntax` 参数。

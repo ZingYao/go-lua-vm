@@ -211,17 +211,17 @@
 - [x] 实现 chunk dump。
 - [x] 实现 chunk load/dump roundtrip。
 - [x] 实现反汇编输出，辅助调试。
-- [ ] 设计自定义加密 chunk encoder/decoder，目标是允许嵌入用户在发布侧生成私有加密 chunk，并在运行侧注册自己的解密/解包逻辑，同时保持 VM 只执行标准 Proto/bytecode。
-- [ ] 定义 chunk 加载流程：输入字节先由 loader 识别格式，标准 Lua 5.3 binary chunk 直接解析，自定义加密 chunk 命中注册 decoder 后解码为标准 binary chunk，再进入统一 chunk parser 与校验。
-- [ ] 定义对外注册接口，优先在 `lua` 嵌入 API 暴露稳定 `ChunkDecoder`、`ChunkEncoder`、`WithChunkDecoder` 等选项，避免用户直接依赖 `bytecode` 内部结构。
-- [ ] 约束 decoder 第一阶段只返回标准 Lua 5.3 binary chunk 字节，禁止直接返回 `Proto` 绕过 header、版本、指令、常量表、嵌套深度等统一校验。
-- [ ] 约束 encoder 输入必须是标准 Lua 5.3 binary chunk 字节，输出必须包含稳定 magic header、版本号与完整性校验，便于 decoder 精确识别和拒绝损坏数据。
-- [ ] 设计 decoder 匹配规则：按注册顺序执行 `Match`，首个命中后停止；标准 Lua chunk decoder 默认保留，是否允许禁用标准 chunk 需单独配置。
-- [ ] 设计安全边界：encoder/decoder 必须支持 `context.Context` 取消，输入与输出必须有最大字节数限制，错误信息不得泄露密钥、明文片段或宿主内部路径。
-- [ ] 设计异常语义：未命中任何 decoder 返回未知 chunk 格式错误，decoder 解密失败返回解码错误，解密后非法 chunk 统一返回 bytecode 校验错误。
-- [ ] 设计 CLI 策略：`glua` 默认兼容标准 chunk；自定义加密 chunk 优先通过 Go 嵌入注册，是否提供 CLI 内置示例 decoder 或显式开关后续评估。
-- [ ] 记录能力边界：该方案只提升通用工具直接反编译门槛，不承诺防止运行时调试、内存 dump 或解密后 Proto 抽取。
-- [ ] 补充测试计划：覆盖标准 chunk、加密 chunk、encoder/decoder roundtrip、未知格式、decoder 错误、非法解密结果、超大解密结果、context 取消和多 decoder 匹配顺序。
+- [x] 设计自定义加密 chunk encoder/decoder，目标是允许嵌入用户在发布侧生成私有加密 chunk，并在运行侧注册自己的解密/解包逻辑，同时保持 VM 只执行标准 Proto/bytecode。
+- [x] 定义 chunk 加载流程：输入字节先由 loader 识别格式，标准 Lua 5.3 binary chunk 直接解析，自定义加密 chunk 命中注册 decoder 后解码为标准 binary chunk，再进入统一 chunk parser 与校验。
+- [x] 定义对外注册接口，优先在 `lua` 嵌入 API 暴露稳定 `ChunkDecoder`、`ChunkEncoder`、`WithChunkDecoder` 等选项，避免用户直接依赖 `bytecode` 内部结构。
+- [x] 约束 decoder 第一阶段只返回标准 Lua 5.3 binary chunk 字节，禁止直接返回 `Proto` 绕过 header、版本、指令、常量表、嵌套深度等统一校验。
+- [x] 约束 encoder 输入必须是标准 Lua 5.3 binary chunk 字节，输出必须包含稳定 magic header、版本号与完整性校验，便于 decoder 精确识别和拒绝损坏数据。
+- [x] 设计 decoder 匹配规则：按注册顺序执行 `Match`，首个命中后停止；标准 Lua chunk decoder 默认保留，是否允许禁用标准 chunk 需单独配置。
+- [x] 设计安全边界：encoder/decoder 必须支持 `context.Context` 取消，输入与输出必须有最大字节数限制，错误信息不得泄露密钥、明文片段或宿主内部路径。
+- [x] 设计异常语义：未命中任何 decoder 返回未知 chunk 格式错误，decoder 解密失败返回解码错误，解密后非法 chunk 统一返回 bytecode 校验错误。
+- [x] 设计 CLI 策略：`glua` 默认兼容标准 chunk；自定义加密 chunk 优先通过 Go 嵌入注册，是否提供 CLI 内置示例 decoder 或显式开关后续评估。
+- [x] 记录能力边界：该方案只提升通用工具直接反编译门槛，不承诺防止运行时调试、内存 dump 或解密后 Proto 抽取。
+- [x] 补充测试计划：覆盖标准 chunk、加密 chunk、encoder/decoder roundtrip、未知格式、decoder 错误、非法解密结果、超大解密结果、context 取消和多 decoder 匹配顺序。
 
 ## 8. VM 指令执行
 
@@ -328,8 +328,9 @@
 - [x] 实现作用域栈。
 - [x] 实现局部变量生命周期。
 - [x] 实现 goto/label 合法性校验。
-- [ ] 实现 `continue` 语法解析，要求只允许出现在循环内，并能在嵌套循环中绑定最近一层循环。
-- [ ] 实现 `switch/case/default` 语法解析，支持多值 case、最多一个 default，并要求 default 第一阶段放在最后。
+- [x] 实现 `continue` 语法解析，要求只允许出现在循环内，并能在嵌套循环中绑定最近一层循环。
+- [x] 实现 `switch/case/default` 语法解析，支持多值 case、最多一个 default，并要求 default 第一阶段放在最后。
+- [x] 实现语法扩展注册表，支持按 build tag 编译裁剪，并在 glua、gluac 和 Go API 中按参数关闭已编译扩展。
 - [x] 建立 parser 错误恢复策略。
 - [x] 建立 parser golden。
 
@@ -349,8 +350,8 @@
 - [x] 实现 tail call codegen。
 - [x] 实现 numeric for codegen。
 - [x] 实现 generic for codegen。
-- [ ] 实现 `continue` codegen，将 continue 编译为现有 `JMP`，分别跳到 while 条件、repeat-until 条件、numeric for `FORLOOP`、generic for `TFORCALL`。
-- [ ] 实现 `switch/case/default` codegen，不新增 VM opcode，通过临时寄存器、`EQ` 与 `JMP` 生成非贯穿多分支控制流。
+- [x] 实现 `continue` codegen，将 continue 编译为现有 `JMP`，分别跳到 while 条件、repeat-until 条件、numeric for `FORLOOP`、generic for `TFORCALL`。
+- [x] 实现 `switch/case/default` codegen，不新增 VM opcode，通过临时寄存器、`EQ` 与 `JMP` 生成非贯穿多分支控制流。
 - [x] 实现 vararg codegen。
 - [x] 实现 return codegen。
 - [x] 对齐官方 Lua 关键样例反汇编。
@@ -670,7 +671,7 @@
 
 - [x] `gofmt` 全量通过。
 - [x] `go test ./...` 全量通过。
-- [ ] 官方 Lua 5.3 测试套件通过。
+- [x] 官方 Lua 5.3 测试套件通过。
   - 拆分验收路径：官方套件不再按一个粗粒度断点推进；后续每轮优先选择一个可单独验证的小段，修复后用对应官方脚本或最小 Lua 片段回归。
   - [x] 官方 `gc.lua` 单文件通过。
   - [x] 官方 `api.lua` 在无 `testC` 环境下通过。
@@ -747,8 +748,10 @@
   - [x] 官方 `all.lua -> files.lua` popen/pclose、execute 与 date/time 小节：补齐 `io.popen(...):close()` 与 `os.execute(...)` 的 Lua 5.3 `ok, what, code` 三元组，区分普通退出和信号终止；同步修复外层 `/bin/sh` 对嵌套 shell 信号退出的状态折算、`os.date` 的 `%w/%j/%x/%y` 与 E/O 修饰符、非法转换错误、超大时间戳不可表示错误，以及 `os.time(table)` 对越界秒数字段的归一化回写。`files.lua` 单文件已输出 `Lua 5.3` 并完成。
   - [x] 官方 `all.lua -> db.lua` debug 名称小节：修复 `if ... then break end; f()`、`if/else ...; f()`、`while ... break ...; f()` 与嵌套 `repeat` 分支后的 local 函数调用名推断，避免 close-only/控制流 JMP 被误判为短路表达式末端；`db.lua` 单文件已输出 `OK`，`all.lua` 顺序回归已越过 `db.lua` 并推进到 `constructs.lua`。
   - [x] 官方 `all.lua -> code.lua` if-goto 连续 label 小节：修复函数表达式内 `if/elseif/else` 子 block 的 goto 跳到外层连续 `::l1:: ::l2:: ::l3::` 时被 codegen 误报 `undefined label` 的问题；缺失 ScopeInfo 时仅在同名 label 唯一时回填，`code.lua` 单文件已零退出，`_soft=true all.lua` 已越过 `code.lua`。
-  - [ ] 官方 `all.lua -> constructs.lua` full level=4 顺序性能卡点：完整 `all.lua` 已越过 `db.lua`，但 full 模式在 `constructs.lua` 动态短路组合 `load` 阶段长时间未到首个 60000 进度点；需恢复或确认 full 顺序验收可接受耗时。
-  - [ ] 官方 `_soft=true all.lua -> closure.lua` 顺序长耗时断点：软模式已顺序越过 `code.lua`、`nextvar.lua`、`pm.lua`、`utf8.lua`、`api.lua`、`events.lua` 与 `vararg.lua`，当前在 `closure.lua` 连续两分钟无输出后中断；需定位是否为 GC/弱表性能卡点或语义停滞。
+  - [x] 官方 `all.lua -> constructs.lua` full level=4 顺序性能卡点：完整 `all.lua` 已越过 `db.lua`，且 full level=4 模式已通过 `constructs.lua` 并输出 `OK`；保留该项作为性能卡点回归记录。
+  - [x] 官方 `_soft=true all.lua -> closure.lua` 顺序长耗时断点：软模式已顺序越过 `code.lua`、`nextvar.lua`、`pm.lua`、`utf8.lua`、`api.lua`、`events.lua`、`vararg.lua` 与 `closure.lua`；本轮修复同作用域重名 local 调试生命周期，以及 binary chunk 读回后共享 StartPC local 误用后续 `CLOSURE A` 的寄存器重建问题。
+  - [x] 官方 `_soft=true all.lua -> coroutine.lua:238` 顺序断点：软模式已越过 `closure.lua` 并进入 `coroutine.lua`，已修复 binary chunk 读回后初始化表达式 local 寄存器重建错误，`coroutine.lua` 弱表清理断点通过。
+  - [x] 官方 `_soft=true all.lua -> errors.lua` 顺序收尾：修复 `events.lua` 留下 nil 空元表后 `aaa.bbb:ddd(9)` 未在 nil 全局索引处报错的问题，并修复默认输出关闭时 `io.write({})` 参数错误优先级；当前 `_soft=true all.lua` 已完整输出 `final OK !!!`。
   - 当前 `gc.lua` 已单文件通过并输出 `OK`，覆盖 `collectgarbage` 选项、`gsub(string.upper)`、多返回赋值、numeric for 初始化、GC step 节奏、pcall 错误帧回收、泛型 for 迭代三元组、`clearing tables`、`weak tables`、ephemeron 弱 key 固定点传播、table `__gc` finalizer 错误顺序、`__gc x weak tables`、`self-referenced threads` 与 closure/upvalue/thread cycle 两轮回收。
   - 当前 `api.lua` 已按无 `testC` 环境通过并输出 `testC not active: skipping API tests`；已修复 RK 常量索引超过 255 的字段访问降级、无返回值 `RETURN` 终止、`package.path/searchers` 类型错误和 `package.loadlib` 无 CGO 跳过分类。
   - 当前 `attrib.lua` 已单文件通过并输出 `OK`；本轮修复了 `package.preload` Lua closure loader、显式 `_ENV` 环境替换、require 语法错误包装、C loader 禁用时的 `package.cpath` 候选错误文本、Go closure raw equality、大整数 table key hash 存储、多重赋值 RHS 先求值、裸 table constructor 不跨行粘连 IIFE、以及 `return upvalue, local` 寄存器覆盖问题。
@@ -766,15 +769,44 @@
 - [x] Binary chunk roundtrip 通过。
 - [x] Fuzz smoke 通过。
 - [x] Benchmark 基线记录完成。
-- [ ] 完成所有开发后，与官方 `lua` 和 `luac` 跑 benchmark 基准测试，并将对比结论输出到文档中。
+- [x] 完成所有开发后，与官方 `lua` 和 `luac` 跑 benchmark 基准测试，并将对比结论输出到文档中。
 - [x] 文档更新完成。
 - [x] `git ls-files --others --exclude-standard | rg '\.go$|_test\.go$'` 无未 add Go 文件。
 
 ## 28. 发布前待确认
 
-- [ ] 确认是否承诺官方 Lua 5.3 二进制 chunk 跨平台完全兼容。
-- [ ] 确认 `io`、`os`、`package` 默认权限策略。
-- [ ] 确认 C 动态库加载是否支持。
-- [ ] 确认 Go reflection 自动绑定是否进入首版。
-- [ ] 确认 Lua stub 生成是否满足“Go 实现转为 Lua 代码”的需求。
-- [ ] 确认首个 release 的已知限制清单。
+- [x] 确认是否承诺官方 Lua 5.3 二进制 chunk 跨平台完全兼容。
+- [x] 确认 `io`、`os`、`package` 默认权限策略。
+- [x] 确认 C 动态库加载是否支持。
+- [x] 补充第三方 C 动态库由宿主自定义 `package.loadlib` 接入的无 CGO 扩展链路测试。
+- [x] 明确 no-CGO 规则目标是保持默认跨系统编译简单，并允许宿主或可选扩展接入外部 lib/so/dylib。
+- [x] 确认 Go reflection 自动绑定是否进入首版。
+- [x] 确认 Lua stub 生成是否满足“Go 实现转为 Lua 代码”的需求。
+- [x] 确认首个 release 的已知限制清单。
+
+## 29. 发布增强：VFS、动态库、反射绑定与 Go 封装 API
+
+- [ ] 生成完整验证 TODO list：覆盖 Go 嵌入 API、CLI、VFS、require、动态库 loader、reflection 自动绑定、Go table/object 封装、常量变量注入、跨平台构建、官方兼容回归与发布文档。
+- [ ] 生成完整验证 TODO list：为每个验证项明确命令、输入夹具、期望输出、失败诊断口径和是否需要 Linux/macOS/Windows 分平台执行。
+- [ ] 生成完整验证 TODO list：补齐 `CGO_ENABLED=0 go test ./...`、全仓 `gopls check`、`./scripts/check-go-gates.sh`、未跟踪 Go 文件检查、官方 Lua 5.3 套件回归和 benchmark 文档回归。
+- [ ] 设计 Go `fs.FS` 虚拟文件系统接入方案：明确 `lua.Options` API、只读/可写边界、路径清洗、权限策略、错误文本和与宿主文件系统的优先级。
+- [ ] 实现 Go `fs.FS` 虚拟文件系统接入：支持 `loadfile`、`dofile`、`require` Lua 文件 loader 读取虚拟文件。
+- [ ] 实现 Go `fs.FS` 虚拟文件系统接入：支持只读 `io.open`、`io.lines`、`file:read`、`file:lines` 的虚拟文件读取路径。
+- [ ] 为 Go `fs.FS` 虚拟文件系统补测试：覆盖嵌入 FS、子目录模块、路径穿越拒绝、宿主权限关闭、虚拟文件优先级和错误文本。
+- [ ] 设计 `require` 动态库 loader 跨平台策略：Linux/macOS 支持 `.so`/`.dylib` 候选，Windows 明确 `.dll` 运行期加载与 `.lib` 链接期/import library 的支持边界。
+- [ ] 实现可选动态库 loader 接入点：默认 `CGO_ENABLED=0` 构建不绑定外部动态库，平台相关实现必须通过显式 build tag、插件或宿主适配层启用。
+- [ ] 实现 `package.loadlib` 可选动态库 loader：支持按 filename/symbol 返回 Lua 可调用 loader，并保持默认无 loader 时的兼容错误三返回。
+- [ ] 实现 `package.searchers` 动态库搜索器可选接入：按 `package.cpath` 展开候选路径，Linux/macOS/Windows 分平台生成诊断文本。
+- [ ] 为动态库 loader 补测试：默认无 CGO 构建下确认不启用；宿主覆盖 loader 可执行；平台候选扩展名和错误文本稳定。
+- [ ] 生成 Go reflection 自动绑定方案：定义可见性规则、命名规则、tag 规则、方法 receiver 支持、字段读写权限、错误语义和性能边界。
+- [ ] 实现 Go reflection 自动扫描函数：支持导出函数自动转 Lua callable，覆盖参数转换、多返回值、error 返回和 panic 恢复。
+- [ ] 实现 Go reflection 自动扫描 struct：支持导出字段读写、导出方法调用、指针和值 receiver、嵌入字段和 tag 重命名。
+- [ ] 为 Go reflection 自动绑定补测试：覆盖函数、struct 字段、方法、错误返回、panic 恢复、不可导出字段拒绝、nil receiver 和循环引用。
+- [ ] 设计 Go 封装方法给 Lua 调用的统一 API：明确注册函数、注册 table、注册 object、注册常量、注册变量和覆盖策略。
+- [ ] 实现 Go 函数封装 API：支持直接注册到全局、模块 table、package.loaded 和 package.preload。
+- [ ] 实现 Go table 对象封装 API：支持构造 Lua table，注入字段、方法、嵌套 table、metatable 和只读 table。
+- [ ] 实现 Go object 方法封装 API：支持 userdata/object proxy、方法冒号调用、字段访问、生命周期关闭和错误传播。
+- [ ] 实现常量与变量注入 API：支持 string、bool、integer、number、nil、table、function、userdata，并区分只读常量与可变变量。
+- [ ] 为 Go 封装 API 补测试：覆盖 Lua 调 Go 函数、table 方法、object 方法、常量读取、变量更新、模块 require 和错误边界。
+- [ ] 更新文档：补齐 VFS、动态库 loader、reflection 自动绑定、Go 封装 API 的使用示例、限制说明和跨平台注意事项。
+- [ ] 完成前五项后重新输出发布限制清单，并同步更新 `docs/PLAN.md`、`docs/RELEASE_LIMITS.md`、`README.md` 与 benchmark/验证结论。
