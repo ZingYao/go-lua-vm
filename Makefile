@@ -68,6 +68,7 @@ $(TARGETS):
 	done
 
 package-vscode:
+	@mkdir -p "$(DIST_DIR)"
 	@cd "$(VSCODE_EXTENSION_DIR)" && "$(NPM)" ci
 	@cd "$(VSCODE_EXTENSION_DIR)" && "$(NPX)" @vscode/vsce package --out "../../../$(DIST_DIR)/glua-lsp-vscode.vsix"
 
