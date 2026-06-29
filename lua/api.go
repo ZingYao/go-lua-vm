@@ -3248,10 +3248,6 @@ func executeLuaLeafClosureFast(state *State, proto *bytecode.Proto, vm *runtime.
 			// RETURN 指令结束当前 leaf closure。
 			return returnValues, nil
 		}
-		if callRequest := vm.LastCallRequest(); callRequest != nil {
-			// direct leaf 预检应排除所有 CALL 类指令，命中说明字节码或预检条件不一致。
-			return nil, decorateLuaRuntimeErrorAtPC(proto, pc, runtime.NewRuntimeError(runtime.StringValue("unexpected call in direct leaf"), runtime.ErrExpectedCallable))
-		}
 		pc++
 		if vm.SkipNext() {
 			// 测试类指令要求跳过下一条指令。
