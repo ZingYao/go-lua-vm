@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/zing/go-lua-vm/compiler/parser"
 	"github.com/zing/go-lua-vm/runtime"
@@ -637,7 +638,7 @@ assert(wrappedOuter() == "outer-done")
 // Lua 5.3 官方 files.lua 会把 dofile 作为协程入口，文件 chunk 内连续 yield 两次并在第三次
 // resume 后返回计算结果；dofile 只是 Lua chunk trampoline，不应被视为普通不可 yield 的 Go 回调。
 func TestCoroutineWrapDofileCanYield(t *testing.T) {
-	state := NewState()
+	state := NewStateWithOptions(Options{AllowHostFilesystem: true})
 	if err := OpenLibs(state); err != nil {
 		// 标准库注册失败时无法测试 dofile 与 coroutine.wrap 组合。
 		t.Fatalf("open libraries failed: %v", err)
@@ -1807,7 +1808,7 @@ result = first == second and first.name == "pl" and first[2] == nil
 // `error loading module`；运行期错误仍由 chunk 执行阶段原样返回。
 func TestRequireLuaFileSyntaxErrorUsesModuleLoadMessage(t *testing.T) {
 	// 用临时目录提供一个语法错误模块，并把 package.path 指向该目录。
-	state := NewState()
+	state := NewStateWithOptions(Options{AllowHostFilesystem: true})
 	defer state.Close()
 	if err := OpenLibs(state); err != nil {
 		t.Fatalf("OpenLibs failed: %v", err)
@@ -1841,7 +1842,7 @@ func TestRequireLuaFileSyntaxErrorUsesModuleLoadMessage(t *testing.T) {
 // 新环境表并作为模块返回，不能污染宿主全局变量。
 func TestRequireLuaFileCanReplaceChunkEnv(t *testing.T) {
 	// 准备一个会替换 `_ENV` 并返回新环境的模块文件。
-	state := NewState()
+	state := NewStateWithOptions(Options{AllowHostFilesystem: true})
 	defer state.Close()
 	if err := OpenLibs(state); err != nil {
 		t.Fatalf("OpenLibs failed: %v", err)
@@ -1867,6 +1868,124 @@ func TestRequireLuaFileCanReplaceChunkEnv(t *testing.T) {
 	if result.Kind != runtime.KindBoolean || !result.Bool {
 		// 模块内赋值必须写入替换后的 _ENV，不能污染全局 AA。
 		t.Fatalf("require env module result = %#v", result)
+	}
+}
+
+// TestVirtualFilesystemCoversLoadRequireAndIO 验证 Go fs.FS VFS 覆盖 Lua 文件加载与只读 io。
+//
+// State 配置 VirtualFilesystem 后，loadfile、dofile、require 的 Lua 文件 loader 以及 io.open、
+// io.lines 都应从 VFS 读取；未开启 AllowHostFilesystem 时写模式仍被拒绝。
+func TestVirtualFilesystemCoversLoadRequireAndIO(t *testing.T) {
+	state := NewStateWithOptions(Options{VirtualFilesystem: fstest.MapFS{
+		"scripts/value.lua": {Data: []byte("return 41\n")},
+		"mods/answer.lua":   {Data: []byte("local name, filename = ...\nreturn {name = name, filename = filename, value = 42}\n")},
+		"data/text.txt":     {Data: []byte("first\nsecond\n")},
+	}})
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// VFS 测试依赖 base、package 和 io 标准库。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+
+	source := `
+local loaded = assert(loadfile("scripts/value.lua"))
+local loadedValue = loaded()
+local dofileValue = dofile("./scripts/value.lua")
+local mod = require "mods.answer"
+local file = assert(io.open("data/text.txt", "r"))
+local all = file:read("*a")
+file:close()
+local lineCount = 0
+for line in io.lines("data/text.txt") do
+  lineCount = lineCount + 1
+end
+local writeOK, writeErr = pcall(io.open, "data/text.txt", "w")
+result = loadedValue == 41
+  and dofileValue == 41
+  and mod.name == "mods.answer"
+  and mod.filename == "./mods/answer.lua"
+  and mod.value == 42
+  and all == "first\nsecond\n"
+  and lineCount == 2
+  and not writeOK
+  and string.find(writeErr, "filesystem access is disabled", 1, true) ~= nil
+`
+	if err := DoString(state, source); err != nil {
+		// VFS 读路径应完整执行，写模式错误由 pcall 捕获。
+		t.Fatalf("DoString VFS script failed: %v", err)
+	}
+	result, err := GetGlobal(state, "result")
+	if err != nil {
+		// 读取验证结果失败说明 State API 异常。
+		t.Fatalf("GetGlobal result failed: %v", err)
+	}
+	if result.Kind != runtime.KindBoolean || !result.Bool {
+		// 所有 VFS 路径都必须命中，并且写模式必须被权限策略拒绝。
+		t.Fatalf("VFS result mismatch: %#v", result)
+	}
+}
+
+// TestVirtualFilesystemPriorityAndTraversalPolicy 验证 VFS 与宿主优先级以及路径穿越拒绝。
+//
+// 默认策略应优先读取 VFS；PreferHostFilesystem 开启且宿主授权时改为宿主优先。宿主未授权时，
+// `..` 路径必须被 VFS 清洗层拒绝，避免逃出 fs.FS 根目录。
+func TestVirtualFilesystemPriorityAndTraversalPolicy(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.WriteFile(filepath.Join(dir, "same.lua"), []byte(`result = "host"`), 0o600); err != nil {
+		// 宿主优先级夹具必须可写。
+		t.Fatalf("write host fixture failed: %v", err)
+	}
+	virtualFS := fstest.MapFS{
+		"same.lua": {Data: []byte(`result = "virtual"`)},
+	}
+
+	virtualFirst := NewStateWithOptions(Options{VirtualFilesystem: virtualFS, AllowHostFilesystem: true})
+	defer virtualFirst.Close()
+	if err := OpenLibs(virtualFirst); err != nil {
+		// loadfile 需要 base 标准库。
+		t.Fatalf("OpenLibs virtual-first failed: %v", err)
+	}
+	if err := DoString(virtualFirst, `assert(loadfile("same.lua"))()`); err != nil {
+		// 默认优先级下应读取 VFS 文件。
+		t.Fatalf("virtual-first loadfile failed: %v", err)
+	}
+	virtualResult, _ := GetGlobal(virtualFirst, "result")
+	if virtualResult.Kind != runtime.KindString || virtualResult.String != "virtual" {
+		// VFS 默认优先，不能被同名宿主文件覆盖。
+		t.Fatalf("virtual-first result mismatch: %#v", virtualResult)
+	}
+
+	hostFirst := NewStateWithOptions(Options{VirtualFilesystem: virtualFS, AllowHostFilesystem: true, PreferHostFilesystem: true})
+	defer hostFirst.Close()
+	if err := OpenLibs(hostFirst); err != nil {
+		// loadfile 需要 base 标准库。
+		t.Fatalf("OpenLibs host-first failed: %v", err)
+	}
+	if err := DoString(hostFirst, `assert(loadfile("same.lua"))()`); err != nil {
+		// 宿主优先级下应读取当前工作目录的宿主文件。
+		t.Fatalf("host-first loadfile failed: %v", err)
+	}
+	hostResult, _ := GetGlobal(hostFirst, "result")
+	if hostResult.Kind != runtime.KindString || hostResult.String != "host" {
+		// PreferHostFilesystem 必须允许宿主同名文件覆盖 VFS。
+		t.Fatalf("host-first result mismatch: %#v", hostResult)
+	}
+
+	sandboxed := NewStateWithOptions(Options{VirtualFilesystem: virtualFS})
+	defer sandboxed.Close()
+	if err := OpenLibs(sandboxed); err != nil {
+		// loadfile 需要 base 标准库。
+		t.Fatalf("OpenLibs sandboxed failed: %v", err)
+	}
+	if err := DoString(sandboxed, `local _, msg = loadfile("../same.lua"); result = string.find(msg, "escapes root", 1, true) ~= nil`); err != nil {
+		// 路径穿越应作为 loadfile 的第二返回值暴露，不应让测试 chunk 失败。
+		t.Fatalf("sandbox traversal script failed: %v", err)
+	}
+	traversalResult, _ := GetGlobal(sandboxed, "result")
+	if traversalResult.Kind != runtime.KindBoolean || !traversalResult.Bool {
+		// VFS 清洗层必须拒绝 `..` 穿越。
+		t.Fatalf("traversal result mismatch: %#v", traversalResult)
 	}
 }
 

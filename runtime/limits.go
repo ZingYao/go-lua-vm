@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"fmt"
+	"io/fs"
 
 	"github.com/zing/go-lua-vm/extensions"
 )
@@ -30,6 +31,10 @@ type Options struct {
 	AllowEnvironment bool
 	// AllowProcess 表示 io.popen 和 os.execute 是否允许启动宿主进程。
 	AllowProcess bool
+	// VirtualFilesystem 保存只读 Go fs.FS 虚拟文件系统。
+	VirtualFilesystem fs.FS
+	// PreferHostFilesystem 表示只读路径查找时是否优先尝试宿主文件系统。
+	PreferHostFilesystem bool
 	// SyntaxExtensions 保存源码编译阶段启用的可选语法扩展集合。
 	SyntaxExtensions extensions.SyntaxSet
 	// SyntaxExtensionsSet 表示调用方是否显式设置过 SyntaxExtensions。

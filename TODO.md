@@ -789,10 +789,10 @@
 - [ ] 生成完整验证 TODO list：覆盖 Go 嵌入 API、CLI、VFS、require、动态库 loader、reflection 自动绑定、Go table/object 封装、常量变量注入、跨平台构建、官方兼容回归与发布文档。
 - [ ] 生成完整验证 TODO list：为每个验证项明确命令、输入夹具、期望输出、失败诊断口径和是否需要 Linux/macOS/Windows 分平台执行。
 - [ ] 生成完整验证 TODO list：补齐 `CGO_ENABLED=0 go test ./...`、全仓 `gopls check`、`./scripts/check-go-gates.sh`、未跟踪 Go 文件检查、官方 Lua 5.3 套件回归和 benchmark 文档回归。
-- [ ] 设计 Go `fs.FS` 虚拟文件系统接入方案：明确 `lua.Options` API、只读/可写边界、路径清洗、权限策略、错误文本和与宿主文件系统的优先级。
-- [ ] 实现 Go `fs.FS` 虚拟文件系统接入：支持 `loadfile`、`dofile`、`require` Lua 文件 loader 读取虚拟文件。
-- [ ] 实现 Go `fs.FS` 虚拟文件系统接入：支持只读 `io.open`、`io.lines`、`file:read`、`file:lines` 的虚拟文件读取路径。
-- [ ] 为 Go `fs.FS` 虚拟文件系统补测试：覆盖嵌入 FS、子目录模块、路径穿越拒绝、宿主权限关闭、虚拟文件优先级和错误文本。
+- [x] 设计 Go `fs.FS` 虚拟文件系统接入方案：明确 `lua.Options` API、只读/可写边界、路径清洗、权限策略、错误文本和与宿主文件系统的优先级。
+- [x] 实现 Go `fs.FS` 虚拟文件系统接入：支持 `loadfile`、`dofile`、`require` Lua 文件 loader 读取虚拟文件。
+- [x] 实现 Go `fs.FS` 虚拟文件系统接入：支持只读 `io.open`、`io.lines`、`file:read`、`file:lines` 的虚拟文件读取路径。
+- [x] 为 Go `fs.FS` 虚拟文件系统补测试：覆盖嵌入 FS、子目录模块、路径穿越拒绝、宿主权限关闭、虚拟文件优先级和错误文本。
 - [ ] 设计 `require` 动态库 loader 跨平台策略：Linux/macOS 支持 `.so`/`.dylib` 候选，Windows 明确 `.dll` 运行期加载与 `.lib` 链接期/import library 的支持边界。
 - [ ] 实现可选动态库 loader 接入点：默认 `CGO_ENABLED=0` 构建不绑定外部动态库，平台相关实现必须通过显式 build tag、插件或宿主适配层启用。
 - [ ] 实现 `package.loadlib` 可选动态库 loader：支持按 filename/symbol 返回 Lua 可调用 loader，并保持默认无 loader 时的兼容错误三返回。

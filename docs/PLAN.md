@@ -217,8 +217,8 @@ Lua 调 Go 需要支持：
 | 待确认项 | 推荐首版口径 | 原因与影响 |
 | --- | --- | --- |
 | 是否承诺官方 Lua 5.3 二进制 chunk 跨平台完全兼容 | 根据当前测试结果，首版不承诺跨端序、跨字长完全互通；承诺本项目 load/dump roundtrip、当前平台标准 chunk 读写和 Lua 5.3 语义字段兼容 | 现有测试已覆盖 roundtrip、反汇编和官方套件，但未做跨架构矩阵验证 |
-| `io`、`os`、`package` 默认权限策略 | Go 嵌入模式默认关闭宿主文件系统、环境变量和进程访问；CLI 普通模式开启，`-E` 继续屏蔽环境变量读取；Go `fs.FS` 虚拟文件系统是期望能力，但当前实现尚未完整接入，首版不能宣称已支持 | 代码已实现 `AllowHostFilesystem`、`AllowEnvironment`、`AllowProcess`；`fs.FS` 需要后续补 Options、io/base/package 读取链路和测试 |
+| `io`、`os`、`package` 默认权限策略 | Go 嵌入模式默认关闭宿主文件系统、环境变量和进程访问；CLI 普通模式开启，`-E` 继续屏蔽环境变量读取；Go `fs.FS` 虚拟文件系统首版按只读能力承诺，覆盖 `loadfile`、`dofile`、`require` Lua 文件 loader 和只读 `io.open/io.lines` | 代码已实现 `AllowHostFilesystem`、`AllowEnvironment`、`AllowProcess`；VFS 通过 `lua.Options.VirtualFilesystem` 接入，默认 VFS 优先，`PreferHostFilesystem` 可在宿主授权后切换优先级 |
 | C 动态库加载是否支持 | 默认构建不绑定外部动态库，首版内置 `package.loadlib`、C searcher 和 C root searcher 不直接打开动态库；但允许嵌入方在自己的程序中通过 CGO、插件、系统动态库机制或后续可选 loader 接入外部 `lib`、`.so`、`.dylib`，并覆盖 `package.loadlib` 或写入 `package.preload/searchers` 接入 | no-CGO 规则的原意是保持默认构建易跨系统编译；只要默认 `CGO_ENABLED=0` 构建和测试不受影响，外部动态库加载可作为宿主或可选扩展能力存在 |
 | Go reflection 自动绑定是否进入首版 | 不进入首版；reflection 自动绑定指“自动扫描 Go struct/function 并暴露字段、方法到 Lua”，当前只承诺显式注册 Go 函数、对象代理和 stub 生成 | 显式绑定已实现并可测试；自动反射会扩大可见 API、权限和错误边界 |
 | Lua stub 生成是否满足“Go 实现转为 Lua 代码”的需求 | 根据当前 bridge 实现，首版只承诺 Lua stub/代理层生成满足该需求，不承诺 Go 源码到 Lua 源码的语义翻译 | `bridge.GenerateLuaStub` 已实现并有测试；源码翻译属于独立编译器问题 |
-| 首个 release 的已知限制清单 | 已知限制包括：跨平台 binary chunk 完全互通未承诺、Go `fs.FS` VFS 未完整接入、默认内置 C 动态库加载器不提供、reflection 自动绑定不支持、强 DRM/防破解不承诺 | 明确首版能力边界，避免发布说明过度承诺 |
+| 首个 release 的已知限制清单 | 已知限制包括：跨平台 binary chunk 完全互通未承诺、Go `fs.FS` VFS 仅承诺只读路径、默认内置 C 动态库加载器不提供、reflection 自动绑定不支持、强 DRM/防破解不承诺 | 明确首版能力边界，避免发布说明过度承诺 |

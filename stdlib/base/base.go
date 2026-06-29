@@ -270,7 +270,7 @@ func Dofile(args ...runtime.Value) ([]runtime.Value, error) {
 		return nil, runtime.RaiseError(runtime.StringValue("bad argument #1 to 'dofile' (string expected)"))
 	}
 
-	_, err := os.ReadFile(args[0].String)
+	_, err := readLoadFileBytes(nil, args[0].String)
 	if err != nil {
 		// 文件系统错误保留原始 error，便于 CLI 和嵌入调用区分不存在与权限失败。
 		return nil, err
@@ -1165,7 +1165,7 @@ func loadFileWithState(state *runtime.State, args ...runtime.Value) ([]runtime.V
 		envValue = &args[2]
 	}
 
-	sourceBytes, err := os.ReadFile(args[0].String)
+	sourceBytes, err := readLoadFileBytes(state, args[0].String)
 	if err != nil {
 		// 文件读取失败返回 nil 和文件系统错误文本。
 		return []runtime.Value{runtime.NilValue(), runtime.StringValue(err.Error())}, nil
@@ -1184,6 +1184,18 @@ func loadFileWithState(state *runtime.State, args ...runtime.Value) ([]runtime.V
 
 	// 返回文件编译出的 Lua closure。
 	return []runtime.Value{closure}, nil
+}
+
+// readLoadFileBytes 按 Lua base 库权限策略读取 chunk 文件。
+//
+// state 为 nil 时保持底层无 State 单测入口的宿主读取行为；state 非 nil 时使用 State Options，
+// 支持 VFS 优先、宿主授权兜底和宿主禁用错误。
+func readLoadFileBytes(state *runtime.State, filename string) ([]byte, error) {
+	// 无 State 的底层 API 没有权限容器，保持历史直接读宿主文件行为。
+	if state == nil {
+		return os.ReadFile(filename)
+	}
+	return runtime.ReadFileWithOptions(state.Options(), filename)
 }
 
 // normalizeFileChunkBytes 规范化文件加载路径的 chunk 字节。
