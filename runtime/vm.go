@@ -2088,14 +2088,27 @@ func (vm *VM) loadConstantIntoRegister(targetIndex int, constantIndex int) error
 		return ErrConstantOutOfRange
 	}
 
-	value, err := constantToValue(vm.constants[constantIndex])
-	if err != nil {
-		// 常量类型不被运行时支持时，直接返回转换错误。
-		return err
+	constant := vm.constants[constantIndex]
+	switch constant.Kind {
+	case bytecode.ConstantNil:
+		// nil 常量转换为 Lua nil 值。
+		vm.registers[targetIndex] = NilValue()
+	case bytecode.ConstantBoolean:
+		// boolean 常量保留 true/false 负载。
+		vm.registers[targetIndex] = BooleanValue(constant.Bool)
+	case bytecode.ConstantInteger:
+		// integer 常量保留 int64 精确值。
+		vm.registers[targetIndex] = IntegerValue(constant.Integer)
+	case bytecode.ConstantNumber:
+		// number 常量保留 float64 负载。
+		vm.registers[targetIndex] = NumberValue(constant.Number)
+	case bytecode.ConstantString:
+		// string 常量按字节序列转换为 Lua string 值。
+		vm.registers[targetIndex] = StringValue(constant.String)
+	default:
+		// 未知常量类型来自损坏 chunk 或未来扩展，当前 VM 拒绝执行。
+		return fmt.Errorf("unsupported constant kind: %d", constant.Kind)
 	}
-
-	// LOADK 直接把常量转换后的运行时值写入目标寄存器。
-	vm.registers[targetIndex] = value
 	return nil
 }
 
