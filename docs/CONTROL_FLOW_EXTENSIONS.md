@@ -16,10 +16,10 @@
 命令行可在已编译扩展范围内关闭功能：
 
 ```bash
-glua --syntax=lua53 script.lua
-glua --syntax=extended --disable-syntax=switch script.lua
-gluac --syntax=lua53 -o out.luac script.lua
-gluac --syntax=extended --disable-syntax=continue script.lua
+glua --glua-syntax=lua53 script.lua
+glua --glua-syntax=extended --glua-disable-syntax=switch script.lua
+gluac --gluac-syntax=lua53 -o out.luac script.lua
+gluac --gluac-syntax=extended --gluac-disable-syntax=continue script.lua
 ```
 
 Go 嵌入 API 可通过 State options 控制源码编译语法：
@@ -113,4 +113,4 @@ end
 - runtime 覆盖 `switch` 首个 case、后续 case、多值 case、default 和未匹配无 default。
 - runtime 覆盖 loop 内 switch + continue。
 - parser 拒绝循环外 `continue`、重复 `default`、非末尾 `default`。
-- glua/gluac 覆盖 `--syntax=lua53` 与 `--disable-syntax` 参数。
+- glua/gluac 覆盖 `--glua-syntax=lua53`、`--glua-disable-syntax`、`--gluac-syntax=lua53` 与 `--gluac-disable-syntax` 参数。

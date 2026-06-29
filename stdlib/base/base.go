@@ -843,13 +843,14 @@ func setMetatableWithState(state *runtime.State, args ...runtime.Value) ([]runti
 		// 损坏元表引用不登记；SetMetatable 已经覆盖正常错误路径。
 		return results, nil
 	}
-	if metatable.RawGetString("__gc").IsNil() {
-		// 没有 __gc 字段时不进入终结队列。
-		return results, nil
-	}
 	table, ok := args[0].Ref.(*runtime.Table)
 	if !ok || table == nil {
 		// 损坏 table 引用不登记。
+		return results, nil
+	}
+	state.RegisterWeakTable(table)
+	if metatable.RawGetString("__gc").IsNil() {
+		// 没有 __gc 字段时不进入终结队列。
 		return results, nil
 	}
 
@@ -1478,7 +1479,7 @@ func executeBaseLuaClosure(state *runtime.State, function runtime.Value, name st
 	proto := closure.Proto
 	varargs := baseLuaClosureVarargs(proto, args)
 	registerCount := baseLuaClosureRegisterCount(proto, len(args), len(varargs))
-	vm := runtime.NewVMWithPrototypeData(registerCount, proto.Constants, closure.Upvalues, proto.Protos, varargs)
+	vm := runtime.NewVMWithBorrowedPrototypeData(registerCount, proto.Constants, closure.Upvalues, proto.Protos, varargs)
 	vm.BindPrototype(proto)
 	vm.BindUpvalueCells(closure.UpvalueCells)
 	vm.BindLuaMetamethodRunner(func(method runtime.Value, name string, args ...runtime.Value) ([]runtime.Value, error) {

@@ -1,0 +1,101 @@
+{
+  "name": "glua-lsp",
+  "displayName": "glua Language Server",
+  "description": "Language server client for go-lua-vm syntax extensions.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "private": true,
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:glua",
+    "onLanguage:lua",
+    "workspaceContains:**/*.glua",
+    "workspaceContains:**/*.lua",
+    "onCommand:glua.openBuiltinSignatureJson",
+    "onCommand:glua.showBuiltinDocStatus"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "glua.openBuiltinSignatureJson",
+        "title": "%glua.openBuiltinSignatureJson.title%"
+      },
+      {
+        "command": "glua.showBuiltinDocStatus",
+        "title": "%glua.showBuiltinDocStatus.title%"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "glua.openBuiltinSignatureJson",
+          "when": "true"
+        },
+        {
+          "command": "glua.showBuiltinDocStatus",
+          "when": "true"
+        }
+      ]
+    },
+    "languages": [
+      {
+        "id": "glua",
+        "aliases": [
+          "glua",
+          "GLua"
+        ],
+        "extensions": [
+          ".glua",
+          ".lua"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "glua",
+        "scopeName": "source.glua",
+        "path": "./syntaxes/glua.tmLanguage.json"
+      }
+    ],
+    "configurationDefaults": {
+      "[glua]": {
+        "editor.defaultFormatter": "local.glua-lsp"
+      }
+    },
+    "configuration": {
+      "title": "glua",
+      "properties": {
+        "glua.syntax": {
+          "type": "string",
+          "default": "extended",
+          "description": "Syntax mode passed to gluals: extended, lua53, continue, switch, or comma-separated extensions."
+        },
+        "glua.docLanguage": {
+          "type": "string",
+          "default": "auto",
+          "description": "Language tag used for builtin docs, hover text and signatures. Use auto to follow VS Code, or set tags like en, zh-CN, ja, ko, fr-FR."
+        },
+        "glua.builtinDocs": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Absolute or workspace-relative JSON files to extend or override builtin function docs."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1",
+    "vscode-languageserver": "^9.0.1",
+    "vscode-languageserver-textdocument": "^1.0.12"
+  }
+}

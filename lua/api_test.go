@@ -11,6 +11,7 @@ import (
 	"testing"
 	"testing/fstest"
 
+	"github.com/zing/go-lua-vm/bytecode"
 	"github.com/zing/go-lua-vm/compiler/parser"
 	"github.com/zing/go-lua-vm/runtime"
 )
@@ -1691,6 +1692,46 @@ func TestDoStringAndDoFileExecuteChunks(t *testing.T) {
 	}
 }
 
+// TestDoFileExecutesBinaryChunk 验证 Go API 文件入口可执行 Lua 5.3 binary chunk。
+//
+// `glua` 脚本入口复用 DoFile；因此该用例确保 `gluac`/string.dump 产出的 chunk 不会被误当作源码
+// 解析，也会绑定顶层 `_ENV` 以便写入全局变量。
+func TestDoFileExecutesBinaryChunk(t *testing.T) {
+	compileState := NewState()
+	defer compileState.Close()
+	closureValue, err := compileString(compileState, "result = 42", "@binary.lua")
+	if err != nil {
+		// 测试源码必须可编译。
+		t.Fatalf("compile binary fixture failed: %v", err)
+	}
+	closure, ok := closureValue.Ref.(*runtime.LuaClosure)
+	if !ok || closure == nil {
+		// compileString 成功后必须得到 Lua closure。
+		t.Fatalf("compiled value = %#v, want Lua closure", closureValue)
+	}
+	path := filepath.Join(t.TempDir(), "binary.luac")
+	if err := os.WriteFile(path, bytecode.DumpBinaryChunk(closure.Proto), 0o600); err != nil {
+		// binary chunk 夹具必须可写入。
+		t.Fatalf("write binary chunk failed: %v", err)
+	}
+
+	state := NewState()
+	defer state.Close()
+	if err := DoFile(state, path); err != nil {
+		// binary chunk 应直接经 loader 执行。
+		t.Fatalf("DoFile binary chunk failed: %v", err)
+	}
+	result, err := GetGlobal(state, "result")
+	if err != nil {
+		// 读取全局结果不应失败。
+		t.Fatalf("GetGlobal result failed: %v", err)
+	}
+	if result.Kind != runtime.KindInteger || result.Integer != 42 {
+		// 顶层 `_ENV` 必须绑定到当前 State globals。
+		t.Fatalf("result = %#v, want integer 42", result)
+	}
+}
+
 // TestDoStringMultipleAssignmentEvaluatesRHSBeforeWrites 验证多重赋值先完整求值 RHS 再写回。
 //
 // Lua 5.3 官方 attrib.lua 依赖该语义处理 `a[1], f(a)[2], b, c = ...` 冲突；RHS 的
@@ -2062,6 +2103,36 @@ result = out
 	if result.Kind != runtime.KindString || result.String != "outer" {
 		// 内层 local 不能覆盖外层 out。
 		t.Fatalf("result = %#v, want outer", result)
+	}
+}
+
+// TestDoStringSelfConcatInsideNumericFor 验证 numeric for 内自拼接不会读取循环控制寄存器。
+//
+// OP_CONCAT 的 B..C 是连续寄存器区间；codegen 优化 `s = s .. "x"` 时必须保证区间只覆盖
+// 真实拼接操作数，不能把 numeric for 的 index/limit/step 临时寄存器拼入结果。
+func TestDoStringSelfConcatInsideNumericFor(t *testing.T) {
+	// 使用完整 API 路径覆盖 parser、codegen、VM 和赋值写回。
+	state := NewState()
+	defer state.Close()
+	source := `
+local s = ""
+for i = 1, 3 do
+  s = s .. "x"
+end
+result = s
+`
+	if err := DoString(state, source); err != nil {
+		// 自拼接脚本必须执行成功。
+		t.Fatalf("self concat script failed: %v", err)
+	}
+	result, err := GetGlobal(state, "result")
+	if err != nil {
+		// 测试结果应写入全局变量。
+		t.Fatalf("GetGlobal result failed: %v", err)
+	}
+	if result.Kind != runtime.KindString || result.String != "xxx" {
+		// 结果只能包含三次追加的字面量，不能混入循环控制数字。
+		t.Fatalf("self concat result mismatch: %#v", result)
 	}
 }
 

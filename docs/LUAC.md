@@ -9,7 +9,7 @@
 - `glua`：对齐官方 `lua`，负责执行脚本、REPL、`-e`、`-l`、`-i`、`-v` 等运行入口。
 - `gluac`：对齐官方 `luac`，负责源码编译、binary chunk 输出、反汇编和 debug dump。
 
-为了方便调试，`glua` 可以提供 `-l` 或内部调试参数查看 chunk 反汇编，但必须与官方 `lua -l <module>` 语义做参数冲突检查，避免破坏 `lua` 兼容入口。
+为了方便调试，`glua` 可以提供内部调试参数查看 chunk 反汇编，但必须避开官方 `lua -l <module>` 语义。`glua -l` 永远按官方 `lua` 的 `require` 入口处理，反汇编类扩展只能使用 `--glua-list-bytecode` 等项目命名空间长参数。
 
 ## 首版范围
 
@@ -22,12 +22,19 @@
 - 支持 `-o <file>` 指定输出文件。
 - 支持 `-p` 只解析/编译检查，不输出 chunk。
 - 支持 `-s` 去除 debug 信息。
+- 支持 `-l` 与 `-l -l` 反汇编入口。
+- 支持 `--` 停止参数解析。
+- 支持单文件和多文件输入；多文件会组合为共享 `_ENV` 的 wrapper chunk。
+- 支持默认输出 `luac.out`。
+- 支持项目调试扩展参数 `--gluac-syntax`、`--gluac-disable-syntax`、`--gluac-opcode-trace`、`--gluac-step-trace`、`--gluac-minimal-disassembly`。
 
 暂不承诺：
 
 - 与官方 `luac` 所有文本输出逐字符一致。
 - 跨架构 binary chunk 完全可互换。
 - 兼容 Lua 5.4 或 LuaJIT chunk。
+- 默认纯 Go 构建中直接加载普通 Lua C 模块。
+- 无项目前缀的扩展参数；`--syntax`、`--opcode-trace` 等旧形式必须迁移到 `--gluac-*`。
 
 ## 依赖顺序
 
@@ -54,10 +61,23 @@
 
 遇到未支持参数时，应返回明确错误和非 0 退出码，不静默忽略。
 
+完整官方可执行文件兼容矩阵见 `docs/CLI_COMPATIBILITY.md`。其中 `gluac` 的 release 阻塞项包括：无参数、`-v`、`-l`、`-l -l`、`-o`、`-p`、`-s`、`--`、`-`、单文件、多文件、错误参数和默认输出 `luac.out` 的 stdout、stderr、退出码与输出文件行为。
+
+## 扩展参数
+
+`gluac` 扩展能力必须使用 `--gluac-*` 命名空间：
+
+- `--gluac-syntax <mode>` 或 `--gluac-syntax=<mode>`：选择源码编译语法集合。
+- `--gluac-disable-syntax <names>` 或 `--gluac-disable-syntax=<names>`：从最终语法集合中关闭指定扩展。
+- `--gluac-opcode-trace`：输出静态 opcode trace。
+- `--gluac-step-trace`：输出 VM step trace 预览。
+- `--gluac-minimal-disassembly`：输出测试失败定位用的最小反汇编。
+
+无项目前缀的旧扩展参数不属于兼容接口；官方 `luac` 参数空间只保留给 Lua 5.3.6 行为。
+
 ## 测试策略
 
 - 使用手写 Proto 覆盖 binary chunk dump/load roundtrip。
 - 使用 Lua 源码 golden 覆盖 parser/codegen 后的反汇编输出。
 - 使用官方 Lua 5.3 `luac` 输出作为行为参考，但不把 C 工具接入构建链路。
 - CLI 层覆盖 stdout、stderr、退出码和输出文件内容。
-

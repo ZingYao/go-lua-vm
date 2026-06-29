@@ -153,6 +153,97 @@ err := bridge.RegisterModulePreload(state, bridge.ModuleBinding{
 - `__gc` 暂不承诺等同 C Lua userdata 析构语义，Go 生命周期以 Go GC 为准；State 关闭阶段只执行已注册 userdata 的显式 finalizer。
 - 代理对象必须保留 Go identity，避免 Lua table 拷贝破坏状态。
 
+## Reflection 自动绑定方案
+
+reflection 自动绑定是显式绑定之后的可选增强，不改变首版默认行为。默认 `ValueOf` 仍拒绝任意 struct、map、slice 和未声明函数；只有调用 `ReflectFunction`、`ReflectedFunctions` 或 `ReflectStruct` 时，才会扫描 Go 值并生成 `bridge.Function` 或 `ObjectBinding`。
+
+设计目标：
+
+- 降低宿主把已有 Go API 暴露给 Lua 的样板代码。
+- 保持默认安全边界，避免把未审计的 Go 成员隐式暴露给 Lua。
+- 生成结果仍复用显式 binding 运行路径，错误、panic、State.Close 生命周期和 stub 生成语义保持一致。
+
+### 可见性规则
+
+- 只扫描导出函数、导出方法和导出字段；未导出成员永远不可见。
+- 包级函数必须由宿主显式传入 map 或 struct carrier；bridge 不扫描 Go 包。
+- struct 指针字段默认可读写，值 struct 只生成 getter；`readonly` 或不可设置字段不生成 setter。
+- 方法默认可调用；Go 方法本身没有 struct tag，首版不支持方法 tag 重命名或排除。
+- 匿名嵌入 struct 字段会展开；命名冲突必须返回配置错误，不做静默覆盖。
+- nil struct 指针绑定会在构造期返回错误；嵌入 struct 指针为 nil 时，字段读取返回明确 Lua error。
+- 循环引用和任意 struct 指针字段首版不做隐式递归代理，必须通过显式 `ObjectBinding` 暴露。
+
+### 命名与 tag 规则
+
+默认命名规则把 Go 导出名转换为 Lua 友好的 lowerCamelCase：
+
+- `Read` -> `read`
+- `HTTPClient` -> `httpClient`
+- `UserID` -> `userID`
+
+推荐 tag 名称为 `glua`：
+
+```go
+type Config struct {
+    Name string `glua:"name,readonly"`
+    Port int    `glua:"port"`
+    Key  string `glua:"-"`
+}
+```
+
+tag 语义：
+
+- `glua:"name"`：重命名 Lua 字段。
+- `glua:"-"`：忽略该字段；匿名嵌入字段设置该 tag 时不会展开。
+- `readonly`：字段只读，Lua 写入返回错误。
+- 未知 tag 选项必须返回错误，避免拼写错误导致错误暴露。
+
+### 函数和方法绑定
+
+自动扫描函数时，bridge 生成 `bridge.Function` 包装器：
+
+- 支持基础参数：bool、整数、浮点、string、`lua.Value`、`*lua.State`、`context.Context`。
+- 第一阶段不支持任意 table 到 struct/slice/map 的深拷贝。
+- 支持返回值：基础类型、`lua.Value`、`*runtime.Table`、`*runtime.Userdata`、`bridge.Function` 和 `runtime.GoResultsFunction`。
+- 最后一位返回值为 `error` 时，非 nil error 映射为 Lua error；nil error 不产生 Lua 返回值。
+- 多返回值按声明顺序压入 Lua；`error` 返回值不作为 Lua 正常返回值。
+- panic 必须 recover 并映射为 Lua runtime error，保留 panic 文本但不泄露宿主堆栈，除非调试选项显式开启。
+
+receiver 支持：
+
+- 值 receiver 和指针 receiver 都可暴露。
+- 指针 receiver 方法需要绑定对象是 struct 指针；值 struct 只暴露值 receiver 方法。
+- 方法调用走对象代理，Lua 冒号调用和点调用都必须有稳定语义；推荐 stub 使用冒号调用。
+
+### 字段权限
+
+- 导出字段默认生成 getter；绑定对象是 struct 指针时，为支持的非只读字段生成 setter。
+- `readonly` 字段只生成 getter。
+- 不可设置字段、未导出字段、非地址可取字段不生成 setter。
+- 写入字段时必须按 Lua 5.3 转换规则验证类型；转换失败返回 Lua error，不修改原字段。
+- 指针字段首版不做隐式转换；需要指针对象字段时应使用显式 `ObjectBinding` 或 `lua.Value`/userdata/table 字段。
+- 字段 set 失败必须保持原值，禁止部分写入。
+
+### 错误语义
+
+- 绑定构造期错误返回 Go error，例如命名冲突、未知 tag、不可支持类型。
+- Lua 调用期错误返回 Lua error，例如参数类型不匹配、nil receiver、只读字段写入、Go error 返回。
+- panic 只在调用期转换为 Lua runtime error；构造期 panic 也必须 recover 为 Go error。
+- 错误文本优先稳定和可诊断，不承诺逐字匹配官方 Lua，因为 reflection 是项目扩展能力。
+
+### 性能边界
+
+- 扫描结果必须缓存到 binding 描述或 wrapper 中，不能每次 Lua 调用都重新扫描方法和字段。
+- 参数和返回值转换可以使用 reflection，但应按函数签名预编译转换器。
+- 自动绑定适合宿主扩展和工具场景；性能敏感路径仍推荐手写 `bridge.Function` 和显式 `ObjectBinding`。
+- benchmark 需要覆盖自动函数调用、字段读写和方法调用，并与显式 binding 对比记录开销。
+
+### 首版实现顺序
+
+1. 已实现函数自动绑定：基础参数、多返回值、`error`、panic recover。
+2. 已实现 struct 自动绑定：导出字段、导出方法、tag 重命名、只读字段、receiver 规则和嵌入字段展开。
+3. 后续可继续补模块级 helper 和 stub 类型注释生成，确保自动绑定结果能更完整地转为显式 `ModuleBinding` 文档。
+
 ## Lua stub 生成
 
 stub 生成不是把 Go 源码翻译为 Lua 源码，而是根据注册信息生成 Lua 侧代理模块：

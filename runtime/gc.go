@@ -21,6 +21,10 @@ const (
 	GCRootTypeTableKeyValue GCRootType = "table-key-value-root"
 	// GCRootTypeCoroutineStack 表示协程独立栈根样本。
 	GCRootTypeCoroutineStack GCRootType = "coroutine-stack-root"
+	// autoGCSweepInterval 表示自动 GC 在分配压力下每多少次可收集对象分配推进一次 weak sweep。
+	autoGCSweepInterval int64 = 96
+	// autoGCFinalizerInterval 表示存在待终结 table 时自动 GC 的推进频率。
+	autoGCFinalizerInterval int64 = 16
 )
 
 // GCRootBatch 表示某类根下的可达值快照。
@@ -240,18 +244,30 @@ func (state *State) NoteTableAllocation() {
 		return
 	}
 
+	sweepInterval := autoGCSweepInterval
+	if len(state.finalizableTables) > 0 {
+		// finalizer 兼容测试依赖较短分配压力周期，否则小循环内观察不到 __gc 运行。
+		sweepInterval = autoGCFinalizerInterval
+	}
 	state.autoGCAllocations++
-	if state.autoGCAllocations < 1 {
-		// 当前阈值为每次分配都检查；保留计数字段便于后续调大节拍。
+	if state.autoGCAllocations < sweepInterval {
+		// 自动 GC 只需在分配压力下周期性推进；每次分配都全图 weak sweep 会让字符串拼接热路径失真。
 		return
 	}
 	state.autoGCAllocations = 0
+	if !state.hasWeakTables && len(state.finalizableTables) == 0 {
+		// 没有弱表或待终结 table 时，自动 GC 无需扫描对象图；显式 collectgarbage 仍执行完整流程。
+		return
+	}
 	state.SweepWeakValuesBeforeFinalizers()
 	if len(state.finalizableTables) > 0 {
 		// 只有存在待终结对象时才运行自动 finalizer，避免普通分配走无意义路径。
 		state.RunTableFinalizersForAuto()
 	}
-	state.SweepWeakTables()
+	if state.hasWeakTables {
+		// 只有 State 中出现过弱表时才需要自动 weak sweep，避免普通字符串拼接反复扫描全局对象图。
+		state.SweepWeakTables()
+	}
 }
 
 // maxInt64 返回两个 int64 中较大的值。
@@ -612,6 +628,17 @@ func (state *State) SetLuaMetamethodRunner(runner LuaMetamethodRunner) {
 	state.luaMetamethodRunner = runner
 }
 
+// LuaMetamethodRunner 返回 State 当前注册的 Lua closure 元方法执行器。
+//
+// 返回值可能为 nil；调用方应在需要 Lua closure 元方法时按 ErrUnsupportedMetamethod 或等价错误处理。
+func (state *State) LuaMetamethodRunner() LuaMetamethodRunner {
+	if state == nil {
+		// nil State 没有可用执行器。
+		return nil
+	}
+	return state.luaMetamethodRunner
+}
+
 // CallLuaClosure 通过 State 注入的 Lua closure runner 调用函数值。
 //
 // function 必须是 Lua closure；args 按 Lua 调用顺序传入。该入口供 runtime 下层标准库在不依赖
@@ -690,6 +717,25 @@ func (state *State) RegisterTableFinalizer(table *Table) {
 		// 非主协程中创建的 finalizer 对象至少延迟一轮，模拟 thread/upvalue cycle 收集节奏。
 		state.coroutineBornFinalizers[table] = true
 	}
+}
+
+// RegisterWeakTable 登记 State 中存在弱表。
+//
+// table 必须是已经设置元表的 table；只有元表 `__mode` 字段包含 `k` 或 `v` 时才标记。
+// 标记一旦置位不会回退，避免弱表后续被普通表覆盖元表时遗漏历史弱边清理需求。
+func (state *State) RegisterWeakTable(table *Table) {
+	if state == nil || state.closed || table == nil {
+		// 无效 State 或 nil table 没有可登记对象。
+		return
+	}
+	weakKeys, weakValues := table.weakMode()
+	if !weakKeys && !weakValues {
+		// 元表没有声明弱 key/value 时，不影响自动 GC 扫描策略。
+		return
+	}
+
+	// 记录当前 State 已出现弱表，后续自动 GC 在分配压力下需要保留 weak sweep。
+	state.hasWeakTables = true
 }
 
 // RunTableFinalizers 对已登记且当前不可达的 table 执行 `__gc` 元方法。

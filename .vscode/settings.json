@@ -1,0 +1,6 @@
+{
+  "files.associations": {
+    "*.glua": "glua",
+    "*.lua": "glua"
+  }
+}

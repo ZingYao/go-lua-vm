@@ -1,0 +1,142 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "glua",
+  "scopeName": "source.glua",
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#constants"
+    },
+    {
+      "include": "#functions"
+    },
+    {
+      "include": "#operators"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.block.glua",
+          "begin": "--\\[=*\\[",
+          "end": "\\]=*\\]"
+        },
+        {
+          "name": "comment.line.double-dash.glua",
+          "match": "--.*$"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.glua",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.glua",
+              "match": "\\\\(?:[abfnrtvz\\\\\"']|\\r?\\n|\\d{1,3}|x[0-9A-Fa-f]{2}|u\\{[0-9A-Fa-f]+\\})"
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.single.glua",
+          "begin": "'",
+          "end": "'",
+          "patterns": [
+            {
+              "name": "constant.character.escape.glua",
+              "match": "\\\\(?:[abfnrtvz\\\\\"']|\\r?\\n|\\d{1,3}|x[0-9A-Fa-f]{2}|u\\{[0-9A-Fa-f]+\\})"
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.other.long-bracket.glua",
+          "begin": "\\[=*\\[",
+          "end": "\\]=*\\]"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.float.glua",
+          "match": "\\b(?:0[xX][0-9A-Fa-f]+(?:\\.[0-9A-Fa-f]*)?(?:[pP][+-]?\\d+)?|\\d+(?:\\.\\d*)?(?:[eE][+-]?\\d+)?|\\.\\d+(?:[eE][+-]?\\d+)?)\\b"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.glua",
+          "match": "\\b(?:break|continue|do|else|elseif|end|for|function|goto|if|in|local|repeat|return|then|until|while|switch|case|default)\\b"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.glua",
+          "match": "\\b(?:false|nil|true|_ENV|_G|_VERSION)\\b"
+        },
+        {
+          "name": "variable.language.self.glua",
+          "match": "\\bself\\b"
+        }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        {
+          "name": "meta.function.member.call.glua",
+          "match": "([.:])\\s*([A-Za-z_][A-Za-z0-9_]*)(?=\\s*\\()",
+          "captures": {
+            "1": {
+              "name": "punctuation.accessor.glua"
+            },
+            "2": {
+              "name": "entity.name.function.member.glua"
+            }
+          }
+        },
+        {
+          "name": "entity.name.type.library.glua",
+          "match": "\\b(?:string|math|table|io|os|coroutine|debug|utf8)\\b(?=\\s*[.:])"
+        },
+        {
+          "name": "entity.name.function.glua",
+          "match": "(?<=\\bfunction\\s)[A-Za-z_][A-Za-z0-9_]*(?:[.:][A-Za-z_][A-Za-z0-9_]*)*"
+        },
+        {
+          "name": "entity.name.function.call.glua",
+          "match": "\\b(?:assert|collectgarbage|dofile|error|getmetatable|ipairs|load|loadfile|next|pairs|pcall|print|rawequal|rawget|rawlen|rawset|require|select|setmetatable|tonumber|tostring|type|xpcall)\\b(?=\\s*\\()"
+        },
+        {
+          "name": "entity.name.function.call.glua",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b(?=\\s*\\()"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.glua",
+          "match": "(?:\\.\\.\\.|\\.\\.|==|~=|<=|>=|<<|>>|//|[+\\-*/%^#=<>;&|~])"
+        }
+      ]
+    }
+  }
+}

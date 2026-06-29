@@ -5,6 +5,12 @@ logs/
 tmp/
 dist/
 build/
+bin/
+node_modules/
+.gradle/
+.intellijPlatform/
 coverage.out
 *.test
+luac.out
+test.glua
 third_party/lua-5.3.6/

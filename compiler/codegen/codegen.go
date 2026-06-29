@@ -446,6 +446,11 @@ func (generator *generator) compileLocalAssignment(statement *parser.LocalAssign
 //
 // 当前阶段左侧支持已经声明的局部变量名称，未知名称按 Lua 5.3 语义写入 `_ENV[name]`。
 func (generator *generator) compileAssignment(statement *parser.AssignmentStatement) error {
+	if handled, err := generator.compileSingleLocalSelfConcatAssignment(statement); handled || err != nil {
+		// 单 local 自拼接赋值可直接写回目标寄存器，避免临时结果和 MOVE。
+		return err
+	}
+
 	firstTempRegister := generator.nextRegister
 	targets := make([]assignmentTarget, 0, len(statement.Left))
 	for _, leftExpression := range statement.Left {
@@ -482,6 +487,113 @@ func (generator *generator) compileAssignment(statement *parser.AssignmentStatem
 
 	// 普通赋值编译完成。
 	return nil
+}
+
+// compileSingleLocalSelfConcatAssignment 优化 `localName = localName .. expression`。
+//
+// 该优化只处理单左值、单右值、当前函数 active local 的自拼接赋值；多重赋值、upvalue、global
+// 和 table/index 左值仍走通用路径，以保留 Lua 5.3 的求值顺序和副作用语义。
+func (generator *generator) compileSingleLocalSelfConcatAssignment(statement *parser.AssignmentStatement) (bool, error) {
+	if len(statement.Left) != 1 || len(statement.Right) != 1 {
+		// 多重赋值需要先求完所有 RHS，再统一写回，不能使用该快路径。
+		return false, nil
+	}
+	targetName, ok := statement.Left[0].(*parser.NameExpression)
+	if !ok {
+		// 只有普通名称左值能直接写回寄存器。
+		return false, nil
+	}
+	binding, ok := generator.locals[targetName.Name]
+	if !ok {
+		// upvalue/global 写回有额外语义，不能用当前 local 寄存器快路径。
+		return false, nil
+	}
+	binaryExpression, ok := statement.Right[0].(*parser.BinaryExpression)
+	if !ok || binaryExpression.Operator != ".." {
+		// 只优化字符串拼接赋值。
+		return false, nil
+	}
+	leftName, ok := binaryExpression.Left.(*parser.NameExpression)
+	if !ok || leftName.Name != targetName.Name {
+		// 只有 `x = x .. rhs` 能保证左操作数就是目标寄存器当前值。
+		return false, nil
+	}
+	if !isSelfConcatSafeRightExpression(binaryExpression.Right) {
+		// 右侧若可能调用函数或触发元方法，就必须先保存左操作数，避免破坏左到右求值语义。
+		return false, nil
+	}
+	if generator.nextRegister != binding.register+1 {
+		// 目标 local 后方已有活动寄存器时，把左操作数复制到连续临时区，仍让 CONCAT 直接写回目标。
+		return true, generator.compileSingleLocalSelfConcatAssignmentWithTemps(binding, binaryExpression)
+	}
+
+	rightRegister := generator.allocateRegister()
+	if err := generator.compileExpressionTo(binaryExpression.Right, rightRegister); err != nil {
+		// 右操作数失败时释放临时寄存器并返回。
+		generator.releaseRegister(rightRegister)
+		return true, err
+	}
+	if err := generator.withSourceLine(binaryExpression.Position, func() error {
+		// CONCAT 允许目标寄存器与左操作数寄存器相同，执行时会先读取区间再写回目标。
+		generator.emitABC(bytecode.OpConcat, binding.register, binding.register, rightRegister)
+		return nil
+	}); err != nil {
+		generator.releaseRegister(rightRegister)
+		return true, err
+	}
+	generator.releaseRegister(rightRegister)
+
+	// 自拼接赋值已完成。
+	return true, nil
+}
+
+// compileSingleLocalSelfConcatAssignmentWithTemps 编译被活动寄存器隔开的 local 自拼接赋值。
+//
+// binding 必须是左值 local 绑定；expression 必须满足 `x = x .. rhs` 且 rhs 已确认无副作用。
+// 该路径使用连续临时寄存器承载真实拼接操作数，并让 OP_CONCAT 直接写回 local，避免通用赋值
+// 额外生成结果临时寄存器后的 MOVE。
+func (generator *generator) compileSingleLocalSelfConcatAssignmentWithTemps(binding localBinding, expression *parser.BinaryExpression) error {
+	// 分配两个连续临时寄存器，分别保存当前 local 值和右操作数。
+	startRegister := generator.allocateRegister()
+	rightRegister := generator.allocateRegister()
+	if err := generator.withSourceLine(expression.Position, func() error {
+		// 先复制左操作数，保证 CONCAT 写回目标前已经保留旧字符串值。
+		generator.emitABC(bytecode.OpMove, startRegister, binding.register, 0)
+		return nil
+	}); err != nil {
+		generator.releaseRegistersFrom(startRegister)
+		return err
+	}
+	if err := generator.compileExpressionTo(expression.Right, rightRegister); err != nil {
+		// 右操作数编译失败时释放临时区并返回。
+		generator.releaseRegistersFrom(startRegister)
+		return err
+	}
+	if err := generator.withSourceLine(expression.Position, func() error {
+		// OP_CONCAT 的 B..C 现在是连续临时区，A 直接写回目标 local。
+		generator.emitABC(bytecode.OpConcat, binding.register, startRegister, rightRegister)
+		return nil
+	}); err != nil {
+		generator.releaseRegistersFrom(startRegister)
+		return err
+	}
+	generator.releaseRegistersFrom(startRegister)
+	return nil
+}
+
+// isSelfConcatSafeRightExpression 判断自拼接右侧是否不会修改目标 local。
+//
+// 当前只允许字面量，覆盖 `s = s .. "x"` 等热点；名称、字段、索引和调用都可能触发读取副作用或
+// 间接修改目标 local，因此交给通用赋值路径保持语义。
+func isSelfConcatSafeRightExpression(expression parser.Expression) bool {
+	_, ok := expression.(*parser.LiteralExpression)
+	if ok {
+		// 字面量求值没有副作用，不会改变左操作数寄存器。
+		return true
+	}
+
+	// 其他表达式保守认为可能有副作用。
+	return false
 }
 
 // compileAssignmentTarget 编译普通赋值左值地址。
@@ -2129,6 +2241,10 @@ func (generator *generator) compileBinaryTo(expression *parser.BinaryExpression,
 		// 比较表达式使用测试指令和 LOADBOOL 合成布尔结果。
 		return generator.compileComparisonTo(expression, targetRegister)
 	}
+	if expression.Operator == ".." {
+		// CONCAT 在 Lua 5.3 codegen 中会合并连续右结合表达式，生成单条连续寄存器范围指令。
+		return generator.compileConcatTo(expression, targetRegister)
+	}
 	if expression.Operator != ".." && !generator.registerHasActiveLocal(targetRegister) {
 		// 目标寄存器不是当前 local 时，可以安全复用它保存左操作数，降低长表达式寄存器压力。
 		return generator.compileBinaryWithReusableTargetTo(expression, targetRegister)
@@ -2168,6 +2284,56 @@ func (generator *generator) compileBinaryTo(expression *parser.BinaryExpression,
 
 	// 二元表达式编译完成。
 	return nil
+}
+
+// compileConcatTo 编译连续字符串拼接表达式。
+//
+// Lua 5.3 的 `..` 是右结合操作符，但 codegen 会把连续 concat 操作数铺到连续寄存器并生成
+// 单条 OP_CONCAT。运行期 OP_CONCAT 负责按右结合语义处理元方法。
+func (generator *generator) compileConcatTo(expression *parser.BinaryExpression, targetRegister int) error {
+	operands := flattenConcatOperands(expression, nil)
+	if len(operands) < 2 {
+		// 防御异常 AST；普通二元表达式至少应有两个操作数。
+		return fmt.Errorf("codegen invalid concat expression")
+	}
+	if generator.nextRegister+len(operands) > maxProtoRegisters {
+		// CONCAT 操作数必须放入连续寄存器，超过上限时返回编译错误。
+		return fmt.Errorf("too many registers")
+	}
+	startRegister := generator.allocateRegister()
+	for operandIndex, operand := range operands {
+		currentRegister := startRegister + operandIndex
+		if operandIndex > 0 {
+			// 第一个寄存器已由 allocateRegister 占用，后续寄存器需要显式纳入水位。
+			generator.ensureRegister(currentRegister)
+		}
+		if err := generator.compileExpressionTo(operand, currentRegister); err != nil {
+			// 任一操作数编译失败时释放整个连续临时区间。
+			generator.releaseRegistersFrom(startRegister)
+			return err
+		}
+	}
+	if err := generator.withSourceLine(expression.Position, func() error {
+		// 单条 CONCAT 覆盖完整操作数区间，减少多段拼接的中间字符串和指令数量。
+		generator.emitABC(bytecode.OpConcat, targetRegister, startRegister, startRegister+len(operands)-1)
+		return nil
+	}); err != nil {
+		generator.releaseRegistersFrom(startRegister)
+		return err
+	}
+	generator.releaseRegistersFrom(startRegister)
+	return nil
+}
+
+// flattenConcatOperands 按源码左到右顺序展开连续 `..` 二元表达式。
+func flattenConcatOperands(expression parser.Expression, operands []parser.Expression) []parser.Expression {
+	binaryExpression, ok := expression.(*parser.BinaryExpression)
+	if !ok || binaryExpression.Operator != ".." {
+		// 非 concat 节点就是一个实际操作数。
+		return append(operands, expression)
+	}
+	operands = flattenConcatOperands(binaryExpression.Left, operands)
+	return flattenConcatOperands(binaryExpression.Right, operands)
 }
 
 // compileBinaryWithReusableTargetTo 复用目标寄存器编译普通二元表达式。

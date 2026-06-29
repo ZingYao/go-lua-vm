@@ -139,6 +139,61 @@ func (environment *Environment) HookActive() bool {
 	return environment.hookActive
 }
 
+// HasActiveHook 判断当前运行线程是否存在任意可触发 hook。
+//
+// 返回 true 表示 VM 执行循环需要继续检查 call、return、line 或 count 事件；返回 false 时
+// 热路径可以跳过逐指令 HookEnabledFor 判断。该方法不累计 count，也不触发 hook。
+func (environment *Environment) HasActiveHook() bool {
+	if environment == nil || environment.hookActive {
+		// 缺少环境或正在 hook 回调内部时，当前路径不会触发新的 hook。
+		return false
+	}
+	if state := environment.activeThreadHookState(); state != nil {
+		// 协程专属 hook 存在时只看该协程状态，避免主线程 hook 干扰协程。
+		return !state.hook.IsNil() && (state.mask != "" || state.count > 0)
+	}
+	return !environment.hook.IsNil() && (environment.hookMask != "" || environment.hookCount > 0)
+}
+
+// HookEnabledFor 判断指定 hook 事件当前是否可能触发。
+//
+// event 必须是 Lua 5.3 标准 hook 事件名；返回 true 表示 VM 需要进入对应 hook 触发路径。
+// 该方法只做无副作用的轻量判断，不累计 count，也不执行 hook 回调。
+func (environment *Environment) HookEnabledFor(event string) bool {
+	if environment == nil || environment.hookActive {
+		// 缺少环境或 hook 回调正在执行时，当前指令不应触发新的 hook。
+		return false
+	}
+	if state := environment.activeThreadHookState(); state != nil {
+		// 协程专属 hook 存在时使用协程状态，避免主线程默认 hook 影响协程。
+		return hookStateEnabledFor(state, event)
+	}
+	if environment.hook.IsNil() {
+		// 主线程未设置 hook 时直接跳过 VM 热路径上的 hook 派发。
+		return false
+	}
+	switch event {
+	case HookEventCall:
+		// call 事件由 c mask 控制。
+		return strings.Contains(environment.hookMask, "c")
+	case HookEventTailCall:
+		// tail call 事件同样由 c mask 控制。
+		return strings.Contains(environment.hookMask, "c")
+	case HookEventReturn:
+		// return 事件由 r mask 控制。
+		return strings.Contains(environment.hookMask, "r")
+	case HookEventLine:
+		// line 事件由 l mask 控制。
+		return strings.Contains(environment.hookMask, "l")
+	case HookEventCount:
+		// count 事件只依赖正数 count 间隔。
+		return environment.hookCount > 0
+	default:
+		// 未知事件保持不触发，避免扩展事件误进 VM hook 热路径。
+		return false
+	}
+}
+
 // NewEnvironment 创建 debug 标准库运行环境。
 //
 // state 可以为 nil；nil 状态下只能使用不依赖调用栈的函数，依赖 State 的函数会返回 nil 或错误。
@@ -2533,6 +2588,17 @@ func hookMaskMatches(state *hookState, event string) bool {
 		// 未知事件不触发 hook。
 		return false
 	}
+}
+
+// hookStateEnabledFor 判断指定 hook 状态是否可能触发某个事件。
+//
+// state 必须来自协程专属 hook；未设置 hook 或事件不匹配时返回 false，供 VM 热路径提前跳过派发。
+func hookStateEnabledFor(state *hookState, event string) bool {
+	if state == nil || state.hook.IsNil() {
+		// 没有协程 hook 或 hook 函数为空时不触发任何事件。
+		return false
+	}
+	return hookMaskMatches(state, event)
 }
 
 // triggerCountHookState 记录指定 hook 状态的一次指令计数并按需触发 count hook。
