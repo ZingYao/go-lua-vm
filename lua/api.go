@@ -2476,9 +2476,11 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 				return nil, err
 			}
 		}
-		if closeFrom, ok := vm.CloseFrom(); ok {
-			// JMP A 非零表示离开局部作用域，必须闭合对应寄存器及之后的 open upvalue。
-			vm.CloseUpvaluesFrom(closeFrom)
+		if instruction.OpCode() == bytecode.OpJmp {
+			if closeFrom, ok := vm.CloseFrom(); ok {
+				// JMP A 非零表示离开局部作用域，必须闭合对应寄存器及之后的 open upvalue。
+				vm.CloseUpvaluesFrom(closeFrom)
+			}
 		}
 		if instruction.OpCode() == bytecode.OpNewTable || instruction.OpCode() == bytecode.OpClosure || instruction.OpCode() == bytecode.OpConcat {
 			// 分配压力指令后给自动 GC 一次推进机会，覆盖 table、closure 和字符串拼接。
@@ -3236,9 +3238,11 @@ func executeLuaLeafClosureFast(state *State, proto *bytecode.Proto, vm *runtime.
 			}
 			return nil, decorateLuaRuntimeErrorAtPC(proto, pc, err)
 		}
-		if closeFrom, ok := vm.CloseFrom(); ok {
-			// 离开局部作用域时仍需闭合 open upvalue。
-			vm.CloseUpvaluesFrom(closeFrom)
+		if instruction.OpCode() == bytecode.OpJmp {
+			if closeFrom, ok := vm.CloseFrom(); ok {
+				// 离开局部作用域时仍需闭合 open upvalue。
+				vm.CloseUpvaluesFrom(closeFrom)
+			}
 		}
 		if instruction.OpCode() == bytecode.OpNewTable || instruction.OpCode() == bytecode.OpConcat {
 			// 分配压力指令后推进自动 GC，保持与完整执行器一致。
