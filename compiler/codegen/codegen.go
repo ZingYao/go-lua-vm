@@ -647,9 +647,13 @@ func (generator *generator) compileSelfBinaryChainViaAccumulator(targetName stri
 		// 不含调用的链路保留既有 table/global 热路径，避免影响 table_rw 字节码形态。
 		return false, nil
 	}
-	accumulatorRegister := generator.allocateRegister()
+	accumulatorRegister := -1
+	if _, leftIsBinary := expression.Left.(*parser.BinaryExpression); leftIsBinary {
+		// 只有左侧存在子链时才需要累加器；简单 `x + call()` 可让 call 直接占用下一个临时寄存器。
+		accumulatorRegister = generator.allocateRegister()
+	}
 	handled, err := generator.compileSelfBinaryChainAccumulatorNode(targetName, binding, expression, accumulatorRegister, binding.register)
-	generator.releaseRegister(accumulatorRegister)
+	generator.releaseOptionalRegister(accumulatorRegister)
 	return handled, err
 }
 
@@ -660,6 +664,10 @@ func (generator *generator) compileSelfBinaryChainAccumulatorNode(targetName str
 	leftOperand := binding.register
 	leftBinary, leftIsBinary := expression.Left.(*parser.BinaryExpression)
 	if leftIsBinary {
+		if accumulatorRegister < 0 {
+			// 左侧存在子链时必须有累加器保存中间结果。
+			return false, nil
+		}
 		// 左子链先写入累加器，但不会提前覆盖目标 local。
 		handled, err := generator.compileSelfBinaryChainAccumulatorNode(targetName, binding, leftBinary, accumulatorRegister, accumulatorRegister)
 		if !handled || err != nil {
