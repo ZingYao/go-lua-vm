@@ -1755,6 +1755,33 @@ a[1].alo(a[2] == 10 and b == 10 and c == print)
 	}
 }
 
+// TestDoStringSelfBinaryAssignmentReadsLocalAfterRHSCall 验证自二元赋值对齐 Lua 5.3 求值形态。
+//
+// 官方 Lua 5.3 对 `x = x + f()` 会先执行 RHS 调用，再由 ADD 指令读取当前 open upvalue
+// `x`；如果 f 修改了 x，最终结果应使用修改后的值，而不是调用前提前缓存的旧值。
+func TestDoStringSelfBinaryAssignmentReadsLocalAfterRHSCall(t *testing.T) {
+	// 使用闭包修改 open upvalue，覆盖 codegen 是否提前读取左操作数的差异。
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// assert 由 base 库提供，打开标准库失败则测试无意义。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+	err := DoString(state, `
+local x = 1
+local function f()
+  x = 10
+  return 2
+end
+x = x + f()
+assert(x == 12)
+`)
+	if err != nil {
+		// 自二元赋值必须读取 RHS 调用后的 open upvalue 值。
+		t.Fatalf("DoString self binary assignment failed: %v", err)
+	}
+}
+
 // TestDoStringNumericForBodyLocalsCloseEachIteration 验证 numeric for 体内 local 每轮独立闭合。
 //
 // 官方 closure.lua 在 `for` 循环内创建闭包捕获 `local y`；每次迭代都必须创建并关闭独立

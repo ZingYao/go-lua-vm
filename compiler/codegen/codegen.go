@@ -594,6 +594,10 @@ func (generator *generator) compileSingleLocalSelfBinaryAssignment(statement *pa
 		// 左结合自二元链已直接写回目标 local。
 		return chainHandled, err
 	}
+	if chainHandled, err := generator.compileSelfBinaryChainViaAccumulator(targetName.Name, binding, binaryExpression); chainHandled || err != nil {
+		// 含调用的左结合自二元链使用临时累加器，保持官方 Lua 的求值和写回时机。
+		return chainHandled, err
+	}
 	leftName, ok := binaryExpression.Left.(*parser.NameExpression)
 	if !ok || leftName.Name != targetName.Name {
 		// 只有 `x = x <op> rhs` 能保证左操作数就是目标寄存器当前值。
@@ -628,6 +632,119 @@ func (generator *generator) compileSingleLocalSelfBinaryAssignment(statement *pa
 
 	// 自二元运算赋值已完成。
 	return true, nil
+}
+
+// compileSelfBinaryChainViaAccumulator 编译 `x = ((x op rhs) op rhs)` 的官方兼容累加器形态。
+//
+// 当 RHS 可能调用函数时，不能提前把 x 读入临时值；Lua 5.3 官方 codegen 会先计算
+// RHS，再在二元 opcode 中读取当前 x，并把中间结果放入临时累加器，直到最后一层才写回 x。
+func (generator *generator) compileSelfBinaryChainViaAccumulator(targetName string, binding localBinding, expression *parser.BinaryExpression) (bool, error) {
+	if !generator.isSelfBinaryChainRoot(targetName, expression) {
+		// 只有左侧最终落到目标 local 的普通二元链可以使用该形态。
+		return false, nil
+	}
+	if !selfBinaryChainContainsCall(expression) {
+		// 不含调用的链路保留既有 table/global 热路径，避免影响 table_rw 字节码形态。
+		return false, nil
+	}
+	accumulatorRegister := generator.allocateRegister()
+	handled, err := generator.compileSelfBinaryChainAccumulatorNode(targetName, binding, expression, accumulatorRegister, binding.register)
+	generator.releaseRegister(accumulatorRegister)
+	return handled, err
+}
+
+// compileSelfBinaryChainAccumulatorNode 递归生成左结合自二元链。
+//
+// accumulatorRegister 保存非最终层的中间结果；finalRegister 是最外层最终写回的目标 local。
+func (generator *generator) compileSelfBinaryChainAccumulatorNode(targetName string, binding localBinding, expression *parser.BinaryExpression, accumulatorRegister int, finalRegister int) (bool, error) {
+	leftOperand := binding.register
+	leftBinary, leftIsBinary := expression.Left.(*parser.BinaryExpression)
+	if leftIsBinary {
+		// 左子链先写入累加器，但不会提前覆盖目标 local。
+		handled, err := generator.compileSelfBinaryChainAccumulatorNode(targetName, binding, leftBinary, accumulatorRegister, accumulatorRegister)
+		if !handled || err != nil {
+			// 子链失败时直接把信号传给调用方。
+			return handled, err
+		}
+		leftOperand = accumulatorRegister
+	} else {
+		leftName, ok := expression.Left.(*parser.NameExpression)
+		if !ok || leftName.Name != targetName {
+			// 预检已保证该分支理论不可达，保守回退通用路径。
+			return false, nil
+		}
+	}
+
+	rightOperand, rightRegister, err := generator.binaryRightOperand(expression.Right)
+	if err != nil {
+		// 右操作数失败时返回原始编译错误。
+		return true, err
+	}
+	opCode, ok := binaryOpCode(expression.Operator)
+	if !ok {
+		// 预检已保证普通二元 opcode；异常时回退原有错误路径。
+		generator.releaseOptionalRegister(rightRegister)
+		return false, nil
+	}
+	if err := generator.withSourceLine(expression.Position, func() error {
+		// 当前层按官方 Lua 形态：先完成右侧求值，再读取左侧寄存器并写入目标。
+		generator.emitABC(opCode, finalRegister, leftOperand, rightOperand)
+		return nil
+	}); err != nil {
+		generator.releaseOptionalRegister(rightRegister)
+		return true, err
+	}
+	generator.releaseOptionalRegister(rightRegister)
+	return true, nil
+}
+
+// isSelfBinaryChainRoot 判断表达式是否是左侧最终落到 targetName 的普通二元链。
+func (generator *generator) isSelfBinaryChainRoot(targetName string, expression *parser.BinaryExpression) bool {
+	if expression == nil || expression.Operator == ".." || expression.Operator == "and" || expression.Operator == "or" || isComparisonOperator(expression.Operator) {
+		// concat、短路和比较不使用普通二元累加器形态。
+		return false
+	}
+	if _, ok := binaryOpCode(expression.Operator); !ok {
+		// 未支持 opcode 的操作符不能进入快路径。
+		return false
+	}
+	if leftName, ok := expression.Left.(*parser.NameExpression); ok {
+		// 链起点必须是目标 local 自身。
+		return leftName.Name == targetName
+	}
+	leftBinary, ok := expression.Left.(*parser.BinaryExpression)
+	if !ok {
+		// 其他左侧形态不是左结合自二元链。
+		return false
+	}
+	return generator.isSelfBinaryChainRoot(targetName, leftBinary)
+}
+
+// selfBinaryChainContainsCall 判断自二元链中是否包含函数或方法调用。
+func selfBinaryChainContainsCall(expression parser.Expression) bool {
+	switch typedExpression := expression.(type) {
+	case *parser.FunctionCallExpression, *parser.MethodCallExpression:
+		// 调用可能修改 open upvalue，因此需要对齐官方 Lua 的延迟读目标 local 形态。
+		return true
+	case *parser.BinaryExpression:
+		// 二元链左右两侧任意一侧包含调用都需要累加器路径。
+		return selfBinaryChainContainsCall(typedExpression.Left) || selfBinaryChainContainsCall(typedExpression.Right)
+	case *parser.UnaryExpression:
+		// 一元表达式内部继续检查操作数。
+		return selfBinaryChainContainsCall(typedExpression.Operand)
+	case *parser.PrefixExpression:
+		// 括号前缀不改变求值副作用。
+		return selfBinaryChainContainsCall(typedExpression.Inner)
+	case *parser.FieldAccessExpression:
+		// 字段访问的 receiver 子表达式可能包含调用。
+		return selfBinaryChainContainsCall(typedExpression.Receiver)
+	case *parser.IndexExpression:
+		// table/index 子表达式本身可能包含调用。
+		return selfBinaryChainContainsCall(typedExpression.Receiver) || selfBinaryChainContainsCall(typedExpression.Index)
+	default:
+		// 字面量、名称和其他当前表达式没有直接调用。
+		return false
+	}
 }
 
 // compileSelfBinaryChainToTarget 编译 `x = ((x op a) op b)` 形式的左结合自二元链。
