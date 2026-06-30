@@ -29,6 +29,10 @@
       {
         "command": "glua.showBuiltinDocStatus",
         "title": "%glua.showBuiltinDocStatus.title%"
+      },
+      {
+        "command": "glua.showOutput",
+        "title": "%glua.showOutput.title%"
       }
     ],
     "menus": {
@@ -39,6 +43,10 @@
         },
         {
           "command": "glua.showBuiltinDocStatus",
+          "when": "true"
+        },
+        {
+          "command": "glua.showOutput",
           "when": "true"
         }
       ]
@@ -66,7 +74,43 @@
     ],
     "configurationDefaults": {
       "[glua]": {
-        "editor.defaultFormatter": "local.glua-lsp"
+        "editor.defaultFormatter": "local.glua-lsp",
+        "editor.semanticHighlighting.enabled": true,
+        "editor.semanticTokenColorCustomizations": {
+          "enabled": true,
+          "rules": {
+            "keyword": "#CC7832",
+            "function": "#56A8F5",
+            "method": "#56A8F5",
+            "namespace": "#4EC9B0"
+          }
+        },
+        "editor.tokenColorCustomizations": {
+          "textMateRules": [
+            {
+              "scope": "keyword.control.glua",
+              "settings": {
+                "foreground": "#CC7832"
+              }
+            },
+            {
+              "scope": [
+                "entity.name.function.glua",
+                "entity.name.function.call.glua",
+                "entity.name.function.member.glua"
+              ],
+              "settings": {
+                "foreground": "#56A8F5"
+              }
+            },
+            {
+              "scope": "entity.name.type.library.glua",
+              "settings": {
+                "foreground": "#4EC9B0"
+              }
+            }
+          ]
+        }
       }
     },
     "configuration": {

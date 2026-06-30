@@ -57,6 +57,610 @@
         "zh-CN": "collectgarbage('collect')\nlocal count = collectgarbage('count')\n-- count: 当前内存使用量，单位 KB"
       }
     },
+    "coroutine.create": {
+      "signature": {
+        "en": "coroutine.create(f)",
+        "zh-CN": "coroutine.create(f)"
+      },
+      "returns": {
+        "en": "returns: a new coroutine thread.",
+        "zh-CN": "返回：新的协程线程。"
+      },
+      "params": {
+        "en": [
+          "f: function to run inside the coroutine"
+        ],
+        "zh-CN": [
+          "f: 要在协程中运行的函数"
+        ]
+      },
+      "description": {
+        "en": "Creates a coroutine from a function without starting it.",
+        "zh-CN": "根据函数创建协程，但不会立即启动。"
+      },
+      "example": {
+        "en": "local co = coroutine.create(function() return 1 end)\n-- co: suspended coroutine thread",
+        "zh-CN": "local co = coroutine.create(function() return 1 end)\n-- co: 挂起状态的协程线程"
+      }
+    },
+    "coroutine.resume": {
+      "signature": {
+        "en": "coroutine.resume(co [, val1, ...])",
+        "zh-CN": "coroutine.resume(co [, val1, ...])"
+      },
+      "returns": {
+        "en": "returns: true plus yielded/returned values, or false plus an error object.",
+        "zh-CN": "返回：成功时为 true 和 yield/return 的值；失败时为 false 和错误对象。"
+      },
+      "params": {
+        "en": [
+          "co: coroutine thread",
+          "val1 ... (optional): values passed into the coroutine or resumed yield"
+        ],
+        "zh-CN": [
+          "co: 协程线程",
+          "val1 ... (可选): 传入协程或恢复 yield 的值"
+        ]
+      },
+      "description": {
+        "en": "Starts or resumes a suspended coroutine.",
+        "zh-CN": "启动或恢复一个挂起的协程。"
+      },
+      "example": {
+        "en": "local ok, value = coroutine.resume(co, \"input\")\n-- ok: resume success flag\n-- value: yielded or returned value",
+        "zh-CN": "local ok, value = coroutine.resume(co, \"input\")\n-- ok: 恢复是否成功\n-- value: yield 或 return 的值"
+      }
+    },
+    "coroutine.running": {
+      "signature": {
+        "en": "coroutine.running()",
+        "zh-CN": "coroutine.running()"
+      },
+      "returns": {
+        "en": "returns: running coroutine thread and a boolean indicating whether it is the main thread.",
+        "zh-CN": "返回：当前运行的协程线程，以及是否为主线程的布尔值。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Returns the currently running coroutine.",
+        "zh-CN": "返回当前正在运行的协程。"
+      },
+      "example": {
+        "en": "local thread, isMain = coroutine.running()\n-- thread: current coroutine\n-- isMain: true when on the main thread",
+        "zh-CN": "local thread, isMain = coroutine.running()\n-- thread: 当前协程\n-- isMain: 位于主线程时为 true"
+      }
+    },
+    "coroutine.status": {
+      "signature": {
+        "en": "coroutine.status(co)",
+        "zh-CN": "coroutine.status(co)"
+      },
+      "returns": {
+        "en": "returns: \"running\", \"suspended\", \"normal\", or \"dead\".",
+        "zh-CN": "返回：\"running\"、\"suspended\"、\"normal\" 或 \"dead\"。"
+      },
+      "params": {
+        "en": [
+          "co: coroutine thread"
+        ],
+        "zh-CN": [
+          "co: 协程线程"
+        ]
+      },
+      "description": {
+        "en": "Returns the execution status of a coroutine.",
+        "zh-CN": "返回协程的执行状态。"
+      },
+      "example": {
+        "en": "local status = coroutine.status(co)\n-- status: coroutine state string",
+        "zh-CN": "local status = coroutine.status(co)\n-- status: 协程状态字符串"
+      }
+    },
+    "coroutine.wrap": {
+      "signature": {
+        "en": "coroutine.wrap(f)",
+        "zh-CN": "coroutine.wrap(f)"
+      },
+      "returns": {
+        "en": "returns: a function that resumes the coroutine and returns yielded/returned values, raising errors directly.",
+        "zh-CN": "返回：用于恢复协程的函数；成功时返回 yield/return 的值，失败时直接抛错。"
+      },
+      "params": {
+        "en": [
+          "f: function to run inside the coroutine"
+        ],
+        "zh-CN": [
+          "f: 要在协程中运行的函数"
+        ]
+      },
+      "description": {
+        "en": "Creates a coroutine and returns a resume wrapper function.",
+        "zh-CN": "创建协程并返回一个恢复协程的包装函数。"
+      },
+      "example": {
+        "en": "local nextValue = coroutine.wrap(function() coroutine.yield(1); return 2 end)\n-- nextValue(): first returns 1, then 2",
+        "zh-CN": "local nextValue = coroutine.wrap(function() coroutine.yield(1); return 2 end)\n-- nextValue(): 第一次返回 1，第二次返回 2"
+      }
+    },
+    "coroutine.yield": {
+      "signature": {
+        "en": "coroutine.yield(...)",
+        "zh-CN": "coroutine.yield(...)"
+      },
+      "returns": {
+        "en": "returns: values passed to the next resume.",
+        "zh-CN": "返回：下一次 resume 传入的值。"
+      },
+      "params": {
+        "en": [
+          "...: values yielded to the resumer"
+        ],
+        "zh-CN": [
+          "...: 交给恢复方的值"
+        ]
+      },
+      "description": {
+        "en": "Suspends the running coroutine and yields values to its resumer.",
+        "zh-CN": "挂起当前协程，并把值交给恢复方。"
+      },
+      "example": {
+        "en": "local input = coroutine.yield(\"ready\")\n-- input: value passed by the next resume",
+        "zh-CN": "local input = coroutine.yield(\"ready\")\n-- input: 下一次 resume 传入的值"
+      }
+    },
+    "debug.debug": {
+      "signature": {
+        "en": "debug.debug()",
+        "zh-CN": "debug.debug()"
+      },
+      "returns": {
+        "en": "returns: no values after the interactive debug session continues.",
+        "zh-CN": "返回：交互调试会话继续后无返回值。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Enters an interactive debug prompt.",
+        "zh-CN": "进入交互式调试提示符。"
+      },
+      "example": {
+        "en": "debug.debug()\n-- opens the debug prompt until cont is entered",
+        "zh-CN": "debug.debug()\n-- 打开调试提示符，直到输入 cont"
+      }
+    },
+    "debug.gethook": {
+      "signature": {
+        "en": "debug.gethook([thread])",
+        "zh-CN": "debug.gethook([thread])"
+      },
+      "returns": {
+        "en": "returns: hook function, mask string, and count.",
+        "zh-CN": "返回：hook 函数、mask 字符串和 count。"
+      },
+      "params": {
+        "en": [
+          "thread (optional): coroutine thread"
+        ],
+        "zh-CN": [
+          "thread (可选): 协程线程"
+        ]
+      },
+      "description": {
+        "en": "Returns the debug hook settings for a thread.",
+        "zh-CN": "返回线程的 debug hook 设置。"
+      },
+      "example": {
+        "en": "local hook, mask, count = debug.gethook()\n-- hook/mask/count: current hook settings",
+        "zh-CN": "local hook, mask, count = debug.gethook()\n-- hook/mask/count: 当前 hook 设置"
+      }
+    },
+    "debug.getinfo": {
+      "signature": {
+        "en": "debug.getinfo([thread,] f [, what])",
+        "zh-CN": "debug.getinfo([thread,] f [, what])"
+      },
+      "returns": {
+        "en": "returns: information table, or nil when unavailable.",
+        "zh-CN": "返回：信息表；不可用时为 nil。"
+      },
+      "params": {
+        "en": [
+          "thread (optional): coroutine thread",
+          "f: function or stack level",
+          "what (optional): option string"
+        ],
+        "zh-CN": [
+          "thread (可选): 协程线程",
+          "f: 函数或栈层级",
+          "what (可选): 选项字符串"
+        ]
+      },
+      "description": {
+        "en": "Returns debug information about a function or stack frame.",
+        "zh-CN": "返回函数或栈帧的调试信息。"
+      },
+      "example": {
+        "en": "local info = debug.getinfo(1, \"nSl\")\n-- info: table with requested debug fields",
+        "zh-CN": "local info = debug.getinfo(1, \"nSl\")\n-- info: 包含请求字段的信息表"
+      }
+    },
+    "debug.getlocal": {
+      "signature": {
+        "en": "debug.getlocal([thread,] f, local)",
+        "zh-CN": "debug.getlocal([thread,] f, local)"
+      },
+      "returns": {
+        "en": "returns: local name and value, or nil when unavailable.",
+        "zh-CN": "返回：局部变量名和值；不可用时为 nil。"
+      },
+      "params": {
+        "en": [
+          "thread (optional): coroutine thread",
+          "f: stack level or function",
+          "local: local variable index"
+        ],
+        "zh-CN": [
+          "thread (可选): 协程线程",
+          "f: 栈层级或函数",
+          "local: 局部变量索引"
+        ]
+      },
+      "description": {
+        "en": "Reads a local variable name and value from a stack frame or function.",
+        "zh-CN": "从栈帧或函数读取局部变量名和值。"
+      },
+      "example": {
+        "en": "local name, value = debug.getlocal(1, 1)\n-- name/value: first visible local",
+        "zh-CN": "local name, value = debug.getlocal(1, 1)\n-- name/value: 第一个可见局部变量"
+      }
+    },
+    "debug.getmetatable": {
+      "signature": {
+        "en": "debug.getmetatable(value)",
+        "zh-CN": "debug.getmetatable(value)"
+      },
+      "returns": {
+        "en": "returns: raw metatable, or nil.",
+        "zh-CN": "返回：原始元表或 nil。"
+      },
+      "params": {
+        "en": [
+          "value: Lua value"
+        ],
+        "zh-CN": [
+          "value: Lua 值"
+        ]
+      },
+      "description": {
+        "en": "Returns the raw metatable, ignoring __metatable protection.",
+        "zh-CN": "返回原始元表，忽略 __metatable 保护。"
+      },
+      "example": {
+        "en": "local mt = debug.getmetatable(value)\n-- mt: raw metatable",
+        "zh-CN": "local mt = debug.getmetatable(value)\n-- mt: 原始元表"
+      }
+    },
+    "debug.getregistry": {
+      "signature": {
+        "en": "debug.getregistry()",
+        "zh-CN": "debug.getregistry()"
+      },
+      "returns": {
+        "en": "returns: registry table.",
+        "zh-CN": "返回：registry 表。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Returns the Lua registry table for the current state.",
+        "zh-CN": "返回当前 State 的 Lua registry 表。"
+      },
+      "example": {
+        "en": "local registry = debug.getregistry()\n-- registry: internal registry table",
+        "zh-CN": "local registry = debug.getregistry()\n-- registry: 内部 registry 表"
+      }
+    },
+    "debug.getupvalue": {
+      "signature": {
+        "en": "debug.getupvalue(f, up)",
+        "zh-CN": "debug.getupvalue(f, up)"
+      },
+      "returns": {
+        "en": "returns: upvalue name and value, or nil.",
+        "zh-CN": "返回：upvalue 名称和值；不可用时为 nil。"
+      },
+      "params": {
+        "en": [
+          "f: function",
+          "up: upvalue index"
+        ],
+        "zh-CN": [
+          "f: 函数",
+          "up: upvalue 索引"
+        ]
+      },
+      "description": {
+        "en": "Reads an upvalue from a function.",
+        "zh-CN": "读取函数的 upvalue。"
+      },
+      "example": {
+        "en": "local name, value = debug.getupvalue(fn, 1)\n-- name/value: first upvalue",
+        "zh-CN": "local name, value = debug.getupvalue(fn, 1)\n-- name/value: 第一个 upvalue"
+      }
+    },
+    "debug.getuservalue": {
+      "signature": {
+        "en": "debug.getuservalue(u)",
+        "zh-CN": "debug.getuservalue(u)"
+      },
+      "returns": {
+        "en": "returns: userdata user value, or nil.",
+        "zh-CN": "返回：userdata 用户值或 nil。"
+      },
+      "params": {
+        "en": [
+          "u: full userdata"
+        ],
+        "zh-CN": [
+          "u: full userdata"
+        ]
+      },
+      "description": {
+        "en": "Returns the user value associated with a userdata.",
+        "zh-CN": "返回 userdata 关联的用户值。"
+      },
+      "example": {
+        "en": "local value = debug.getuservalue(userdata)\n-- value: user value or nil",
+        "zh-CN": "local value = debug.getuservalue(userdata)\n-- value: 用户值或 nil"
+      }
+    },
+    "debug.sethook": {
+      "signature": {
+        "en": "debug.sethook([thread,] hook, mask [, count])",
+        "zh-CN": "debug.sethook([thread,] hook, mask [, count])"
+      },
+      "returns": {
+        "en": "returns: no values.",
+        "zh-CN": "返回：无返回值。"
+      },
+      "params": {
+        "en": [
+          "thread (optional): coroutine thread",
+          "hook: function or nil",
+          "mask: hook mask string",
+          "count (optional): instruction count interval"
+        ],
+        "zh-CN": [
+          "thread (可选): 协程线程",
+          "hook: 函数或 nil",
+          "mask: hook mask 字符串",
+          "count (可选): 指令计数间隔"
+        ]
+      },
+      "description": {
+        "en": "Sets the debug hook for a thread.",
+        "zh-CN": "设置线程的 debug hook。"
+      },
+      "example": {
+        "en": "debug.sethook(function() end, \"l\")\n-- installs a line hook",
+        "zh-CN": "debug.sethook(function() end, \"l\")\n-- 安装 line hook"
+      }
+    },
+    "debug.setlocal": {
+      "signature": {
+        "en": "debug.setlocal([thread,] level, local, value)",
+        "zh-CN": "debug.setlocal([thread,] level, local, value)"
+      },
+      "returns": {
+        "en": "returns: local name, or nil when unavailable.",
+        "zh-CN": "返回：局部变量名；不可用时为 nil。"
+      },
+      "params": {
+        "en": [
+          "thread (optional): coroutine thread",
+          "level: stack level",
+          "local: local variable index",
+          "value: new value"
+        ],
+        "zh-CN": [
+          "thread (可选): 协程线程",
+          "level: 栈层级",
+          "local: 局部变量索引",
+          "value: 新值"
+        ]
+      },
+      "description": {
+        "en": "Writes a local variable in a stack frame.",
+        "zh-CN": "写入栈帧中的局部变量。"
+      },
+      "example": {
+        "en": "local name = debug.setlocal(1, 1, value)\n-- name: updated local name",
+        "zh-CN": "local name = debug.setlocal(1, 1, value)\n-- name: 被更新的局部变量名"
+      }
+    },
+    "debug.setmetatable": {
+      "signature": {
+        "en": "debug.setmetatable(value, table)",
+        "zh-CN": "debug.setmetatable(value, table)"
+      },
+      "returns": {
+        "en": "returns: the original value.",
+        "zh-CN": "返回：原始 value。"
+      },
+      "params": {
+        "en": [
+          "value: Lua value",
+          "table: metatable or nil"
+        ],
+        "zh-CN": [
+          "value: Lua 值",
+          "table: 元表或 nil"
+        ]
+      },
+      "description": {
+        "en": "Sets the raw metatable for a value.",
+        "zh-CN": "设置值的原始元表。"
+      },
+      "example": {
+        "en": "debug.setmetatable(value, mt)\n-- value now uses mt as its metatable",
+        "zh-CN": "debug.setmetatable(value, mt)\n-- value 现在使用 mt 作为元表"
+      }
+    },
+    "debug.setupvalue": {
+      "signature": {
+        "en": "debug.setupvalue(f, up, value)",
+        "zh-CN": "debug.setupvalue(f, up, value)"
+      },
+      "returns": {
+        "en": "returns: upvalue name, or nil when unavailable.",
+        "zh-CN": "返回：upvalue 名称；不可用时为 nil。"
+      },
+      "params": {
+        "en": [
+          "f: function",
+          "up: upvalue index",
+          "value: new value"
+        ],
+        "zh-CN": [
+          "f: 函数",
+          "up: upvalue 索引",
+          "value: 新值"
+        ]
+      },
+      "description": {
+        "en": "Writes an upvalue in a function.",
+        "zh-CN": "写入函数中的 upvalue。"
+      },
+      "example": {
+        "en": "local name = debug.setupvalue(fn, 1, value)\n-- name: updated upvalue name",
+        "zh-CN": "local name = debug.setupvalue(fn, 1, value)\n-- name: 被更新的 upvalue 名称"
+      }
+    },
+    "debug.setuservalue": {
+      "signature": {
+        "en": "debug.setuservalue(u, value)",
+        "zh-CN": "debug.setuservalue(u, value)"
+      },
+      "returns": {
+        "en": "returns: the userdata.",
+        "zh-CN": "返回：该 userdata。"
+      },
+      "params": {
+        "en": [
+          "u: full userdata",
+          "value: new user value"
+        ],
+        "zh-CN": [
+          "u: full userdata",
+          "value: 新用户值"
+        ]
+      },
+      "description": {
+        "en": "Sets the user value associated with a userdata.",
+        "zh-CN": "设置 userdata 关联的用户值。"
+      },
+      "example": {
+        "en": "debug.setuservalue(userdata, value)\n-- userdata now stores value as its user value",
+        "zh-CN": "debug.setuservalue(userdata, value)\n-- userdata 现在保存 value 作为用户值"
+      }
+    },
+    "debug.traceback": {
+      "signature": {
+        "en": "debug.traceback([thread,] [message [, level]])",
+        "zh-CN": "debug.traceback([thread,] [message [, level]])"
+      },
+      "returns": {
+        "en": "returns: traceback string, or non-string message unchanged.",
+        "zh-CN": "返回：traceback 字符串；非字符串 message 原样返回。"
+      },
+      "params": {
+        "en": [
+          "thread (optional): coroutine thread",
+          "message (optional): message prefix",
+          "level (optional): stack level to start from"
+        ],
+        "zh-CN": [
+          "thread (可选): 协程线程",
+          "message (可选): 消息前缀",
+          "level (可选): 起始栈层级"
+        ]
+      },
+      "description": {
+        "en": "Builds a stack traceback for the current or specified thread.",
+        "zh-CN": "为当前线程或指定线程构造栈回溯。"
+      },
+      "example": {
+        "en": "local text = debug.traceback(\"failed\")\n-- text: message plus stack traceback",
+        "zh-CN": "local text = debug.traceback(\"failed\")\n-- text: 消息和栈回溯"
+      }
+    },
+    "debug.upvalueid": {
+      "signature": {
+        "en": "debug.upvalueid(f, n)",
+        "zh-CN": "debug.upvalueid(f, n)"
+      },
+      "returns": {
+        "en": "returns: unique identifier for an upvalue.",
+        "zh-CN": "返回：upvalue 的唯一标识。"
+      },
+      "params": {
+        "en": [
+          "f: function",
+          "n: upvalue index"
+        ],
+        "zh-CN": [
+          "f: 函数",
+          "n: upvalue 索引"
+        ]
+      },
+      "description": {
+        "en": "Returns a stable identity object for a function upvalue.",
+        "zh-CN": "返回函数 upvalue 的稳定身份对象。"
+      },
+      "example": {
+        "en": "local id = debug.upvalueid(fn, 1)\n-- id: identity for the first upvalue",
+        "zh-CN": "local id = debug.upvalueid(fn, 1)\n-- id: 第一个 upvalue 的身份"
+      }
+    },
+    "debug.upvaluejoin": {
+      "signature": {
+        "en": "debug.upvaluejoin(f1, n1, f2, n2)",
+        "zh-CN": "debug.upvaluejoin(f1, n1, f2, n2)"
+      },
+      "returns": {
+        "en": "returns: no values.",
+        "zh-CN": "返回：无返回值。"
+      },
+      "params": {
+        "en": [
+          "f1: target function",
+          "n1: target upvalue index",
+          "f2: source function",
+          "n2: source upvalue index"
+        ],
+        "zh-CN": [
+          "f1: 目标函数",
+          "n1: 目标 upvalue 索引",
+          "f2: 源函数",
+          "n2: 源 upvalue 索引"
+        ]
+      },
+      "description": {
+        "en": "Makes one function upvalue refer to another function upvalue.",
+        "zh-CN": "让一个函数的 upvalue 引用另一个函数的 upvalue。"
+      },
+      "example": {
+        "en": "debug.upvaluejoin(f1, 1, f2, 1)\n-- f1 upvalue now shares f2 upvalue storage",
+        "zh-CN": "debug.upvaluejoin(f1, 1, f2, 1)\n-- f1 的 upvalue 现在共享 f2 的 upvalue 存储"
+      }
+    },
     "dofile": {
       "signature": {
         "en": "dofile(filename)",
@@ -111,6 +715,202 @@
         "zh-CN": "error('操作失败')\n-- 抛出: 错误对象/消息，这里是 '操作失败'"
       }
     },
+    "file.close": {
+      "signature": {
+        "en": "file:close()",
+        "zh-CN": "file:close()"
+      },
+      "returns": {
+        "en": "returns: true on normal close, or process status values for popen files.",
+        "zh-CN": "返回：普通关闭成功时为 true；popen 文件返回进程状态值。"
+      },
+      "params": {
+        "en": [
+          "self: file handle"
+        ],
+        "zh-CN": [
+          "self: 文件句柄"
+        ]
+      },
+      "description": {
+        "en": "Closes this file handle.",
+        "zh-CN": "关闭当前文件句柄。"
+      },
+      "example": {
+        "en": "local ok = file:close()\n-- ok: close result",
+        "zh-CN": "local ok = file:close()\n-- ok: 关闭结果"
+      }
+    },
+    "file.flush": {
+      "signature": {
+        "en": "file:flush()",
+        "zh-CN": "file:flush()"
+      },
+      "returns": {
+        "en": "returns: true when flushed successfully.",
+        "zh-CN": "返回：刷新成功时为 true。"
+      },
+      "params": {
+        "en": [
+          "self: file handle"
+        ],
+        "zh-CN": [
+          "self: 文件句柄"
+        ]
+      },
+      "description": {
+        "en": "Flushes buffered output for this file.",
+        "zh-CN": "刷新当前文件的缓冲输出。"
+      },
+      "example": {
+        "en": "file:write(\"pending\")\nfile:flush()\n-- flushes file output",
+        "zh-CN": "file:write(\"pending\")\nfile:flush()\n-- 刷新文件输出"
+      }
+    },
+    "file.lines": {
+      "signature": {
+        "en": "file:lines(...)",
+        "zh-CN": "file:lines(...)"
+      },
+      "returns": {
+        "en": "returns: iterator function that reads from this file.",
+        "zh-CN": "返回：从当前文件读取的迭代器函数。"
+      },
+      "params": {
+        "en": [
+          "self: file handle",
+          "... (optional): read formats"
+        ],
+        "zh-CN": [
+          "self: 文件句柄",
+          "... (可选): 读取格式"
+        ]
+      },
+      "description": {
+        "en": "Creates an iterator over lines or formatted reads from this file.",
+        "zh-CN": "创建从当前文件逐行或按格式读取的迭代器。"
+      },
+      "example": {
+        "en": "for line in file:lines() do\n  print(line)\nend\n-- line: next line from file",
+        "zh-CN": "for line in file:lines() do\n  print(line)\nend\n-- line: 文件中的下一行"
+      }
+    },
+    "file.read": {
+      "signature": {
+        "en": "file:read(...)",
+        "zh-CN": "file:read(...)"
+      },
+      "returns": {
+        "en": "returns: values read from this file, or nil on EOF/failure.",
+        "zh-CN": "返回：从当前文件读取的值；EOF 或失败时返回 nil。"
+      },
+      "params": {
+        "en": [
+          "self: file handle",
+          "... (optional): read formats"
+        ],
+        "zh-CN": [
+          "self: 文件句柄",
+          "... (可选): 读取格式"
+        ]
+      },
+      "description": {
+        "en": "Reads from this file handle.",
+        "zh-CN": "从当前文件句柄读取内容。"
+      },
+      "example": {
+        "en": "local text = file:read(\"a\")\n-- text: remaining file content",
+        "zh-CN": "local text = file:read(\"a\")\n-- text: 文件剩余内容"
+      }
+    },
+    "file.seek": {
+      "signature": {
+        "en": "file:seek([whence [, offset]])",
+        "zh-CN": "file:seek([whence [, offset]])"
+      },
+      "returns": {
+        "en": "returns: new file position, or false plus error information.",
+        "zh-CN": "返回：新的文件位置；失败时返回 false 和错误信息。"
+      },
+      "params": {
+        "en": [
+          "self: file handle",
+          "whence (optional): \"set\", \"cur\", or \"end\"",
+          "offset (optional): byte offset, defaults to 0"
+        ],
+        "zh-CN": [
+          "self: 文件句柄",
+          "whence (可选): \"set\"、\"cur\" 或 \"end\"",
+          "offset (可选): 字节偏移，默认 0"
+        ]
+      },
+      "description": {
+        "en": "Sets or queries the file position.",
+        "zh-CN": "设置或查询文件位置。"
+      },
+      "example": {
+        "en": "local pos = file:seek(\"cur\", 0)\n-- pos: current byte position",
+        "zh-CN": "local pos = file:seek(\"cur\", 0)\n-- pos: 当前字节位置"
+      }
+    },
+    "file.setvbuf": {
+      "signature": {
+        "en": "file:setvbuf(mode [, size])",
+        "zh-CN": "file:setvbuf(mode [, size])"
+      },
+      "returns": {
+        "en": "returns: true when the buffering mode is accepted.",
+        "zh-CN": "返回：缓冲模式设置成功时为 true。"
+      },
+      "params": {
+        "en": [
+          "self: file handle",
+          "mode: \"no\", \"full\", or \"line\"",
+          "size (optional): buffer size for full buffering"
+        ],
+        "zh-CN": [
+          "self: 文件句柄",
+          "mode: \"no\"、\"full\" 或 \"line\"",
+          "size (可选): full 缓冲大小"
+        ]
+      },
+      "description": {
+        "en": "Sets the buffering mode for writes to this file.",
+        "zh-CN": "设置当前文件写入时的缓冲模式。"
+      },
+      "example": {
+        "en": "file:setvbuf(\"line\")\n-- enables line buffering for writes",
+        "zh-CN": "file:setvbuf(\"line\")\n-- 启用行缓冲写入"
+      }
+    },
+    "file.write": {
+      "signature": {
+        "en": "file:write(...)",
+        "zh-CN": "file:write(...)"
+      },
+      "returns": {
+        "en": "returns: this file handle on success.",
+        "zh-CN": "返回：成功时返回当前文件句柄。"
+      },
+      "params": {
+        "en": [
+          "self: file handle",
+          "...: strings or numbers to write"
+        ],
+        "zh-CN": [
+          "self: 文件句柄",
+          "...: 要写入的字符串或数字"
+        ]
+      },
+      "description": {
+        "en": "Writes values to this file handle.",
+        "zh-CN": "向当前文件句柄写入值。"
+      },
+      "example": {
+        "en": "file:write(\"hello\", \"\\n\")\n-- writes text to file",
+        "zh-CN": "file:write(\"hello\", \"\\n\")\n-- 向文件写入文本"
+      }
+    },
     "getmetatable": {
       "signature": {
         "en": "getmetatable(object)",
@@ -135,6 +935,290 @@
       "example": {
         "en": "local mt = getmetatable(value)\n-- mt: metatable attached to value, or nil when absent",
         "zh-CN": "local mt = getmetatable(value)\n-- mt: value 绑定的元表；不存在时为 nil"
+      }
+    },
+    "io.close": {
+      "signature": {
+        "en": "io.close([file])",
+        "zh-CN": "io.close([file])"
+      },
+      "returns": {
+        "en": "returns: true on normal close, or process status values for popen files.",
+        "zh-CN": "返回：普通关闭成功时为 true；popen 文件返回进程状态值。"
+      },
+      "params": {
+        "en": [
+          "file (optional): file handle, defaults to current output file"
+        ],
+        "zh-CN": [
+          "file (可选): 文件句柄，默认当前输出文件"
+        ]
+      },
+      "description": {
+        "en": "Closes a file handle or the current output file.",
+        "zh-CN": "关闭文件句柄或当前输出文件。"
+      },
+      "example": {
+        "en": "local ok = io.close(file)\n-- ok: close result",
+        "zh-CN": "local ok = io.close(file)\n-- ok: 关闭结果"
+      }
+    },
+    "io.flush": {
+      "signature": {
+        "en": "io.flush()",
+        "zh-CN": "io.flush()"
+      },
+      "returns": {
+        "en": "returns: true when the current output is flushed.",
+        "zh-CN": "返回：当前输出刷新成功时为 true。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Flushes the current output file.",
+        "zh-CN": "刷新当前输出文件。"
+      },
+      "example": {
+        "en": "io.write(\"pending\")\nio.flush()\n-- flushes current output",
+        "zh-CN": "io.write(\"pending\")\nio.flush()\n-- 刷新当前输出"
+      }
+    },
+    "io.input": {
+      "signature": {
+        "en": "io.input([file])",
+        "zh-CN": "io.input([file])"
+      },
+      "returns": {
+        "en": "returns: current input file after query or switch.",
+        "zh-CN": "返回：查询或切换后的当前输入文件。"
+      },
+      "params": {
+        "en": [
+          "file (optional): file handle or path string"
+        ],
+        "zh-CN": [
+          "file (可选): 文件句柄或路径字符串"
+        ]
+      },
+      "description": {
+        "en": "Gets or changes the default input file.",
+        "zh-CN": "获取或修改默认输入文件。"
+      },
+      "example": {
+        "en": "local input = io.input()\n-- input: current default input file",
+        "zh-CN": "local input = io.input()\n-- input: 当前默认输入文件"
+      }
+    },
+    "io.lines": {
+      "signature": {
+        "en": "io.lines([filename, ...])",
+        "zh-CN": "io.lines([filename, ...])"
+      },
+      "returns": {
+        "en": "returns: iterator function that reads the file line by line or by formats.",
+        "zh-CN": "返回：逐行或按格式读取文件的迭代器函数。"
+      },
+      "params": {
+        "en": [
+          "filename (optional): path string; absent means current input",
+          "... (optional): read formats such as \"l\", \"L\", \"a\", \"n\", or byte counts"
+        ],
+        "zh-CN": [
+          "filename (可选): 路径字符串；省略时使用当前输入",
+          "... (可选): 读取格式，如 \"l\"、\"L\"、\"a\"、\"n\" 或字节数"
+        ]
+      },
+      "description": {
+        "en": "Creates an iterator over lines or formatted reads from a file.",
+        "zh-CN": "创建用于逐行或按格式读取文件的迭代器。"
+      },
+      "example": {
+        "en": "for line in io.lines(\"test.txt\") do\n  print(line)\nend\n-- line: next line without the line ending",
+        "zh-CN": "for line in io.lines(\"test.txt\") do\n  print(line)\nend\n-- line: 下一行文本，不含行尾"
+      }
+    },
+    "io.open": {
+      "signature": {
+        "en": "io.open(filename [, mode])",
+        "zh-CN": "io.open(filename [, mode])"
+      },
+      "returns": {
+        "en": "returns: file handle, or nil plus error message and code.",
+        "zh-CN": "返回：文件句柄；失败时返回 nil、错误信息和错误码。"
+      },
+      "params": {
+        "en": [
+          "filename: path string",
+          "mode (optional): open mode such as \"r\", \"w\", \"a\", optionally with \"b\" or \"+\""
+        ],
+        "zh-CN": [
+          "filename: 路径字符串",
+          "mode (可选): 打开模式，如 \"r\"、\"w\"、\"a\"，可带 \"b\" 或 \"+\""
+        ]
+      },
+      "description": {
+        "en": "Opens a file using Lua 5.3 mode strings.",
+        "zh-CN": "按 Lua 5.3 文件模式打开文件。"
+      },
+      "example": {
+        "en": "local file, err = io.open(\"test.txt\", \"r\")\n-- file: opened file handle when successful\n-- err: error message when failed",
+        "zh-CN": "local file, err = io.open(\"test.txt\", \"r\")\n-- file: 成功时的文件句柄\n-- err: 失败时的错误信息"
+      }
+    },
+    "io.output": {
+      "signature": {
+        "en": "io.output([file])",
+        "zh-CN": "io.output([file])"
+      },
+      "returns": {
+        "en": "returns: current output file after query or switch.",
+        "zh-CN": "返回：查询或切换后的当前输出文件。"
+      },
+      "params": {
+        "en": [
+          "file (optional): file handle or path string"
+        ],
+        "zh-CN": [
+          "file (可选): 文件句柄或路径字符串"
+        ]
+      },
+      "description": {
+        "en": "Gets or changes the default output file.",
+        "zh-CN": "获取或修改默认输出文件。"
+      },
+      "example": {
+        "en": "local output = io.output()\n-- output: current default output file",
+        "zh-CN": "local output = io.output()\n-- output: 当前默认输出文件"
+      }
+    },
+    "io.popen": {
+      "signature": {
+        "en": "io.popen(prog [, mode])",
+        "zh-CN": "io.popen(prog [, mode])"
+      },
+      "returns": {
+        "en": "returns: pipe file handle, or nil plus error message and code.",
+        "zh-CN": "返回：管道文件句柄；失败时返回 nil、错误信息和错误码。"
+      },
+      "params": {
+        "en": [
+          "prog: shell command string",
+          "mode (optional): \"r\" to read command output or \"w\" to write command input"
+        ],
+        "zh-CN": [
+          "prog: shell 命令字符串",
+          "mode (可选): \"r\" 读取命令输出，\"w\" 写入命令输入"
+        ]
+      },
+      "description": {
+        "en": "Starts a shell command and returns a file handle connected to the process pipe.",
+        "zh-CN": "启动 shell 命令，并返回连接到进程管道的文件句柄。"
+      },
+      "example": {
+        "en": "local exec = io.popen(\"ls -la\")\nfor line in exec:lines() do\n  print(line)\nend\n-- exec: pipe file handle",
+        "zh-CN": "local exec = io.popen(\"ls -la\")\nfor line in exec:lines() do\n  print(line)\nend\n-- exec: 管道文件句柄"
+      }
+    },
+    "io.read": {
+      "signature": {
+        "en": "io.read(...)",
+        "zh-CN": "io.read(...)"
+      },
+      "returns": {
+        "en": "returns: values read from current input, or nil on EOF/failure.",
+        "zh-CN": "返回：从当前输入读取的值；EOF 或失败时返回 nil。"
+      },
+      "params": {
+        "en": [
+          "... (optional): read formats such as \"l\", \"L\", \"a\", \"n\", or byte counts"
+        ],
+        "zh-CN": [
+          "... (可选): 读取格式，如 \"l\"、\"L\"、\"a\"、\"n\" 或字节数"
+        ]
+      },
+      "description": {
+        "en": "Reads from the current input file.",
+        "zh-CN": "从当前输入文件读取内容。"
+      },
+      "example": {
+        "en": "local line = io.read(\"l\")\n-- line: next line without line ending",
+        "zh-CN": "local line = io.read(\"l\")\n-- line: 下一行文本，不含行尾"
+      }
+    },
+    "io.tmpfile": {
+      "signature": {
+        "en": "io.tmpfile()",
+        "zh-CN": "io.tmpfile()"
+      },
+      "returns": {
+        "en": "returns: temporary file handle, or nil plus error information on failure.",
+        "zh-CN": "返回：临时文件句柄；失败时返回 nil 和错误信息。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Creates a temporary file opened for update.",
+        "zh-CN": "创建一个以更新模式打开的临时文件。"
+      },
+      "example": {
+        "en": "local file = io.tmpfile()\n-- file: temporary file handle",
+        "zh-CN": "local file = io.tmpfile()\n-- file: 临时文件句柄"
+      }
+    },
+    "io.type": {
+      "signature": {
+        "en": "io.type(obj)",
+        "zh-CN": "io.type(obj)"
+      },
+      "returns": {
+        "en": "returns: \"file\", \"closed file\", or nil.",
+        "zh-CN": "返回：\"file\"、\"closed file\" 或 nil。"
+      },
+      "params": {
+        "en": [
+          "obj: value to inspect"
+        ],
+        "zh-CN": [
+          "obj: 要检查的值"
+        ]
+      },
+      "description": {
+        "en": "Checks whether a value is an open or closed file handle.",
+        "zh-CN": "检查值是否为打开或关闭的文件句柄。"
+      },
+      "example": {
+        "en": "local kind = io.type(file)\n-- kind: \"file\" when the handle is open",
+        "zh-CN": "local kind = io.type(file)\n-- kind: 句柄打开时为 \"file\""
+      }
+    },
+    "io.write": {
+      "signature": {
+        "en": "io.write(...)",
+        "zh-CN": "io.write(...)"
+      },
+      "returns": {
+        "en": "returns: current output file on success.",
+        "zh-CN": "返回：成功时返回当前输出文件。"
+      },
+      "params": {
+        "en": [
+          "...: strings or numbers to write"
+        ],
+        "zh-CN": [
+          "...: 要写入的字符串或数字"
+        ]
+      },
+      "description": {
+        "en": "Writes values to the current output file.",
+        "zh-CN": "向当前输出文件写入值。"
+      },
+      "example": {
+        "en": "io.write(\"hello\", \"\\n\")\n-- writes text to current output",
+        "zh-CN": "io.write(\"hello\", \"\\n\")\n-- 向当前输出写入文本"
       }
     },
     "ipairs": {
@@ -301,6 +1385,34 @@
       "example": {
         "en": "local radians = math.asin(0)\n-- radians: arc sine in radians, here 0",
         "zh-CN": "local radians = math.asin(0)\n-- radians: 反正弦弧度值，这里是 0"
+      }
+    },
+    "math.atan": {
+      "signature": {
+        "en": "math.atan(y [, x])",
+        "zh-CN": "math.atan(y [, x])"
+      },
+      "returns": {
+        "en": "returns: arc tangent in radians.",
+        "zh-CN": "返回：反正切弧度值。"
+      },
+      "params": {
+        "en": [
+          "y: number",
+          "x (optional): number; when present computes atan2(y, x)"
+        ],
+        "zh-CN": [
+          "y: 数字",
+          "x (可选): 数字；传入时计算 atan2(y, x)"
+        ]
+      },
+      "description": {
+        "en": "Returns the arc tangent. With two arguments, uses quadrant-aware atan2 semantics.",
+        "zh-CN": "返回反正切值；传入两个参数时使用带象限的 atan2 语义。"
+      },
+      "example": {
+        "en": "local angle = math.atan(1, 1)\n-- angle: pi / 4 radians",
+        "zh-CN": "local angle = math.atan(1, 1)\n-- angle: pi / 4 弧度"
       }
     },
     "math.atan2": {
@@ -573,6 +1685,58 @@
         "zh-CN": "local value = math.min(1, 5, 3)\n-- value: 最小参数值，这里是 1"
       }
     },
+    "math.modf": {
+      "signature": {
+        "en": "math.modf(x)",
+        "zh-CN": "math.modf(x)"
+      },
+      "returns": {
+        "en": "returns: integer part and fractional part.",
+        "zh-CN": "返回：整数部分和小数部分。"
+      },
+      "params": {
+        "en": [
+          "x: number"
+        ],
+        "zh-CN": [
+          "x: 数字"
+        ]
+      },
+      "description": {
+        "en": "Splits a number into integer and fractional parts.",
+        "zh-CN": "把数字拆分为整数部分和小数部分。"
+      },
+      "example": {
+        "en": "local i, f = math.modf(3.25)\n-- i: 3\n-- f: 0.25",
+        "zh-CN": "local i, f = math.modf(3.25)\n-- i: 3\n-- f: 0.25"
+      }
+    },
+    "math.rad": {
+      "signature": {
+        "en": "math.rad(x)",
+        "zh-CN": "math.rad(x)"
+      },
+      "returns": {
+        "en": "returns: angle in radians.",
+        "zh-CN": "返回：弧度值。"
+      },
+      "params": {
+        "en": [
+          "x: angle in degrees"
+        ],
+        "zh-CN": [
+          "x: 角度值，单位为度"
+        ]
+      },
+      "description": {
+        "en": "Converts degrees to radians.",
+        "zh-CN": "把角度从度转换为弧度。"
+      },
+      "example": {
+        "en": "local radians = math.rad(180)\n-- radians: pi",
+        "zh-CN": "local radians = math.rad(180)\n-- radians: pi"
+      }
+    },
     "math.random": {
       "signature": {
         "en": "math.random([m [, n]])",
@@ -759,6 +1923,34 @@
         "zh-CN": "local kind = math.type(1)\n-- kind: 数字子类型名，这里是 'integer'"
       }
     },
+    "math.ult": {
+      "signature": {
+        "en": "math.ult(m, n)",
+        "zh-CN": "math.ult(m, n)"
+      },
+      "returns": {
+        "en": "returns: true when m is below n as unsigned integers.",
+        "zh-CN": "返回：按无符号整数比较时 m 小于 n 则为 true。"
+      },
+      "params": {
+        "en": [
+          "m: integer",
+          "n: integer"
+        ],
+        "zh-CN": [
+          "m: 整数",
+          "n: 整数"
+        ]
+      },
+      "description": {
+        "en": "Compares two integers using unsigned ordering.",
+        "zh-CN": "按无符号顺序比较两个整数。"
+      },
+      "example": {
+        "en": "local ok = math.ult(-1, 1)\n-- ok: false on 64-bit unsigned ordering",
+        "zh-CN": "local ok = math.ult(-1, 1)\n-- ok: 按 64 位无符号顺序为 false"
+      }
+    },
     "next": {
       "signature": {
         "en": "next(table [, index])",
@@ -787,6 +1979,110 @@
         "zh-CN": "local key, value = next({name = 'glua'})\n-- key: 下一项 table key，例如 'name'\n-- value: key 对应的值，例如 'glua'"
       }
     },
+    "os.clock": {
+      "signature": {
+        "en": "os.clock()",
+        "zh-CN": "os.clock()"
+      },
+      "returns": {
+        "en": "returns: elapsed process time in seconds.",
+        "zh-CN": "返回：进程经过时间，单位秒。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Returns an elapsed time counter for the process.",
+        "zh-CN": "返回进程时间计数。"
+      },
+      "example": {
+        "en": "local seconds = os.clock()\n-- seconds: elapsed process time",
+        "zh-CN": "local seconds = os.clock()\n-- seconds: 进程经过时间"
+      }
+    },
+    "os.date": {
+      "signature": {
+        "en": "os.date([format [, time]])",
+        "zh-CN": "os.date([format [, time]])"
+      },
+      "returns": {
+        "en": "returns: formatted date string or date table.",
+        "zh-CN": "返回：格式化日期字符串或日期表。"
+      },
+      "params": {
+        "en": [
+          "format (optional): strftime-like format, \"*t\", or \"!*t\"",
+          "time (optional): Unix timestamp in seconds"
+        ],
+        "zh-CN": [
+          "format (可选): 类 strftime 格式、\"*t\" 或 \"!*t\"",
+          "time (可选): Unix 秒时间戳"
+        ]
+      },
+      "description": {
+        "en": "Formats a date/time value using local time or UTC.",
+        "zh-CN": "使用本地时间或 UTC 格式化日期时间。"
+      },
+      "example": {
+        "en": "local text = os.date(\"%Y-%m-%d\")\n-- text: formatted current date",
+        "zh-CN": "local text = os.date(\"%Y-%m-%d\")\n-- text: 当前日期文本"
+      }
+    },
+    "os.difftime": {
+      "signature": {
+        "en": "os.difftime(t2, t1)",
+        "zh-CN": "os.difftime(t2, t1)"
+      },
+      "returns": {
+        "en": "returns: difference in seconds.",
+        "zh-CN": "返回：秒数差。"
+      },
+      "params": {
+        "en": [
+          "t2: ending Unix timestamp",
+          "t1: starting Unix timestamp"
+        ],
+        "zh-CN": [
+          "t2: 结束 Unix 时间戳",
+          "t1: 起始 Unix 时间戳"
+        ]
+      },
+      "description": {
+        "en": "Computes the difference between two time values.",
+        "zh-CN": "计算两个时间值之间的差。"
+      },
+      "example": {
+        "en": "local seconds = os.difftime(os.time(), start)\n-- seconds: elapsed seconds",
+        "zh-CN": "local seconds = os.difftime(os.time(), start)\n-- seconds: 经过秒数"
+      }
+    },
+    "os.execute": {
+      "signature": {
+        "en": "os.execute([command])",
+        "zh-CN": "os.execute([command])"
+      },
+      "returns": {
+        "en": "returns: shell availability, or process status values after running a command.",
+        "zh-CN": "返回：无参数时返回 shell 可用性；执行命令后返回进程状态值。"
+      },
+      "params": {
+        "en": [
+          "command (optional): shell command string"
+        ],
+        "zh-CN": [
+          "command (可选): shell 命令字符串"
+        ]
+      },
+      "description": {
+        "en": "Executes a shell command when host process access is enabled.",
+        "zh-CN": "在宿主进程权限开启时执行 shell 命令。"
+      },
+      "example": {
+        "en": "local ok, what, code = os.execute(\"true\")\n-- ok/what/code: process status triple",
+        "zh-CN": "local ok, what, code = os.execute(\"true\")\n-- ok/what/code: 进程状态三元组"
+      }
+    },
     "os.exit": {
       "signature": {
         "en": "os.exit([code [, close]])",
@@ -813,6 +2109,222 @@
       "example": {
         "en": "os.exit(0)\n-- returns: no values; process exits successfully",
         "zh-CN": "os.exit(0)\n-- 返回: 无返回值；进程以成功状态退出"
+      }
+    },
+    "os.getenv": {
+      "signature": {
+        "en": "os.getenv(varname)",
+        "zh-CN": "os.getenv(varname)"
+      },
+      "returns": {
+        "en": "returns: environment value string, or nil when absent/unavailable.",
+        "zh-CN": "返回：环境变量字符串；不存在或不可用时为 nil。"
+      },
+      "params": {
+        "en": [
+          "varname: environment variable name"
+        ],
+        "zh-CN": [
+          "varname: 环境变量名"
+        ]
+      },
+      "description": {
+        "en": "Reads a host environment variable when environment access is enabled.",
+        "zh-CN": "在环境变量权限开启时读取宿主环境变量。"
+      },
+      "example": {
+        "en": "local path = os.getenv(\"PATH\")\n-- path: environment value or nil",
+        "zh-CN": "local path = os.getenv(\"PATH\")\n-- path: 环境变量值或 nil"
+      }
+    },
+    "os.remove": {
+      "signature": {
+        "en": "os.remove(filename)",
+        "zh-CN": "os.remove(filename)"
+      },
+      "returns": {
+        "en": "returns: true on success, or nil plus error message and code.",
+        "zh-CN": "返回：成功时为 true；失败时为 nil、错误信息和错误码。"
+      },
+      "params": {
+        "en": [
+          "filename: path to remove"
+        ],
+        "zh-CN": [
+          "filename: 要删除的路径"
+        ]
+      },
+      "description": {
+        "en": "Removes a file or empty directory when filesystem access is enabled.",
+        "zh-CN": "在文件系统权限开启时删除文件或空目录。"
+      },
+      "example": {
+        "en": "local ok, err = os.remove(\"old.tmp\")\n-- ok: true on success\n-- err: error message on failure",
+        "zh-CN": "local ok, err = os.remove(\"old.tmp\")\n-- ok: 成功时为 true\n-- err: 失败时的错误信息"
+      }
+    },
+    "os.rename": {
+      "signature": {
+        "en": "os.rename(oldname, newname)",
+        "zh-CN": "os.rename(oldname, newname)"
+      },
+      "returns": {
+        "en": "returns: true on success, or nil plus error message and code.",
+        "zh-CN": "返回：成功时为 true；失败时为 nil、错误信息和错误码。"
+      },
+      "params": {
+        "en": [
+          "oldname: existing path",
+          "newname: target path"
+        ],
+        "zh-CN": [
+          "oldname: 原路径",
+          "newname: 目标路径"
+        ]
+      },
+      "description": {
+        "en": "Renames or moves a file when filesystem access is enabled.",
+        "zh-CN": "在文件系统权限开启时重命名或移动文件。"
+      },
+      "example": {
+        "en": "local ok, err = os.rename(\"a.tmp\", \"b.tmp\")\n-- ok: true on success",
+        "zh-CN": "local ok, err = os.rename(\"a.tmp\", \"b.tmp\")\n-- ok: 成功时为 true"
+      }
+    },
+    "os.setlocale": {
+      "signature": {
+        "en": "os.setlocale(locale [, category])",
+        "zh-CN": "os.setlocale(locale [, category])"
+      },
+      "returns": {
+        "en": "returns: locale name, or nil when the locale cannot be set.",
+        "zh-CN": "返回：locale 名称；无法设置时为 nil。"
+      },
+      "params": {
+        "en": [
+          "locale: locale name or nil to query",
+          "category (optional): locale category"
+        ],
+        "zh-CN": [
+          "locale: locale 名称，或 nil 表示查询",
+          "category (可选): locale 分类"
+        ]
+      },
+      "description": {
+        "en": "Sets or queries the current locale.",
+        "zh-CN": "设置或查询当前 locale。"
+      },
+      "example": {
+        "en": "local locale = os.setlocale(nil, \"numeric\")\n-- locale: current locale name",
+        "zh-CN": "local locale = os.setlocale(nil, \"numeric\")\n-- locale: 当前 locale 名称"
+      }
+    },
+    "os.time": {
+      "signature": {
+        "en": "os.time([table])",
+        "zh-CN": "os.time([table])"
+      },
+      "returns": {
+        "en": "returns: Unix timestamp in seconds.",
+        "zh-CN": "返回：Unix 秒时间戳。"
+      },
+      "params": {
+        "en": [
+          "table (optional): date table with year, month, day and optional hour/min/sec/isdst"
+        ],
+        "zh-CN": [
+          "table (可选): 日期表，包含 year、month、day，以及可选 hour/min/sec/isdst"
+        ]
+      },
+      "description": {
+        "en": "Returns the current time or converts a date table to a timestamp.",
+        "zh-CN": "返回当前时间，或把日期表转换为时间戳。"
+      },
+      "example": {
+        "en": "local now = os.time()\n-- now: current Unix timestamp",
+        "zh-CN": "local now = os.time()\n-- now: 当前 Unix 时间戳"
+      }
+    },
+    "os.tmpname": {
+      "signature": {
+        "en": "os.tmpname()",
+        "zh-CN": "os.tmpname()"
+      },
+      "returns": {
+        "en": "returns: temporary filename string.",
+        "zh-CN": "返回：临时文件名字符串。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Creates and returns a temporary filename when filesystem access is enabled.",
+        "zh-CN": "在文件系统权限开启时创建并返回临时文件名。"
+      },
+      "example": {
+        "en": "local name = os.tmpname()\n-- name: temporary path",
+        "zh-CN": "local name = os.tmpname()\n-- name: 临时路径"
+      }
+    },
+    "package.loadlib": {
+      "signature": {
+        "en": "package.loadlib(libname, funcname)",
+        "zh-CN": "package.loadlib(libname, funcname)"
+      },
+      "returns": {
+        "en": "returns: loader function, or nil plus error message and category.",
+        "zh-CN": "返回：loader 函数；失败时返回 nil、错误信息和分类。"
+      },
+      "params": {
+        "en": [
+          "libname: dynamic library path",
+          "funcname: symbol name"
+        ],
+        "zh-CN": [
+          "libname: 动态库路径",
+          "funcname: 符号名"
+        ]
+      },
+      "description": {
+        "en": "Loads a dynamic library symbol through the host-provided loader when available.",
+        "zh-CN": "在宿主提供 loader 时加载动态库符号。"
+      },
+      "example": {
+        "en": "local loader, err, where = package.loadlib(path, \"luaopen_mod\")\n-- loader: callable module loader when available",
+        "zh-CN": "local loader, err, where = package.loadlib(path, \"luaopen_mod\")\n-- loader: 可用时的模块加载函数"
+      }
+    },
+    "package.searchpath": {
+      "signature": {
+        "en": "package.searchpath(name, path [, sep [, rep]])",
+        "zh-CN": "package.searchpath(name, path [, sep [, rep]])"
+      },
+      "returns": {
+        "en": "returns: resolved filename, or nil plus candidate error text.",
+        "zh-CN": "返回：解析到的文件名；失败时返回 nil 和候选错误文本。"
+      },
+      "params": {
+        "en": [
+          "name: module name",
+          "path: template path list",
+          "sep (optional): module separator, defaults to \".\"",
+          "rep (optional): replacement separator, defaults to directory separator"
+        ],
+        "zh-CN": [
+          "name: 模块名",
+          "path: 模板路径列表",
+          "sep (可选): 模块分隔符，默认 \".\"",
+          "rep (可选): 替换分隔符，默认目录分隔符"
+        ]
+      },
+      "description": {
+        "en": "Searches for a module file by expanding package path templates.",
+        "zh-CN": "展开 package 路径模板并查找模块文件。"
+      },
+      "example": {
+        "en": "local filename = package.searchpath(\"a.b\", package.path)\n-- filename: first readable candidate path",
+        "zh-CN": "local filename = package.searchpath(\"a.b\", package.path)\n-- filename: 第一个可读候选路径"
       }
     },
     "pairs": {
@@ -1145,6 +2657,34 @@
         "zh-CN": "local s = string.char(65, 66, 67)\n-- s: 由字节值构造的字符串，这里是 'ABC'"
       }
     },
+    "string.dump": {
+      "signature": {
+        "en": "string.dump(function [, strip])",
+        "zh-CN": "string.dump(function [, strip])"
+      },
+      "returns": {
+        "en": "returns: binary chunk string.",
+        "zh-CN": "返回：二进制 chunk 字符串。"
+      },
+      "params": {
+        "en": [
+          "function: Lua function to dump",
+          "strip (optional): true to strip debug information"
+        ],
+        "zh-CN": [
+          "function: 要导出的 Lua 函数",
+          "strip (可选): true 表示剥离调试信息"
+        ]
+      },
+      "description": {
+        "en": "Serializes a Lua function as a binary chunk.",
+        "zh-CN": "把 Lua 函数序列化为二进制 chunk。"
+      },
+      "example": {
+        "en": "local chunk = string.dump(fn, true)\n-- chunk: binary representation of fn",
+        "zh-CN": "local chunk = string.dump(fn, true)\n-- chunk: fn 的二进制表示"
+      }
+    },
     "string.find": {
       "signature": {
         "en": "string.find(s, pattern [, init [, plain]])",
@@ -1347,6 +2887,60 @@
         "zh-CN": "local first, second = string.match('Hello, world!', '(.-),(.-)!')\n-- first: 第一个捕获值，这里是 'Hello'\n-- second: 第二个捕获值，这里是 ' world'"
       }
     },
+    "string.pack": {
+      "signature": {
+        "en": "string.pack(fmt, v1, v2, ...)",
+        "zh-CN": "string.pack(fmt, v1, v2, ...)"
+      },
+      "returns": {
+        "en": "returns: binary string containing packed values.",
+        "zh-CN": "返回：包含打包值的二进制字符串。"
+      },
+      "params": {
+        "en": [
+          "fmt: binary format string",
+          "v1, v2, ...: values matching the format"
+        ],
+        "zh-CN": [
+          "fmt: 二进制格式字符串",
+          "v1, v2, ...: 与格式匹配的值"
+        ]
+      },
+      "description": {
+        "en": "Packs values into a binary string according to a format.",
+        "zh-CN": "按格式把值打包为二进制字符串。"
+      },
+      "example": {
+        "en": "local bytes = string.pack(\"<I4\", 42)\n-- bytes: four little-endian bytes",
+        "zh-CN": "local bytes = string.pack(\"<I4\", 42)\n-- bytes: 4 字节小端二进制"
+      }
+    },
+    "string.packsize": {
+      "signature": {
+        "en": "string.packsize(fmt)",
+        "zh-CN": "string.packsize(fmt)"
+      },
+      "returns": {
+        "en": "returns: number of bytes produced by the fixed-size format.",
+        "zh-CN": "返回：固定长度格式生成的字节数。"
+      },
+      "params": {
+        "en": [
+          "fmt: binary format string without variable-length options"
+        ],
+        "zh-CN": [
+          "fmt: 不含可变长度选项的二进制格式字符串"
+        ]
+      },
+      "description": {
+        "en": "Returns the size of a fixed-size binary packing format.",
+        "zh-CN": "返回固定长度二进制打包格式的大小。"
+      },
+      "example": {
+        "en": "local size = string.packsize(\"<I4\")\n-- size: 4",
+        "zh-CN": "local size = string.packsize(\"<I4\")\n-- size: 4"
+      }
+    },
     "string.rep": {
       "signature": {
         "en": "string.rep(s, n [, sep])",
@@ -1433,6 +3027,36 @@
         "zh-CN": "local sub = string.sub('hello', 1, 2)\n-- sub: 指定区间的子串，这里是 'he'"
       }
     },
+    "string.unpack": {
+      "signature": {
+        "en": "string.unpack(fmt, s [, pos])",
+        "zh-CN": "string.unpack(fmt, s [, pos])"
+      },
+      "returns": {
+        "en": "returns: unpacked values followed by next position.",
+        "zh-CN": "返回：解包出的值，最后追加下一读取位置。"
+      },
+      "params": {
+        "en": [
+          "fmt: binary format string",
+          "s: binary string",
+          "pos (optional): start byte position, defaults to 1"
+        ],
+        "zh-CN": [
+          "fmt: 二进制格式字符串",
+          "s: 二进制字符串",
+          "pos (可选): 起始字节位置，默认 1"
+        ]
+      },
+      "description": {
+        "en": "Unpacks values from a binary string according to a format.",
+        "zh-CN": "按格式从二进制字符串中解包值。"
+      },
+      "example": {
+        "en": "local value, nextPos = string.unpack(\"<I4\", bytes)\n-- value: unpacked integer\n-- nextPos: next byte position",
+        "zh-CN": "local value, nextPos = string.unpack(\"<I4\", bytes)\n-- value: 解包出的整数\n-- nextPos: 下一字节位置"
+      }
+    },
     "string.upper": {
       "signature": {
         "en": "string.upper(s)",
@@ -1457,6 +3081,214 @@
       "example": {
         "en": "local value = string.upper('hello')\n-- value: upper-case string, here 'HELLO'",
         "zh-CN": "local value = string.upper('hello')\n-- value: 大写转换后的字符串，这里是 'HELLO'"
+      }
+    },
+    "table.concat": {
+      "signature": {
+        "en": "table.concat(list [, sep [, i [, j]]])",
+        "zh-CN": "table.concat(list [, sep [, i [, j]]])"
+      },
+      "returns": {
+        "en": "returns: concatenated string.",
+        "zh-CN": "返回：拼接后的字符串。"
+      },
+      "params": {
+        "en": [
+          "list: table sequence",
+          "sep (optional): separator string, defaults to empty string",
+          "i (optional): start index, defaults to 1",
+          "j (optional): end index, defaults to #list"
+        ],
+        "zh-CN": [
+          "list: 序列表",
+          "sep (可选): 分隔字符串，默认为空字符串",
+          "i (可选): 起始索引，默认 1",
+          "j (可选): 结束索引，默认 #list"
+        ]
+      },
+      "description": {
+        "en": "Concatenates string/number elements in a table sequence.",
+        "zh-CN": "拼接表序列中的字符串或数字元素。"
+      },
+      "example": {
+        "en": "local text = table.concat({\"a\", \"b\", \"c\"}, \",\")\n-- text: \"a,b,c\"",
+        "zh-CN": "local text = table.concat({\"a\", \"b\", \"c\"}, \",\")\n-- text: \"a,b,c\""
+      }
+    },
+    "table.insert": {
+      "signature": {
+        "en": "table.insert(list [, pos], value)",
+        "zh-CN": "table.insert(list [, pos], value)"
+      },
+      "returns": {
+        "en": "returns: no values.",
+        "zh-CN": "返回：无返回值。"
+      },
+      "params": {
+        "en": [
+          "list: table sequence",
+          "pos (optional): insertion position",
+          "value: value to insert"
+        ],
+        "zh-CN": [
+          "list: 序列表",
+          "pos (可选): 插入位置",
+          "value: 要插入的值"
+        ]
+      },
+      "description": {
+        "en": "Inserts a value into a table sequence, shifting following elements.",
+        "zh-CN": "向表序列插入一个值，并后移后续元素。"
+      },
+      "example": {
+        "en": "local t = {\"a\", \"c\"}\ntable.insert(t, 2, \"b\")\n-- t: {\"a\", \"b\", \"c\"}",
+        "zh-CN": "local t = {\"a\", \"c\"}\ntable.insert(t, 2, \"b\")\n-- t: {\"a\", \"b\", \"c\"}"
+      }
+    },
+    "table.move": {
+      "signature": {
+        "en": "table.move(a1, f, e, t [, a2])",
+        "zh-CN": "table.move(a1, f, e, t [, a2])"
+      },
+      "returns": {
+        "en": "returns: destination table.",
+        "zh-CN": "返回：目标表。"
+      },
+      "params": {
+        "en": [
+          "a1: source table",
+          "f: first source index",
+          "e: last source index",
+          "t: destination start index",
+          "a2 (optional): destination table, defaults to a1"
+        ],
+        "zh-CN": [
+          "a1: 源表",
+          "f: 源起始索引",
+          "e: 源结束索引",
+          "t: 目标起始索引",
+          "a2 (可选): 目标表，默认 a1"
+        ]
+      },
+      "description": {
+        "en": "Moves a range of elements between table sequences.",
+        "zh-CN": "在表序列之间移动一段元素。"
+      },
+      "example": {
+        "en": "local dst = table.move({\"a\", \"b\"}, 1, 2, 3, {})\n-- dst[3], dst[4]: \"a\", \"b\"",
+        "zh-CN": "local dst = table.move({\"a\", \"b\"}, 1, 2, 3, {})\n-- dst[3], dst[4]: \"a\", \"b\""
+      }
+    },
+    "table.pack": {
+      "signature": {
+        "en": "table.pack(...)",
+        "zh-CN": "table.pack(...)"
+      },
+      "returns": {
+        "en": "returns: table containing all arguments and field n.",
+        "zh-CN": "返回：包含全部参数并带有字段 n 的表。"
+      },
+      "params": {
+        "en": [
+          "...: values to pack"
+        ],
+        "zh-CN": [
+          "...: 要打包的值"
+        ]
+      },
+      "description": {
+        "en": "Packs varargs into a table and records the original count in field n.",
+        "zh-CN": "把可变参数打包为表，并在字段 n 中记录原始数量。"
+      },
+      "example": {
+        "en": "local packed = table.pack(1, nil, 3)\n-- packed.n: 3",
+        "zh-CN": "local packed = table.pack(1, nil, 3)\n-- packed.n: 3"
+      }
+    },
+    "table.remove": {
+      "signature": {
+        "en": "table.remove(list [, pos])",
+        "zh-CN": "table.remove(list [, pos])"
+      },
+      "returns": {
+        "en": "returns: removed value.",
+        "zh-CN": "返回：被移除的值。"
+      },
+      "params": {
+        "en": [
+          "list: table sequence",
+          "pos (optional): position to remove, defaults to #list"
+        ],
+        "zh-CN": [
+          "list: 序列表",
+          "pos (可选): 要移除的位置，默认 #list"
+        ]
+      },
+      "description": {
+        "en": "Removes an element from a table sequence, shifting following elements down.",
+        "zh-CN": "从表序列移除一个元素，并前移后续元素。"
+      },
+      "example": {
+        "en": "local value = table.remove(t, 1)\n-- value: removed first element",
+        "zh-CN": "local value = table.remove(t, 1)\n-- value: 被移除的第一个元素"
+      }
+    },
+    "table.sort": {
+      "signature": {
+        "en": "table.sort(list [, comp])",
+        "zh-CN": "table.sort(list [, comp])"
+      },
+      "returns": {
+        "en": "returns: no values.",
+        "zh-CN": "返回：无返回值。"
+      },
+      "params": {
+        "en": [
+          "list: table sequence",
+          "comp (optional): comparison function a,b -> boolean"
+        ],
+        "zh-CN": [
+          "list: 序列表",
+          "comp (可选): 比较函数 a,b -> boolean"
+        ]
+      },
+      "description": {
+        "en": "Sorts a table sequence in place.",
+        "zh-CN": "原地排序表序列。"
+      },
+      "example": {
+        "en": "table.sort(values, function(a, b) return a < b end)\n-- values: sorted in place",
+        "zh-CN": "table.sort(values, function(a, b) return a < b end)\n-- values: 已原地排序"
+      }
+    },
+    "table.unpack": {
+      "signature": {
+        "en": "table.unpack(list [, i [, j]])",
+        "zh-CN": "table.unpack(list [, i [, j]])"
+      },
+      "returns": {
+        "en": "returns: elements list[i] through list[j].",
+        "zh-CN": "返回：list[i] 到 list[j] 的元素。"
+      },
+      "params": {
+        "en": [
+          "list: table sequence",
+          "i (optional): start index, defaults to 1",
+          "j (optional): end index, defaults to #list"
+        ],
+        "zh-CN": [
+          "list: 序列表",
+          "i (可选): 起始索引，默认 1",
+          "j (可选): 结束索引，默认 #list"
+        ]
+      },
+      "description": {
+        "en": "Returns table sequence elements as multiple return values.",
+        "zh-CN": "把表序列元素作为多返回值返回。"
+      },
+      "example": {
+        "en": "local a, b = table.unpack({\"x\", \"y\"})\n-- a, b: \"x\", \"y\"",
+        "zh-CN": "local a, b = table.unpack({\"x\", \"y\"})\n-- a, b: \"x\", \"y\""
       }
     },
     "tonumber": {
@@ -1537,6 +3369,148 @@
       "example": {
         "en": "local kind = type({})\n-- kind: Lua type name, here 'table'",
         "zh-CN": "local kind = type({})\n-- kind: Lua 类型名，这里是 'table'"
+      }
+    },
+    "utf8.char": {
+      "signature": {
+        "en": "utf8.char(...)",
+        "zh-CN": "utf8.char(...)"
+      },
+      "returns": {
+        "en": "returns: UTF-8 string built from code points.",
+        "zh-CN": "返回：由码点构造的 UTF-8 字符串。"
+      },
+      "params": {
+        "en": [
+          "...: integer Unicode code points"
+        ],
+        "zh-CN": [
+          "...: Unicode 整数码点"
+        ]
+      },
+      "description": {
+        "en": "Builds a UTF-8 string from one or more code points.",
+        "zh-CN": "根据一个或多个码点构造 UTF-8 字符串。"
+      },
+      "example": {
+        "en": "local text = utf8.char(0x4E2D)\n-- text: UTF-8 character",
+        "zh-CN": "local text = utf8.char(0x4E2D)\n-- text: UTF-8 字符"
+      }
+    },
+    "utf8.codepoint": {
+      "signature": {
+        "en": "utf8.codepoint(s [, i [, j]])",
+        "zh-CN": "utf8.codepoint(s [, i [, j]])"
+      },
+      "returns": {
+        "en": "returns: code points for characters in the byte range.",
+        "zh-CN": "返回：指定字节范围内字符的码点。"
+      },
+      "params": {
+        "en": [
+          "s: UTF-8 string",
+          "i (optional): start byte position, defaults to 1",
+          "j (optional): end byte position, defaults to i"
+        ],
+        "zh-CN": [
+          "s: UTF-8 字符串",
+          "i (可选): 起始字节位置，默认 1",
+          "j (可选): 结束字节位置，默认 i"
+        ]
+      },
+      "description": {
+        "en": "Returns Unicode code points from a UTF-8 string.",
+        "zh-CN": "返回 UTF-8 字符串中的 Unicode 码点。"
+      },
+      "example": {
+        "en": "local code = utf8.codepoint(\"A\")\n-- code: 65",
+        "zh-CN": "local code = utf8.codepoint(\"A\")\n-- code: 65"
+      }
+    },
+    "utf8.codes": {
+      "signature": {
+        "en": "utf8.codes(s)",
+        "zh-CN": "utf8.codes(s)"
+      },
+      "returns": {
+        "en": "returns: iterator over byte positions and code points.",
+        "zh-CN": "返回：遍历字节位置和码点的迭代器。"
+      },
+      "params": {
+        "en": [
+          "s: UTF-8 string"
+        ],
+        "zh-CN": [
+          "s: UTF-8 字符串"
+        ]
+      },
+      "description": {
+        "en": "Iterates over UTF-8 code points in a string.",
+        "zh-CN": "遍历字符串中的 UTF-8 码点。"
+      },
+      "example": {
+        "en": "for pos, code in utf8.codes(text) do\n  print(pos, code)\nend\n-- pos: byte position\n-- code: code point",
+        "zh-CN": "for pos, code in utf8.codes(text) do\n  print(pos, code)\nend\n-- pos: 字节位置\n-- code: 码点"
+      }
+    },
+    "utf8.len": {
+      "signature": {
+        "en": "utf8.len(s [, i [, j]])",
+        "zh-CN": "utf8.len(s [, i [, j]])"
+      },
+      "returns": {
+        "en": "returns: number of UTF-8 characters, or nil plus byte position of an invalid sequence.",
+        "zh-CN": "返回：UTF-8 字符数；遇到非法序列时返回 nil 和非法字节位置。"
+      },
+      "params": {
+        "en": [
+          "s: UTF-8 string",
+          "i (optional): start byte position",
+          "j (optional): end byte position"
+        ],
+        "zh-CN": [
+          "s: UTF-8 字符串",
+          "i (可选): 起始字节位置",
+          "j (可选): 结束字节位置"
+        ]
+      },
+      "description": {
+        "en": "Counts UTF-8 characters in a byte range.",
+        "zh-CN": "统计字节范围内的 UTF-8 字符数。"
+      },
+      "example": {
+        "en": "local count = utf8.len(\"hello\")\n-- count: 5",
+        "zh-CN": "local count = utf8.len(\"hello\")\n-- count: 5"
+      }
+    },
+    "utf8.offset": {
+      "signature": {
+        "en": "utf8.offset(s, n [, i])",
+        "zh-CN": "utf8.offset(s, n [, i])"
+      },
+      "returns": {
+        "en": "returns: byte position of the requested UTF-8 character, or nil.",
+        "zh-CN": "返回：目标 UTF-8 字符的字节位置；不存在时为 nil。"
+      },
+      "params": {
+        "en": [
+          "s: UTF-8 string",
+          "n: character offset",
+          "i (optional): starting byte position"
+        ],
+        "zh-CN": [
+          "s: UTF-8 字符串",
+          "n: 字符偏移",
+          "i (可选): 起始字节位置"
+        ]
+      },
+      "description": {
+        "en": "Finds the byte position of a UTF-8 character relative to a starting point.",
+        "zh-CN": "查找相对起点的 UTF-8 字符字节位置。"
+      },
+      "example": {
+        "en": "local pos = utf8.offset(text, 2)\n-- pos: byte position of the second character",
+        "zh-CN": "local pos = utf8.offset(text, 2)\n-- pos: 第二个字符的字节位置"
       }
     },
     "xpcall": {

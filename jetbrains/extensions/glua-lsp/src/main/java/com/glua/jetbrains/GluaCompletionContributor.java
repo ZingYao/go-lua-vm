@@ -5,7 +5,10 @@ import com.intellij.codeInsight.completion.CompletionParameters;
 import com.intellij.codeInsight.completion.CompletionProvider;
 import com.intellij.codeInsight.completion.CompletionResultSet;
 import com.intellij.codeInsight.completion.CompletionType;
+import com.intellij.codeInsight.completion.InsertHandler;
+import com.intellij.codeInsight.lookup.LookupElement;
 import com.intellij.codeInsight.lookup.LookupElementBuilder;
+import com.intellij.openapi.editor.Document;
 import com.intellij.patterns.PlatformPatterns;
 import com.intellij.util.ProcessingContext;
 import org.jetbrains.annotations.NotNull;
@@ -25,6 +28,7 @@ public final class GluaCompletionContributor extends CompletionContributor {
                     parameters.getEditor().getDocument(),
                     parameters.getOffset()
                 );
+                addAnnotationTemplates(completion, result);
                 for (String name : catalog.sortedNames()) {
                     GluaBuiltin builtin = catalog.get(name);
                     if (builtin == null) {
@@ -53,5 +57,38 @@ public final class GluaCompletionContributor extends CompletionContributor {
                 }
             }
         });
+    }
+
+    private static void addAnnotationTemplates(GluaAnalysis.CompletionContext completion, CompletionResultSet result) {
+        if (completion.method()) {
+            return;
+        }
+        String prefix = completion.prefix().toLowerCase();
+        if (!prefix.isBlank() && !"doc".startsWith(prefix) && !"docs".startsWith(prefix) && !"func".startsWith(prefix) && !"function".startsWith(prefix) && !"glua".startsWith(prefix)) {
+            return;
+        }
+        result.addElement(LookupElementBuilder.create("glua doc comment")
+            .withTypeText("GLua annotation", true)
+            .withTailText(" standard parseable comment", true)
+            .withInsertHandler(insertText(GluaUserDocumentation.standardSnippet())));
+        result.addElement(LookupElementBuilder.create("glua documented function")
+            .withTypeText("GLua annotation + function", true)
+            .withTailText(" table method template", true)
+            .withInsertHandler(insertText(String.join("\n",
+                GluaUserDocumentation.standardSnippet(),
+                "module.functionName = function(name)",
+                "  ",
+                "end"
+            ))));
+    }
+
+    private static InsertHandler<LookupElement> insertText(String text) {
+        return (context, item) -> {
+            Document document = context.getDocument();
+            int start = context.getStartOffset();
+            int end = context.getTailOffset();
+            document.replaceString(start, end, text);
+            context.getEditor().getCaretModel().moveToOffset(start + text.length());
+        };
     }
 }

@@ -25,40 +25,42 @@ final class GluaBuiltin {
     }
 
     String markdown(String name) {
+        Labels labels = Labels.of(GluaBuiltinCatalog.getInstance().locale());
         StringBuilder builder = new StringBuilder();
         builder.append(codeBlock(signature));
-        builder.append("<p><b>Description</b><br/>").append(escape(description)).append("</p>");
-        builder.append("<p><b>Parameters</b></p><ul>");
+        builder.append("<p><b>").append(escape(labels.description)).append("</b><br/>").append(escape(description)).append("</p>");
+        builder.append("<p><b>").append(escape(labels.parameters)).append("</b></p><ul>");
         for (String param : params) {
             builder.append("<li><code>").append(escape(param)).append("</code></li>");
         }
         builder.append("</ul>");
-        builder.append("<p><b>Returns</b><br/>").append(escape(returns)).append("</p>");
+        builder.append("<p><b>").append(escape(labels.returns)).append("</b><br/>").append(escape(returns)).append("</p>");
         if (!example.isBlank()) {
-            builder.append("<p><b>Example</b></p>").append(codeBlock(example));
+            builder.append("<p><b>").append(escape(labels.example)).append("</b></p>").append(codeBlock(example));
         }
         builder.append("<p><code>").append(escape(name)).append("</code></p>");
         return builder.toString();
     }
 
     String quickInfo() {
+        Labels labels = Labels.of(GluaBuiltinCatalog.getInstance().locale());
         StringBuilder builder = new StringBuilder("<html><body>");
         builder.append(codeBlock(signature));
         if (!description.isBlank()) {
-            builder.append("<p><b>Description</b><br/>").append(escape(description)).append("</p>");
+            builder.append("<p><b>").append(escape(labels.description)).append("</b><br/>").append(escape(description)).append("</p>");
         }
         if (!params.isEmpty()) {
-            builder.append("<p><b>Parameters</b></p><ul>");
+            builder.append("<p><b>").append(escape(labels.parameters)).append("</b></p><ul>");
             for (String param : params) {
                 builder.append("<li><code>").append(escape(param)).append("</code></li>");
             }
             builder.append("</ul>");
         }
         if (!returns.isBlank()) {
-            builder.append("<p><b>Returns</b><br/>").append(escape(returns)).append("</p>");
+            builder.append("<p><b>").append(escape(labels.returns)).append("</b><br/>").append(escape(returns)).append("</p>");
         }
         if (!example.isBlank()) {
-            builder.append("<p><b>Example</b></p>").append(codeBlock(example));
+            builder.append("<p><b>").append(escape(labels.example)).append("</b></p>").append(codeBlock(example));
         }
         builder.append("</body></html>");
         return builder.toString();
@@ -171,5 +173,15 @@ final class GluaBuiltin {
             .append("\">")
             .append(escape(text))
             .append("</span>");
+    }
+
+    private record Labels(String description, String parameters, String returns, String example) {
+        static Labels of(String locale) {
+            String normalized = locale == null ? "" : locale.toLowerCase();
+            if (normalized.startsWith("zh")) {
+                return new Labels("说明", "参数", "返回值", "示例");
+            }
+            return new Labels("Description", "Parameters", "Returns", "Example");
+        }
     }
 }

@@ -1,4 +1,5 @@
 {
   "glua.openBuiltinSignatureJson.title": "GLua: Open builtin signature JSON",
-  "glua.showBuiltinDocStatus.title": "GLua: Show builtin doc status"
+  "glua.showBuiltinDocStatus.title": "GLua: Show builtin doc status",
+  "glua.showOutput.title": "GLua: Show language server output"
 }

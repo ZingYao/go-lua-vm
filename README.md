@@ -33,6 +33,7 @@ go build -tags with_continue ./cmd/glua
 - `debug`：Debug hook 与调试信息。
 - `bridge`：Go 与 Lua 双向调用。
 - `docs/LUAC.md`：`gluac` / `luac` 兼容工具设计。
+- `docs/BENCHMARK.md`：官方 Lua 5.3.6 与 glua/gluac 的性能基准对比。
 - `docs/CUSTOM_CHUNK.md`：自定义加密 chunk 的 encoder/decoder 接入规划与最小 Demo。
 - `docs/CONTROL_FLOW_EXTENSIONS.md`：`continue` 与 `switch/case/default` 语法扩展设计。
 - `third_party/lua-5.3.6`：Lua 5.3.6 官方源码参考，不参与构建。
@@ -50,6 +51,10 @@ go build -tags with_continue ./cmd/glua
 - `gluals` 扩展使用 `--gluals-*`，例如 `--gluals-syntax`。
 
 完整兼容矩阵和 release 阻塞验收见 [docs/CLI_COMPATIBILITY.md](docs/CLI_COMPATIBILITY.md)，总体差异口径见 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)。
+
+## 性能基准
+
+官方 Lua 5.3.6、`glua`、`gluac` 的脚本运行、CLI 冷启动、编译和 Go 内部 benchmark 对比见 [docs/BENCHMARK.md](docs/BENCHMARK.md)。
 
 ## 自定义加密 chunk 接入规划
 
