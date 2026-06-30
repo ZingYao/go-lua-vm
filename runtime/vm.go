@@ -188,6 +188,12 @@ type LuaLeafAddReturn struct {
 	UpvalueIndex int
 	// HasUpvalueRegister 表示该叶子函数带 GETUPVAL 前缀。
 	HasUpvalueRegister bool
+	// IntegerRegisterIndex 保存 `R + integer` 快路径中的寄存器操作数下标。
+	IntegerRegisterIndex int
+	// IntegerConstant 保存 `R + integer` 快路径中的 integer 常量。
+	IntegerConstant int64
+	// HasRegisterIntegerConstant 表示该叶子函数可走寄存器加 integer 常量专用快路径。
+	HasRegisterIntegerConstant bool
 }
 
 // LuaLeafAddOperand 保存 caller-side 叶子 ADD 操作数形态。
@@ -282,7 +288,33 @@ func luaProtoLeafAddReturn(proto *bytecode.Proto) *LuaLeafAddReturn {
 	leaf.ReturnInstruction = returnInstruction
 	leaf.LeftOperand = leftOperand
 	leaf.RightOperand = rightOperand
+	leaf.cacheRegisterIntegerConstantAdd()
 	return &leaf
+}
+
+// cacheRegisterIntegerConstantAdd 缓存 `register + integer constant` 叶子加法形态。
+//
+// 该缓存只覆盖无 GETUPVAL 前缀的原生参数加整数常量形态；字符串转换和元方法仍由通用路径处理。
+func (leaf *LuaLeafAddReturn) cacheRegisterIntegerConstantAdd() {
+	// 带 upvalue 前缀时寄存器可能映射到 upvalue 临时槽，本专用路径先保持保守。
+	if leaf == nil || leaf.HasUpvalueRegister {
+		// nil 元数据或 upvalue 形态不启用该专用缓存。
+		return
+	}
+	if !leaf.LeftOperand.Constant && leaf.RightOperand.Constant && leaf.RightOperand.ConstantValue.Kind == KindInteger {
+		// `R + Kint` 是函数调用 micro benchmark 的最常见形态。
+		leaf.IntegerRegisterIndex = leaf.LeftOperand.RegisterIndex
+		leaf.IntegerConstant = leaf.RightOperand.ConstantValue.Integer
+		leaf.HasRegisterIntegerConstant = true
+		return
+	}
+	if leaf.LeftOperand.Constant && leaf.LeftOperand.ConstantValue.Kind == KindInteger && !leaf.RightOperand.Constant {
+		// `Kint + R` 对原生 number/integer 加法等价，也可复用同一写回路径。
+		leaf.IntegerRegisterIndex = leaf.RightOperand.RegisterIndex
+		leaf.IntegerConstant = leaf.LeftOperand.ConstantValue.Integer
+		leaf.HasRegisterIntegerConstant = true
+		return
+	}
 }
 
 // luaLeafAddOperandFromProto 预解析 ADD 操作数。
@@ -605,6 +637,10 @@ func (vm *VM) TryExecuteLeafAddReturnInCaller(closure *LuaClosure, request *Call
 
 	// 读取预解析的叶子函数形态，后续只在 caller 寄存器窗口内完成操作数映射。
 	leafAddReturn := closure.LeafAddReturn
+	if handled, err := vm.tryLeafRegisterIntegerConstantAdd(leafAddReturn, request); handled || err != nil {
+		// 命中特化 `R + integer` 形态时直接返回；未命中时继续通用叶子加法路径。
+		return handled, err
+	}
 	var upvalueValue Value
 	if leafAddReturn.HasUpvalueRegister {
 		// 闭包捕获常量形态可直接读取 upvalue cell，避免每次解释 GETUPVAL。
@@ -639,6 +675,42 @@ func (vm *VM) TryExecuteLeafAddReturnInCaller(closure *LuaClosure, request *Call
 
 	// 直接写回函数槽并清理开放栈顶，匹配 CALL 消费完成后的 caller VM 状态。
 	vm.registers[request.FunctionIndex] = resultValue
+	vm.openTop = -1
+	return true, nil
+}
+
+// tryLeafRegisterIntegerConstantAdd 执行 `return R + integer` 叶子函数专用快路径。
+//
+// request 必须已由 TryExecuteLeafAddReturnInCaller 校验为单参数单返回；该函数仅处理原生
+// integer/number 操作数，其他类型返回 handled=false 交给完整 VM 处理字符串转换和元方法。
+func (vm *VM) tryLeafRegisterIntegerConstantAdd(leaf *LuaLeafAddReturn, request *CallRequest) (bool, error) {
+	if leaf == nil || !leaf.HasRegisterIntegerConstant {
+		// 没有专用形态时交给通用叶子加法路径。
+		return false, nil
+	}
+	if request.FunctionIndex < 0 || request.FunctionIndex >= len(vm.registers) {
+		// 结果写回失败表示调用寄存器窗口异常。
+		return true, ErrRegisterOutOfRange
+	}
+	registerIndex := request.FunctionIndex + 1 + leaf.IntegerRegisterIndex
+	if registerIndex < 0 || registerIndex >= len(vm.registers) {
+		// caller 实参区缺失时回退完整 VM 路径。
+		return false, nil
+	}
+
+	// 只读取原生 integer/number；字符串数字必须保留 Lua 算术转换语义。
+	operandValue := vm.registers[registerIndex]
+	switch operandValue.Kind {
+	case KindInteger:
+		// 双 integer 加法保持 integer 结果。
+		vm.registers[request.FunctionIndex] = IntegerValue(operandValue.Integer + leaf.IntegerConstant)
+	case KindNumber:
+		// number 与 integer 常量混合时按 Lua number 结果写回。
+		vm.registers[request.FunctionIndex] = NumberValue(operandValue.Number + float64(leaf.IntegerConstant))
+	default:
+		// 非原生数值需要完整 VM 算术路径。
+		return false, nil
+	}
 	vm.openTop = -1
 	return true, nil
 }

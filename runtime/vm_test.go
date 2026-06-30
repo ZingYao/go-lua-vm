@@ -602,6 +602,10 @@ func TestNewLuaClosureCachesDirectCallSafe(t *testing.T) {
 		// 右操作数 K1 应在创建时转换为 runtime integer 值。
 		t.Fatalf("add closure right operand metadata mismatch: %+v", addClosure.LeafAddReturn.RightOperand)
 	}
+	if !addClosure.LeafAddReturn.HasRegisterIntegerConstant || addClosure.LeafAddReturn.IntegerRegisterIndex != 0 || addClosure.LeafAddReturn.IntegerConstant != 1 {
+		// R0 + K1 应额外缓存为寄存器加 integer 常量专用形态。
+		t.Fatalf("add closure integer constant metadata mismatch: %+v", addClosure.LeafAddReturn)
+	}
 
 	upvalueAddProto := &bytecode.Proto{
 		Code: []bytecode.Instruction{
