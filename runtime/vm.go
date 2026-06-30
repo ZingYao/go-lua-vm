@@ -119,6 +119,8 @@ const (
 	arithmeticIntRegisterCacheMul
 	// arithmeticIntRegisterCacheAddNumber 表示当前 PC 最近命中过 ADD 的寄存器 number 路径。
 	arithmeticIntRegisterCacheAddNumber
+	// arithmeticIntRegisterCacheDivNumber 表示当前 PC 最近命中过 DIV 的寄存器原生数值路径。
+	arithmeticIntRegisterCacheDivNumber
 )
 
 // arithmeticIntOperandCacheEntry 表示一条 integer 算术 inline cache 的操作数形态。
@@ -2496,6 +2498,10 @@ func (vm *VM) executeDiv(instruction bytecode.Instruction) error {
 		// 目标寄存器越界时不能写入，避免破坏寄存器窗口。
 		return ErrRegisterOutOfRange
 	}
+	if handled, err := vm.tryCachedNativeNumberDivArithmetic(instruction); handled || err != nil {
+		// DIV number 缓存命中已完成写回；缓存形态损坏时返回原始寄存器错误。
+		return err
+	}
 
 	leftValue, err := vm.rkValue(instruction.B())
 	if err != nil {
@@ -2513,10 +2519,12 @@ func (vm *VM) executeDiv(instruction bytecode.Instruction) error {
 		switch rightValue.Kind {
 		case KindInteger:
 			// integer / integer 也返回 number。
+			vm.rememberNativeNumberDiv(instruction)
 			vm.registers[targetIndex] = NumberValue(float64(leftValue.Integer) / float64(rightValue.Integer))
 			return nil
 		case KindNumber:
 			// integer / number 直接按 float64 执行。
+			vm.rememberNativeNumberDiv(instruction)
 			vm.registers[targetIndex] = NumberValue(float64(leftValue.Integer) / rightValue.Number)
 			return nil
 		}
@@ -2525,10 +2533,12 @@ func (vm *VM) executeDiv(instruction bytecode.Instruction) error {
 		switch rightValue.Kind {
 		case KindInteger:
 			// number / integer 直接按 float64 执行。
+			vm.rememberNativeNumberDiv(instruction)
 			vm.registers[targetIndex] = NumberValue(leftValue.Number / float64(rightValue.Integer))
 			return nil
 		case KindNumber:
 			// number / number 直接按 float64 执行。
+			vm.rememberNativeNumberDiv(instruction)
 			vm.registers[targetIndex] = NumberValue(leftValue.Number / rightValue.Number)
 			return nil
 		}
@@ -2808,6 +2818,39 @@ func (vm *VM) tryCachedNativeNumberAddArithmetic(instruction bytecode.Instructio
 	return true, nil
 }
 
+// tryCachedNativeNumberDivArithmetic 尝试执行当前 PC 的寄存器原生数值 DIV 缓存。
+//
+// 该缓存只记录 B/C 都是寄存器且运行期值为 integer/number 的 DIV。命中时始终写回 Lua
+// number；类型变化为字符串数字或元方法相关类型时清理缓存并回到完整 DIV 语义。
+func (vm *VM) tryCachedNativeNumberDivArithmetic(instruction bytecode.Instruction) (bool, error) {
+	currentPC := vm.currentPC
+	if currentPC < 0 || currentPC >= len(vm.arithmeticIntRegisterCache) || currentPC >= len(vm.arithmeticIntOperandCache) || vm.arithmeticIntRegisterCache[currentPC] != arithmeticIntRegisterCacheDivNumber {
+		// 当前 PC 没有 DIV number 缓存，调用方继续走普通 RK 路径。
+		return false, nil
+	}
+	cacheEntry := vm.arithmeticIntOperandCache[currentPC]
+	if cacheEntry.leftIndex < 0 || cacheEntry.leftIndex >= len(vm.registers) || cacheEntry.rightIndex < 0 || cacheEntry.rightIndex >= len(vm.registers) {
+		// 寄存器窗口变化时清理缓存，并回到通用 RK 路径报出原始错误。
+		vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
+		vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
+		return false, nil
+	}
+	leftValue := vm.registers[cacheEntry.leftIndex]
+	rightValue := vm.registers[cacheEntry.rightIndex]
+	leftNumber, leftOK := nativeNumberValue(leftValue)
+	rightNumber, rightOK := nativeNumberValue(rightValue)
+	if !leftOK || !rightOK {
+		// 字符串数字或元方法相关类型必须回退完整 Lua 算术路径。
+		vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
+		vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
+		return false, nil
+	}
+
+	// Lua 5.3 的 DIV 总是返回 number，整数除法也按 float64 计算。
+	vm.registers[instruction.A()] = NumberValue(leftNumber / rightNumber)
+	return true, nil
+}
+
 // tryCachedIntegerSubArithmetic 尝试执行当前 PC 的 SUB integer 算术缓存。
 //
 // 该函数只处理 SUB 热路径；缓存不存在、类型变化或指令形态变化时返回 handled=false，让调用方
@@ -3002,6 +3045,32 @@ func (vm *VM) rememberNativeNumberAdd(instruction bytecode.Instruction) {
 	// 记录当前 PC 的寄存器 number ADD 热路径，下次可跳过 integer cache miss 和通用 RK helper。
 	vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{leftIndex: leftIndex, rightIndex: rightIndex}
 	vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheAddNumber
+}
+
+// rememberNativeNumberDiv 记录当前 PC 的寄存器原生数值 DIV 热路径。
+//
+// 只缓存 B/C 都是寄存器的 DIV；常量、字符串数字和元方法相关路径保留完整 RK 读取与回退语义。
+func (vm *VM) rememberNativeNumberDiv(instruction bytecode.Instruction) {
+	currentPC := vm.currentPC
+	if currentPC < 0 || currentPC >= len(vm.arithmeticIntRegisterCache) || currentPC >= len(vm.arithmeticIntOperandCache) {
+		// 无效 PC 不适合缓存，直接保留完整 RK 路径。
+		return
+	}
+	leftOperand := instruction.B()
+	rightOperand := instruction.C()
+	if bytecode.IsK(leftOperand) || bytecode.IsK(rightOperand) {
+		// 只缓存寄存器操作数，避免常量和字符串数字转换语义混入窄路径。
+		return
+	}
+	leftIndex := bytecode.IndexK(leftOperand)
+	rightIndex := bytecode.IndexK(rightOperand)
+	if leftIndex < 0 || leftIndex >= len(vm.registers) || rightIndex < 0 || rightIndex >= len(vm.registers) {
+		// 损坏指令或寄存器窗口变化时不建立缓存，后续完整路径会报原始错误。
+		return
+	}
+	// 记录当前 PC 的寄存器 DIV 热路径，下次可跳过通用 RK helper 和类型分支。
+	vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{leftIndex: leftIndex, rightIndex: rightIndex}
+	vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheDivNumber
 }
 
 // integerArithmeticOperandCacheEntry 为可缓存 integer RK 操作数构造缓存项。

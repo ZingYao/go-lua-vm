@@ -1475,6 +1475,74 @@ func TestVMDivNativeNumberFastPath(t *testing.T) {
 	}
 }
 
+// TestVMDivNativeNumberCacheFallback 验证寄存器原生数值 DIV 缓存命中与回退。
+//
+// 同一 PC 首次执行 integer/integer DIV 会建立缓存；第二次应命中缓存并继续返回 number。若后续
+// 操作数变为字符串数字，缓存必须失效并回到完整 Lua 数字字符串转换语义。
+func TestVMDivNativeNumberCacheFallback(t *testing.T) {
+	// 使用带 Proto 的 VM 启用按 PC 的算术缓存。
+	proto := bytecode.NewProto("number-div-cache")
+	proto.Code = []bytecode.Instruction{bytecode.CreateABC(bytecode.OpDiv, 0, 1, 2)}
+	vm := NewVMWithPrototypeData(3, nil, nil, nil, nil)
+	vm.BindPrototype(proto)
+	vm.SetCurrentPC(0)
+	if err := vm.SetRegister(1, IntegerValue(7)); err != nil {
+		// 测试准备阶段必须能写入左 integer 操作数。
+		t.Fatalf("set first left failed: %v", err)
+	}
+	if err := vm.SetRegister(2, IntegerValue(2)); err != nil {
+		// 测试准备阶段必须能写入右 integer 操作数。
+		t.Fatalf("set first right failed: %v", err)
+	}
+	if err := vm.Step(proto.Code[0]); err != nil {
+		// 首次 DIV 不应失败。
+		t.Fatalf("first div failed: %v", err)
+	}
+	firstValue, firstOK := vm.Register(0)
+	if !firstOK || !firstValue.RawEqual(NumberValue(3.5)) {
+		// integer / integer 也必须得到 Lua number 结果。
+		t.Fatalf("first value mismatch: value=%#v ok=%v", firstValue, firstOK)
+	}
+
+	vm.SetCurrentPC(0)
+	if err := vm.SetRegister(1, NumberValue(9)); err != nil {
+		// 第二次执行复用同一 PC，左操作数切换为 number。
+		t.Fatalf("set second left failed: %v", err)
+	}
+	if err := vm.SetRegister(2, IntegerValue(3)); err != nil {
+		// 右操作数保持 integer。
+		t.Fatalf("set second right failed: %v", err)
+	}
+	if err := vm.Step(proto.Code[0]); err != nil {
+		// 缓存命中路径不应失败。
+		t.Fatalf("second div failed: %v", err)
+	}
+	secondValue, secondOK := vm.Register(0)
+	if !secondOK || !secondValue.RawEqual(NumberValue(3)) {
+		// DIV cache 命中后必须保留 Lua number 结果。
+		t.Fatalf("second value mismatch: value=%#v ok=%v", secondValue, secondOK)
+	}
+
+	vm.SetCurrentPC(0)
+	if err := vm.SetRegister(1, StringValue("8")); err != nil {
+		// 字符串数字需要触发缓存回退。
+		t.Fatalf("set third left failed: %v", err)
+	}
+	if err := vm.SetRegister(2, StringValue("2")); err != nil {
+		// 右操作数同样使用字符串数字。
+		t.Fatalf("set third right failed: %v", err)
+	}
+	if err := vm.Step(proto.Code[0]); err != nil {
+		// 完整路径应支持字符串数字转换。
+		t.Fatalf("third div failed: %v", err)
+	}
+	thirdValue, thirdOK := vm.Register(0)
+	if !thirdOK || !thirdValue.RawEqual(NumberValue(4)) {
+		// 字符串数字回退路径必须保持 Lua 5.3 算术转换语义。
+		t.Fatalf("third value mismatch: value=%#v ok=%v", thirdValue, thirdOK)
+	}
+}
+
 // TestVMBinaryArithmeticErrors 验证二元算术指令的错误边界。
 //
 // 算术错误必须返回明确错误，并保持目标寄存器原值。
