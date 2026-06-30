@@ -91,6 +91,8 @@ type localBinding struct {
 	localVarIndex int
 	// scopeID 保存声明该局部变量的 parser 作用域编号，用于区分同作用域重名和内层遮蔽。
 	scopeID int
+	// captured 表示该局部变量已被子函数捕获为 open upvalue。
+	captured bool
 }
 
 // pendingGoto 描述 codegen 阶段尚未确定目标 PC 的 goto 跳转。
@@ -3045,8 +3047,8 @@ func (generator *generator) beginScope() scopeSnapshot {
 //
 // endPC 是当前 block 结束时的指令位置；本作用域新增的 LocalVars 都会把 EndPC 回填到这里。
 func (generator *generator) endScope(scope scopeSnapshot, endPC int) {
-	if scope.localVarCount < len(generator.proto.LocalVars) {
-		// 退出包含新增 local 的 block 时发出 close-only JMP，运行期据此闭合被捕获的 open upvalue。
+	if generator.hasCapturedLocalSince(scope.localVarCount) {
+		// 退出包含已捕获新增 local 的 block 时发出 close-only JMP，运行期据此闭合 open upvalue。
 		generator.emitAsBx(bytecode.OpJmp, scope.nextRegister+1, 0)
 		endPC = len(generator.proto.Code)
 	}
@@ -3056,6 +3058,19 @@ func (generator *generator) endScope(scope scopeSnapshot, endPC int) {
 	}
 	generator.locals = scope.locals
 	generator.nextRegister = scope.nextRegister
+}
+
+// hasCapturedLocalSince 判断指定 LocalVars 起点之后是否存在被子函数捕获的局部变量。
+func (generator *generator) hasCapturedLocalSince(localVarStart int) bool {
+	for _, binding := range generator.locals {
+		if binding.localVarIndex >= localVarStart && binding.captured {
+			// 只要有新增 local 被捕获，退出作用域就必须关闭对应 open upvalue。
+			return true
+		}
+	}
+
+	// 没有新增 captured local 时可省略 close-only JMP。
+	return false
 }
 
 // closeLocals 将当前函数所有局部变量生命周期结束位置回填为 endPC。
@@ -3090,6 +3105,8 @@ func (generator *generator) resolveUpvalue(name string, position lexer.Position)
 		index := len(generator.proto.Upvalues)
 		generator.proto.Upvalues = append(generator.proto.Upvalues, bytecode.UpvalueDesc{Name: name, InStack: true, Index: uint8(binding.register)})
 		generator.upvalues[name] = index
+		binding.captured = true
+		generator.parent.locals[name] = binding
 		return index, true, nil
 	}
 	parentIndex, exists, err := generator.parent.resolveUpvalue(name, position)
@@ -3145,6 +3162,8 @@ func (generator *generator) envUpvalueIndex() int {
 		// 父函数显式 local _ENV 时，嵌套函数必须捕获该寄存器作为自身环境。
 		generator.proto.Upvalues = append(generator.proto.Upvalues, bytecode.UpvalueDesc{Name: envUpvalueName, InStack: true, Index: uint8(binding.register)})
 		generator.upvalues[envUpvalueName] = index
+		binding.captured = true
+		generator.parent.locals[envUpvalueName] = binding
 		return index
 	}
 	parentIndex := generator.parent.envUpvalueIndex()

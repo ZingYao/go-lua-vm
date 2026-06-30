@@ -761,6 +761,31 @@ func TestCompileSafeBinaryReturnUsesRKOperands(t *testing.T) {
 	}
 }
 
+// TestCompileCapturedBlockLocalKeepsCloseJump 验证被闭包捕获的 block local 仍生成 close-only JMP。
+//
+// 未捕获 local 的作用域退出可以省略零距离 close-only JMP；一旦内层函数捕获 block local，
+// 退出 block 时必须保留 A>0 的 JMP，以便运行期关闭 open upvalue。
+func TestCompileCapturedBlockLocalKeepsCloseJump(t *testing.T) {
+	chunk := parseChunkForCodegenTest(t, "do local x = 1 local function f() return x end end")
+
+	proto, err := CompileChunk(chunk, "captured-block-local")
+	if err != nil {
+		// 捕获 block local 的样例必须可编译。
+		t.Fatalf("compile captured block local failed: %v", err)
+	}
+	hasCloseOnlyJump := false
+	for _, instruction := range proto.Code {
+		if instruction.OpCode() == bytecode.OpJmp && instruction.A() > 0 && instruction.SBx() == 0 {
+			// A>0 表示从 A-1 起关闭 open upvalue；sBx=0 表示只关闭不跳转。
+			hasCloseOnlyJump = true
+		}
+	}
+	if !hasCloseOnlyJump {
+		// 捕获 block local 时不能省略 close-only JMP。
+		t.Fatalf("missing close-only JMP for captured block local; code=%v", proto.Code)
+	}
+}
+
 // TestCompileAssignmentExpandsLastCallResults 验证普通赋值会展开最后一个调用的多返回值。
 //
 // 官方 gc.lua 的 `s, i = string.gsub(...)` 依赖 CALL C 字段请求两个返回值；否则第二个左值

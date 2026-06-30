@@ -9,15 +9,14 @@ main <sample:0,0> params=0 vararg=true maxstack=7
   [0007] line=1 ADD       A=0 B=R(0) C=R(6)
   [0008] line=1 FORLOOP   A=2 sBx=-3
   [0009] line=1 JMP       A=0 sBx=0
-  [0010] line=1 JMP       A=3 sBx=0
-  [0011] line=0 RETURN    A=0 B=1 C=0
+  [0010] line=0 RETURN    A=0 B=1 C=0
   constants (2):
     [0] integer(1)
     [1] integer(2)
   locals (3):
-    [0] name="a" pc=[1,12)
-    [1] name="f" pc=[1,12)
-    [2] name="i" pc=[5,11)
+    [0] name="a" pc=[1,11)
+    [1] name="f" pc=[1,11)
+    [2] name="i" pc=[5,10)
   child[0] <sample:1,1> params=1 vararg=false maxstack=3
     [0000] line=1 MOVE      A=1 B=0 C=0
     [0001] line=1 GETUPVAL  A=2 B=0 C=0
