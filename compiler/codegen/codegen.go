@@ -446,6 +446,10 @@ func (generator *generator) compileLocalAssignment(statement *parser.LocalAssign
 //
 // 当前阶段左侧支持已经声明的局部变量名称，未知名称按 Lua 5.3 语义写入 `_ENV[name]`。
 func (generator *generator) compileAssignment(statement *parser.AssignmentStatement) error {
+	if handled, err := generator.compileSingleLocalSelfBinaryAssignment(statement); handled || err != nil {
+		// 单 local 自二元运算赋值可直接写回目标寄存器，避免通用赋值临时结果和 MOVE。
+		return err
+	}
 	if handled, err := generator.compileSingleLocalSelfConcatAssignment(statement); handled || err != nil {
 		// 单 local 自拼接赋值可直接写回目标寄存器，避免临时结果和 MOVE。
 		return err
@@ -487,6 +491,65 @@ func (generator *generator) compileAssignment(statement *parser.AssignmentStatem
 
 	// 普通赋值编译完成。
 	return nil
+}
+
+// compileSingleLocalSelfBinaryAssignment 优化 `localName = localName <op> expression`。
+//
+// 该优化只处理单左值、单右值、当前函数 active local 的普通二元运算；右侧表达式必须没有调用、
+// table/global 访问或元方法触发风险，避免破坏 Lua 5.3 对左操作数先于右操作数求值的语义。
+func (generator *generator) compileSingleLocalSelfBinaryAssignment(statement *parser.AssignmentStatement) (bool, error) {
+	if len(statement.Left) != 1 || len(statement.Right) != 1 {
+		// 多重赋值需要先求完所有 RHS，再统一写回，不能使用该快路径。
+		return false, nil
+	}
+	targetName, ok := statement.Left[0].(*parser.NameExpression)
+	if !ok {
+		// 只有普通名称左值能直接写回寄存器。
+		return false, nil
+	}
+	binding, ok := generator.locals[targetName.Name]
+	if !ok {
+		// upvalue/global 写回有额外语义，不能用当前 local 寄存器快路径。
+		return false, nil
+	}
+	binaryExpression, ok := statement.Right[0].(*parser.BinaryExpression)
+	if !ok || binaryExpression.Operator == ".." || binaryExpression.Operator == "and" || binaryExpression.Operator == "or" || isComparisonOperator(binaryExpression.Operator) {
+		// concat、短路和比较已有专门语义，当前优化只处理普通二元运算。
+		return false, nil
+	}
+	leftName, ok := binaryExpression.Left.(*parser.NameExpression)
+	if !ok || leftName.Name != targetName.Name {
+		// 只有 `x = x <op> rhs` 能保证左操作数就是目标寄存器当前值。
+		return false, nil
+	}
+	if !generator.isSelfBinarySafeRightExpression(binaryExpression.Right) {
+		// 右侧若可能调用函数或触发元方法，就必须先保存左操作数，避免破坏左到右求值语义。
+		return false, nil
+	}
+	opCode, ok := binaryOpCode(binaryExpression.Operator)
+	if !ok {
+		// 未支持的二元运算回退通用路径，让通用编译器返回原有错误。
+		return false, nil
+	}
+
+	rightRegister := generator.allocateRegister()
+	if err := generator.compileExpressionTo(binaryExpression.Right, rightRegister); err != nil {
+		// 右操作数失败时释放临时寄存器并返回。
+		generator.releaseRegister(rightRegister)
+		return true, err
+	}
+	if err := generator.withSourceLine(binaryExpression.Position, func() error {
+		// 左操作数直接读取目标 local 旧值，结果也直接写回该 local。
+		generator.emitABC(opCode, binding.register, binding.register, rightRegister)
+		return nil
+	}); err != nil {
+		generator.releaseRegister(rightRegister)
+		return true, err
+	}
+	generator.releaseRegister(rightRegister)
+
+	// 自二元运算赋值已完成。
+	return true, nil
 }
 
 // compileSingleLocalSelfConcatAssignment 优化 `localName = localName .. expression`。
@@ -593,6 +656,37 @@ func isSelfConcatSafeRightExpression(expression parser.Expression) bool {
 	}
 
 	// 其他表达式保守认为可能有副作用。
+	return false
+}
+
+// isSelfBinarySafeRightExpression 判断自二元运算右侧是否不会修改目标 local。
+//
+// 当前允许字面量、当前 local 名称和已存在的 upvalue 名称；未知名称会走 `_ENV[name]`，可能触发
+// table 元方法，因此不进入快路径。复杂表达式、调用、字段和索引同样回退通用赋值路径。
+func (generator *generator) isSelfBinarySafeRightExpression(expression parser.Expression) bool {
+	if _, ok := expression.(*parser.LiteralExpression); ok {
+		// 字面量求值没有副作用，不会改变左操作数寄存器。
+		return true
+	}
+	nameExpression, ok := expression.(*parser.NameExpression)
+	if !ok {
+		// 非名称表达式可能包含调用、table 访问或嵌套运算，保守回退。
+		return false
+	}
+	if _, ok := generator.locals[nameExpression.Name]; ok {
+		// 当前 local 读取只是寄存器 MOVE，不会触发元方法或调用。
+		return true
+	}
+	if nameExpression.Name == envUpvalueName {
+		// `_ENV` 本身作为 upvalue 读取没有 table 元方法。
+		return true
+	}
+	if _, ok, err := generator.resolveUpvalue(nameExpression.Name, nameExpression.Position); err == nil && ok {
+		// 已捕获或可捕获的 upvalue 读取不会调用 Lua 代码。
+		return true
+	}
+
+	// 未知名称或 upvalue 上限错误交给通用路径保留原错误时机。
 	return false
 }
 

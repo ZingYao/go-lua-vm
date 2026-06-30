@@ -645,6 +645,35 @@ func TestCompileLocalAssignmentUsesTemporaryRegister(t *testing.T) {
 	}
 }
 
+// TestCompileSelfArithmeticAssignmentWritesDirectly 验证 local 自算术赋值直接写回目标寄存器。
+//
+// 数值 for 热循环中的 `acc = acc + i` 不应生成“复制 acc 到临时、计算临时、MOVE 回 acc”的
+// 通用赋值序列；安全右操作数为 local 名称时可以直接生成 `ADD acc, acc, temp`。
+func TestCompileSelfArithmeticAssignmentWritesDirectly(t *testing.T) {
+	chunk := parseChunkForCodegenTest(t, "local acc = 0 for i = 1, 10 do acc = acc + i end")
+
+	proto, err := CompileChunk(chunk, "self-arith-assign")
+	if err != nil {
+		// 自算术赋值样例必须可编译。
+		t.Fatalf("compile self arithmetic assignment failed: %v", err)
+	}
+	foundDirectAdd := false
+	for _, instruction := range proto.Code {
+		// 目标 local acc 使用 R0；优化后 ADD 直接写回 R0 并以 R0 作为左操作数。
+		if instruction.OpCode() == bytecode.OpAdd && instruction.A() == 0 && instruction.B() == 0 && !bytecode.IsK(instruction.C()) {
+			foundDirectAdd = true
+		}
+		if instruction.OpCode() == bytecode.OpMove && instruction.A() == 0 && instruction.B() != 0 {
+			// 旧通用赋值路径会把临时结果 MOVE 回 acc，优化后不应存在该写回。
+			t.Fatalf("unexpected MOVE back to acc from R%d", instruction.B())
+		}
+	}
+	if !foundDirectAdd {
+		// 必须存在直接写回 acc 的 ADD。
+		t.Fatalf("missing direct ADD into acc; code=%v", proto.Code)
+	}
+}
+
 // TestCompileAssignmentExpandsLastCallResults 验证普通赋值会展开最后一个调用的多返回值。
 //
 // 官方 gc.lua 的 `s, i = string.gsub(...)` 依赖 CALL C 字段请求两个返回值；否则第二个左值
