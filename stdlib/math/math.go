@@ -39,8 +39,8 @@ func Open(state *runtime.State) error {
 	numberUnaryKinds := runtime.UnaryKindMask(runtime.KindInteger, runtime.KindNumber)
 	// math 库函数以 Go closure 注册，后续 VM CALL 会通过 bridge 调用。
 	library.RawSetString("abs", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: AbsUnaryValue, AcceptedKinds: numberUnaryKinds}))
-	library.RawSetString("acos", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(ACos)))
-	library.RawSetString("asin", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(ASin)))
+	library.RawSetString("acos", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: ACosUnaryValue, AcceptedKinds: numberUnaryKinds}))
+	library.RawSetString("asin", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: ASinUnaryValue, AcceptedKinds: numberUnaryKinds}))
 	library.RawSetString("atan", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(ATan)))
 	library.RawSetString("ceil", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Ceil)))
 	library.RawSetString("cos", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: CosUnaryValue, AcceptedKinds: numberUnaryKinds}))
@@ -134,6 +134,25 @@ func ACos(args ...runtime.Value) ([]runtime.Value, error) {
 	return []runtime.Value{runtime.NumberValue(math.Acos(value))}, nil
 }
 
+// ACosUnaryValue 实现 Lua 5.3 `math.acos` 的单参数单返回热路径。
+//
+// value 必须是 number 或 integer；返回值始终是 Lua float number。该入口服务 VM CALL
+// fast path，避免标准库热点调用构造临时参数和结果切片。
+func ACosUnaryValue(value runtime.Value) (runtime.Value, error) {
+	// acos 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
+	if value.Kind != runtime.KindInteger && value.Kind != runtime.KindNumber {
+		// 非 number 入参按 Lua 标准库参数错误返回。
+		return runtime.NilValue(), badArgument("acos", 1, fmt.Sprintf("number expected, got %s", runtime.LuaErrorTypeName(value)))
+	}
+	if value.Kind == runtime.KindInteger {
+		// integer 入参转换为 float64 后计算反余弦。
+		return runtime.NumberValue(math.Acos(float64(value.Integer))), nil
+	}
+
+	// number 入参直接计算反余弦。
+	return runtime.NumberValue(math.Acos(value.Number)), nil
+}
+
 // ASin 实现 Lua 5.3 `math.asin`。
 //
 // 第一个参数必须是 number；integer 会转换为 float64。返回值是 float number，非法定义域
@@ -148,6 +167,25 @@ func ASin(args ...runtime.Value) ([]runtime.Value, error) {
 
 	// 返回反正弦结果。
 	return []runtime.Value{runtime.NumberValue(math.Asin(value))}, nil
+}
+
+// ASinUnaryValue 实现 Lua 5.3 `math.asin` 的单参数单返回热路径。
+//
+// value 必须是 number 或 integer；返回值始终是 Lua float number。该入口服务 VM CALL
+// fast path，避免标准库热点调用构造临时参数和结果切片。
+func ASinUnaryValue(value runtime.Value) (runtime.Value, error) {
+	// asin 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
+	if value.Kind != runtime.KindInteger && value.Kind != runtime.KindNumber {
+		// 非 number 入参按 Lua 标准库参数错误返回。
+		return runtime.NilValue(), badArgument("asin", 1, fmt.Sprintf("number expected, got %s", runtime.LuaErrorTypeName(value)))
+	}
+	if value.Kind == runtime.KindInteger {
+		// integer 入参转换为 float64 后计算反正弦。
+		return runtime.NumberValue(math.Asin(float64(value.Integer))), nil
+	}
+
+	// number 入参直接计算反正弦。
+	return runtime.NumberValue(math.Asin(value.Number)), nil
 }
 
 // ATan 实现 Lua 5.3 `math.atan`。
