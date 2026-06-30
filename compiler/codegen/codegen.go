@@ -452,6 +452,10 @@ func (generator *generator) compileAssignment(statement *parser.AssignmentStatem
 		// 单 table 索引赋值在 receiver/key/value 均安全时可直接生成 SETTABLE，避免临时 MOVE。
 		return err
 	}
+	if handled, err := generator.compileSingleLocalSafeAssignment(statement); handled || err != nil {
+		// 单 local 安全 RHS 可直接写回目标寄存器，避免通用赋值临时值和 MOVE。
+		return err
+	}
 	if handled, err := generator.compileSingleLocalSelfBinaryAssignment(statement); handled || err != nil {
 		// 单 local 自二元运算赋值可直接写回目标寄存器，避免通用赋值临时结果和 MOVE。
 		return err
@@ -501,6 +505,51 @@ func (generator *generator) compileAssignment(statement *parser.AssignmentStatem
 
 	// 普通赋值编译完成。
 	return nil
+}
+
+// compileSingleLocalSafeAssignment 优化 `localName = literal/localName`。
+//
+// 该优化只处理单左值、单右值，且 RHS 必须是字面量或当前 local 名称；不处理全局、upvalue、调用、
+// table 访问和多重赋值，避免改变 Lua 5.3 的求值顺序、副作用和 upvalue 捕获时机。
+func (generator *generator) compileSingleLocalSafeAssignment(statement *parser.AssignmentStatement) (bool, error) {
+	if len(statement.Left) != 1 || len(statement.Right) != 1 {
+		// 多重赋值必须先求完所有 RHS，再统一写回。
+		return false, nil
+	}
+	targetName, ok := statement.Left[0].(*parser.NameExpression)
+	if !ok {
+		// 非名称左值需要保留普通赋值地址求值语义。
+		return false, nil
+	}
+	binding, ok := generator.locals[targetName.Name]
+	if !ok {
+		// upvalue/global 写回不进入该快路径。
+		return false, nil
+	}
+	if !generator.isSafeDirectLocalAssignmentValue(statement.Right[0]) {
+		// 右侧可能有副作用或需要运行期查找时回退通用路径。
+		return false, nil
+	}
+	if err := generator.compileExpressionTo(statement.Right[0], binding.register); err != nil {
+		// RHS 编译失败时保持原始错误。
+		return true, err
+	}
+	return true, nil
+}
+
+// isSafeDirectLocalAssignmentValue 判断 RHS 是否可直接写入目标 local。
+func (generator *generator) isSafeDirectLocalAssignmentValue(expression parser.Expression) bool {
+	if _, ok := expression.(*parser.LiteralExpression); ok {
+		// 字面量没有副作用，直接 LOAD 到目标 local 等价于通用赋值。
+		return true
+	}
+	nameExpression, ok := expression.(*parser.NameExpression)
+	if !ok {
+		// 其他表达式可能触发调用、索引或全局读取。
+		return false
+	}
+	_, exists := generator.locals[nameExpression.Name]
+	return exists
 }
 
 // compileSingleSafeTableAssignment 优化 `tableExpression[keyExpression] = valueExpression`。
@@ -1648,13 +1697,15 @@ func (generator *generator) compileIfStatement(statement *parser.IfStatement) er
 	for clauseIndex := range statement.Clauses {
 		// 每个 if/elseif 条件失败时跳到下一 clause 或 else。
 		clause := statement.Clauses[clauseIndex]
-		conditionRegister := generator.allocateRegister()
+		conditionRegister, releaseConditionRegister := generator.ifConditionRegister(clause.Condition)
 		if err := generator.withSourceLine(clause.Condition.Pos(), func() error {
-			// 条件表达式自身归属表达式起始行，避免继承 if/elseif 关键字行。
-			return generator.compileExpressionTo(clause.Condition, conditionRegister)
+			// 条件表达式自身归属表达式起始行；简单 local 名称可直接复用寄存器。
+			return generator.compileIfConditionTo(clause.Condition, conditionRegister, releaseConditionRegister)
 		}); err != nil {
 			// 条件表达式编译失败时释放临时寄存器并返回。
-			generator.releaseRegister(conditionRegister)
+			if releaseConditionRegister {
+				generator.releaseRegister(conditionRegister)
+			}
 			return err
 		}
 		if err := generator.withSourceLine(clause.ThenPosition, func() error {
@@ -1663,7 +1714,9 @@ func (generator *generator) compileIfStatement(statement *parser.IfStatement) er
 			return nil
 		}); err != nil {
 			// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
-			generator.releaseRegister(conditionRegister)
+			if releaseConditionRegister {
+				generator.releaseRegister(conditionRegister)
+			}
 			return err
 		}
 		falseTargetPosition := generator.ifFalseTargetPosition(statement, clauseIndex)
@@ -1674,24 +1727,31 @@ func (generator *generator) compileIfStatement(statement *parser.IfStatement) er
 			return nil
 		}); err != nil {
 			// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
-			generator.releaseRegister(conditionRegister)
+			if releaseConditionRegister {
+				generator.releaseRegister(conditionRegister)
+			}
 			return err
 		}
-		generator.releaseRegister(conditionRegister)
+		if releaseConditionRegister {
+			generator.releaseRegister(conditionRegister)
+		}
 		if err := generator.compileScopedBlock(clause.Block); err != nil {
 			// 分支 block 编译失败时返回错误。
 			return err
 		}
-		endJumpPC := 0
-		if err := generator.withSourceLine(statement.EndPosition, func() error {
-			// 分支执行完成后跳到 if 结束，该 JMP 被执行时应报告 end 行。
-			endJumpPC = generator.emitJump(0)
-			return nil
-		}); err != nil {
-			// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
-			return err
+		if clauseIndex+1 < len(statement.Clauses) || statement.ElseBlock != nil {
+			// 当前分支后仍有 elseif/else 时，执行完 then 必须跳过后续分支。
+			endJumpPC := 0
+			if err := generator.withSourceLine(statement.EndPosition, func() error {
+				// 分支执行完成后跳到 if 结束，该 JMP 被执行时应报告 end 行。
+				endJumpPC = generator.emitJump(0)
+				return nil
+			}); err != nil {
+				// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
+				return err
+			}
+			endJumpPCs = append(endJumpPCs, endJumpPC)
 		}
-		endJumpPCs = append(endJumpPCs, endJumpPC)
 		generator.patchJump(falseJumpPC, len(generator.proto.Code))
 	}
 	if statement.ElseBlock != nil {
@@ -1718,6 +1778,29 @@ func (generator *generator) compileIfStatement(statement *parser.IfStatement) er
 
 	// if 语句编译完成。
 	return nil
+}
+
+// ifConditionRegister 选择 if 条件 TEST 使用的寄存器。
+//
+// 当前 local 名称条件可直接复用已有寄存器，避免 `if a then` 额外生成 MOVE；其他表达式仍分配
+// 临时寄存器以保留求值、副作用和错误语义。
+func (generator *generator) ifConditionRegister(expression parser.Expression) (register int, release bool) {
+	if nameExpression, ok := expression.(*parser.NameExpression); ok {
+		if binding, exists := generator.locals[nameExpression.Name]; exists {
+			// 当前 local 读取不会触发元方法或调用，TEST 可直接读取其寄存器。
+			return binding.register, false
+		}
+	}
+	return generator.allocateRegister(), true
+}
+
+// compileIfConditionTo 编译 if 条件表达式到 TEST 使用的寄存器。
+func (generator *generator) compileIfConditionTo(expression parser.Expression, targetRegister int, targetIsTemporary bool) error {
+	if !targetIsTemporary {
+		// 非临时目标只会来自当前 local 名称，源值已在寄存器中，无需生成 MOVE。
+		return nil
+	}
+	return generator.compileExpressionTo(expression, targetRegister)
 }
 
 // ifFalseTargetPosition 返回 if/elseif 条件失败时跳转指令应标注的源码行。

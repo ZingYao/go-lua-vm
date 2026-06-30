@@ -135,6 +135,51 @@ func TestCompileChunkIfStatement(t *testing.T) {
 	}
 }
 
+// TestCompileChunkIfLocalConditionReusesRegister 验证 if local 条件直接复用寄存器。
+//
+// Lua 5.3 官方 codegen 对 `if a then` 直接 TEST local 寄存器；不需要先 MOVE 到临时槽。
+func TestCompileChunkIfLocalConditionReusesRegister(t *testing.T) {
+	chunk := parseChunkForCodegenTest(t, "local a = true local out = 0 if a then out = 1 end return out")
+
+	proto, err := CompileChunk(chunk, "if-local-condition")
+	if err != nil {
+		// 合法 if local 条件不应编译失败。
+		t.Fatalf("compile if-local-condition failed: %v", err)
+	}
+	testInstruction, ok := firstInstruction(proto, bytecode.OpTest)
+	if !ok {
+		// if 条件必须生成 TEST 指令。
+		t.Fatalf("expected TEST instruction")
+	}
+	if testInstruction.A() != 0 {
+		// local a 位于 R0，TEST 应直接读取它而不是临时寄存器。
+		t.Fatalf("TEST should use local register R0, got R%d", testInstruction.A())
+	}
+	if hasMove(proto, 2, 0) {
+		// 旧形态会把 a MOVE 到第一个临时寄存器 R2 后再 TEST。
+		t.Fatalf("unexpected MOVE from local condition into temporary register")
+	}
+	if proto.MaxStackSize != 2 {
+		// 条件和 then 内简单赋值都不需要额外临时寄存器，应与官方 Lua 5.3 同为两个栈槽。
+		t.Fatalf("unexpected max stack=%d", proto.MaxStackSize)
+	}
+	loadOne := false
+	for _, instruction := range proto.Code {
+		if instruction.OpCode() == bytecode.OpLoadK && instruction.A() == 1 {
+			// then 分支中的 out = 1 应直接加载到 out 的寄存器 R1。
+			loadOne = true
+		}
+	}
+	if !loadOne {
+		// 没有直接 LOADK 到 R1 说明仍走了临时寄存器再 MOVE 的通用赋值路径。
+		t.Fatalf("expected direct LOADK into local out")
+	}
+	if len(proto.Code) != 6 {
+		// 单分支 if 后没有后续分支，then 结束后应自然落到 return，不需要零距离 JMP。
+		t.Fatalf("unexpected instruction count=%d code=%v", len(proto.Code), proto.Code)
+	}
+}
+
 // TestCompileChunkWhileStatement 验证 while 语句生成 TEST 和回跳 JMP。
 //
 // 当前测试覆盖官方 main.lua 早期使用的条件循环形态，运行时跳转语义由 VM JMP/TEST 测试承担。
