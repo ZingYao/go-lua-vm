@@ -561,6 +561,10 @@ func TestNewLuaClosureCachesDirectCallSafe(t *testing.T) {
 		// 只有 RETURN 的叶子函数应被标记为 direct CALL safe。
 		t.Fatalf("leaf closure should be direct-call safe")
 	}
+	if leafClosure.LeafAddReturn != nil {
+		// 只有 RETURN 的叶子函数不是 ADD;RETURN 形态。
+		t.Fatalf("return-only closure should not cache leaf add")
+	}
 
 	callingProto := &bytecode.Proto{
 		Code: []bytecode.Instruction{
@@ -572,6 +576,36 @@ func TestNewLuaClosureCachesDirectCallSafe(t *testing.T) {
 	if callingClosure.DirectCallSafe {
 		// 含 CALL 的函数不能进入 leaf direct CALL 路径。
 		t.Fatalf("calling closure should not be direct-call safe")
+	}
+	if callingClosure.LeafAddReturn != nil {
+		// 含 CALL 的函数不能缓存 ADD;RETURN 形态。
+		t.Fatalf("calling closure should not cache leaf add")
+	}
+
+	addProto := &bytecode.Proto{
+		Constants: []bytecode.Constant{bytecode.IntegerConstant(1)},
+		Code: []bytecode.Instruction{
+			bytecode.CreateABC(bytecode.OpAdd, 1, 0, bytecode.RKAsK(0)),
+			bytecode.CreateABC(bytecode.OpReturn, 1, 2, 0),
+		},
+	}
+	addClosure := NewLuaClosure(addProto, nil, nil)
+	if addClosure.LeafAddReturn == nil || addClosure.LeafAddReturn.AddInstruction.OpCode() != bytecode.OpAdd {
+		// ADD;RETURN 形态应在 closure 创建时缓存，避免调用热路径重复扫描 Proto。
+		t.Fatalf("add closure should cache leaf add")
+	}
+
+	upvalueAddProto := &bytecode.Proto{
+		Code: []bytecode.Instruction{
+			bytecode.CreateABC(bytecode.OpGetUpval, 1, 0, 0),
+			bytecode.CreateABC(bytecode.OpAdd, 1, 0, 1),
+			bytecode.CreateABC(bytecode.OpReturn, 1, 2, 0),
+		},
+	}
+	upvalueAddClosure := NewLuaClosure(upvalueAddProto, nil, nil)
+	if upvalueAddClosure.LeafAddReturn == nil || !upvalueAddClosure.LeafAddReturn.HasUpvalueRegister || upvalueAddClosure.LeafAddReturn.UpvalueIndex != 0 {
+		// GETUPVAL;ADD;RETURN 形态也应缓存 upvalue 元数据。
+		t.Fatalf("upvalue add closure should cache leaf add metadata")
 	}
 }
 

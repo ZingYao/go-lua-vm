@@ -165,12 +165,31 @@ type LuaClosure struct {
 	UpvalueCells []*UpvalueCell
 	// DirectCallSafe 表示该 closure 的 Proto 可走 Lua 叶子函数 direct CALL 快路径。
 	DirectCallSafe bool
+	// LeafAddReturn 保存 ADD;RETURN 叶子函数的预解析形态，nil 表示不能走 caller-side 加法快路径。
+	LeafAddReturn *LuaLeafAddReturn
+}
+
+// LuaLeafAddReturn 保存 `ADD;RETURN` 或 `GETUPVAL;ADD;RETURN` 叶子函数快路径元数据。
+//
+// AddInstruction 和 ReturnInstruction 来自不可变 Proto；HasUpvalueRegister 为 true 时，
+// UpvalueRegister 表示 GETUPVAL 写入的临时寄存器，UpvalueIndex 表示被读取的 closure upvalue。
+type LuaLeafAddReturn struct {
+	// AddInstruction 保存实际 ADD 指令。
+	AddInstruction bytecode.Instruction
+	// ReturnInstruction 保存 ADD 后的 RETURN 指令。
+	ReturnInstruction bytecode.Instruction
+	// UpvalueRegister 保存可由 upvalue 直接替代的 GETUPVAL 目标寄存器。
+	UpvalueRegister int
+	// UpvalueIndex 保存 GETUPVAL 读取的 upvalue 下标。
+	UpvalueIndex int
+	// HasUpvalueRegister 表示该叶子函数带 GETUPVAL 前缀。
+	HasUpvalueRegister bool
 }
 
 // NewLuaClosure 创建带运行期缓存属性的 Lua closure。
 //
 // proto 必须是不可变 Lua 函数原型；upvalues/upvalueCells 由调用方按捕获语义准备。返回 closure
-// 会缓存 direct CALL 安全性，避免热循环中每次 CALL 重复扫描 Proto 指令。
+// 会缓存 direct CALL 安全性和极小叶子函数形态，避免热循环中每次 CALL 重复扫描 Proto 指令。
 func NewLuaClosure(proto *bytecode.Proto, upvalues []Value, upvalueCells []*UpvalueCell) *LuaClosure {
 	// 创建 closure 时一次性计算不可变 Proto 的 direct CALL 属性。
 	return &LuaClosure{
@@ -178,6 +197,7 @@ func NewLuaClosure(proto *bytecode.Proto, upvalues []Value, upvalueCells []*Upva
 		Upvalues:       upvalues,
 		UpvalueCells:   upvalueCells,
 		DirectCallSafe: luaProtoDirectCallSafe(proto),
+		LeafAddReturn:  luaProtoLeafAddReturn(proto),
 	}
 }
 
@@ -197,6 +217,43 @@ func luaProtoDirectCallSafe(proto *bytecode.Proto) bool {
 		}
 	}
 	return true
+}
+
+// luaProtoLeafAddReturn 预解析 `ADD;RETURN` 叶子函数形态。
+//
+// proto 必须是不可变函数原型；返回 nil 表示不支持 caller-side 原生加法快路径。
+func luaProtoLeafAddReturn(proto *bytecode.Proto) *LuaLeafAddReturn {
+	if proto == nil {
+		// 缺少 Proto 时不能识别叶子函数。
+		return nil
+	}
+	prefixLength := 0
+	leaf := LuaLeafAddReturn{}
+	if len(proto.Code) == 3 && proto.Code[0].OpCode() == bytecode.OpGetUpval {
+		// 闭包捕获常量形态通常先 GETUPVAL 到临时寄存器，再 ADD 后 RETURN。
+		getUpvalueInstruction := proto.Code[0]
+		leaf.UpvalueRegister = getUpvalueInstruction.A()
+		leaf.UpvalueIndex = getUpvalueInstruction.B()
+		leaf.HasUpvalueRegister = true
+		prefixLength = 1
+	}
+	if len(proto.Code) != prefixLength+2 {
+		// 当前只处理 ADD;RETURN 或 GETUPVAL;ADD;RETURN 两种极小形态。
+		return nil
+	}
+	addInstruction := proto.Code[prefixLength]
+	returnInstruction := proto.Code[prefixLength+1]
+	if addInstruction.OpCode() != bytecode.OpAdd || returnInstruction.OpCode() != bytecode.OpReturn {
+		// 只识别 ADD 后接 RETURN 的极小函数。
+		return nil
+	}
+	if returnInstruction.A() != addInstruction.A() || returnInstruction.B() != 2 {
+		// 只处理返回 ADD 单个结果的形态。
+		return nil
+	}
+	leaf.AddInstruction = addInstruction
+	leaf.ReturnInstruction = returnInstruction
+	return &leaf
 }
 
 // UpvalueCell 表示一个可共享的 Lua upvalue 存储槽。

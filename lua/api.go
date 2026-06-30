@@ -3496,42 +3496,27 @@ func executeLuaCallRequestDirect(state *State, callerVM *runtime.VM, functionVal
 // 原生加法，字符串数字和元方法语义回退原 VM 执行路径。
 func tryExecuteLeafAddReturnInCaller(callerVM *runtime.VM, closure *runtime.LuaClosure, callRequest *runtime.CallRequest) (bool, error) {
 	// 先校验调用形态和函数体形态，避免对普通 Lua 函数改变执行路径。
-	if callerVM == nil || closure == nil || closure.Proto == nil || callRequest == nil || callRequest.ArgumentCount != 1 || callRequest.ReturnCount != 1 {
+	if callerVM == nil || closure == nil || closure.Proto == nil || closure.LeafAddReturn == nil || callRequest == nil || callRequest.ArgumentCount != 1 || callRequest.ReturnCount != 1 {
 		// 非单参数单返回或非两指令叶子函数，交给原 direct CALL。
 		return false, nil
 	}
 	proto := closure.Proto
-	prefixLength := 0
 	var upvalueRegister int
 	var upvalueValue runtime.Value
 	var hasUpvalueRegister bool
-	if len(proto.Code) == 3 && proto.Code[0].OpCode() == bytecode.OpGetUpval {
-		// 闭包捕获常量形态通常先 GETUPVAL 到临时寄存器，再 ADD 后 RETURN。
-		getUpvalueInstruction := proto.Code[0]
-		upvalueRegister = getUpvalueInstruction.A()
+	leafAddReturn := closure.LeafAddReturn
+	if leafAddReturn.HasUpvalueRegister {
+		// 闭包捕获常量形态可直接读取 upvalue cell，避免每次解释 GETUPVAL。
+		upvalueRegister = leafAddReturn.UpvalueRegister
 		var ok bool
-		upvalueValue, ok = luaClosureUpvalueValue(closure, getUpvalueInstruction.B())
+		upvalueValue, ok = luaClosureUpvalueValue(closure, leafAddReturn.UpvalueIndex)
 		if !ok {
 			// upvalue 状态异常时回退原 VM 路径生成标准错误。
 			return false, nil
 		}
 		hasUpvalueRegister = true
-		prefixLength = 1
 	}
-	if len(proto.Code) != prefixLength+2 {
-		// 当前只处理 ADD;RETURN 或 GETUPVAL;ADD;RETURN 两种极小形态。
-		return false, nil
-	}
-	addInstruction := proto.Code[prefixLength]
-	returnInstruction := proto.Code[prefixLength+1]
-	if addInstruction.OpCode() != bytecode.OpAdd || returnInstruction.OpCode() != bytecode.OpReturn {
-		// 只识别 ADD 后接 RETURN 的极小函数。
-		return false, nil
-	}
-	if returnInstruction.A() != addInstruction.A() || returnInstruction.B() != 2 {
-		// 只处理返回 ADD 单个结果的形态。
-		return false, nil
-	}
+	addInstruction := leafAddReturn.AddInstruction
 	leftValue, leftOK := luaLeafAddOperandValue(callerVM, proto, callRequest.FunctionIndex+1, addInstruction.B(), upvalueRegister, upvalueValue, hasUpvalueRegister)
 	if !leftOK {
 		// 操作数无法在 caller 侧无副作用读取时回退。
