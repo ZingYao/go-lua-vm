@@ -2833,6 +2833,11 @@ func (vm *VM) tryCachedNativeNumberDivArithmetic(instruction bytecode.Instructio
 	}
 	leftValue := vm.registers[cacheEntry.leftIndex]
 	rightValue := vm.registers[cacheEntry.rightIndex]
+	if leftValue.Kind == KindInteger && rightValue.Kind == KindInteger {
+		// 双 integer 是算术循环常见 DIV 形态，直接按 float64 除法写回 number。
+		vm.registers[instruction.A()] = NumberValue(float64(leftValue.Integer) / float64(rightValue.Integer))
+		return true, nil
+	}
 	leftNumber, leftOK := nativeNumberValue(leftValue)
 	rightNumber, rightOK := nativeNumberValue(rightValue)
 	if !leftOK || !rightOK {
