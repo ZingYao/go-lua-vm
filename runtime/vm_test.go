@@ -1293,6 +1293,60 @@ func TestVMMulNumberConstantFastPath(t *testing.T) {
 	}
 }
 
+// TestVMDivNativeNumberFastPath 验证 DIV 的原生 number/integer 窄快路径。
+//
+// Lua 5.3 的 `/` 总是返回 float number；快路径必须覆盖原生数值，并让字符串数字继续走
+// 完整算术转换路径。
+func TestVMDivNativeNumberFastPath(t *testing.T) {
+	tests := []struct {
+		name          string
+		leftValue     Value
+		rightValue    Value
+		expectedValue Value
+	}{
+		{
+			name:          "integer division returns number",
+			leftValue:     IntegerValue(7),
+			rightValue:    IntegerValue(2),
+			expectedValue: NumberValue(3.5),
+		},
+		{
+			name:          "number division",
+			leftValue:     NumberValue(9),
+			rightValue:    NumberValue(4.5),
+			expectedValue: NumberValue(2),
+		},
+		{
+			name:          "string number falls back",
+			leftValue:     StringValue("8"),
+			rightValue:    StringValue("2"),
+			expectedValue: NumberValue(4),
+		},
+	}
+
+	for _, testCase := range tests {
+		// 每个形态独立构造寄存器窗口，避免前一个用例的目标寄存器影响结果。
+		vm := NewVM(3)
+		if err := vm.SetRegister(1, testCase.leftValue); err != nil {
+			// 测试准备阶段必须能写入左操作数。
+			t.Fatalf("%s set left register failed: %v", testCase.name, err)
+		}
+		if err := vm.SetRegister(2, testCase.rightValue); err != nil {
+			// 测试准备阶段必须能写入右操作数。
+			t.Fatalf("%s set right register failed: %v", testCase.name, err)
+		}
+		if err := vm.Step(bytecode.CreateABC(bytecode.OpDiv, 0, 1, 2)); err != nil {
+			// 合法除法不应失败。
+			t.Fatalf("%s failed: %v", testCase.name, err)
+		}
+		value, ok := vm.Register(0)
+		if !ok || !value.RawEqual(testCase.expectedValue) {
+			// 目标寄存器必须保存除法结果。
+			t.Fatalf("%s value mismatch: value=%#v ok=%v", testCase.name, value, ok)
+		}
+	}
+}
+
 // TestVMBinaryArithmeticErrors 验证二元算术指令的错误边界。
 //
 // 算术错误必须返回明确错误，并保持目标寄存器原值。

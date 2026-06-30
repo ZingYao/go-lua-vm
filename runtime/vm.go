@@ -1665,7 +1665,7 @@ func (vm *VM) Step(instruction bytecode.Instruction) error {
 		return vm.executeBinaryArithmetic(instruction, binaryArithmeticPow, metamethodPow)
 	case bytecode.OpDiv:
 		// DIV 执行 Lua 5.3 浮点除法，结果为 float number。
-		return vm.executeBinaryArithmetic(instruction, binaryArithmeticDiv, metamethodDiv)
+		return vm.executeDiv(instruction)
 	case bytecode.OpIDiv:
 		// IDIV 执行 Lua 5.3 向下取整除法。
 		return vm.executeBinaryArithmetic(instruction, binaryArithmeticIDiv, metamethodIDiv)
@@ -2427,6 +2427,39 @@ func (vm *VM) executeMul(instruction bytecode.Instruction) error {
 	}, metamethodMul)
 }
 
+// executeDiv 执行 Lua 5.3 OP_DIV 指令。
+//
+// instruction 的 A 是目标寄存器，B/C 使用 RK 编码读取操作数。原生 integer/number 直接按
+// float64 除法写回；字符串数字、非数值和元方法语义回退完整二元算术路径。
+func (vm *VM) executeDiv(instruction bytecode.Instruction) error {
+	targetIndex := instruction.A()
+	if targetIndex < 0 || targetIndex >= len(vm.registers) {
+		// 目标寄存器越界时不能写入，避免破坏寄存器窗口。
+		return ErrRegisterOutOfRange
+	}
+
+	leftValue, err := vm.rkValue(instruction.B())
+	if err != nil {
+		// 左操作数读取失败时不能继续计算，目标寄存器保持原值。
+		return err
+	}
+	rightValue, err := vm.rkValue(instruction.C())
+	if err != nil {
+		// 右操作数读取失败时不能继续计算，目标寄存器保持原值。
+		return err
+	}
+	leftNumber, leftOK := nativeNumberValue(leftValue)
+	rightNumber, rightOK := nativeNumberValue(rightValue)
+	if leftOK && rightOK {
+		// Lua 5.3 的 `/` 总是返回 float number，零除保留 IEEE-754 Inf/NaN 语义。
+		vm.registers[targetIndex] = NumberValue(leftNumber / rightNumber)
+		return nil
+	}
+
+	// 非原生数值继续使用完整路径，保留字符串数字转换和 __div 元方法。
+	return vm.executeBinaryArithmetic(instruction, binaryArithmeticDiv, metamethodDiv)
+}
+
 // tryNumberConstantMul 执行寄存器数值与 number 常量相乘的窄快路径。
 //
 // instruction 必须是 MUL；只处理一侧为寄存器、另一侧为 Proto number 常量，且寄存器运行期值是
@@ -2487,6 +2520,23 @@ func (vm *VM) tryNumberConstantMul(instruction bytecode.Instruction) (bool, erro
 	}
 	vm.registers[targetIndex] = NumberValue(registerNumber * constant.Number)
 	return true, nil
+}
+
+// nativeNumberValue 只把真实 integer/number 转为 Lua number。
+//
+// 该 helper 用于 VM 窄快路径；字符串数字必须返回 false，让完整算术路径处理字符串转换和元方法。
+func nativeNumberValue(value Value) (float64, bool) {
+	switch value.Kind {
+	case KindInteger:
+		// integer 参与浮点算术时按 Lua number 转换。
+		return float64(value.Integer), true
+	case KindNumber:
+		// number 可直接作为 float64 使用。
+		return value.Number, true
+	default:
+		// 字符串、table、userdata 等必须交给完整 Lua 算术路径。
+		return 0, false
+	}
 }
 
 // executeFastArithmetic 执行 ADD/SUB/MUL 的低风险热路径。
