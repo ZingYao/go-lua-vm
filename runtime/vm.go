@@ -718,9 +718,25 @@ func (vm *VM) tryLeafRegisterUpvalueAdd(closure *LuaClosure, leaf *LuaLeafAddRet
 		// caller 实参区缺失时回退完整 VM 路径。
 		return false, nil
 	}
-	upvalueValue, ok := luaClosureUpvalueValue(closure, leaf.UpvalueIndex)
-	if !ok {
+	upvalueIndex := leaf.UpvalueIndex
+	if closure == nil || upvalueIndex < 0 {
 		// upvalue 状态异常时回退原 VM 路径生成标准错误。
+		return false, nil
+	}
+	var upvalueValue Value
+	if upvalueIndex < len(closure.UpvalueCells) {
+		// 共享 cell 优先反映外层局部变量当前值。
+		cell := closure.UpvalueCells[upvalueIndex]
+		if cell == nil {
+			// 损坏 cell 回退完整 VM，由原路径暴露错误。
+			return false, nil
+		}
+		upvalueValue = cell.Value()
+	} else if upvalueIndex < len(closure.Upvalues) {
+		// 没有共享 cell 时使用闭包创建时的 upvalue 快照。
+		upvalueValue = closure.Upvalues[upvalueIndex]
+	} else {
+		// upvalue 越界时回退原 VM 路径生成标准错误。
 		return false, nil
 	}
 	resultValue, ok := leafFastAddValue(vm.registers[registerIndex], upvalueValue)
