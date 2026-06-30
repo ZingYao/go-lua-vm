@@ -96,8 +96,10 @@ type VM struct {
 	returnValues []Value
 	// returnInline 保存少量返回值，避免普通 Lua 函数每次 return 都分配切片底层数组。
 	returnInline [2]Value
-	// arithmeticIntRegisterCache 按 PC 标记算术指令最近命中过的寄存器 integer+integer 热路径。
+	// arithmeticIntRegisterCache 按 PC 标记算术指令最近命中过的 integer 热路径。
 	arithmeticIntRegisterCache []byte
+	// arithmeticIntOperandCache 按 PC 记录 integer 算术热路径的 RK 操作数形态和值。
+	arithmeticIntOperandCache []arithmeticIntOperandCacheEntry
 	// arithmeticIntRegisterCacheProto 记录 arithmeticIntRegisterCache 对应的 Proto，避免 VM 池复用时误用旧缓存。
 	arithmeticIntRegisterCacheProto *bytecode.Proto
 	// stringTableReadCache 按 PC 缓存无元表 table 的字符串常量 key 读取结果。
@@ -116,6 +118,25 @@ const (
 	// arithmeticIntRegisterCacheMul 表示当前 PC 最近命中过 MUL 的双 integer 寄存器路径。
 	arithmeticIntRegisterCacheMul
 )
+
+// arithmeticIntOperandCacheEntry 表示一条 integer 算术 inline cache 的操作数形态。
+//
+// 寄存器操作数保存寄存器索引，运行期仍检查 KindInteger；常量操作数保存不可变常量值，命中后
+// 不再重复访问 Proto 常量表。
+type arithmeticIntOperandCacheEntry struct {
+	// leftIndex 保存左操作数为寄存器时的寄存器索引。
+	leftIndex int
+	// rightIndex 保存右操作数为寄存器时的寄存器索引。
+	rightIndex int
+	// leftConstant 保存左操作数为 integer 常量时的常量值。
+	leftConstant int64
+	// rightConstant 保存右操作数为 integer 常量时的常量值。
+	rightConstant int64
+	// leftConstantOperand 表示左操作数来自 RK 常量表。
+	leftConstantOperand bool
+	// rightConstantOperand 表示右操作数来自 RK 常量表。
+	rightConstantOperand bool
+}
 
 // stringTableReadCacheEntry 表示一条字符串常量 table 读取 inline cache。
 //
@@ -534,18 +555,21 @@ func (vm *VM) BindPrototype(proto *bytecode.Proto) {
 		// 手工 VM 或测试路径没有 Proto，不启用指令级热路径缓存。
 		vm.arithmeticIntRegisterCacheProto = nil
 		vm.arithmeticIntRegisterCache = nil
+		vm.arithmeticIntOperandCache = nil
 		vm.stringTableReadCacheProto = nil
 		vm.stringTableReadCache = nil
 		return
 	}
-	if vm.arithmeticIntRegisterCacheProto != proto || len(vm.arithmeticIntRegisterCache) < len(proto.Code) {
+	if vm.arithmeticIntRegisterCacheProto != proto || len(vm.arithmeticIntRegisterCache) < len(proto.Code) || len(vm.arithmeticIntOperandCache) < len(proto.Code) {
 		// VM 池复用到不同 Proto 时必须重建缓存，避免 PC 相同但指令不同导致错误命中。
 		vm.arithmeticIntRegisterCacheProto = proto
 		vm.arithmeticIntRegisterCache = make([]byte, len(proto.Code))
+		vm.arithmeticIntOperandCache = make([]arithmeticIntOperandCacheEntry, len(proto.Code))
 	} else {
 		// 同一 Proto 理论上 Code 长度稳定；防御异常缩短时清掉越界尾部缓存。
 		for pc := len(proto.Code); pc < len(vm.arithmeticIntRegisterCache); pc++ {
 			vm.arithmeticIntRegisterCache[pc] = arithmeticIntRegisterCacheNone
+			vm.arithmeticIntOperandCache[pc] = arithmeticIntOperandCacheEntry{}
 		}
 	}
 	if vm.stringTableReadCacheProto != proto || len(vm.stringTableReadCache) < len(proto.Code) {
@@ -1703,23 +1727,25 @@ func (vm *VM) executeFastArithmetic(instruction bytecode.Instruction, cacheKind 
 // 返回 handled 表示指令已经成功写回；当缓存记录存在但操作数形态或类型不再匹配时会清除
 // 缓存并返回 handled=false，让调用方回到完整 Lua 语义。
 func (vm *VM) tryCachedIntegerRegisterArithmetic(instruction bytecode.Instruction, cacheKind byte, integerOperation func(int64, int64) int64) (bool, error) {
-	if vm.currentPC < 0 || vm.currentPC >= len(vm.arithmeticIntRegisterCache) || vm.arithmeticIntRegisterCache[vm.currentPC] != cacheKind {
+	currentPC := vm.currentPC
+	if currentPC < 0 || currentPC >= len(vm.arithmeticIntRegisterCache) || currentPC >= len(vm.arithmeticIntOperandCache) || vm.arithmeticIntRegisterCache[currentPC] != cacheKind {
 		// 当前 PC 没有目标算术缓存，调用方继续走普通 RK 路径。
 		return false, nil
 	}
 
-	leftOperand := instruction.B()
-	rightOperand := instruction.C()
-	leftInteger, leftOK, leftErr := vm.cachedIntegerArithmeticOperand(leftOperand)
-	rightInteger, rightOK, rightErr := vm.cachedIntegerArithmeticOperand(rightOperand)
+	cacheEntry := vm.arithmeticIntOperandCache[currentPC]
+	leftInteger, leftOK, leftErr := vm.cachedIntegerArithmeticEntryValue(cacheEntry.leftIndex, cacheEntry.leftConstant, cacheEntry.leftConstantOperand)
+	rightInteger, rightOK, rightErr := vm.cachedIntegerArithmeticEntryValue(cacheEntry.rightIndex, cacheEntry.rightConstant, cacheEntry.rightConstantOperand)
 	if leftErr != nil || rightErr != nil {
 		// 指令形态或寄存器窗口变化时清理缓存，并回到通用 RK 路径报出原始错误。
-		vm.arithmeticIntRegisterCache[vm.currentPC] = arithmeticIntRegisterCacheNone
+		vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
+		vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
 		return false, nil
 	}
 	if !leftOK || !rightOK {
 		// 类型不再匹配时清理缓存，后续走完整 Lua 算术和元方法语义。
-		vm.arithmeticIntRegisterCache[vm.currentPC] = arithmeticIntRegisterCacheNone
+		vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
+		vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
 		return false, nil
 	}
 
@@ -1732,49 +1758,80 @@ func (vm *VM) tryCachedIntegerRegisterArithmetic(instruction bytecode.Instructio
 //
 // 只有 B/C 都是寄存器或 integer 常量时才记录缓存；其他 RK 常量保留通用读取路径。
 func (vm *VM) rememberIntegerRegisterArithmetic(leftOperand int, rightOperand int, cacheKind byte) {
-	if vm.currentPC < 0 || vm.currentPC >= len(vm.arithmeticIntRegisterCache) {
+	currentPC := vm.currentPC
+	if currentPC < 0 || currentPC >= len(vm.arithmeticIntRegisterCache) || currentPC >= len(vm.arithmeticIntOperandCache) {
 		// 无效 PC 不适合缓存，直接保留完整 RK 路径。
 		return
 	}
-	if _, ok, err := vm.cachedIntegerArithmeticOperand(leftOperand); err != nil || !ok {
+	leftCache, ok, err := vm.integerArithmeticOperandCacheEntry(leftOperand)
+	if err != nil || !ok {
 		// 左操作数不是可缓存 integer 时保留完整 RK 路径。
 		return
 	}
-	if _, ok, err := vm.cachedIntegerArithmeticOperand(rightOperand); err != nil || !ok {
+	rightCache, ok, err := vm.integerArithmeticOperandCacheEntry(rightOperand)
+	if err != nil || !ok {
 		// 右操作数不是可缓存 integer 时保留完整 RK 路径。
 		return
 	}
 
 	// 记录当前 PC 的 integer 热路径，下次同类算术可跳过通用 RK 读取和 number fallback。
-	vm.arithmeticIntRegisterCache[vm.currentPC] = cacheKind
+	vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{
+		leftIndex:            leftCache.leftIndex,
+		rightIndex:           rightCache.leftIndex,
+		leftConstant:         leftCache.leftConstant,
+		rightConstant:        rightCache.leftConstant,
+		leftConstantOperand:  leftCache.leftConstantOperand,
+		rightConstantOperand: rightCache.leftConstantOperand,
+	}
+	vm.arithmeticIntRegisterCache[currentPC] = cacheKind
 }
 
-// cachedIntegerArithmeticOperand 读取已确认可缓存算术指令的 integer 操作数。
+// integerArithmeticOperandCacheEntry 为可缓存 integer RK 操作数构造缓存项。
 //
-// rk 可指向寄存器或 integer 常量；返回 ok=false 表示运行期类型发生变化，需要清理缓存并回到
-// 完整 Lua 算术语义。
-func (vm *VM) cachedIntegerArithmeticOperand(rk int) (int64, bool, error) {
+// rk 可指向寄存器或 integer 常量；寄存器操作数只记录索引，命中时继续检查运行期类型。
+func (vm *VM) integerArithmeticOperandCacheEntry(rk int) (arithmeticIntOperandCacheEntry, bool, error) {
 	index := bytecode.IndexK(rk)
 	if bytecode.IsK(rk) {
 		// RK 常量路径只接受 Proto 中的 integer 常量，其他常量交给通用算术路径处理。
 		if index < 0 || index >= len(vm.constants) {
 			// 常量索引越界通常表示损坏 chunk 或编译器输出错误。
-			return 0, false, ErrConstantOutOfRange
+			return arithmeticIntOperandCacheEntry{}, false, ErrConstantOutOfRange
 		}
 		constant := vm.constants[index]
 		if constant.Kind != bytecode.ConstantInteger {
 			// 非 integer 常量不能走整数算术快路径。
-			return 0, false, nil
+			return arithmeticIntOperandCacheEntry{}, false, nil
 		}
-		return constant.Integer, true, nil
+		return arithmeticIntOperandCacheEntry{leftConstant: constant.Integer, leftConstantOperand: true}, true, nil
 	}
 	if index < 0 || index >= len(vm.registers) {
 		// RK 寄存器路径越界时不能读取寄存器窗口。
-		return 0, false, ErrRegisterOutOfRange
+		return arithmeticIntOperandCacheEntry{}, false, ErrRegisterOutOfRange
 	}
 	value := vm.registers[index]
 	if value.Kind != KindInteger {
 		// 非 integer 寄存器值需要回到完整 number/string/metamethod 语义。
+		return arithmeticIntOperandCacheEntry{}, false, nil
+	}
+	return arithmeticIntOperandCacheEntry{leftIndex: index}, true, nil
+}
+
+// cachedIntegerArithmeticEntryValue 读取 integer 算术缓存项当前值。
+//
+// 常量操作数直接返回缓存值；寄存器操作数必须重新检查边界与 KindInteger，保证运行期类型变化
+// 能回退完整 Lua 算术语义。
+func (vm *VM) cachedIntegerArithmeticEntryValue(registerIndex int, constantValue int64, constantOperand bool) (int64, bool, error) {
+	if constantOperand {
+		// Proto 常量不可变，命中后可直接复用缓存值。
+		return constantValue, true, nil
+	}
+	if registerIndex < 0 || registerIndex >= len(vm.registers) {
+		// 寄存器窗口变化时缓存失效，调用方回退通用路径。
+		return 0, false, ErrRegisterOutOfRange
+	}
+	value := vm.registers[registerIndex]
+	if value.Kind != KindInteger {
+		// 寄存器运行期类型变化时缓存失效。
 		return 0, false, nil
 	}
 	return value.Integer, true, nil
