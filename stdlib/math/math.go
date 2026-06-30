@@ -36,16 +36,16 @@ func Open(state *runtime.State) error {
 	}
 
 	library := runtime.NewTable()
+	numberUnaryKinds := runtime.UnaryKindMask(runtime.KindInteger, runtime.KindNumber)
 	// math 库函数以 Go closure 注册，后续 VM CALL 会通过 bridge 调用。
 	library.RawSetString("abs", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Abs)))
 	library.RawSetString("acos", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(ACos)))
 	library.RawSetString("asin", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(ASin)))
 	library.RawSetString("atan", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(ATan)))
 	library.RawSetString("ceil", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Ceil)))
-	library.RawSetString("cos", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Cos)))
+	library.RawSetString("cos", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: CosUnaryValue, AcceptedKinds: numberUnaryKinds}))
 	library.RawSetString("deg", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Deg)))
 	library.RawSetString("exp", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Exp)))
-	numberUnaryKinds := runtime.UnaryKindMask(runtime.KindInteger, runtime.KindNumber)
 	library.RawSetString("floor", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: FloorUnaryValue, AcceptedKinds: numberUnaryKinds}))
 	library.RawSetString("fmod", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(FMod)))
 	library.RawSetString("huge", runtime.NumberValue(math.Inf(1)))
@@ -192,6 +192,25 @@ func Cos(args ...runtime.Value) ([]runtime.Value, error) {
 
 	// 返回余弦结果。
 	return []runtime.Value{runtime.NumberValue(math.Cos(value))}, nil
+}
+
+// CosUnaryValue 实现 Lua 5.3 `math.cos` 的单参数单返回热路径。
+//
+// value 必须是 number 或 integer；返回值始终是 Lua float number。该入口服务 VM CALL
+// fast path，避免标准库热点调用构造临时参数和结果切片。
+func CosUnaryValue(value runtime.Value) (runtime.Value, error) {
+	// cos 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
+	if value.Kind != runtime.KindInteger && value.Kind != runtime.KindNumber {
+		// 非 number 入参按 Lua 标准库参数错误返回。
+		return runtime.NilValue(), badArgument("cos", 1, fmt.Sprintf("number expected, got %s", runtime.LuaErrorTypeName(value)))
+	}
+	if value.Kind == runtime.KindInteger {
+		// integer 入参转换为 float64 后计算三角函数。
+		return runtime.NumberValue(math.Cos(float64(value.Integer))), nil
+	}
+
+	// number 入参直接计算三角函数。
+	return runtime.NumberValue(math.Cos(value.Number)), nil
 }
 
 // Deg 实现 Lua 5.3 `math.deg`。
