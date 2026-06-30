@@ -3345,13 +3345,30 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 			}
 			var resultCount int
 			var handled bool
-			resultCount, handled, err = callGoFixedResultsFunctionWithDebugFrame(state, functionValue, fixedFunction, resultSlots, debugName, debugNameWhat, false, arguments...)
+			if !hooksEnabled && fixedFunction != nil && fixedFunction.Function != nil {
+				// 无 hook 热路径先直接执行固定 writer；成功命中时没有可见调用帧副作用。
+				resultCount, handled, err = fixedFunction.Function(resultSlots, arguments...)
+			} else {
+				// hook 或损坏注册场景保留完整 Go 调用帧与错误语义。
+				resultCount, handled, err = callGoFixedResultsFunctionWithDebugFrame(state, functionValue, fixedFunction, resultSlots, debugName, debugNameWhat, false, arguments...)
+			}
 			if err == nil && handled {
 				if writeErr := writeLuaCallResults(vm, callRequest, resultSlots[:resultCount]); writeErr != nil {
 					// 固定结果写回失败时返回寄存器边界错误。
 					return writeErr
 				}
 				return nil
+			}
+			if err != nil && !hooksEnabled {
+				// 参数错误等慢路径需要重新进入 debug frame，保持 traceback 和调用名可见性。
+				resultCount, handled, err = callGoFixedResultsFunctionWithDebugFrame(state, functionValue, fixedFunction, resultSlots, debugName, debugNameWhat, false, arguments...)
+				if err == nil && handled {
+					if writeErr := writeLuaCallResults(vm, callRequest, resultSlots[:resultCount]); writeErr != nil {
+						// 固定结果写回失败时返回寄存器边界错误。
+						return writeErr
+					}
+					return nil
+				}
 			}
 			if err == nil && !handled {
 				// 固定 writer 未覆盖当前调用时，回退通用路径以保留 Lua pattern/capture 等完整语义。
