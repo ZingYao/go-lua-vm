@@ -1844,6 +1844,10 @@ func (generator *generator) compileReturn(statement *parser.ReturnStatement) err
 		generator.returned = true
 		return nil
 	}
+	if handled, err := generator.compileSingleSafeBinaryReturn(statement); handled || err != nil {
+		// 单个安全二元表达式 return 可直接使用 RK 操作数，避免为参数 local 生成临时 MOVE。
+		return err
+	}
 	firstTempRegister := generator.nextRegister
 	tempRegisters := make([]int, 0, len(statement.Values))
 	for range statement.Values {
@@ -1867,6 +1871,68 @@ func (generator *generator) compileReturn(statement *parser.ReturnStatement) err
 
 	// return 指令生成完成。
 	return nil
+}
+
+// compileSingleSafeBinaryReturn 优化 `return localOrLiteral <op> localOrLiteral`。
+//
+// 该路径只处理单返回值和普通二元 opcode；两侧必须能转为安全 RK 操作数，不能包含调用、索引、
+// upvalue/global 读取或其他副作用。复杂表达式保留通用 return 编译路径。
+func (generator *generator) compileSingleSafeBinaryReturn(statement *parser.ReturnStatement) (bool, error) {
+	if len(statement.Values) != 1 {
+		// 多返回值需要保持完整求值和返回区间语义。
+		return false, nil
+	}
+	binaryExpression, ok := statement.Values[0].(*parser.BinaryExpression)
+	if !ok {
+		// 非二元表达式交给通用 return 路径。
+		return false, nil
+	}
+	if binaryExpression.Operator == ".." {
+		// CONCAT 需要连续寄存器区间，不能使用普通 RK 二元快路径。
+		return false, nil
+	}
+	opCode, ok := binaryOpCode(binaryExpression.Operator)
+	if !ok {
+		// 尚未支持的操作符沿用通用路径返回原有错误。
+		return false, nil
+	}
+
+	firstTempRegister := generator.nextRegister
+	resultRegister := generator.allocateRegister()
+	leftOperand, leftOK, err := generator.safeRKOperand(binaryExpression.Left)
+	if err != nil {
+		// 左操作数编译失败时释放临时区并返回。
+		generator.releaseRegistersFrom(firstTempRegister)
+		return true, err
+	}
+	if !leftOK {
+		// 左操作数不满足无副作用条件时回退通用路径。
+		generator.releaseRegistersFrom(firstTempRegister)
+		return false, nil
+	}
+	rightOperand, rightOK, err := generator.safeRKOperand(binaryExpression.Right)
+	if err != nil {
+		// 右操作数编译失败时释放临时区并返回。
+		generator.releaseRegistersFrom(firstTempRegister)
+		return true, err
+	}
+	if !rightOK {
+		// 右操作数不满足无副作用条件时回退通用路径。
+		generator.releaseRegistersFrom(firstTempRegister)
+		return false, nil
+	}
+	if err := generator.withSourceLine(binaryExpression.Position, func() error {
+		// 运算错误归因到操作符所在行；结果寄存器作为单返回值起点。
+		generator.emitABC(opCode, resultRegister, leftOperand, rightOperand)
+		return nil
+	}); err != nil {
+		generator.releaseRegistersFrom(firstTempRegister)
+		return true, err
+	}
+	generator.emitABC(bytecode.OpReturn, resultRegister, 2, 0)
+	generator.releaseRegistersFrom(firstTempRegister)
+	generator.returned = true
+	return true, nil
 }
 
 // compileOpenReturn 编译末尾为开放表达式的 return 列表。

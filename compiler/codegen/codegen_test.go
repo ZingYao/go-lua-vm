@@ -723,6 +723,44 @@ func TestCompileTableReadWriteUsesDirectRegisters(t *testing.T) {
 	}
 }
 
+// TestCompileSafeBinaryReturnUsesRKOperands 验证单返回值安全二元表达式直接复用参数寄存器。
+//
+// Lua 5.3 C codegen 对 `return a + b` 生成 `ADD temp, a, b; RETURN temp`，不需要先把 a/b
+// MOVE 到额外临时寄存器。该形态能降低函数调用热循环中 leaf callee 的指令数。
+func TestCompileSafeBinaryReturnUsesRKOperands(t *testing.T) {
+	chunk := parseChunkForCodegenTest(t, "local function add(a, b) return a + b end return add(1, 2)")
+
+	proto, err := CompileChunk(chunk, "safe-binary-return")
+	if err != nil {
+		// 函数调用样例必须可编译。
+		t.Fatalf("compile safe binary return failed: %v", err)
+	}
+	if len(proto.Protos) != 1 {
+		// 测试样例应只生成 add 一个子函数。
+		t.Fatalf("unexpected child proto count: %d", len(proto.Protos))
+	}
+	child := proto.Protos[0]
+	foundDirectAdd := false
+	for _, instruction := range child.Code {
+		switch instruction.OpCode() {
+		case bytecode.OpAdd:
+			if instruction.B() == 0 && instruction.C() == 1 {
+				// a/b 参数分别位于 R0/R1，优化后 ADD 直接读取参数寄存器。
+				foundDirectAdd = true
+			}
+		case bytecode.OpMove:
+			if instruction.A() == 2 || instruction.A() == 3 {
+				// 旧通用 return 路径会把 a/b 移到临时寄存器再 ADD。
+				t.Fatalf("unexpected argument MOVE in child proto: %v", child.Code)
+			}
+		}
+	}
+	if !foundDirectAdd {
+		// 子函数必须包含直接读取参数寄存器的 ADD。
+		t.Fatalf("missing direct ADD for return a + b; code=%v", child.Code)
+	}
+}
+
 // TestCompileAssignmentExpandsLastCallResults 验证普通赋值会展开最后一个调用的多返回值。
 //
 // 官方 gc.lua 的 `s, i = string.gsub(...)` 依赖 CALL C 字段请求两个返回值；否则第二个左值
