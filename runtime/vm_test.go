@@ -781,6 +781,90 @@ func TestVMTryExecuteLeafAddReturnInCallerTwoArguments(t *testing.T) {
 	}
 }
 
+// TestVMTryExecuteLeafAddReturnInCallerFirstArgumentConstant 验证单实参加常量叶子快路径。
+//
+// `local function inc(x) return x + 1 end` 是函数调用循环的高频形态；caller 侧只能在第一个
+// 实参真实存在且为原生数值时写回，缺参或非数值必须回退完整 VM。
+func TestVMTryExecuteLeafAddReturnInCallerFirstArgumentConstant(t *testing.T) {
+	proto := &bytecode.Proto{
+		Constants: []bytecode.Constant{bytecode.IntegerConstant(1)},
+		Code: []bytecode.Instruction{
+			bytecode.CreateABC(bytecode.OpAdd, 1, 0, bytecode.RKAsK(0)),
+			bytecode.CreateABC(bytecode.OpReturn, 1, 2, 0),
+		},
+	}
+	closure := NewLuaClosure(proto, nil, nil)
+	if closure.LeafAddReturn == nil || !closure.LeafAddReturn.HasRegisterIntegerConstant {
+		// x + 1 必须预解析为寄存器加 integer 常量形态。
+		t.Fatalf("expected register integer leaf metadata: %+v", closure.LeafAddReturn)
+	}
+
+	vm := NewVMWithConstants(3, proto.Constants)
+	if err := vm.SetRegister(0, ReferenceValue(KindLuaClosure, closure)); err != nil {
+		// 调用函数槽写入必须成功。
+		t.Fatalf("set function register failed: %v", err)
+	}
+	if err := vm.SetRegister(1, IntegerValue(41)); err != nil {
+		// 第一个实参写入必须成功。
+		t.Fatalf("set integer argument failed: %v", err)
+	}
+	handled, err := vm.TryExecuteLeafAddReturnInCaller(closure, &CallRequest{
+		FunctionIndex: 0,
+		ArgumentCount: 1,
+		ReturnCount:   1,
+	})
+	if err != nil || !handled {
+		// integer + 常量应在 caller 侧完成。
+		t.Fatalf("integer constant leaf mismatch: handled=%v err=%v", handled, err)
+	}
+	value, ok := vm.Register(0)
+	if !ok || !value.RawEqual(IntegerValue(42)) {
+		// 结果必须直接写回函数槽。
+		t.Fatalf("integer result mismatch: value=%#v ok=%v", value, ok)
+	}
+
+	if err := vm.SetRegister(0, ReferenceValue(KindLuaClosure, closure)); err != nil {
+		// 重新写回函数槽用于 number 路径验证。
+		t.Fatalf("reset function register failed: %v", err)
+	}
+	if err := vm.SetRegister(1, NumberValue(40.5)); err != nil {
+		// number 实参写入必须成功。
+		t.Fatalf("set number argument failed: %v", err)
+	}
+	handled, err = vm.TryExecuteLeafAddReturnInCaller(closure, &CallRequest{
+		FunctionIndex: 0,
+		ArgumentCount: 1,
+		ReturnCount:   1,
+	})
+	if err != nil || !handled {
+		// number + 常量同样应在 caller 侧完成。
+		t.Fatalf("number constant leaf mismatch: handled=%v err=%v", handled, err)
+	}
+	value, ok = vm.Register(0)
+	if !ok || !value.RawEqual(NumberValue(41.5)) {
+		// number 路径必须写回浮点结果。
+		t.Fatalf("number result mismatch: value=%#v ok=%v", value, ok)
+	}
+
+	if err := vm.SetRegister(0, ReferenceValue(KindLuaClosure, closure)); err != nil {
+		// 重新写回函数槽用于缺参回退验证。
+		t.Fatalf("reset function for missing argument failed: %v", err)
+	}
+	if err := vm.SetRegister(1, IntegerValue(99)); err != nil {
+		// 相邻寄存器放置哨兵，缺参时不能读取该值。
+		t.Fatalf("set sentinel failed: %v", err)
+	}
+	handled, err = vm.TryExecuteLeafAddReturnInCaller(closure, &CallRequest{
+		FunctionIndex: 0,
+		ArgumentCount: 0,
+		ReturnCount:   1,
+	})
+	if err != nil || handled {
+		// 缺参必须回退完整 VM，避免把旧 R1 当作参数。
+		t.Fatalf("missing argument should fallback: handled=%v err=%v", handled, err)
+	}
+}
+
 // TestVMNewTable 验证 NEWTABLE 会创建新的 table 引用。
 //
 // Lua 5.3 NEWTABLE 的 B/C 预分配 hint 暂未生效，但创建空 table 的可观察语义必须正确。

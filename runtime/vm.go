@@ -667,6 +667,10 @@ func (vm *VM) TryExecuteLeafAddReturnInCaller(closure *LuaClosure, request *Call
 
 	// 读取预解析的叶子函数形态，后续只在 caller 寄存器窗口内完成操作数映射。
 	leafAddReturn := closure.LeafAddReturn
+	if handled, err := vm.tryLeafFirstArgumentIntegerConstantAdd(leafAddReturn, request); handled || err != nil {
+		// `return arg1 + integer` 是函数调用 micro benchmark 的主路径，先走最窄特化。
+		return handled, err
+	}
 	if handled, err := vm.tryLeafRegisterIntegerConstantAdd(closure, leafAddReturn, request); handled || err != nil {
 		// 命中特化 `R + integer` 形态时直接返回；未命中时继续通用叶子加法路径。
 		return handled, err
@@ -713,6 +717,39 @@ func (vm *VM) TryExecuteLeafAddReturnInCaller(closure *LuaClosure, request *Call
 
 	// 直接写回函数槽并清理开放栈顶，匹配 CALL 消费完成后的 caller VM 状态。
 	vm.registers[request.FunctionIndex] = resultValue
+	vm.openTop = -1
+	return true, nil
+}
+
+// tryLeafFirstArgumentIntegerConstantAdd 执行 `return arg1 + integer` 叶子函数专用快路径。
+//
+// request 必须已由 TryExecuteLeafAddReturnInCaller 校验为固定单返回；该分支只处理第一个实参
+// 和 integer 常量，无 upvalue、缺参、字符串转换或元方法时才写回 caller 函数槽。
+func (vm *VM) tryLeafFirstArgumentIntegerConstantAdd(leaf *LuaLeafAddReturn, request *CallRequest) (bool, error) {
+	if leaf == nil || !leaf.HasRegisterIntegerConstant || leaf.HasUpvalueRegister || leaf.IntegerRegisterIndex != 0 {
+		// 只处理最常见的第一个实参加整数常量，其余形态交给通用 leaf 分支。
+		return false, nil
+	}
+	if request.ArgumentCount < 1 {
+		// 缺参时 callee 内部会看到 nil，caller 侧不能读取相邻旧寄存器。
+		return false, nil
+	}
+	if request.FunctionIndex < 0 || request.FunctionIndex+1 >= len(vm.registers) {
+		// 函数槽或第一个实参槽越界时保持原错误语义。
+		return true, ErrRegisterOutOfRange
+	}
+	operandValue := vm.registers[request.FunctionIndex+1]
+	switch operandValue.Kind {
+	case KindInteger:
+		// integer 加 integer 常量保持 integer 结果。
+		vm.registers[request.FunctionIndex] = IntegerValue(operandValue.Integer + leaf.IntegerConstant)
+	case KindNumber:
+		// number 加 integer 常量按 Lua number 结果写回。
+		vm.registers[request.FunctionIndex] = NumberValue(operandValue.Number + float64(leaf.IntegerConstant))
+	default:
+		// 非原生数值需要完整 VM 算术路径保留字符串转换和元方法语义。
+		return false, nil
+	}
 	vm.openTop = -1
 	return true, nil
 }
@@ -850,6 +887,10 @@ func (vm *VM) tryLeafRegisterIntegerConstantAdd(closure *LuaClosure, leaf *LuaLe
 		operandValue = upvalueValue
 	} else {
 		// 普通寄存器操作数映射到 caller 实参区。
+		if leaf.IntegerRegisterIndex < 0 || leaf.IntegerRegisterIndex >= request.ArgumentCount {
+			// 缺失实参在 callee 中应为 nil，caller 侧不能读取相邻旧寄存器。
+			return false, nil
+		}
 		registerIndex := request.FunctionIndex + 1 + leaf.IntegerRegisterIndex
 		if registerIndex < 0 || registerIndex >= len(vm.registers) {
 			// caller 实参区缺失时回退完整 VM 路径。
