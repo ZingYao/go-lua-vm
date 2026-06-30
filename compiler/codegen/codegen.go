@@ -848,11 +848,11 @@ func (generator *generator) selfBinaryAccumulatorRightOperand(expression parser.
 func expressionIsFixedSingleResultCall(expression parser.Expression) bool {
 	switch typedExpression := expression.(type) {
 	case *parser.FunctionCallExpression:
-		// 普通表达式上下文中的函数调用请求单返回值；尾部开放实参会使用 CALL B=0，不能回收水位。
-		return !callArgumentsEndWithOpenList(typedExpression.Arguments)
+		// 普通表达式上下文中的函数调用请求单返回值；即使 B=0 开放实参也会在 CALL 后固定写回一个结果。
+		return typedExpression != nil
 	case *parser.MethodCallExpression:
-		// method 调用同样需要排除尾部开放实参，避免破坏 CALL B=0 参数列表。
-		return !callArgumentsEndWithOpenList(typedExpression.Arguments)
+		// method 调用在表达式上下文同样固定请求一个返回值，CALL 后可回收参数槽。
+		return typedExpression != nil
 	default:
 		// 其他表达式没有 CALL 参数槽可回收。
 		return false
@@ -3464,6 +3464,10 @@ func (generator *generator) compileBinaryLeftRKRightToTargetTo(expression *parse
 		// 右侧表达式失败时直接返回，不生成二元运算。
 		return true, err
 	}
+	if expressionIsFixedSingleResultCall(expression.Right) {
+		// 固定单返回右侧调用完成后可回收参数槽，避免后续同层表达式被推高寄存器水位。
+		generator.releaseCallArgumentsAfterFixedResult(targetRegister, 1)
+	}
 	if err := generator.withSourceLine(expression.Position, func() error {
 		// 左 RK + 右目标寄存器路径保持二元运算错误归因到操作符所在行。
 		generator.emitABC(opCode, targetRegister, leftOperand, targetRegister)
@@ -3573,6 +3577,10 @@ func (generator *generator) binaryRightOperand(expression parser.Expression) (op
 		// 右操作数失败时释放临时寄存器并返回。
 		generator.releaseRegister(rightRegister)
 		return 0, -1, err
+	}
+	if expressionIsFixedSingleResultCall(expression) {
+		// 固定单返回调用的实参槽不再被后续指令读取，可立即回收以贴近 Lua 5.3 codegen 水位。
+		generator.releaseCallArgumentsAfterFixedResult(rightRegister, 1)
 	}
 	return rightRegister, rightRegister, nil
 }

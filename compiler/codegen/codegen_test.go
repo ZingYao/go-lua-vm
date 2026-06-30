@@ -83,6 +83,44 @@ return x
 	}
 }
 
+// TestCompileChunkReleasesOpenArgumentCallAfterFixedResult 验证开放实参固定单返回 CALL 后回收参数槽。
+//
+// `string.len(string.sub(...))` 会生成外层 CALL B=0/C=2；CALL 完成后仍只有一个固定返回值，
+// 参数槽必须释放给后续 math 嵌套调用复用，否则混合标准库脚本会比 Lua 5.3 多占寄存器。
+func TestCompileChunkReleasesOpenArgumentCallAfterFixedResult(t *testing.T) {
+	chunk := parseChunkForCodegenTest(t, `
+local i = 1
+local acc = 0
+local text = "abcdef0123456789"
+while i <= 10 do
+  local s, e = string.find(text, "cd", 1, true)
+  acc = acc + (s or 0) + (e or 0)
+  acc = acc + string.len(string.sub(text, 2, 8))
+  acc = acc + math.floor(math.sin(i) * 1000)
+  i = i + 1
+end
+return acc
+`)
+
+	proto, err := CompileChunk(chunk, "open-arg-fixed-result")
+	if err != nil {
+		// 合法标准库混合脚本不应编译失败。
+		t.Fatalf("compile open-arg-fixed-result failed: %v", err)
+	}
+	if proto.MaxStackSize != 10 {
+		// 官方 Lua 5.3 该形态使用 10 个栈槽；更高说明 B=0 外层 CALL 后没有释放参数槽。
+		t.Fatalf("unexpected max stack=%d", proto.MaxStackSize)
+	}
+	if !hasCall(proto, 5, 0, 2) {
+		// string.len(string.sub(...)) 应保留 CALL B=0/C=2 语义，只在 CALL 后回收水位。
+		t.Fatalf("expected outer string.len CALL B=0 C=2")
+	}
+	if !hasGetTabUpAtOrAfter(proto, 5, 30) {
+		// 后续 math.floor 应复用 R5，而不是被上一行开放实参调用推到更高寄存器。
+		t.Fatalf("expected later math call to reuse R5")
+	}
+}
+
 // TestCompileChunkShortCircuit 验证 and/or 短路表达式生成 TESTSET/JMP 形态。
 //
 // 当前阶段只验证指令结构，运行时真假语义由 VM 指令测试覆盖。
@@ -1630,6 +1668,32 @@ func hasTestSetWithC(proto *bytecode.Proto, c int) bool {
 	}
 
 	// 没有找到匹配 TESTSET 指令。
+	return false
+}
+
+// hasCall 判断 Proto 中是否存在指定 A/B/C 字段的 CALL 指令。
+func hasCall(proto *bytecode.Proto, a int, b int, c int) bool {
+	for _, instruction := range proto.Code {
+		// CALL 指令字段精确匹配时返回 true。
+		if instruction.OpCode() == bytecode.OpCall && instruction.A() == a && instruction.B() == b && instruction.C() == c {
+			return true
+		}
+	}
+
+	// 没有找到匹配 CALL 指令。
+	return false
+}
+
+// hasGetTabUpAtOrAfter 判断指定 PC 之后是否存在写入目标寄存器的 GETTABUP。
+func hasGetTabUpAtOrAfter(proto *bytecode.Proto, targetRegister int, startPC int) bool {
+	for instructionIndex, instruction := range proto.Code {
+		// 只检查指定 PC 之后的 GETTABUP 写入。
+		if instructionIndex >= startPC && instruction.OpCode() == bytecode.OpGetTabUp && instruction.A() == targetRegister {
+			return true
+		}
+	}
+
+	// 没有找到匹配 GETTABUP 指令。
 	return false
 }
 
