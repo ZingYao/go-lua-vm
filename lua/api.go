@@ -2733,6 +2733,58 @@ func callGoFunctionWithDebugFrame(state *State, function Value, goFunction runti
 	return result, nil
 }
 
+// callGoUnaryFunctionWithDebugFrame 在调试帧保护下执行单参数单返回 Go closure。
+//
+// state 必须非 nil；function 必须是 KindGoClosure 且 unaryFunction 是其实际入口。该路径用于
+// 标准库一元函数 CALL 快路径，保留 call/return hook、错误帧和 bad argument 名称重写语义。
+func callGoUnaryFunctionWithDebugFrame(state *State, function Value, unaryFunction runtime.GoUnaryFunction, name string, nameWhat string, tailCall bool, argument Value) (result Value, err error) {
+	// Go closure 帧不占用真实寄存器窗口，只保存函数与调用点名称供 debug API 查询。
+	frame := runtime.NewGoCallFrame(function, state.StackTop()+1, -1)
+	frame.Name = name
+	frame.NameWhat = nameWhat
+	frame.TailCall = tailCall
+	if err := state.PushCallFrame(frame); err != nil {
+		// 调用帧压入失败时无法安全进入 Go 回调。
+		return runtime.NilValue(), err
+	}
+	debugEnvironment, hasDebugEnvironment := debuglib.EnvironmentForState((*runtime.State)(state))
+	if hasDebugEnvironment {
+		// call/tail call hook 在 Go closure 帧入栈后触发，对齐 Lua 5.3 的被调函数可见性。
+		hookErr := error(nil)
+		if tailCall && debugEnvironment.HookEnabledFor(debuglib.HookEventTailCall) {
+			// Go closure 也可能由 TAILCALL 进入，debug hook 需要看到 tail call 事件。
+			hookErr = triggerLuaTailCallHook(state, debugEnvironment)
+		} else if !tailCall && debugEnvironment.HookEnabledFor(debuglib.HookEventCall) {
+			// 普通 Go closure 调用保持 call 事件。
+			hookErr = triggerLuaCallHook(state, debugEnvironment)
+		}
+		if hookErr != nil {
+			// hook 错误时保留帧给 protected call 边界恢复。
+			return runtime.NilValue(), hookErr
+		}
+	}
+	defer func() {
+		if err == nil || errors.Is(err, runtime.ErrCoroutineYield) {
+			// 成功路径和协程 yield 都弹出当前 Go 帧；普通错误路径保留帧以便 ProtectedCall 生成 traceback 后恢复。
+			_, _ = state.PopCallFrame()
+		}
+	}()
+	result, err = unaryFunction(argument)
+	if err != nil {
+		// Go 回调的参数错误可结合调用点补齐完整库函数名。
+		err = rewriteGoClosureBadArgumentName(err, goClosureBadArgumentName(state, function, name, nameWhat), nameWhat)
+		// Go 回调错误返回后，调用帧保留给上层错误边界。
+		return runtime.NilValue(), err
+	}
+	if hasDebugEnvironment && debugEnvironment.HookEnabledFor(debuglib.HookEventReturn) {
+		// return hook 在 Go closure 帧仍可见时触发。
+		if err := triggerLuaReturnHook(state, debugEnvironment); err != nil {
+			return runtime.NilValue(), err
+		}
+	}
+	return result, nil
+}
+
 // callGoFixedResultsFunctionWithDebugFrame 在调试帧保护下执行固定上限多返回 Go closure。
 //
 // dst 由调用方提供且长度至少为 fixedFunction.MaxResults；返回 handled=false 时表示快路径未覆盖，
@@ -3175,6 +3227,24 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 		// 固定参数/固定返回的 Lua closure 走 direct CALL，避免构造参数切片。
 		results, directCallVM, err = executeLuaCallRequestDirect(state, vm, functionValue, debugName, debugNameWhat, callRequest)
 	} else {
+		if unaryFunction, ok := functionValue.Ref.(runtime.GoUnaryFunction); ok && callRequest.ArgumentCount == 1 && callRequest.ReturnCount == 1 && !callRequest.GenericFor {
+			// 单参数单返回 Go closure 直接读取参数寄存器，避免为标准库一元函数构造参数切片。
+			argument, argumentOK := vm.Register(callRequest.FunctionIndex + 1)
+			if !argumentOK {
+				// 参数寄存器缺失说明 CALL 布局异常。
+				return runtime.ErrRegisterOutOfRange
+			}
+			var result Value
+			result, err = callGoUnaryFunctionWithDebugFrame(state, functionValue, unaryFunction, debugName, debugNameWhat, false, argument)
+			if err == nil {
+				if setErr := vm.SetRegister(callRequest.FunctionIndex, result); setErr != nil {
+					// 写回超过寄存器窗口时返回边界错误。
+					return setErr
+				}
+				vm.SetOpenTop(-1)
+				return nil
+			}
+		}
 		var arguments []Value
 		if functionValue.Kind == runtime.KindLuaClosure {
 			// Lua closure 只在进入前读取参数并写入寄存器，可复用 State scratch 降低 CALL 小切片分配。
@@ -4373,8 +4443,8 @@ func writeLuaCallResults(vm *runtime.VM, callRequest *runtime.CallRequest, resul
 
 // callGoClosureValue 执行 Go closure 引用值。
 //
-// function 必须是 KindGoClosure；args 是调用实参快照。支持 GoResultsFunction 和 GoFunction 两类
-// runtime 回调形态，其他引用负载按不可调用运行期错误处理。
+// function 必须是 KindGoClosure；args 是调用实参快照。支持 GoResultsFunction、GoFunction 和
+// GoUnaryFunction 等 runtime 回调形态，其他引用负载按不可调用运行期错误处理。
 func callGoClosureValue(function Value, args ...Value) ([]Value, error) {
 	// 根据 Ref 中保存的实际 Go 回调形态分发。
 	switch callback := function.Ref.(type) {
@@ -4410,6 +4480,19 @@ func callGoClosureValue(function Value, args ...Value) ([]Value, error) {
 	case runtime.GoFunction:
 		// 单返回 Go 回调转换成单元素结果列表，保持 Call 总是返回 []Value。
 		result, err := callback(args...)
+		if err != nil {
+			// 回调错误原样向上传播，ProtectedCall 会负责转换为 Lua error object。
+			return nil, err
+		}
+		return []Value{result}, nil
+	case runtime.GoUnaryFunction:
+		// 单参数单返回 Go 回调在通用路径中也需要可调用，覆盖开放参数和公开 Call 入口。
+		argument := runtime.NilValue()
+		if len(args) > 0 {
+			// Lua 标准库允许多余参数；一元入口只读取第一个实参。
+			argument = args[0]
+		}
+		result, err := callback(argument)
 		if err != nil {
 			// 回调错误原样向上传播，ProtectedCall 会负责转换为 Lua error object。
 			return nil, err

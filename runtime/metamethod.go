@@ -63,6 +63,12 @@ const (
 // 仍返回 ErrUnsupportedMetamethod。
 type GoFunction func(args ...Value) (Value, error)
 
+// GoUnaryFunction 表示单参数单返回的 Go closure 热路径。
+//
+// 参数按 Lua 调用前已经完成的寄存器布局传入；错误语义与 GoFunction 保持一致。该类型用于
+// 标准库中高频的一元函数，避免 VM CALL 为单参数构造临时参数切片。
+type GoUnaryFunction func(Value) (Value, error)
+
 // GoResultsFunction 表示当前 VM 可直接调用并返回多返回值的 Go 元方法函数。
 //
 // args 按 Lua 调用顺序传入；返回切片按 Lua 多返回值顺序排列。该类型主要服务 `__pairs`、

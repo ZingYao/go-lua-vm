@@ -45,7 +45,7 @@ func Open(state *runtime.State) error {
 	library.RawSetString("cos", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Cos)))
 	library.RawSetString("deg", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Deg)))
 	library.RawSetString("exp", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Exp)))
-	library.RawSetString("floor", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoFunction(FloorValue)))
+	library.RawSetString("floor", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoUnaryFunction(FloorUnaryValue)))
 	library.RawSetString("fmod", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(FMod)))
 	library.RawSetString("huge", runtime.NumberValue(math.Inf(1)))
 	library.RawSetString("log", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Log)))
@@ -59,7 +59,7 @@ func Open(state *runtime.State) error {
 	library.RawSetString("random", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Random)))
 	library.RawSetString("randomseed", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(RandomSeed)))
 	library.RawSetString("sin", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Sin)))
-	library.RawSetString("sqrt", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoFunction(SqrtValue)))
+	library.RawSetString("sqrt", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoUnaryFunction(SqrtUnaryValue)))
 	library.RawSetString("tan", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Tan)))
 	library.RawSetString("tointeger", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(ToInteger)))
 	library.RawSetString("type", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Type)))
@@ -251,6 +251,30 @@ func FloorValue(args ...runtime.Value) (runtime.Value, error) {
 	if err != nil {
 		// 第一个参数不是 number 时直接返回 Lua 参数错误。
 		return runtime.NilValue(), err
+	}
+	if value.Kind == runtime.KindInteger {
+		// integer 已经是整数，直接返回。
+		return value, nil
+	}
+
+	floored := math.Floor(value.Number)
+	if math.IsNaN(floored) || math.IsInf(floored, 0) || floored < float64(math.MinInt64) || floored >= -float64(math.MinInt64) {
+		// 非有限或超出 int64 范围时保留 float number。
+		return runtime.NumberValue(floored), nil
+	}
+
+	// 有限且可表达时返回 Lua integer。
+	return runtime.IntegerValue(int64(floored)), nil
+}
+
+// FloorUnaryValue 实现 Lua 5.3 `math.floor` 的单参数单返回热路径。
+//
+// value 是调用方已经从 Lua 寄存器读取出的第一个参数；返回语义和错误语义与 FloorValue 保持一致。
+func FloorUnaryValue(value runtime.Value) (runtime.Value, error) {
+	// floor 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
+	if !value.IsNumber() {
+		// 非 number 类型不做字符串转数值隐式转换。
+		return runtime.NilValue(), badArgument("floor", 1, fmt.Sprintf("number expected, got %s", runtime.LuaErrorTypeName(value)))
 	}
 	if value.Kind == runtime.KindInteger {
 		// integer 已经是整数，直接返回。
@@ -566,6 +590,21 @@ func SqrtValue(args ...runtime.Value) (runtime.Value, error) {
 
 	// 返回平方根结果。
 	return runtime.NumberValue(math.Sqrt(value)), nil
+}
+
+// SqrtUnaryValue 实现 Lua 5.3 `math.sqrt` 的单参数单返回热路径。
+//
+// value 是调用方已经从 Lua 寄存器读取出的第一个参数；返回语义和错误语义与 SqrtValue 保持一致。
+func SqrtUnaryValue(value runtime.Value) (runtime.Value, error) {
+	// sqrt 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
+	if !value.IsNumber() {
+		// 非 number 类型不做字符串转数值隐式转换。
+		return runtime.NilValue(), badArgument("sqrt", 1, fmt.Sprintf("number expected, got %s", runtime.LuaErrorTypeName(value)))
+	}
+	numberValue, _ := value.ToNumber()
+
+	// 返回平方根结果。
+	return runtime.NumberValue(math.Sqrt(numberValue)), nil
 }
 
 // Tan 实现 Lua 5.3 `math.tan`。

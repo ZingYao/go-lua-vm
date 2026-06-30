@@ -71,7 +71,7 @@ func Open(state *runtime.State) error {
 		// gsub 的 Lua closure 替换函数需要当前 State 提供 Lua closure runner。
 		return gsubWithState(state, args...)
 	})))
-	library.RawSetString("len", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoFunction(LenValue)))
+	library.RawSetString("len", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoUnaryFunction(LenUnaryValue)))
 	library.RawSetString("lower", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Lower)))
 	library.RawSetString("match", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Match)))
 	library.RawSetString("pack", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Pack)))
@@ -615,6 +615,20 @@ func LenValue(args ...runtime.Value) (runtime.Value, error) {
 
 	// Lua string.len 返回字节长度。
 	return runtime.IntegerValue(int64(len(source))), nil
+}
+
+// LenUnaryValue 实现 Lua 5.3 `string.len` 的单参数单返回热路径。
+//
+// value 是调用方已经从 Lua 寄存器读取出的第一个参数；返回语义和错误语义与 LenValue 保持一致。
+func LenUnaryValue(value runtime.Value) (runtime.Value, error) {
+	// len 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
+	if value.Kind != runtime.KindString {
+		// 非 string 类型不做 tostring 隐式转换。
+		return runtime.NilValue(), badArgument("len", 1, "string expected")
+	}
+
+	// Lua string.len 返回字节长度。
+	return runtime.IntegerValue(int64(len(value.String))), nil
 }
 
 // Lower 实现 Lua 5.3 `string.lower` 的基础 ASCII 小写转换。
