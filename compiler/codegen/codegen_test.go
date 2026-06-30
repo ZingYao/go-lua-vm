@@ -805,6 +805,34 @@ func TestCompileSafeBinaryReturnReadsUpvalueDirectly(t *testing.T) {
 	}
 }
 
+// TestCompileSingleLocalReturnUsesSourceRegister 验证单 local 返回直接使用源寄存器。
+//
+// `return x` 不需要 MOVE 到临时寄存器；Lua 5.3 C codegen 直接生成 `RETURN x, 1`。
+func TestCompileSingleLocalReturnUsesSourceRegister(t *testing.T) {
+	chunk := parseChunkForCodegenTest(t, "local function id(x) return x end return id(1)")
+
+	proto, err := CompileChunk(chunk, "single-local-return")
+	if err != nil {
+		// 单 local return 样例必须可编译。
+		t.Fatalf("compile single local return failed: %v", err)
+	}
+	if len(proto.Protos) != 1 {
+		// 测试样例应只生成 id 一个子函数。
+		t.Fatalf("unexpected child proto count: %d", len(proto.Protos))
+	}
+	child := proto.Protos[0]
+	if len(child.Code) == 0 || child.Code[0].OpCode() != bytecode.OpReturn || child.Code[0].A() != 0 || child.Code[0].B() != 2 {
+		// 参数 x 位于 R0，应直接作为单返回值起点。
+		t.Fatalf("missing direct RETURN R0; code=%v", child.Code)
+	}
+	for _, instruction := range child.Code {
+		if instruction.OpCode() == bytecode.OpMove {
+			// 旧通用 return 路径会 MOVE x 到临时寄存器。
+			t.Fatalf("unexpected MOVE in single local return: %v", child.Code)
+		}
+	}
+}
+
 // TestCompileCapturedBlockLocalKeepsCloseJump 验证被闭包捕获的 block local 仍生成 close-only JMP。
 //
 // 未捕获 local 的作用域退出可以省略零距离 close-only JMP；一旦内层函数捕获 block local，

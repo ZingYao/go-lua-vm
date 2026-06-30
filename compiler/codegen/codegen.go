@@ -1846,6 +1846,10 @@ func (generator *generator) compileReturn(statement *parser.ReturnStatement) err
 		generator.returned = true
 		return nil
 	}
+	if handled, err := generator.compileSingleSafeNameReturn(statement); handled || err != nil {
+		// 单个 local/upvalue 名称 return 可避免额外临时 MOVE。
+		return err
+	}
 	if handled, err := generator.compileSingleSafeBinaryReturn(statement); handled || err != nil {
 		// 单个安全二元表达式 return 可直接使用 RK 操作数，避免为参数 local 生成临时 MOVE。
 		return err
@@ -1873,6 +1877,42 @@ func (generator *generator) compileReturn(statement *parser.ReturnStatement) err
 
 	// return 指令生成完成。
 	return nil
+}
+
+// compileSingleSafeNameReturn 优化 `return localName` 或 `return upvalueName`。
+//
+// 单返回值不会覆盖后续返回表达式，因此当前 local 可直接作为 RETURN 起点；upvalue 读取到结果
+// 寄存器后返回。未知全局名称仍走通用路径，以保留 `_ENV[name]` 访问和元方法语义。
+func (generator *generator) compileSingleSafeNameReturn(statement *parser.ReturnStatement) (bool, error) {
+	if len(statement.Values) != 1 {
+		// 多返回值需要保持完整求值顺序和连续返回区间。
+		return false, nil
+	}
+	nameExpression, ok := statement.Values[0].(*parser.NameExpression)
+	if !ok {
+		// 非名称表达式交给后续快路径或通用 return。
+		return false, nil
+	}
+	if binding, ok := generator.locals[nameExpression.Name]; ok {
+		// 当前 local 已在寄存器中，直接作为单返回值起点。
+		generator.emitABC(bytecode.OpReturn, binding.register, 2, 0)
+		generator.returned = true
+		return true, nil
+	}
+	if nameExpression.Name != envUpvalueName && !generator.canResolveUpvalueName(nameExpression.Name) {
+		// 未知名称会读取当前 `_ENV[name]`，不能当作无副作用 upvalue 处理。
+		return false, nil
+	}
+	resultRegister := generator.allocateRegister()
+	if err := generator.compileExpressionTo(nameExpression, resultRegister); err != nil {
+		// upvalue 读取失败时释放临时寄存器并返回。
+		generator.releaseRegister(resultRegister)
+		return true, err
+	}
+	generator.emitABC(bytecode.OpReturn, resultRegister, 2, 0)
+	generator.releaseRegister(resultRegister)
+	generator.returned = true
+	return true, nil
 }
 
 // compileSingleSafeBinaryReturn 优化 `return localOrLiteral <op> localOrLiteral`。
