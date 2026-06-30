@@ -5035,7 +5035,8 @@ func TestTryExecuteLeafAddReturnInCaller(t *testing.T) {
 		t.Fatalf("set caller argument failed: %v", err)
 	}
 	request := &runtime.CallRequest{FunctionIndex: 0, ArgumentCount: 1, ReturnCount: 1}
-	handled, err := tryExecuteLeafAddReturnInCaller(vm, proto, request)
+	closure := runtime.NewLuaClosure(proto, nil, nil)
+	handled, err := tryExecuteLeafAddReturnInCaller(vm, closure, request)
 	if err != nil {
 		// 合法原生加法不应失败。
 		t.Fatalf("caller leaf add failed: %v", err)
@@ -5054,9 +5055,37 @@ func TestTryExecuteLeafAddReturnInCaller(t *testing.T) {
 		// 测试准备阶段必须能覆盖调用实参。
 		t.Fatalf("set string argument failed: %v", err)
 	}
-	handled, err = tryExecuteLeafAddReturnInCaller(vm, proto, request)
+	handled, err = tryExecuteLeafAddReturnInCaller(vm, closure, request)
 	if err != nil || handled {
 		// 字符串数字需要完整 Lua 算术转换语义，必须回退。
 		t.Fatalf("string operand should fallback: handled=%v err=%v", handled, err)
+	}
+
+	upvalueProto := &bytecode.Proto{
+		Code: []bytecode.Instruction{
+			bytecode.CreateABC(bytecode.OpGetUpval, 1, 0, 0),
+			bytecode.CreateABC(bytecode.OpAdd, 1, 0, 1),
+			bytecode.CreateABC(bytecode.OpReturn, 1, 2, 0),
+		},
+	}
+	upvalueCell := runtime.NewClosedUpvalueCell(runtime.IntegerValue(7))
+	upvalueClosure := runtime.NewLuaClosure(upvalueProto, nil, []*runtime.UpvalueCell{upvalueCell})
+	if err := vm.SetRegister(1, runtime.IntegerValue(35)); err != nil {
+		// 测试准备阶段必须能写入调用实参。
+		t.Fatalf("set upvalue argument failed: %v", err)
+	}
+	handled, err = tryExecuteLeafAddReturnInCaller(vm, upvalueClosure, request)
+	if err != nil {
+		// 原生 upvalue 加法不应失败。
+		t.Fatalf("upvalue leaf add failed: %v", err)
+	}
+	if !handled {
+		// GETUPVAL;ADD;RETURN 形态必须被快路径识别。
+		t.Fatalf("upvalue leaf add should be handled")
+	}
+	value, ok = vm.Register(0)
+	if !ok || !value.RawEqual(runtime.IntegerValue(42)) {
+		// 快路径必须读取 upvalue cell 当前值并写回结果。
+		t.Fatalf("upvalue leaf add result mismatch: value=%#v ok=%v", value, ok)
 	}
 }

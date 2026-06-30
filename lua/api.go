@@ -3410,7 +3410,7 @@ func executeLuaCallRequestDirect(state *State, callerVM *runtime.VM, functionVal
 	}
 	proto := closure.Proto
 	if debugName == "" && debugNameWhat == "" {
-		if handled, err := tryExecuteLeafAddReturnInCaller(callerVM, proto, callRequest); handled || err != nil {
+		if handled, err := tryExecuteLeafAddReturnInCaller(callerVM, closure, callRequest); handled || err != nil {
 			// 极小加法叶子函数可直接在 caller 寄存器上完成；未命中时回退原 direct CALL。
 			return nil, nil, handled, err
 		}
@@ -3450,14 +3450,36 @@ func executeLuaCallRequestDirect(state *State, callerVM *runtime.VM, functionVal
 //
 // 该快路径只覆盖无 debug/hook、固定单参数、固定单返回的 direct CALL；仅处理 integer/number
 // 原生加法，字符串数字和元方法语义回退原 VM 执行路径。
-func tryExecuteLeafAddReturnInCaller(callerVM *runtime.VM, proto *bytecode.Proto, callRequest *runtime.CallRequest) (bool, error) {
+func tryExecuteLeafAddReturnInCaller(callerVM *runtime.VM, closure *runtime.LuaClosure, callRequest *runtime.CallRequest) (bool, error) {
 	// 先校验调用形态和函数体形态，避免对普通 Lua 函数改变执行路径。
-	if callerVM == nil || proto == nil || callRequest == nil || callRequest.ArgumentCount != 1 || callRequest.ReturnCount != 1 || len(proto.Code) != 2 {
+	if callerVM == nil || closure == nil || closure.Proto == nil || callRequest == nil || callRequest.ArgumentCount != 1 || callRequest.ReturnCount != 1 {
 		// 非单参数单返回或非两指令叶子函数，交给原 direct CALL。
 		return false, nil
 	}
-	addInstruction := proto.Code[0]
-	returnInstruction := proto.Code[1]
+	proto := closure.Proto
+	prefixLength := 0
+	var upvalueRegister int
+	var upvalueValue runtime.Value
+	var hasUpvalueRegister bool
+	if len(proto.Code) == 3 && proto.Code[0].OpCode() == bytecode.OpGetUpval {
+		// 闭包捕获常量形态通常先 GETUPVAL 到临时寄存器，再 ADD 后 RETURN。
+		getUpvalueInstruction := proto.Code[0]
+		upvalueRegister = getUpvalueInstruction.A()
+		var ok bool
+		upvalueValue, ok = luaClosureUpvalueValue(closure, getUpvalueInstruction.B())
+		if !ok {
+			// upvalue 状态异常时回退原 VM 路径生成标准错误。
+			return false, nil
+		}
+		hasUpvalueRegister = true
+		prefixLength = 1
+	}
+	if len(proto.Code) != prefixLength+2 {
+		// 当前只处理 ADD;RETURN 或 GETUPVAL;ADD;RETURN 两种极小形态。
+		return false, nil
+	}
+	addInstruction := proto.Code[prefixLength]
+	returnInstruction := proto.Code[prefixLength+1]
 	if addInstruction.OpCode() != bytecode.OpAdd || returnInstruction.OpCode() != bytecode.OpReturn {
 		// 只识别 ADD 后接 RETURN 的极小函数。
 		return false, nil
@@ -3466,12 +3488,12 @@ func tryExecuteLeafAddReturnInCaller(callerVM *runtime.VM, proto *bytecode.Proto
 		// 只处理返回 ADD 单个结果的形态。
 		return false, nil
 	}
-	leftValue, leftOK := luaLeafAddOperandValue(callerVM, proto, callRequest.FunctionIndex+1, addInstruction.B())
+	leftValue, leftOK := luaLeafAddOperandValue(callerVM, proto, callRequest.FunctionIndex+1, addInstruction.B(), upvalueRegister, upvalueValue, hasUpvalueRegister)
 	if !leftOK {
 		// 操作数无法在 caller 侧无副作用读取时回退。
 		return false, nil
 	}
-	rightValue, rightOK := luaLeafAddOperandValue(callerVM, proto, callRequest.FunctionIndex+1, addInstruction.C())
+	rightValue, rightOK := luaLeafAddOperandValue(callerVM, proto, callRequest.FunctionIndex+1, addInstruction.C(), upvalueRegister, upvalueValue, hasUpvalueRegister)
 	if !rightOK {
 		// 操作数无法在 caller 侧无副作用读取时回退。
 		return false, nil
@@ -3492,7 +3514,7 @@ func tryExecuteLeafAddReturnInCaller(callerVM *runtime.VM, proto *bytecode.Proto
 // luaLeafAddOperandValue 读取 caller-side leaf ADD 操作数。
 //
 // argumentStart 是 caller 中第一个实参寄存器；寄存器操作数映射到 callee Rn 对应的 caller 实参。
-func luaLeafAddOperandValue(callerVM *runtime.VM, proto *bytecode.Proto, argumentStart int, operand int) (runtime.Value, bool) {
+func luaLeafAddOperandValue(callerVM *runtime.VM, proto *bytecode.Proto, argumentStart int, operand int, upvalueRegister int, upvalueValue runtime.Value, hasUpvalueRegister bool) (runtime.Value, bool) {
 	// 常量操作数直接从 callee Proto 常量表读取。
 	if bytecode.IsK(operand) {
 		constantIndex := bytecode.IndexK(operand)
@@ -3507,7 +3529,35 @@ func luaLeafAddOperandValue(callerVM *runtime.VM, proto *bytecode.Proto, argumen
 		// 非法寄存器操作数回退原路径。
 		return runtime.NilValue(), false
 	}
+	if hasUpvalueRegister && registerIndex == upvalueRegister {
+		// GETUPVAL 写入的临时寄存器可直接读取 closure 当前 upvalue。
+		return upvalueValue, true
+	}
 	return callerVM.Register(argumentStart + registerIndex)
+}
+
+// luaClosureUpvalueValue 读取 Lua closure 当前 upvalue 值。
+//
+// 运行期共享 cell 优先于创建时快照；索引越界或 cell 损坏时返回 ok=false 让调用方回退 VM。
+func luaClosureUpvalueValue(closure *runtime.LuaClosure, index int) (runtime.Value, bool) {
+	// 先读取共享 upvalue cell，保证闭包看到最新外层局部值。
+	if closure == nil || index < 0 {
+		// 非法 closure 或索引不能读取 upvalue。
+		return runtime.NilValue(), false
+	}
+	if index < len(closure.UpvalueCells) {
+		cell := closure.UpvalueCells[index]
+		if cell == nil {
+			// 损坏 cell 回退完整 VM，由原路径暴露错误。
+			return runtime.NilValue(), false
+		}
+		return cell.Value(), true
+	}
+	if index < len(closure.Upvalues) {
+		// 没有共享 cell 时使用闭包创建时的 upvalue 快照。
+		return closure.Upvalues[index], true
+	}
+	return runtime.NilValue(), false
 }
 
 // luaFastAddValue 执行 caller-side 原生 number/integer 加法。
