@@ -72,7 +72,7 @@ func Open(state *runtime.State) error {
 		return gsubWithState(state, args...)
 	})))
 	library.RawSetString("len", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: LenUnaryValue, AcceptedKinds: runtime.UnaryKindMask(runtime.KindString)}))
-	library.RawSetString("lower", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Lower)))
+	library.RawSetString("lower", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: LowerUnaryValue, AcceptedKinds: runtime.UnaryKindMask(runtime.KindString)}))
 	library.RawSetString("match", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Match)))
 	library.RawSetString("pack", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Pack)))
 	library.RawSetString("packsize", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(PackSize)))
@@ -699,6 +699,28 @@ func Lower(args ...runtime.Value) ([]runtime.Value, error) {
 		}
 	}
 	return []runtime.Value{runtime.StringValue(string(bytes))}, nil
+}
+
+// LowerUnaryValue 实现 Lua 5.3 `string.lower` 的单参数单返回热路径。
+//
+// value 必须是 string；当前阶段只转换 ASCII `A-Z` 字节，其他字节原样保留。该入口服务
+// VM CALL fast path，避免标准库热点调用构造临时参数和结果切片。
+func LowerUnaryValue(value runtime.Value) (runtime.Value, error) {
+	// lower 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
+	if value.Kind != runtime.KindString {
+		// 非 string 类型不做 tostring 隐式转换。
+		return runtime.NilValue(), badArgument("lower", 1, "string expected")
+	}
+
+	bytes := []byte(value.String)
+	for index, currentByte := range bytes {
+		// 只对 ASCII 大写字母做单字节转换。
+		if currentByte >= 'A' && currentByte <= 'Z' {
+			// ASCII 大小写字母相差 32，转换不会改变字节长度。
+			bytes[index] = currentByte + ('a' - 'A')
+		}
+	}
+	return runtime.StringValue(string(bytes)), nil
 }
 
 // Rep 实现 Lua 5.3 `string.rep` 的基础重复语义。
