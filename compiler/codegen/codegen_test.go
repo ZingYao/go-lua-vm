@@ -674,6 +674,45 @@ func TestCompileSelfArithmeticAssignmentWritesDirectly(t *testing.T) {
 	}
 }
 
+// TestCompileSelfBinaryCallChainReusesAccumulator 验证自二元调用链复用累加器寄存器。
+//
+// `sum = sum + call() + call()` 需要保持最终写回前不覆盖 sum，同时第一层 `sum + call()`
+// 可让调用结果直接占用累加器，避免额外临时寄存器并对齐 Lua 5.3 的寄存器布局。
+func TestCompileSelfBinaryCallChainReusesAccumulator(t *testing.T) {
+	chunk := parseChunkForCodegenTest(t, "local sum = 0 local s = 'abcdef' for i = 1, 10 do sum = sum + math.sin(i) + math.floor(i / 3) + string.len(s) end")
+
+	proto, err := CompileChunk(chunk, "self-binary-call-chain")
+	if err != nil {
+		// 自二元调用链样例必须可编译。
+		t.Fatalf("compile self binary call chain failed: %v", err)
+	}
+	if proto.MaxStackSize != 12 {
+		// 第一层调用复用累加器后当前样例只需要 12 个寄存器。
+		t.Fatalf("unexpected max stack=%d", proto.MaxStackSize)
+	}
+	for instructionIndex, instruction := range proto.Code {
+		if instruction.OpCode() != bytecode.OpCall {
+			// 只关心第一条标准库调用。
+			continue
+		}
+		if instruction.A() != 6 {
+			// 第一层 math.sin 调用应直接写入累加器 R6。
+			t.Fatalf("first CALL should use accumulator R6, got R%d", instruction.A())
+		}
+		if instructionIndex+1 >= len(proto.Code) {
+			// CALL 后缺少 ADD 表示测试样例或 codegen 形态异常。
+			t.Fatalf("missing ADD after first CALL")
+		}
+		addInstruction := proto.Code[instructionIndex+1]
+		if addInstruction.OpCode() != bytecode.OpAdd || addInstruction.A() != 6 || addInstruction.B() != 0 || addInstruction.C() != 6 {
+			// 第一层应生成 `ADD R6, R0, R6`，避免旧形态的 `ADD R6, R0, R7`。
+			t.Fatalf("unexpected ADD after first CALL: %s", addInstruction.OpCode().Name())
+		}
+		return
+	}
+	t.Fatalf("missing CALL instruction")
+}
+
 // TestCompileTableReadWriteUsesDirectRegisters 验证 table 热循环复用 local/for 寄存器。
 //
 // 对齐 Lua 5.3 C codegen 的 `t[i] = i` 与 `acc = acc + t[i]` 形态，避免通用赋值路径为

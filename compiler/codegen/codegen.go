@@ -683,7 +683,7 @@ func (generator *generator) compileSelfBinaryChainAccumulatorNode(targetName str
 		}
 	}
 
-	rightOperand, rightRegister, err := generator.binaryRightOperand(expression.Right)
+	rightOperand, rightRegister, err := generator.selfBinaryAccumulatorRightOperand(expression.Right, leftOperand, finalRegister)
 	if err != nil {
 		// 右操作数失败时返回原始编译错误。
 		return true, err
@@ -704,6 +704,28 @@ func (generator *generator) compileSelfBinaryChainAccumulatorNode(targetName str
 	}
 	generator.releaseOptionalRegister(rightRegister)
 	return true, nil
+}
+
+// selfBinaryAccumulatorRightOperand 编译自二元累加器路径当前层的右操作数。
+//
+// 当 finalRegister 是临时累加器且左操作数不是同一个寄存器时，右侧复杂表达式可直接写入
+// finalRegister，随后用 `final = left op final` 合成当前层结果，减少 `x = x + call()` 子链的
+// 额外调用寄存器。若两者相同则必须分配独立右操作数，避免覆盖左侧中间值。
+func (generator *generator) selfBinaryAccumulatorRightOperand(expression parser.Expression, leftOperand int, finalRegister int) (operand int, tempRegister int, err error) {
+	if operand, ok, err := generator.safeRKOperand(expression); err != nil || ok {
+		// 安全 RK 操作数不需要额外临时寄存器；错误保持原编译语义。
+		return operand, -1, err
+	}
+	if finalRegister >= 0 && finalRegister != leftOperand && !generator.registerHasActiveLocal(finalRegister) {
+		// finalRegister 是可覆盖临时槽时，右侧直接写入该槽，避免额外调用结果寄存器。
+		generator.ensureRegister(finalRegister)
+		if err := generator.compileExpressionTo(expression, finalRegister); err != nil {
+			// 右操作数失败时返回原始编译错误。
+			return 0, -1, err
+		}
+		return finalRegister, -1, nil
+	}
+	return generator.binaryRightOperand(expression)
 }
 
 // isSelfBinaryChainRoot 判断表达式是否是左侧最终落到 targetName 的普通二元链。
@@ -3008,6 +3030,10 @@ func (generator *generator) compileBinaryTo(expression *parser.BinaryExpression,
 		return err
 	}
 	if expression.Operator != ".." && !generator.registerHasActiveLocal(targetRegister) {
+		if handled, err := generator.compileBinaryLeftRKRightToTargetTo(expression, targetRegister); handled || err != nil {
+			// 左操作数可 RK 编码时，右侧表达式直接写入目标寄存器，减少临时寄存器压力。
+			return err
+		}
 		// 目标寄存器不是当前 local 时，可以安全复用它保存左操作数，降低长表达式寄存器压力。
 		return generator.compileBinaryWithReusableTargetTo(expression, targetRegister)
 	}
@@ -3071,6 +3097,40 @@ func (generator *generator) compileBinaryRKTo(expression *parser.BinaryExpressio
 	if err := generator.withSourceLine(expression.Position, func() error {
 		// RK 快路径仍把运行期错误归因到二元操作符所在行。
 		generator.emitABC(opCode, targetRegister, leftOperand, rightOperand)
+		return nil
+	}); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+// compileBinaryLeftRKRightToTargetTo 编译左侧可 RK、右侧需要求值的普通二元表达式。
+//
+// targetRegister 不能承载 active local；该路径对齐 Lua 5.3 codegen，先让右侧表达式直接占用目标
+// 临时寄存器，再使用 RK 左操作数与目标寄存器生成运算，减少 `local + call()` 场景的额外临时槽。
+func (generator *generator) compileBinaryLeftRKRightToTargetTo(expression *parser.BinaryExpression, targetRegister int) (handled bool, err error) {
+	opCode, ok := binaryOpCode(expression.Operator)
+	if !ok {
+		// 非普通二元 opcode 不属于该快路径。
+		return false, nil
+	}
+	leftOperand, leftOK, err := generator.safeRKOperand(expression.Left)
+	if err != nil || !leftOK {
+		// 左侧无法安全转 RK 时交给通用可复用目标路径。
+		return false, err
+	}
+	if _, rightOK, err := generator.safeRKOperand(expression.Right); err != nil || rightOK {
+		// 右侧也能转 RK 时已由 compileBinaryRKTo 处理；错误保持原始编译语义。
+		return false, err
+	}
+	generator.ensureRegister(targetRegister)
+	if err := generator.compileExpressionTo(expression.Right, targetRegister); err != nil {
+		// 右侧表达式失败时直接返回，不生成二元运算。
+		return true, err
+	}
+	if err := generator.withSourceLine(expression.Position, func() error {
+		// 左 RK + 右目标寄存器路径保持二元运算错误归因到操作符所在行。
+		generator.emitABC(opCode, targetRegister, leftOperand, targetRegister)
 		return nil
 	}); err != nil {
 		return true, err
