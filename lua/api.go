@@ -3222,9 +3222,19 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 	directClosure, directCall := canExecuteLuaCallRequestDirect(state, functionValue, callRequest)
 	debugName := ""
 	debugNameWhat := ""
-	if !directCall || hooksEnabled {
-		// 通用调用和可被 hook 观察的 direct 调用需要推断调试名称；普通 direct 叶子调用跳过该成本。
+	debugNameResolved := false
+	ensureDebugName := func() {
+		// 调试名称只在 hook、错误回退或需要 Go/Lua 调用帧时才推断，避免无 hook fast path 支付名称分析成本。
+		if debugNameResolved {
+			// 已推断过的调用点直接复用结果，保持同一次 CALL 中错误回退名称一致。
+			return
+		}
 		debugName, debugNameWhat = luaCallDebugNameAtCall(state, functionValue, callRequest.GenericFor, proto, vm, callPC)
+		debugNameResolved = true
+	}
+	if directCall && hooksEnabled {
+		// 可被 hook 观察的 direct 调用需要提前推断调试名称；普通 direct 叶子调用跳过该成本。
+		ensureDebugName()
 	}
 	var results []Value
 	var directCallVM *runtime.VM
@@ -3261,6 +3271,7 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 				err = callErr
 			} else {
 				// 参数类型未命中或存在 hook 时必须保留完整 Go 调用帧语义。
+				ensureDebugName()
 				result, callErr := callGoUnaryFunctionWithDebugFrame(state, functionValue, fastUnaryFunction.Function, debugName, debugNameWhat, false, argument)
 				if callErr == nil {
 					if setErr := vm.SetRegister(callRequest.FunctionIndex, result); setErr != nil {
@@ -3286,6 +3297,7 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 				return runtime.ErrRegisterOutOfRange
 			}
 			var result Value
+			ensureDebugName()
 			result, err = callGoUnaryFunctionWithDebugFrame(state, functionValue, unaryFunction, debugName, debugNameWhat, false, argument)
 			if err == nil {
 				if setErr := vm.SetRegister(callRequest.FunctionIndex, result); setErr != nil {
@@ -3323,6 +3335,7 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 		if goFunction, ok := functionValue.Ref.(runtime.GoFunction); ok && callRequest.ReturnCount == 1 && !callRequest.GenericFor {
 			// 单返回 GoFunction 可直接写回调用寄存器，避免为结果构造临时 []Value。
 			var result Value
+			ensureDebugName()
 			result, err = callGoFunctionWithDebugFrame(state, functionValue, goFunction, debugName, debugNameWhat, false, arguments...)
 			if err == nil {
 				if setErr := vm.SetRegister(callRequest.FunctionIndex, result); setErr != nil {
@@ -3350,6 +3363,7 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 				resultCount, handled, err = fixedFunction.Function(resultSlots, arguments...)
 			} else {
 				// hook 或损坏注册场景保留完整 Go 调用帧与错误语义。
+				ensureDebugName()
 				resultCount, handled, err = callGoFixedResultsFunctionWithDebugFrame(state, functionValue, fixedFunction, resultSlots, debugName, debugNameWhat, false, arguments...)
 			}
 			if err == nil && handled {
@@ -3361,6 +3375,7 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 			}
 			if err != nil && !hooksEnabled {
 				// 参数错误等慢路径需要重新进入 debug frame，保持 traceback 和调用名可见性。
+				ensureDebugName()
 				resultCount, handled, err = callGoFixedResultsFunctionWithDebugFrame(state, functionValue, fixedFunction, resultSlots, debugName, debugNameWhat, false, arguments...)
 				if err == nil && handled {
 					if writeErr := writeLuaCallResults(vm, callRequest, resultSlots[:resultCount]); writeErr != nil {
@@ -3372,10 +3387,12 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 			}
 			if err == nil && !handled {
 				// 固定 writer 未覆盖当前调用时，回退通用路径以保留 Lua pattern/capture 等完整语义。
+				ensureDebugName()
 				results, err = callWithDebugNameArgs(state, functionValue, debugName, debugNameWhat, arguments)
 			}
 		} else {
 			// 多返回 Go/Lua 调用仍走通用结果切片路径。
+			ensureDebugName()
 			results, err = callWithDebugNameArgs(state, functionValue, debugName, debugNameWhat, arguments)
 		}
 	}
