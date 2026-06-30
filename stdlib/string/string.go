@@ -265,6 +265,14 @@ func FindFixed(dst []runtime.Value, args ...runtime.Value) (int, bool, error) {
 		// 调用方提供的结果槽不足时无法安全写入固定两返回值。
 		return 0, false, runtime.ErrRegisterOutOfRange
 	}
+	if len(args) >= 4 && args[3].Truthy() {
+		// plain=true 是标准库热点，直接按字面查找处理，避免额外 pattern magic 扫描。
+		resultCount, ok, err := findPlainFixedFast(dst, args)
+		if ok || err != nil {
+			// 参数形态完整时已处理；参数错误保持 FindFixed 原有错误语义。
+			return resultCount, true, err
+		}
+	}
 	source, err := stringArgument(args, 1, "find")
 	if err != nil {
 		// 第一个参数不是 string 时直接返回 Lua 参数错误。
@@ -305,6 +313,45 @@ func FindFixed(dst []runtime.Value, args ...runtime.Value) (int, bool, error) {
 
 	// 字面量路径直接写入调用方结果槽，避免构造临时 []Value。
 	return findLiteralRangeInto(dst, source, pattern, startOffset), true, nil
+}
+
+// findPlainFixedFast 执行 string.find plain=true 的固定返回快路径。
+//
+// dst 至少包含两个槽位；args 必须已有第四个 truthy 参数。返回 ok=false 表示参数形态不满足
+// 窄快路径，调用方继续走完整 FindFixed 校验。
+func findPlainFixedFast(dst []runtime.Value, args []runtime.Value) (int, bool, error) {
+	if len(args) < 2 {
+		// 缺少必选参数时交回通用路径生成标准参数错误。
+		return 0, false, nil
+	}
+	if args[0].Kind != runtime.KindString {
+		// 第一个参数不是 string 时直接返回 Lua 参数错误。
+		return 0, true, badArgument("find", 1, "string expected")
+	}
+	if args[1].Kind != runtime.KindString {
+		// 第二个参数不是 string 时直接返回 Lua 参数错误。
+		return 0, true, badArgument("find", 2, "string expected")
+	}
+	startIndex := int64(1)
+	if len(args) >= 3 {
+		// init 参数存在时必须可转换为 integer。
+		convertedIndex, ok := args[2].ToInteger()
+		if !ok {
+			// 非整数起点无法换算为字节偏移。
+			return 0, true, badArgument("find", 3, "integer expected")
+		}
+		startIndex = convertedIndex
+	}
+	source := args[0].String
+	startOffset := normalizeStart(len(source), startIndex)
+	if startOffset > len(source) {
+		// 起点超过字符串尾部时必然找不到匹配。
+		dst[0] = runtime.NilValue()
+		return 1, true, nil
+	}
+
+	// plain=true 明确禁用 pattern，直接执行字面量查找。
+	return findLiteralRangeInto(dst, source, args[1].String, startOffset), true, nil
 }
 
 // findLiteralRange 执行 string.find 的字面量查找并返回 Lua 1-based 闭区间。

@@ -4406,6 +4406,29 @@ func writeLuaCallResults(vm *runtime.VM, callRequest *runtime.CallRequest, resul
 		vm.SetOpenTop(-1)
 		return nil
 	}
+	if resultCount == 2 && !callRequest.GenericFor {
+		// string.find 等固定双返回热点直接写两个结果槽，避免进入通用结果循环。
+		firstResult := runtime.NilValue()
+		if len(results) > 0 {
+			// 被调函数实际返回的第一个值优先写入。
+			firstResult = results[0]
+		}
+		secondResult := runtime.NilValue()
+		if len(results) > 1 {
+			// 被调函数实际返回的第二个值优先写入。
+			secondResult = results[1]
+		}
+		if err := vm.SetRegister(callRequest.FunctionIndex, firstResult); err != nil {
+			// 第一个结果写回超过寄存器窗口时返回边界错误。
+			return err
+		}
+		if err := vm.SetRegister(callRequest.FunctionIndex+1, secondResult); err != nil {
+			// 第二个结果写回超过寄存器窗口时返回边界错误。
+			return err
+		}
+		vm.SetOpenTop(-1)
+		return nil
+	}
 	if resultCount < 0 {
 		// 开放返回写入被调函数实际返回的所有结果。
 		resultCount = len(results)
