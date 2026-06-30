@@ -930,6 +930,46 @@ func TestCompileTableReadWriteUsesDirectRegisters(t *testing.T) {
 	}
 }
 
+// TestCompileSelfBinaryGlobalRightAvoidsLeftMove 验证自二元赋值的全局右操作数对齐官方字节码。
+//
+// 官方 Lua 5.3 对 `sum = sum + x` 会先把全局 `x` 读取到临时寄存器，再直接生成
+// `ADD sum, sum, temp`；不需要先把 `sum` MOVE 到临时寄存器。
+func TestCompileSelfBinaryGlobalRightAvoidsLeftMove(t *testing.T) {
+	chunk := parseChunkForCodegenTest(t, "x = 1 local i = 1 local sum = 0 while i <= 10 do sum = sum + x i = i + 1 end")
+
+	proto, err := CompileChunk(chunk, "self-binary-global-right")
+	if err != nil {
+		// 全局右操作数自二元赋值样例必须可编译。
+		t.Fatalf("compile self binary global right failed: %v", err)
+	}
+	for _, instruction := range proto.Code {
+		if instruction.OpCode() == bytecode.OpMove && instruction.A() == 2 && instruction.B() == 1 {
+			// 旧形态会把 sum 从 R1 复制到 R2，再用 R2 作为 ADD 左操作数。
+			t.Fatalf("unexpected MOVE of sum before global right operand; code=%v", proto.Code)
+		}
+	}
+	hasGlobalReadToTemp := false
+	hasDirectAdd := false
+	for _, instruction := range proto.Code {
+		switch instruction.OpCode() {
+		case bytecode.OpGetTabUp:
+			if instruction.A() == 2 {
+				// 右侧全局 x 应直接读入第一个临时寄存器 R2。
+				hasGlobalReadToTemp = true
+			}
+		case bytecode.OpAdd:
+			if instruction.A() == 1 && instruction.B() == 1 && instruction.C() == 2 {
+				// sum 位于 R1，官方形态直接以 R1 作为左操作数并写回 R1。
+				hasDirectAdd = true
+			}
+		}
+	}
+	if !hasGlobalReadToTemp || !hasDirectAdd {
+		// 缺失任一关键指令都说明仍未对齐官方 Lua 的寄存器布局。
+		t.Fatalf("missing direct global-right ADD; get=%v add=%v code=%v", hasGlobalReadToTemp, hasDirectAdd, proto.Code)
+	}
+}
+
 // TestCompileSafeBinaryReturnUsesRKOperands 验证单返回值安全二元表达式直接复用参数寄存器。
 //
 // Lua 5.3 C codegen 对 `return a + b` 生成 `ADD temp, a, b; RETURN temp`，不需要先把 a/b

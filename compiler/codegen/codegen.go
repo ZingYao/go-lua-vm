@@ -1253,8 +1253,9 @@ func isSelfConcatSafeRightExpression(expression parser.Expression) bool {
 
 // isSelfBinarySafeRightExpression 判断自二元运算右侧是否不会修改目标 local。
 //
-// 当前允许字面量、当前 local 名称和已存在的 upvalue 名称；未知名称会走 `_ENV[name]`，可能触发
-// table 元方法，因此不进入快路径。复杂表达式、调用、字段和索引同样回退通用赋值路径。
+// 当前允许字面量、当前 local 名称、已存在的 upvalue 名称和未知全局名称；全局名称会在右操作数
+// 临时寄存器中完成 `_ENV[name]` 读取，再按 Lua 5.3 官方 codegen 形态读取目标 local 执行二元运算。
+// 复杂表达式、调用、字段和索引仍回退通用赋值路径。
 func (generator *generator) isSelfBinarySafeRightExpression(expression parser.Expression) bool {
 	if _, ok := expression.(*parser.LiteralExpression); ok {
 		// 字面量求值没有副作用，不会改变左操作数寄存器。
@@ -1273,13 +1274,18 @@ func (generator *generator) isSelfBinarySafeRightExpression(expression parser.Ex
 		// `_ENV` 本身作为 upvalue 读取没有 table 元方法。
 		return true
 	}
-	if _, ok, err := generator.resolveUpvalue(nameExpression.Name, nameExpression.Position); err == nil && ok {
+	_, captured, err := generator.resolveUpvalue(nameExpression.Name, nameExpression.Position)
+	if err != nil {
+		// upvalue 上限错误交给通用路径保留原错误时机。
+		return false
+	}
+	if captured {
 		// 已捕获或可捕获的 upvalue 读取不会调用 Lua 代码。
 		return true
 	}
 
-	// 未知名称或 upvalue 上限错误交给通用路径保留原错误时机。
-	return false
+	// 未声明名称按全局读取处理；官方 Lua 5.3 同样先求右侧全局，再以目标 local 作为左操作数。
+	return true
 }
 
 // safeRKOperand 将无副作用表达式转换为 RK 操作数。
