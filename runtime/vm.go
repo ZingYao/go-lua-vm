@@ -667,12 +667,12 @@ func (vm *VM) TryExecuteLeafAddReturnInCaller(closure *LuaClosure, request *Call
 
 	// 读取预解析的叶子函数形态，后续只在 caller 寄存器窗口内完成操作数映射。
 	leafAddReturn := closure.LeafAddReturn
-	if handled, err := vm.tryLeafRegisterRegisterAdd(leafAddReturn, request); handled || err != nil {
-		// 命中特化 `R + R` 形态时直接返回；未命中时继续通用叶子加法路径。
-		return handled, err
-	}
 	if handled, err := vm.tryLeafRegisterIntegerConstantAdd(closure, leafAddReturn, request); handled || err != nil {
 		// 命中特化 `R + integer` 形态时直接返回；未命中时继续通用叶子加法路径。
+		return handled, err
+	}
+	if handled, err := vm.tryLeafRegisterRegisterAdd(leafAddReturn, request); handled || err != nil {
+		// 命中特化 `R + R` 形态时直接返回；未命中时继续通用叶子加法路径。
 		return handled, err
 	}
 	if handled, err := vm.tryLeafRegisterUpvalueAdd(closure, leafAddReturn, request); handled || err != nil {
