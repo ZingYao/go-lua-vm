@@ -96,6 +96,10 @@ type VM struct {
 	returnValues []Value
 	// returnInline 保存少量返回值，避免普通 Lua 函数每次 return 都分配切片底层数组。
 	returnInline [2]Value
+	// addIntRegisterCache 按 PC 标记 ADD 指令最近是否命中过寄存器 integer+integer 热路径。
+	addIntRegisterCache []bool
+	// addIntRegisterCacheProto 记录 addIntRegisterCache 对应的 Proto，避免 VM 池复用时误用旧缓存。
+	addIntRegisterCacheProto *bytecode.Proto
 }
 
 // LuaClosure 表示最小 VM 阶段的 Lua closure 值。
@@ -462,6 +466,22 @@ func (vm *VM) BindPrototype(proto *bytecode.Proto) {
 
 	// 记录原型供 GC root 裁剪使用。
 	vm.proto = proto
+	if proto == nil {
+		// 手工 VM 或测试路径没有 Proto，不启用指令级热路径缓存。
+		vm.addIntRegisterCacheProto = nil
+		vm.addIntRegisterCache = nil
+		return
+	}
+	if vm.addIntRegisterCacheProto != proto || len(vm.addIntRegisterCache) < len(proto.Code) {
+		// VM 池复用到不同 Proto 时必须重建缓存，避免 PC 相同但指令不同导致错误命中。
+		vm.addIntRegisterCacheProto = proto
+		vm.addIntRegisterCache = make([]bool, len(proto.Code))
+		return
+	}
+	for pc := len(proto.Code); pc < len(vm.addIntRegisterCache); pc++ {
+		// 同一 Proto 理论上 Code 长度稳定；防御异常缩短时清掉越界尾部缓存。
+		vm.addIntRegisterCache[pc] = false
+	}
 }
 
 // BindLuaMetamethodRunner 绑定当前 VM 可用的 Lua closure 元方法执行器。
@@ -1382,18 +1402,44 @@ func (vm *VM) executeAdd(instruction bytecode.Instruction) error {
 		return ErrRegisterOutOfRange
 	}
 
-	leftValue, err := vm.rkValue(instruction.B())
+	leftOperand := instruction.B()
+	rightOperand := instruction.C()
+	if vm.currentPC >= 0 && vm.currentPC < len(vm.addIntRegisterCache) && vm.addIntRegisterCache[vm.currentPC] {
+		// 命中过 ADD 寄存器 integer 缓存时仍逐次检查类型，保证动态改写局部变量可回退。
+		leftIndex := bytecode.IndexK(leftOperand)
+		rightIndex := bytecode.IndexK(rightOperand)
+		if bytecode.IsK(leftOperand) || bytecode.IsK(rightOperand) || leftIndex < 0 || leftIndex >= len(vm.registers) || rightIndex < 0 || rightIndex >= len(vm.registers) {
+			// 指令形态或寄存器窗口变化时清理缓存，并回到通用 RK 路径报出原始错误。
+			vm.addIntRegisterCache[vm.currentPC] = false
+		} else {
+			leftRegisterValue := vm.registers[leftIndex]
+			rightRegisterValue := vm.registers[rightIndex]
+			if leftRegisterValue.Kind == KindInteger && rightRegisterValue.Kind == KindInteger {
+				// 双 integer 加法保留 integer 结果，并按 64 位补码自然回绕。
+				vm.registers[targetIndex] = IntegerValue(leftRegisterValue.Integer + rightRegisterValue.Integer)
+				return nil
+			}
+			// 类型不再匹配时清理缓存，后续走完整 Lua 算术和元方法语义。
+			vm.addIntRegisterCache[vm.currentPC] = false
+		}
+	}
+
+	leftValue, err := vm.rkValue(leftOperand)
 	if err != nil {
 		// 左操作数读取失败时不能继续计算，目标寄存器保持原值。
 		return err
 	}
-	rightValue, err := vm.rkValue(instruction.C())
+	rightValue, err := vm.rkValue(rightOperand)
 	if err != nil {
 		// 右操作数读取失败时不能继续计算，目标寄存器保持原值。
 		return err
 	}
 
 	if leftValue.Kind == KindInteger && rightValue.Kind == KindInteger {
+		if !bytecode.IsK(leftOperand) && !bytecode.IsK(rightOperand) && vm.currentPC >= 0 && vm.currentPC < len(vm.addIntRegisterCache) {
+			// 记录当前 PC 的寄存器 integer 热路径，下次同一 ADD 可跳过通用 RK 读取和 number fallback。
+			vm.addIntRegisterCache[vm.currentPC] = true
+		}
 		// 双 integer 加法保留 integer 结果，并按 64 位补码自然回绕。
 		vm.registers[targetIndex] = IntegerValue(leftValue.Integer + rightValue.Integer)
 		return nil
