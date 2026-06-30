@@ -2412,6 +2412,10 @@ func (vm *VM) executeMul(instruction bytecode.Instruction) error {
 		// 目标寄存器越界时不能写入，避免破坏寄存器窗口。
 		return ErrRegisterOutOfRange
 	}
+	if handled, err := vm.tryNumberConstantMul(instruction); handled || err != nil {
+		// 混合算术循环常见 `number register * number constant`，命中后跳过通用 RK 和闭包回调。
+		return err
+	}
 	if handled, err := vm.tryCachedIntegerMulArithmetic(instruction); handled || err != nil {
 		// MUL 专用缓存命中已完成写回；缓存形态损坏时返回原始寄存器错误。
 		return err
@@ -2421,6 +2425,68 @@ func (vm *VM) executeMul(instruction bytecode.Instruction) error {
 	return vm.executeFastArithmetic(instruction, arithmeticIntRegisterCacheMul, func(left float64, right float64) float64 {
 		return left * right
 	}, metamethodMul)
+}
+
+// tryNumberConstantMul 执行寄存器数值与 number 常量相乘的窄快路径。
+//
+// instruction 必须是 MUL；只处理一侧为寄存器、另一侧为 Proto number 常量，且寄存器运行期值是
+// integer 或 number 的场景。字符串数字、非数值和元方法语义返回 handled=false 交给完整算术路径。
+func (vm *VM) tryNumberConstantMul(instruction bytecode.Instruction) (bool, error) {
+	// 先解析 B/C 操作数，只有恰好一侧为常量时才可能命中该窄快路径。
+	leftOperand := instruction.B()
+	rightOperand := instruction.C()
+	leftIsConstant := bytecode.IsK(leftOperand)
+	rightIsConstant := bytecode.IsK(rightOperand)
+	if leftIsConstant == rightIsConstant {
+		// 双寄存器或双常量形态不属于当前优化目标。
+		return false, nil
+	}
+
+	registerOperand := leftOperand
+	constantOperand := rightOperand
+	if leftIsConstant {
+		// 常量在左侧时交换读取顺序；乘法交换律允许共用同一结果计算。
+		registerOperand = rightOperand
+		constantOperand = leftOperand
+	}
+
+	constantIndex := bytecode.IndexK(constantOperand)
+	if constantIndex < 0 || constantIndex >= len(vm.constants) {
+		// 损坏 chunk 或越界常量应暴露原始常量错误。
+		return true, ErrConstantOutOfRange
+	}
+	constant := vm.constants[constantIndex]
+	if constant.Kind != bytecode.ConstantNumber {
+		// integer 常量继续交给已有 integer cache；字符串数字需要完整 Lua 转换语义。
+		return false, nil
+	}
+
+	registerIndex := bytecode.IndexK(registerOperand)
+	if registerIndex < 0 || registerIndex >= len(vm.registers) {
+		// 寄存器越界时保持原 VM 错误语义。
+		return true, ErrRegisterOutOfRange
+	}
+	registerValue := vm.registers[registerIndex]
+	var registerNumber float64
+	switch registerValue.Kind {
+	case KindInteger:
+		// integer 与 number 常量混合时按 Lua number 结果写回。
+		registerNumber = float64(registerValue.Integer)
+	case KindNumber:
+		// number 寄存器可直接参与浮点乘法。
+		registerNumber = registerValue.Number
+	default:
+		// 非原生数值必须保留字符串转换和元方法回退。
+		return false, nil
+	}
+
+	targetIndex := instruction.A()
+	if targetIndex < 0 || targetIndex >= len(vm.registers) {
+		// 目标寄存器越界时不能写入结果。
+		return true, ErrRegisterOutOfRange
+	}
+	vm.registers[targetIndex] = NumberValue(registerNumber * constant.Number)
+	return true, nil
 }
 
 // executeFastArithmetic 执行 ADD/SUB/MUL 的低风险热路径。

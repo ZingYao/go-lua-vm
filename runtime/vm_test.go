@@ -1243,6 +1243,56 @@ func TestVMBinaryArithmeticInstructions(t *testing.T) {
 	}
 }
 
+// TestVMMulNumberConstantFastPath 验证 MUL 的 number 常量窄快路径。
+//
+// 该快路径服务混合算术循环中的 `number * Knum` 形态；必须支持常量左右两侧，并在字符串数字
+// 场景回退完整 Lua 算术转换路径。
+func TestVMMulNumberConstantFastPath(t *testing.T) {
+	tests := []struct {
+		name          string
+		instruction   bytecode.Instruction
+		registerValue Value
+		expectedValue Value
+	}{
+		{
+			name:          "register times number constant",
+			instruction:   bytecode.CreateABC(bytecode.OpMul, 0, 1, bytecode.RKAsK(0)),
+			registerValue: NumberValue(2.5),
+			expectedValue: NumberValue(10),
+		},
+		{
+			name:          "number constant times register",
+			instruction:   bytecode.CreateABC(bytecode.OpMul, 0, bytecode.RKAsK(0), 1),
+			registerValue: IntegerValue(3),
+			expectedValue: NumberValue(12),
+		},
+		{
+			name:          "string number falls back",
+			instruction:   bytecode.CreateABC(bytecode.OpMul, 0, 1, bytecode.RKAsK(0)),
+			registerValue: StringValue("3"),
+			expectedValue: NumberValue(12),
+		},
+	}
+
+	for _, testCase := range tests {
+		// 每个形态使用独立 VM，避免寄存器和值类型缓存影响后续断言。
+		vm := NewVMWithConstants(2, []bytecode.Constant{bytecode.NumberConstant(4)})
+		if err := vm.SetRegister(1, testCase.registerValue); err != nil {
+			// 测试准备阶段必须能写入待乘寄存器。
+			t.Fatalf("%s set register failed: %v", testCase.name, err)
+		}
+		if err := vm.Step(testCase.instruction); err != nil {
+			// 合法 number 常量乘法不应失败。
+			t.Fatalf("%s failed: %v", testCase.name, err)
+		}
+		value, ok := vm.Register(0)
+		if !ok || !value.RawEqual(testCase.expectedValue) {
+			// 目标寄存器必须保存乘法结果。
+			t.Fatalf("%s value mismatch: value=%#v ok=%v", testCase.name, value, ok)
+		}
+	}
+}
+
 // TestVMBinaryArithmeticErrors 验证二元算术指令的错误边界。
 //
 // 算术错误必须返回明确错误，并保持目标寄存器原值。
