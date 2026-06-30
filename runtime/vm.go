@@ -1902,6 +1902,25 @@ func (vm *VM) executeSetTable(instruction bytecode.Instruction) error {
 		return err
 	}
 	if table.metatable == nil {
+		if bytecode.IsK(instruction.B()) {
+			// 无元表 table 使用 string 常量 key 时可直接写 hash，避免构造临时 Value 和通用 key 编码。
+			keyIndex := bytecode.IndexK(instruction.B())
+			if keyIndex < 0 || keyIndex >= len(vm.constants) {
+				// key 常量越界时不能读取 value，也不能尝试写入 table。
+				return ErrConstantOutOfRange
+			}
+			keyConstant := vm.constants[keyIndex]
+			if keyConstant.Kind == bytecode.ConstantString {
+				// string key 写入不会触发元方法；value 仍按 RK 语义读取，保留常量越界错误边界。
+				value, err := vm.rkValue(instruction.C())
+				if err != nil {
+					// value 常量读取失败时不能尝试写入 table。
+					return err
+				}
+				table.RawSetString(keyConstant.String, value)
+				return nil
+			}
+		}
 		if !bytecode.IsK(instruction.B()) {
 			// 数值 for 常见的整数寄存器 key 直接写数组区，避免 RawSet 内部再次解析 key 类型。
 			keyIndex := bytecode.IndexK(instruction.B())
@@ -1982,6 +2001,40 @@ func (vm *VM) executeSetTabUp(instruction bytecode.Instruction) error {
 		// SETTABUP 需要 upvalue 保存 table，例如 Lua 5.3 的 _ENV。
 		return err
 	}
+	if table.metatable == nil {
+		if bytecode.IsK(instruction.B()) {
+			// 无元表 upvalue table 使用 string 常量 key 时可直接写 hash，避免构造临时 Value。
+			keyIndex := bytecode.IndexK(instruction.B())
+			if keyIndex < 0 || keyIndex >= len(vm.constants) {
+				// key 常量越界时不能读取 value，也不能尝试写入 table。
+				return ErrConstantOutOfRange
+			}
+			keyConstant := vm.constants[keyIndex]
+			if keyConstant.Kind == bytecode.ConstantString {
+				// string key 写入不会触发元方法；value 仍按 RK 语义读取，保留常量越界错误边界。
+				value, err := vm.rkValue(instruction.C())
+				if err != nil {
+					// value 常量读取失败时不能尝试写入 table。
+					return err
+				}
+				table.RawSetString(keyConstant.String, value)
+				return nil
+			}
+		}
+		key, err := vm.rkValue(instruction.B())
+		if err != nil {
+			// key 读取失败时不能尝试写入 table。
+			return err
+		}
+		value, err := vm.rkValue(instruction.C())
+		if err != nil {
+			// value 读取失败时不能尝试写入 table。
+			return err
+		}
+		// 无元表 upvalue table 写入等价于 raw set，常见于 _ENV 初始化和普通模块表更新。
+		return table.RawSet(key, value)
+	}
+
 	key, err := vm.rkValue(instruction.B())
 	if err != nil {
 		// key 读取失败时不能尝试写入 table。
@@ -1992,12 +2045,6 @@ func (vm *VM) executeSetTabUp(instruction bytecode.Instruction) error {
 		// value 读取失败时不能尝试写入 table。
 		return err
 	}
-
-	if table.metatable == nil {
-		// 无元表 upvalue table 写入等价于 raw set，常见于 _ENV 初始化和普通模块表更新。
-		return table.RawSet(key, value)
-	}
-
 	// SETTABUP 使用带 runner 的普通写入，支持 Lua closure 形式 __newindex 元方法。
 	return table.SetWithRunner(key, value, vm.luaMetamethodRunner)
 }

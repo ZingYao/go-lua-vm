@@ -191,9 +191,17 @@ func TestCompileChunkWhileStatement(t *testing.T) {
 		// 合法 while 语句不应编译失败。
 		t.Fatalf("compile while statement failed: %v", err)
 	}
-	if countOpCode(proto, bytecode.OpTest) != 1 {
-		// while 条件应生成一个 TEST 指令。
-		t.Fatalf("expected one TEST instruction")
+	if countOpCode(proto, bytecode.OpLt) != 1 {
+		// 安全比较条件应直译为 Lua 5.3 的 LT 测试指令。
+		t.Fatalf("expected one LT instruction")
+	}
+	if countOpCode(proto, bytecode.OpTest) != 0 {
+		// while 比较条件不应先物化为 boolean 再 TEST。
+		t.Fatalf("unexpected TEST instruction count=%d", countOpCode(proto, bytecode.OpTest))
+	}
+	if countOpCode(proto, bytecode.OpLoadBool) != 0 {
+		// while 比较条件不应生成 LOADBOOL true/false 序列。
+		t.Fatalf("unexpected LOADBOOL instruction count=%d", countOpCode(proto, bytecode.OpLoadBool))
 	}
 	if countOpCode(proto, bytecode.OpJmp) < 2 {
 		// while 至少需要一个条件失败跳出 JMP 和一个循环尾部回跳 JMP。
@@ -348,6 +356,34 @@ func TestCompileChunkGlobalNamesUseEnv(t *testing.T) {
 	if !hasStringConstant(proto, "_VERSION") || !hasStringConstant(proto, "answer") {
 		// 全局 key 必须以字符串常量形式进入当前 Proto 常量池。
 		t.Fatalf("missing global key constants=%+v", proto.Constants)
+	}
+}
+
+// TestCompileChunkGlobalSafeAssignmentUsesSourceRegister 验证安全全局赋值直接使用 RHS 寄存器。
+//
+// Lua 5.3 官方 codegen 对 `global = local` 会直接把 local 寄存器作为 SETTABUP value 操作数。
+func TestCompileChunkGlobalSafeAssignmentUsesSourceRegister(t *testing.T) {
+	chunk := parseChunkForCodegenTest(t, "local i = 1 answer = i return answer")
+
+	proto, err := CompileChunk(chunk, "global-safe-assign")
+	if err != nil {
+		// 合法全局赋值不应编译失败。
+		t.Fatalf("compile global safe assignment failed: %v", err)
+	}
+	foundDirectSet := false
+	for _, instruction := range proto.Code {
+		if instruction.OpCode() == bytecode.OpSetTabUp && instruction.C() == 0 {
+			// local i 位于 R0，SETTABUP 的 value 操作数应直接使用 R0。
+			foundDirectSet = true
+		}
+	}
+	if !foundDirectSet {
+		// 未找到直接 SETTABUP 说明仍走了临时 MOVE 路径。
+		t.Fatalf("expected SETTABUP to use source register R0 directly")
+	}
+	if hasMove(proto, 1, 0) {
+		// 旧形态会先 MOVE R1 R0，再用 R1 写入全局表。
+		t.Fatalf("unexpected MOVE before global assignment")
 	}
 }
 

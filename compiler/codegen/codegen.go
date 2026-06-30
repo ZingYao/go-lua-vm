@@ -452,6 +452,10 @@ func (generator *generator) compileAssignment(statement *parser.AssignmentStatem
 		// 单 table 索引赋值在 receiver/key/value 均安全时可直接生成 SETTABLE，避免临时 MOVE。
 		return err
 	}
+	if handled, err := generator.compileSingleGlobalSafeAssignment(statement); handled || err != nil {
+		// 单全局安全 RHS 可直接生成 SETTABUP/SETTABLE，避免通用赋值临时值和 MOVE。
+		return err
+	}
 	if handled, err := generator.compileSingleLocalSafeAssignment(statement); handled || err != nil {
 		// 单 local 安全 RHS 可直接写回目标寄存器，避免通用赋值临时值和 MOVE。
 		return err
@@ -505,6 +509,54 @@ func (generator *generator) compileAssignment(statement *parser.AssignmentStatem
 
 	// 普通赋值编译完成。
 	return nil
+}
+
+// compileSingleGlobalSafeAssignment 优化 `globalName = literal/localName`。
+//
+// 该优化只处理单左值、单右值，左值必须解析为真正全局名，RHS 必须是字面量或当前 local；
+// upvalue、local `_ENV` 捕获、多重赋值和有副作用 RHS 都回退通用路径以保持 Lua 5.3 语义。
+func (generator *generator) compileSingleGlobalSafeAssignment(statement *parser.AssignmentStatement) (bool, error) {
+	if len(statement.Left) != 1 || len(statement.Right) != 1 {
+		// 多重赋值必须先求完所有 RHS，再统一写回。
+		return false, nil
+	}
+	targetName, ok := statement.Left[0].(*parser.NameExpression)
+	if !ok {
+		// 非名称左值不属于全局名写入。
+		return false, nil
+	}
+	if _, exists := generator.locals[targetName.Name]; exists {
+		// 当前 local 写入交给 local 快路径或通用路径。
+		return false, nil
+	}
+	if targetName.Name == envUpvalueName {
+		// `_ENV = value` 是环境 upvalue 写入，不是 `_ENV["_ENV"]` 全局字段写入。
+		return false, nil
+	}
+	if !generator.isSafeRKCandidate(statement.Right[0]) {
+		// RHS 可能有副作用或需要运行期查找时回退通用路径。
+		return false, nil
+	}
+	if _, captured, err := generator.resolveUpvalue(targetName.Name, targetName.Position); err != nil || captured {
+		if err != nil {
+			// upvalue 解析错误需要按原始编译错误返回。
+			return true, err
+		}
+		// 外层 local 捕获为 upvalue 时不能当作全局写入。
+		return false, nil
+	}
+	valueOperand, valueRegister, err := generator.safeRKOperandWithRegister(statement.Right[0])
+	if err != nil {
+		// RHS 常量装载失败时返回编译错误。
+		return true, err
+	}
+	if err := generator.emitSetGlobalNameOperand(targetName.Name, valueOperand); err != nil {
+		// 全局 key 无法编码时释放 RHS 临时寄存器并返回。
+		generator.releaseOptionalRegister(valueRegister)
+		return true, err
+	}
+	generator.releaseOptionalRegister(valueRegister)
+	return true, nil
 }
 
 // compileSingleLocalSafeAssignment 优化 `localName = literal/localName`。
@@ -1262,6 +1314,38 @@ func (generator *generator) safeRKOperand(expression parser.Expression) (operand
 	}
 }
 
+// safeRKOperandWithRegister 将安全表达式转换为可释放临时寄存器的 RK 操作数。
+//
+// 当前只接受 active local 和字面量；字面量超过 RK 常量范围时会装载到临时寄存器，返回的
+// register 需要调用方用 releaseOptionalRegister 释放。
+func (generator *generator) safeRKOperandWithRegister(expression parser.Expression) (operand int, register int, err error) {
+	switch typedExpression := expression.(type) {
+	case *parser.NameExpression:
+		binding, exists := generator.locals[typedExpression.Name]
+		if !exists {
+			// 调用方已筛选 safe candidate；防御性返回编译错误便于定位损坏状态。
+			return 0, -1, fmt.Errorf("codegen missing local %s", typedExpression.Name)
+		}
+		return binding.register, -1, nil
+	case *parser.LiteralExpression:
+		constant, ok := literalConstant(typedExpression)
+		if !ok {
+			// 调用方已筛选 literal 常量；防御性返回编译错误便于定位损坏状态。
+			return 0, -1, fmt.Errorf("codegen unsupported comparison literal")
+		}
+		constantIndex := generator.addConstant(constant)
+		operand, register, err := generator.rkOperandForConstantIndex(constantIndex)
+		if err != nil {
+			// 常量装载失败时保持原始错误。
+			return 0, -1, err
+		}
+		return operand, register, nil
+	default:
+		// 调用方已筛选表达式形态；防御性返回编译错误便于定位损坏状态。
+		return 0, -1, fmt.Errorf("codegen unsupported comparison operand %T", expression)
+	}
+}
+
 // literalConstant 将可直接放入常量表的字面量转为 bytecode.Constant。
 func literalConstant(expression *parser.LiteralExpression) (bytecode.Constant, bool) {
 	if expression.Kind == lexer.TokenString {
@@ -1845,39 +1929,47 @@ func firstBlockLinePosition(block *parser.Block, fallback lexer.Position) lexer.
 // 循环体结束后生成回跳到条件起点的 JMP。break/goto 的跳转列表会在后续控制流任务接入。
 func (generator *generator) compileWhileStatement(statement *parser.WhileStatement) error {
 	conditionPC := len(generator.proto.Code)
-	conditionRegister := generator.allocateRegister()
 	loopIndex := generator.beginLoop()
-	if err := generator.withSourceLine(statement.Condition.Pos(), func() error {
-		// while 条件表达式每轮执行时报告条件所在源码行。
-		return generator.compileExpressionTo(statement.Condition, conditionRegister)
-	}); err != nil {
-		// 条件表达式编译失败时释放临时寄存器并返回。
-		generator.releaseRegister(conditionRegister)
-		generator.discardLoop(loopIndex)
-		return err
-	}
-	if err := generator.withSourceLine(statement.DoPosition, func() error {
-		// TEST 对应 while 条件到 do 的控制检查，多行条件时需要保留 do 行。
-		generator.emitABC(bytecode.OpTest, conditionRegister, 0, 0)
-		return nil
-	}); err != nil {
-		// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
-		generator.releaseRegister(conditionRegister)
-		generator.discardLoop(loopIndex)
-		return err
-	}
 	falseJumpPC := 0
-	if err := generator.withSourceLine(statement.EndPosition, func() error {
-		// 条件失败时执行该 JMP，line hook 应能看到 while 的 end 行。
-		falseJumpPC = generator.emitJump(0)
-		return nil
-	}); err != nil {
-		// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
+	if handled, err := generator.compileWhileComparisonCondition(statement, &falseJumpPC); err != nil || handled {
+		if err != nil {
+			// 条件比较编译失败时丢弃当前循环状态并返回。
+			generator.discardLoop(loopIndex)
+			return err
+		}
+	} else {
+		conditionRegister := generator.allocateRegister()
+		if err := generator.withSourceLine(statement.Condition.Pos(), func() error {
+			// while 条件表达式每轮执行时报告条件所在源码行。
+			return generator.compileExpressionTo(statement.Condition, conditionRegister)
+		}); err != nil {
+			// 条件表达式编译失败时释放临时寄存器并返回。
+			generator.releaseRegister(conditionRegister)
+			generator.discardLoop(loopIndex)
+			return err
+		}
+		if err := generator.withSourceLine(statement.DoPosition, func() error {
+			// TEST 对应 while 条件到 do 的控制检查，多行条件时需要保留 do 行。
+			generator.emitABC(bytecode.OpTest, conditionRegister, 0, 0)
+			return nil
+		}); err != nil {
+			// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
+			generator.releaseRegister(conditionRegister)
+			generator.discardLoop(loopIndex)
+			return err
+		}
+		if err := generator.withSourceLine(statement.EndPosition, func() error {
+			// 条件失败时执行该 JMP，line hook 应能看到 while 的 end 行。
+			falseJumpPC = generator.emitJump(0)
+			return nil
+		}); err != nil {
+			// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
+			generator.releaseRegister(conditionRegister)
+			generator.discardLoop(loopIndex)
+			return err
+		}
 		generator.releaseRegister(conditionRegister)
-		generator.discardLoop(loopIndex)
-		return err
 	}
-	generator.releaseRegister(conditionRegister)
 
 	if err := generator.compileScopedBlock(statement.Body); err != nil {
 		// 循环体编译失败时返回错误。
@@ -1909,6 +2001,61 @@ func (generator *generator) compileWhileStatement(statement *parser.WhileStateme
 
 	// while 语句编译完成。
 	return nil
+}
+
+// compileWhileComparisonCondition 将安全比较条件直译成 Lua 5.3 测试跳转。
+//
+// 仅当 while 条件是比较表达式，且左右操作数都是当前 local 或字面量时启用；其他表达式继续走
+// 通用 boolean 物化路径，避免改变调用、索引、全局读取、短路逻辑和元方法错误时机。
+func (generator *generator) compileWhileComparisonCondition(statement *parser.WhileStatement, falseJumpPC *int) (bool, error) {
+	expression, ok := statement.Condition.(*parser.BinaryExpression)
+	if !ok || !isComparisonOperator(expression.Operator) {
+		// 非比较条件仍使用通用 TEST 路径。
+		return false, nil
+	}
+	if !generator.isSafeRKCandidate(expression.Left) || !generator.isSafeRKCandidate(expression.Right) {
+		// 复杂操作数可能有副作用或运行期查找，不能直译为测试指令。
+		return false, nil
+	}
+	leftOperand, leftRegister, err := generator.safeRKOperandWithRegister(expression.Left)
+	if err != nil {
+		// 左操作数常量装载失败时返回编译错误。
+		return true, err
+	}
+	rightOperand, rightRegister, err := generator.safeRKOperandWithRegister(expression.Right)
+	if err != nil {
+		// 右操作数失败时释放左操作数临时寄存器。
+		generator.releaseOptionalRegister(leftRegister)
+		return true, err
+	}
+	opCode, skipOnTrueA, swapOperands := comparisonConditionOpCode(expression.Operator)
+	if swapOperands {
+		// `>` 和 `>=` 通过交换左右操作数复用 LT/LE。
+		leftOperand, rightOperand = rightOperand, leftOperand
+	}
+	if err := generator.withSourceLine(statement.Condition.Pos(), func() error {
+		// 比较测试指令直接决定是否跳过后续 false JMP。
+		generator.emitABC(opCode, skipOnTrueA, leftOperand, rightOperand)
+		return nil
+	}); err != nil {
+		// 当前闭包只生成指令，不预期返回错误；释放临时寄存器后返回。
+		generator.releaseOptionalRegister(rightRegister)
+		generator.releaseOptionalRegister(leftRegister)
+		return true, err
+	}
+	if err := generator.withSourceLine(statement.EndPosition, func() error {
+		// 条件为 false 时不跳过该 JMP，从而跳出 while。
+		*falseJumpPC = generator.emitJump(0)
+		return nil
+	}); err != nil {
+		// 当前闭包只生成指令，不预期返回错误；释放临时寄存器后返回。
+		generator.releaseOptionalRegister(rightRegister)
+		generator.releaseOptionalRegister(leftRegister)
+		return true, err
+	}
+	generator.releaseOptionalRegister(rightRegister)
+	generator.releaseOptionalRegister(leftRegister)
+	return true, nil
 }
 
 // compileRepeatUntilStatement 编译 repeat-until 后置条件循环。
@@ -3073,6 +3220,14 @@ func (generator *generator) compileGlobalAssignment(name string, rights []parser
 //
 // name 会写入当前函数常量池并通过 RK 编码；valueRegister 必须保存已求值的右侧结果。
 func (generator *generator) emitSetGlobalName(name string, valueRegister int) error {
+	return generator.emitSetGlobalNameOperand(name, valueRegister)
+}
+
+// emitSetGlobalNameOperand 生成 `_ENV[name] = RK(valueOperand)`。
+//
+// name 会写入当前函数常量池并通过 RK 编码；valueOperand 可以是寄存器或常量 RK 操作数，
+// 调用方负责释放 valueOperand 对应的可选临时寄存器。
+func (generator *generator) emitSetGlobalNameOperand(name string, valueOperand int) error {
 	keyIndex := generator.addConstant(bytecode.StringConstant(name))
 	keyOperand, keyRegister, err := generator.rkOperandForConstantIndex(keyIndex)
 	if err != nil {
@@ -3081,11 +3236,11 @@ func (generator *generator) emitSetGlobalName(name string, valueRegister int) er
 	}
 	if envBinding, ok := generator.locals[envUpvalueName]; ok {
 		// 当前作用域显式声明 local _ENV 时，未声明名称写入该环境表。
-		generator.emitABC(bytecode.OpSetTable, envBinding.register, keyOperand, valueRegister)
+		generator.emitABC(bytecode.OpSetTable, envBinding.register, keyOperand, valueOperand)
 	} else {
 		// 没有 local _ENV 时沿用 upvalue 形式写入环境表。
 		envIndex := generator.envUpvalueIndex()
-		generator.emitABC(bytecode.OpSetTabUp, envIndex, keyOperand, valueRegister)
+		generator.emitABC(bytecode.OpSetTabUp, envIndex, keyOperand, valueOperand)
 	}
 	generator.releaseOptionalRegister(keyRegister)
 
@@ -4284,6 +4439,36 @@ func comparisonOpCode(operator string) (opCode bytecode.OpCode, expectedTrue int
 	case ">=":
 		// 大于等于通过交换操作数复用 LE。
 		return bytecode.OpLe, 1, true
+	default:
+		// 调用方应先通过 isComparisonOperator 过滤，默认值只作为防御兜底。
+		return 0, 0, false
+	}
+}
+
+// comparisonConditionOpCode 返回比较条件直译为“真时跳过下一条 JMP”的 opcode 形态。
+//
+// Lua 5.3 比较指令语义是 `(comparison ~= A) then pc++`；while 需要条件为 true 时跳过
+// false JMP，因此 A 字段与布尔物化路径不同。
+func comparisonConditionOpCode(operator string) (opCode bytecode.OpCode, skipOnTrueA int, swapOperands bool) {
+	switch operator {
+	case "==":
+		// 相等为真时需要跳过 false JMP，因此 A=0。
+		return bytecode.OpEq, 0, false
+	case "~=":
+		// 不等于为真等价于 EQ 结果为 false，此时 A=1 才会跳过 false JMP。
+		return bytecode.OpEq, 1, false
+	case "<":
+		// 小于为真时 A=0 才会跳过 false JMP。
+		return bytecode.OpLt, 0, false
+	case "<=":
+		// 小于等于为真时 A=0 才会跳过 false JMP。
+		return bytecode.OpLe, 0, false
+	case ">":
+		// 大于通过交换操作数复用 LT。
+		return bytecode.OpLt, 0, true
+	case ">=":
+		// 大于等于通过交换操作数复用 LE。
+		return bytecode.OpLe, 0, true
 	default:
 		// 调用方应先通过 isComparisonOperator 过滤，默认值只作为防御兜底。
 		return 0, 0, false
