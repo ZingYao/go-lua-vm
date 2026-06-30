@@ -460,6 +460,10 @@ func (generator *generator) compileAssignment(statement *parser.AssignmentStatem
 		// 单 local 自拼接赋值可直接写回目标寄存器，避免临时结果和 MOVE。
 		return err
 	}
+	if handled, err := generator.compileSingleLocalBinaryAssignment(statement); handled || err != nil {
+		// 单 local 二元表达式赋值可在 RHS 完成后直接写回目标寄存器，避免最终 MOVE。
+		return err
+	}
 
 	firstTempRegister := generator.nextRegister
 	targets := make([]assignmentTarget, 0, len(statement.Left))
@@ -818,6 +822,38 @@ func (generator *generator) compileSelfBinaryRightExpressionTo(expression parser
 		return true, err
 	}
 	generator.releaseRegistersFrom(firstTempRegister)
+	return true, nil
+}
+
+// compileSingleLocalBinaryAssignment 优化 `localName = left <op> right`。
+//
+// 该优化只处理单左值、单右值、当前函数 active local 的非短路二元表达式。compileBinaryTo 在目标
+// 是 active local 时会把左右子表达式放到临时寄存器，最终 opcode 才写回目标 local，因此不会提前
+// 覆盖 RHS 后续读取的旧 local 值；相比通用赋值路径可省去最后的 MOVE。
+func (generator *generator) compileSingleLocalBinaryAssignment(statement *parser.AssignmentStatement) (bool, error) {
+	if len(statement.Left) != 1 || len(statement.Right) != 1 {
+		// 多重赋值需要先求完所有 RHS，再统一写回，不能使用该快路径。
+		return false, nil
+	}
+	targetName, ok := statement.Left[0].(*parser.NameExpression)
+	if !ok {
+		// 只有普通名称左值能直接写回寄存器。
+		return false, nil
+	}
+	binding, ok := generator.locals[targetName.Name]
+	if !ok {
+		// upvalue/global 写回有额外语义，不能用当前 local 寄存器快路径。
+		return false, nil
+	}
+	binaryExpression, ok := statement.Right[0].(*parser.BinaryExpression)
+	if !ok || binaryExpression.Operator == "and" || binaryExpression.Operator == "or" {
+		// and/or 会把短路左值先写入目标寄存器，可能提前覆盖同名 local。
+		return false, nil
+	}
+	if err := generator.compileBinaryTo(binaryExpression, binding.register); err != nil {
+		// RHS 编译失败时保留原始错误。
+		return true, err
+	}
 	return true, nil
 }
 
