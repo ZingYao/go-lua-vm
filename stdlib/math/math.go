@@ -44,7 +44,7 @@ func Open(state *runtime.State) error {
 	library.RawSetString("atan", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(ATan)))
 	library.RawSetString("ceil", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Ceil)))
 	library.RawSetString("cos", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: CosUnaryValue, AcceptedKinds: numberUnaryKinds}))
-	library.RawSetString("deg", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Deg)))
+	library.RawSetString("deg", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: DegUnaryValue, AcceptedKinds: numberUnaryKinds}))
 	library.RawSetString("exp", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: ExpUnaryValue, AcceptedKinds: numberUnaryKinds}))
 	library.RawSetString("floor", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: FloorUnaryValue, AcceptedKinds: numberUnaryKinds}))
 	library.RawSetString("fmod", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(FMod)))
@@ -56,7 +56,7 @@ func Open(state *runtime.State) error {
 	library.RawSetString("mininteger", runtime.IntegerValue(math.MinInt64))
 	library.RawSetString("modf", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(ModF)))
 	library.RawSetString("pi", runtime.NumberValue(math.Pi))
-	library.RawSetString("rad", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Rad)))
+	library.RawSetString("rad", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: RadUnaryValue, AcceptedKinds: numberUnaryKinds}))
 	library.RawSetString("random", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Random)))
 	library.RawSetString("randomseed", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(RandomSeed)))
 	library.RawSetString("sin", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: SinUnaryValue, AcceptedKinds: numberUnaryKinds}))
@@ -251,6 +251,25 @@ func Deg(args ...runtime.Value) ([]runtime.Value, error) {
 
 	// 返回角度结果。
 	return []runtime.Value{runtime.NumberValue(value * 180 / math.Pi)}, nil
+}
+
+// DegUnaryValue 实现 Lua 5.3 `math.deg` 的单参数单返回热路径。
+//
+// value 必须是 number 或 integer；返回值始终是 Lua float number。该入口服务 VM CALL
+// fast path，避免标准库热点调用构造临时参数和结果切片。
+func DegUnaryValue(value runtime.Value) (runtime.Value, error) {
+	// deg 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
+	if value.Kind != runtime.KindInteger && value.Kind != runtime.KindNumber {
+		// 非 number 入参按 Lua 标准库参数错误返回。
+		return runtime.NilValue(), badArgument("deg", 1, fmt.Sprintf("number expected, got %s", runtime.LuaErrorTypeName(value)))
+	}
+	if value.Kind == runtime.KindInteger {
+		// integer 入参转换为 float64 后执行弧度到角度转换。
+		return runtime.NumberValue(float64(value.Integer) * 180 / math.Pi), nil
+	}
+
+	// number 入参直接执行弧度到角度转换。
+	return runtime.NumberValue(value.Number * 180 / math.Pi), nil
 }
 
 // Exp 实现 Lua 5.3 `math.exp`。
@@ -532,6 +551,25 @@ func Rad(args ...runtime.Value) ([]runtime.Value, error) {
 
 	// 返回弧度结果。
 	return []runtime.Value{runtime.NumberValue(value * math.Pi / 180)}, nil
+}
+
+// RadUnaryValue 实现 Lua 5.3 `math.rad` 的单参数单返回热路径。
+//
+// value 必须是 number 或 integer；返回值始终是 Lua float number。该入口服务 VM CALL
+// fast path，避免标准库热点调用构造临时参数和结果切片。
+func RadUnaryValue(value runtime.Value) (runtime.Value, error) {
+	// rad 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
+	if value.Kind != runtime.KindInteger && value.Kind != runtime.KindNumber {
+		// 非 number 入参按 Lua 标准库参数错误返回。
+		return runtime.NilValue(), badArgument("rad", 1, fmt.Sprintf("number expected, got %s", runtime.LuaErrorTypeName(value)))
+	}
+	if value.Kind == runtime.KindInteger {
+		// integer 入参转换为 float64 后执行角度到弧度转换。
+		return runtime.NumberValue(float64(value.Integer) * math.Pi / 180), nil
+	}
+
+	// number 入参直接执行角度到弧度转换。
+	return runtime.NumberValue(value.Number * math.Pi / 180), nil
 }
 
 // Random 实现 Lua 5.3 `math.random` 的基础区间语义。
