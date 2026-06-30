@@ -45,7 +45,7 @@ func Open(state *runtime.State) error {
 	library.RawSetString("ceil", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Ceil)))
 	library.RawSetString("cos", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: CosUnaryValue, AcceptedKinds: numberUnaryKinds}))
 	library.RawSetString("deg", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Deg)))
-	library.RawSetString("exp", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Exp)))
+	library.RawSetString("exp", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: ExpUnaryValue, AcceptedKinds: numberUnaryKinds}))
 	library.RawSetString("floor", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: FloorUnaryValue, AcceptedKinds: numberUnaryKinds}))
 	library.RawSetString("fmod", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(FMod)))
 	library.RawSetString("huge", runtime.NumberValue(math.Inf(1)))
@@ -267,6 +267,25 @@ func Exp(args ...runtime.Value) ([]runtime.Value, error) {
 
 	// 返回指数结果。
 	return []runtime.Value{runtime.NumberValue(math.Exp(value))}, nil
+}
+
+// ExpUnaryValue 实现 Lua 5.3 `math.exp` 的单参数单返回热路径。
+//
+// value 必须是 number 或 integer；返回值始终是 Lua float number。该入口服务 VM CALL
+// fast path，避免标准库热点调用构造临时参数和结果切片。
+func ExpUnaryValue(value runtime.Value) (runtime.Value, error) {
+	// exp 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
+	if value.Kind != runtime.KindInteger && value.Kind != runtime.KindNumber {
+		// 非 number 入参按 Lua 标准库参数错误返回。
+		return runtime.NilValue(), badArgument("exp", 1, fmt.Sprintf("number expected, got %s", runtime.LuaErrorTypeName(value)))
+	}
+	if value.Kind == runtime.KindInteger {
+		// integer 入参转换为 float64 后计算指数。
+		return runtime.NumberValue(math.Exp(float64(value.Integer))), nil
+	}
+
+	// number 入参直接计算指数。
+	return runtime.NumberValue(math.Exp(value.Number)), nil
 }
 
 // Floor 实现 Lua 5.3 `math.floor`。
