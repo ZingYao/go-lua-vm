@@ -38,7 +38,7 @@ func Open(state *runtime.State) error {
 	library := runtime.NewTable()
 	numberUnaryKinds := runtime.UnaryKindMask(runtime.KindInteger, runtime.KindNumber)
 	// math 库函数以 Go closure 注册，后续 VM CALL 会通过 bridge 调用。
-	library.RawSetString("abs", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Abs)))
+	library.RawSetString("abs", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: AbsUnaryValue, AcceptedKinds: numberUnaryKinds}))
 	library.RawSetString("acos", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(ACos)))
 	library.RawSetString("asin", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(ASin)))
 	library.RawSetString("atan", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(ATan)))
@@ -92,6 +92,30 @@ func Abs(args ...runtime.Value) ([]runtime.Value, error) {
 
 	// float number 使用 Go math.Abs。
 	return []runtime.Value{runtime.NumberValue(math.Abs(value.Number))}, nil
+}
+
+// AbsUnaryValue 实现 Lua 5.3 `math.abs` 的单参数单返回热路径。
+//
+// value 必须是 number 或 integer；integer 入参返回 integer，float number 入参返回 number。
+// 该入口服务 VM CALL fast path，避免标准库热点调用构造临时参数和结果切片。
+func AbsUnaryValue(value runtime.Value) (runtime.Value, error) {
+	// abs 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
+	if value.Kind != runtime.KindInteger && value.Kind != runtime.KindNumber {
+		// 非 number 入参按 Lua 标准库参数错误返回。
+		return runtime.NilValue(), badArgument("abs", 1, fmt.Sprintf("number expected, got %s", runtime.LuaErrorTypeName(value)))
+	}
+	if value.Kind == runtime.KindInteger {
+		// integer 快路径保留整数类型。
+		if value.Integer < 0 && value.Integer != math.MinInt64 {
+			// 普通负整数可以安全取反。
+			return runtime.IntegerValue(-value.Integer), nil
+		}
+		// 非负整数或 MinInt64 边界直接返回原 integer。
+		return value, nil
+	}
+
+	// float number 使用 Go math.Abs。
+	return runtime.NumberValue(math.Abs(value.Number)), nil
 }
 
 // ACos 实现 Lua 5.3 `math.acos`。
