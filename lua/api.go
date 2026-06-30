@@ -3228,10 +3228,11 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 	}
 	var results []Value
 	var directCallVM *runtime.VM
+	directResultsWritten := false
 	var err error
 	if directCall {
 		// 固定参数/固定返回的 Lua closure 走 direct CALL，避免构造参数切片。
-		results, directCallVM, err = executeLuaCallRequestDirect(state, vm, functionValue, debugName, debugNameWhat, callRequest)
+		results, directCallVM, directResultsWritten, err = executeLuaCallRequestDirect(state, vm, functionValue, debugName, debugNameWhat, callRequest)
 	} else {
 		if unaryFunction, ok := functionValue.Ref.(runtime.GoUnaryFunction); ok && callRequest.ArgumentCount == 1 && (callRequest.ReturnCount == 1 || callRequest.ReturnCount < 0) && !callRequest.GenericFor {
 			// 单参数单返回 Go closure 直接读取参数寄存器，避免为标准库一元函数构造参数切片。
@@ -3349,6 +3350,10 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 		}
 		return err
 	}
+	if directResultsWritten {
+		// caller-side direct CALL 已完成写回，不再用空 results 覆盖目标寄存器。
+		return nil
+	}
 	writeErr := writeLuaCallResults(vm, callRequest, results)
 	if directCallVM != nil {
 		// direct CALL 的结果切片可能指向 callee VM 内部数组，必须在 caller 写回后再归还 VM。
@@ -3393,17 +3398,23 @@ func canExecuteLuaCallRequestDirect(state *State, functionValue Value, callReque
 //
 // callerVM 是当前调用方 VM；functionValue 必须是合法 Lua closure。该路径直接把 caller 参数寄存器
 // 写入 callee R0..，避免为 CALL 构造参数切片。
-func executeLuaCallRequestDirect(state *State, callerVM *runtime.VM, functionValue Value, debugName string, debugNameWhat string, callRequest *runtime.CallRequest) ([]Value, *runtime.VM, error) {
+func executeLuaCallRequestDirect(state *State, callerVM *runtime.VM, functionValue Value, debugName string, debugNameWhat string, callRequest *runtime.CallRequest) ([]Value, *runtime.VM, bool, error) {
 	closure, ok := functionValue.Ref.(*runtime.LuaClosure)
 	if !ok || closure == nil || closure.Proto == nil {
 		// 防御损坏 closure，保持不可调用错误语义。
-		return nil, nil, runtime.NewRuntimeError(runtime.StringValue(ErrExpectedCallable.Error()), ErrExpectedCallable)
+		return nil, nil, false, runtime.NewRuntimeError(runtime.StringValue(ErrExpectedCallable.Error()), ErrExpectedCallable)
 	}
 	if err := state.CheckContext(); err != nil {
 		// State 已关闭或 context 已取消时不进入 callee VM。
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 	proto := closure.Proto
+	if debugName == "" && debugNameWhat == "" {
+		if handled, err := tryExecuteLeafAddReturnInCaller(callerVM, proto, callRequest); handled || err != nil {
+			// 极小加法叶子函数可直接在 caller 寄存器上完成；未命中时回退原 direct CALL。
+			return nil, nil, handled, err
+		}
+	}
 	registerCount := luaClosureRegisterCount(proto, callRequest.ArgumentCount, 0)
 	calleeVM := ((*runtime.State)(state)).BorrowLuaVMAfterReset(registerCount, proto.Constants, closure.Upvalues, proto.Protos, nil)
 	calleeVM.BindPrototype(proto)
@@ -3413,7 +3424,7 @@ func executeLuaCallRequestDirect(state *State, callerVM *runtime.VM, functionVal
 	if !callerVM.CopyRegistersTo(callRequest.FunctionIndex+1, calleeVM, 0, fixedArgumentCount) {
 		// caller 或 callee 固定参数窗口异常时返回寄存器错误。
 		((*runtime.State)(state)).ReturnLuaVMToPool(calleeVM)
-		return nil, nil, runtime.ErrRegisterOutOfRange
+		return nil, nil, false, runtime.ErrRegisterOutOfRange
 	}
 	var results []Value
 	var err error
@@ -3427,12 +3438,110 @@ func executeLuaCallRequestDirect(state *State, callerVM *runtime.VM, functionVal
 	if err != nil {
 		if errors.Is(err, runtime.ErrCoroutineYield) && currentCoroutineThread(state) != nil {
 			// yield 会保存 callee VM 到 continuation，不能归还到池。
-			return nil, nil, err
+			return nil, nil, false, err
 		}
 		((*runtime.State)(state)).ReturnLuaVMToPool(calleeVM)
-		return nil, nil, err
+		return nil, nil, false, err
 	}
-	return results, calleeVM, nil
+	return results, calleeVM, false, nil
+}
+
+// tryExecuteLeafAddReturnInCaller 在 caller VM 中执行 `return x + const` 形态叶子函数。
+//
+// 该快路径只覆盖无 debug/hook、固定单参数、固定单返回的 direct CALL；仅处理 integer/number
+// 原生加法，字符串数字和元方法语义回退原 VM 执行路径。
+func tryExecuteLeafAddReturnInCaller(callerVM *runtime.VM, proto *bytecode.Proto, callRequest *runtime.CallRequest) (bool, error) {
+	// 先校验调用形态和函数体形态，避免对普通 Lua 函数改变执行路径。
+	if callerVM == nil || proto == nil || callRequest == nil || callRequest.ArgumentCount != 1 || callRequest.ReturnCount != 1 || len(proto.Code) != 2 {
+		// 非单参数单返回或非两指令叶子函数，交给原 direct CALL。
+		return false, nil
+	}
+	addInstruction := proto.Code[0]
+	returnInstruction := proto.Code[1]
+	if addInstruction.OpCode() != bytecode.OpAdd || returnInstruction.OpCode() != bytecode.OpReturn {
+		// 只识别 ADD 后接 RETURN 的极小函数。
+		return false, nil
+	}
+	if returnInstruction.A() != addInstruction.A() || returnInstruction.B() != 2 {
+		// 只处理返回 ADD 单个结果的形态。
+		return false, nil
+	}
+	leftValue, leftOK := luaLeafAddOperandValue(callerVM, proto, callRequest.FunctionIndex+1, addInstruction.B())
+	if !leftOK {
+		// 操作数无法在 caller 侧无副作用读取时回退。
+		return false, nil
+	}
+	rightValue, rightOK := luaLeafAddOperandValue(callerVM, proto, callRequest.FunctionIndex+1, addInstruction.C())
+	if !rightOK {
+		// 操作数无法在 caller 侧无副作用读取时回退。
+		return false, nil
+	}
+	resultValue, ok := luaFastAddValue(leftValue, rightValue)
+	if !ok {
+		// 非原生 number/integer 加法需要保留字符串转换和元方法回退语义。
+		return false, nil
+	}
+	if err := callerVM.SetRegister(callRequest.FunctionIndex, resultValue); err != nil {
+		// 结果写回失败表示调用寄存器窗口异常。
+		return true, err
+	}
+	callerVM.SetOpenTop(-1)
+	return true, nil
+}
+
+// luaLeafAddOperandValue 读取 caller-side leaf ADD 操作数。
+//
+// argumentStart 是 caller 中第一个实参寄存器；寄存器操作数映射到 callee Rn 对应的 caller 实参。
+func luaLeafAddOperandValue(callerVM *runtime.VM, proto *bytecode.Proto, argumentStart int, operand int) (runtime.Value, bool) {
+	// 常量操作数直接从 callee Proto 常量表读取。
+	if bytecode.IsK(operand) {
+		constantIndex := bytecode.IndexK(operand)
+		if constantIndex < 0 || constantIndex >= len(proto.Constants) {
+			// 损坏常量索引必须回退原路径，由 VM 生成标准错误。
+			return runtime.NilValue(), false
+		}
+		return luaConstantValue(proto.Constants[constantIndex])
+	}
+	registerIndex := bytecode.IndexK(operand)
+	if registerIndex < 0 {
+		// 非法寄存器操作数回退原路径。
+		return runtime.NilValue(), false
+	}
+	return callerVM.Register(argumentStart + registerIndex)
+}
+
+// luaFastAddValue 执行 caller-side 原生 number/integer 加法。
+//
+// 仅覆盖 Lua 5.3 原生双 integer 或双可数值类型；不处理字符串数字和元方法，以便回退完整 VM。
+func luaFastAddValue(leftValue runtime.Value, rightValue runtime.Value) (runtime.Value, bool) {
+	if leftValue.Kind == runtime.KindInteger && rightValue.Kind == runtime.KindInteger {
+		// 双 integer 加法保持 integer 结果。
+		return runtime.IntegerValue(leftValue.Integer + rightValue.Integer), true
+	}
+	leftNumber, leftOK := luaNativeNumberOperand(leftValue)
+	rightNumber, rightOK := luaNativeNumberOperand(rightValue)
+	if !leftOK || !rightOK {
+		// 任一侧不是原生 number/integer 时不能走快路径。
+		return runtime.NilValue(), false
+	}
+	return runtime.NumberValue(leftNumber + rightNumber), true
+}
+
+// luaNativeNumberOperand 把原生 integer/number 操作数转换为 float64。
+//
+// 字符串数字在 Lua 算术中可转换，但该快路径故意不覆盖，避免复制完整 tonumber 语义。
+func luaNativeNumberOperand(value runtime.Value) (float64, bool) {
+	switch value.Kind {
+	case runtime.KindInteger:
+		// integer 可作为 float 运算操作数。
+		return float64(value.Integer), true
+	case runtime.KindNumber:
+		// number 直接返回浮点负载。
+		return value.Number, true
+	default:
+		// 其他类型需要完整 VM 算术路径。
+		return 0, false
+	}
 }
 
 // executeLuaLeafClosureFast 执行 direct CALL 已判定安全的叶子 Lua closure。

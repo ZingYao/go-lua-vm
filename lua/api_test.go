@@ -5017,3 +5017,46 @@ func TestWriteLuaCallResultsSingleReturnFastPath(t *testing.T) {
 		t.Fatalf("single missing return mismatch: value=%#v ok=%v", value, ok)
 	}
 }
+
+// TestTryExecuteLeafAddReturnInCaller 验证 caller-side 叶子加法快路径。
+//
+// 该快路径必须只处理原生 integer/number 加法；需要字符串转换或元方法时必须回退完整 VM。
+func TestTryExecuteLeafAddReturnInCaller(t *testing.T) {
+	proto := &bytecode.Proto{
+		Constants: []bytecode.Constant{bytecode.IntegerConstant(1)},
+		Code: []bytecode.Instruction{
+			bytecode.CreateABC(bytecode.OpAdd, 1, 0, bytecode.RKAsK(0)),
+			bytecode.CreateABC(bytecode.OpReturn, 1, 2, 0),
+		},
+	}
+	vm := runtime.NewVM(2)
+	if err := vm.SetRegister(1, runtime.IntegerValue(41)); err != nil {
+		// 测试准备阶段必须能写入调用实参。
+		t.Fatalf("set caller argument failed: %v", err)
+	}
+	request := &runtime.CallRequest{FunctionIndex: 0, ArgumentCount: 1, ReturnCount: 1}
+	handled, err := tryExecuteLeafAddReturnInCaller(vm, proto, request)
+	if err != nil {
+		// 合法原生加法不应失败。
+		t.Fatalf("caller leaf add failed: %v", err)
+	}
+	if !handled {
+		// 目标形态必须被 caller-side 快路径处理。
+		t.Fatalf("caller leaf add should be handled")
+	}
+	value, ok := vm.Register(0)
+	if !ok || !value.RawEqual(runtime.IntegerValue(42)) {
+		// 结果必须直接写回函数槽。
+		t.Fatalf("caller leaf add result mismatch: value=%#v ok=%v", value, ok)
+	}
+
+	if err := vm.SetRegister(1, runtime.StringValue("41")); err != nil {
+		// 测试准备阶段必须能覆盖调用实参。
+		t.Fatalf("set string argument failed: %v", err)
+	}
+	handled, err = tryExecuteLeafAddReturnInCaller(vm, proto, request)
+	if err != nil || handled {
+		// 字符串数字需要完整 Lua 算术转换语义，必须回退。
+		t.Fatalf("string operand should fallback: handled=%v err=%v", handled, err)
+	}
+}
