@@ -80,7 +80,7 @@ func Open(state *runtime.State) error {
 	library.RawSetString("reverse", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Reverse)))
 	library.RawSetString("sub", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Sub)))
 	library.RawSetString("unpack", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Unpack)))
-	library.RawSetString("upper", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Upper)))
+	library.RawSetString("upper", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: UpperUnaryValue, AcceptedKinds: runtime.UnaryKindMask(runtime.KindString)}))
 	state.SetGlobal("string", runtime.ReferenceValue(runtime.KindTable, library))
 	runtime.SetStringIndexTable(library)
 	return nil
@@ -1015,6 +1015,28 @@ func Upper(args ...runtime.Value) ([]runtime.Value, error) {
 		}
 	}
 	return []runtime.Value{runtime.StringValue(string(bytes))}, nil
+}
+
+// UpperUnaryValue 实现 Lua 5.3 `string.upper` 的单参数单返回热路径。
+//
+// value 必须是 string；当前阶段只转换 ASCII `a-z` 字节，其他字节原样保留。该入口服务
+// VM CALL fast path，避免标准库热点调用构造临时参数和结果切片。
+func UpperUnaryValue(value runtime.Value) (runtime.Value, error) {
+	// upper 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
+	if value.Kind != runtime.KindString {
+		// 非 string 类型不做 tostring 隐式转换。
+		return runtime.NilValue(), badArgument("upper", 1, "string expected")
+	}
+
+	bytes := []byte(value.String)
+	for index, currentByte := range bytes {
+		// 只对 ASCII 小写字母做单字节转换。
+		if currentByte >= 'a' && currentByte <= 'z' {
+			// ASCII 大小写字母相差 32，转换不会改变字节长度。
+			bytes[index] = currentByte - ('a' - 'A')
+		}
+	}
+	return runtime.StringValue(string(bytes)), nil
 }
 
 // packTokenKind 表示 string.pack 格式 token 的执行类别。
