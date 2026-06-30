@@ -2538,6 +2538,42 @@ func (vm *VM) executeReturn(instruction bytecode.Instruction) error {
 	return nil
 }
 
+// TryExecuteLeafAddReturn 尝试执行 `ADD; RETURN` 形态的叶子函数快路径。
+//
+// proto 必须与当前 VM 已绑定的原型一致；仅当函数体恰好为一条 ADD 后接单值 RETURN 时返回
+// handled=true。返回 errorPC 表示错误发生的指令位置，调用方可沿用完整执行器的错误装饰逻辑。
+func (vm *VM) TryExecuteLeafAddReturn(proto *bytecode.Proto) (returnValues []Value, errorPC int, handled bool, err error) {
+	// 先检查原型和 VM 基础状态，非目标形态直接回退通用 leaf 执行器。
+	if vm == nil || proto == nil || len(proto.Code) != 2 {
+		// 只有两条指令的极小叶子函数才进入该快路径。
+		return nil, 0, false, nil
+	}
+	addInstruction := proto.Code[0]
+	returnInstruction := proto.Code[1]
+	if addInstruction.OpCode() != bytecode.OpAdd || returnInstruction.OpCode() != bytecode.OpReturn {
+		// 非 ADD 后接 RETURN 的函数不在本快路径覆盖范围。
+		return nil, 0, false, nil
+	}
+	if returnInstruction.A() != addInstruction.A() || returnInstruction.B() != 2 {
+		// 只处理 return 单个 ADD 结果的常见叶子函数，其他返回形态交给通用路径。
+		return nil, 0, false, nil
+	}
+
+	vm.SetCurrentPC(0)
+	if err := vm.executeAdd(addInstruction); err != nil {
+		// ADD 失败时让调用方按第 0 条指令补齐 Lua 错误上下文。
+		return nil, 0, true, err
+	}
+	vm.SetCurrentPC(1)
+	if err := vm.executeReturn(returnInstruction); err != nil {
+		// RETURN 失败时让调用方按第 1 条指令补齐 Lua 错误上下文。
+		return nil, 1, true, err
+	}
+
+	// 返回值切片仍由 VM 持有，调用方写回 caller 后才能归还 VM。
+	return vm.BorrowReturnValues(), 1, true, nil
+}
+
 // executeForPrep 执行 Lua 5.3 OP_FORPREP 指令。
 //
 // 指令语义为 R(A) -= R(A+2); pc += sBx。当前支持 integer 快速路径和 number 路径。

@@ -575,6 +575,49 @@ func TestNewLuaClosureCachesDirectCallSafe(t *testing.T) {
 	}
 }
 
+// TestVMTryExecuteLeafAddReturn 验证 `ADD; RETURN` 叶子函数快路径。
+//
+// 该快路径服务 Lua direct CALL 热点，必须只在单值返回形态命中，并保持普通 ADD/RETURN 语义。
+func TestVMTryExecuteLeafAddReturn(t *testing.T) {
+	proto := &bytecode.Proto{
+		Constants: []bytecode.Constant{bytecode.IntegerConstant(1)},
+		Code: []bytecode.Instruction{
+			bytecode.CreateABC(bytecode.OpAdd, 1, 0, bytecode.RKAsK(0)),
+			bytecode.CreateABC(bytecode.OpReturn, 1, 2, 0),
+		},
+	}
+	vm := NewVMWithConstants(2, proto.Constants)
+	vm.BindPrototype(proto)
+	if err := vm.SetRegister(0, IntegerValue(41)); err != nil {
+		// 测试准备阶段必须能写入参数寄存器。
+		t.Fatalf("set argument register failed: %v", err)
+	}
+	results, _, handled, err := vm.TryExecuteLeafAddReturn(proto)
+	if err != nil {
+		// 合法 ADD/RETURN 快路径不应失败。
+		t.Fatalf("leaf add return failed: %v", err)
+	}
+	if !handled {
+		// 目标字节码形态必须被快路径识别。
+		t.Fatalf("leaf add return should be handled")
+	}
+	if len(results) != 1 || !results[0].RawEqual(IntegerValue(42)) {
+		// 快路径必须返回 ADD 结果。
+		t.Fatalf("leaf add return result mismatch: %#v", results)
+	}
+
+	otherProto := &bytecode.Proto{
+		Code: []bytecode.Instruction{
+			bytecode.CreateABC(bytecode.OpMove, 1, 0, 0),
+			bytecode.CreateABC(bytecode.OpReturn, 1, 2, 0),
+		},
+	}
+	if _, _, handled, err := vm.TryExecuteLeafAddReturn(otherProto); err != nil || handled {
+		// 非 ADD/RETURN 形态必须回退通用执行器。
+		t.Fatalf("unexpected non-add handling: handled=%v err=%v", handled, err)
+	}
+}
+
 // TestVMNewTable 验证 NEWTABLE 会创建新的 table 引用。
 //
 // Lua 5.3 NEWTABLE 的 B/C 预分配 hint 暂未生效，但创建空 table 的可观察语义必须正确。
