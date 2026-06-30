@@ -1433,9 +1433,20 @@ func (vm *VM) executeSetTable(instruction bytecode.Instruction) error {
 			}
 			keyValue := vm.registers[keyIndex]
 			if keyValue.Kind == KindInteger {
+				if !bytecode.IsK(instruction.C()) {
+					// value 同样来自寄存器时直接读取，避免数值 for 数组写入热路径重复解析 RK。
+					valueIndex := bytecode.IndexK(instruction.C())
+					if valueIndex < 0 || valueIndex >= len(vm.registers) {
+						// value 寄存器越界时不能尝试写入 table。
+						return ErrRegisterOutOfRange
+					}
+					// integer key raw set 不触发元方法；寄存器值已按 RK 语义读取完成。
+					table.RawSetInteger(keyValue.Integer, vm.registers[valueIndex])
+					return nil
+				}
 				value, err := vm.rkValue(instruction.C())
 				if err != nil {
-					// value 读取失败时不能尝试写入 table。
+					// value 常量读取失败时不能尝试写入 table。
 					return err
 				}
 				// integer key raw set 不触发元方法；value 已按 RK 语义读取完成。
