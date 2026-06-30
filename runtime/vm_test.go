@@ -594,6 +594,14 @@ func TestNewLuaClosureCachesDirectCallSafe(t *testing.T) {
 		// ADD;RETURN 形态应在 closure 创建时缓存，避免调用热路径重复扫描 Proto。
 		t.Fatalf("add closure should cache leaf add")
 	}
+	if addClosure.LeafAddReturn.LeftOperand.Constant || addClosure.LeafAddReturn.LeftOperand.RegisterIndex != 0 {
+		// 左操作数 R0 应缓存为寄存器操作数。
+		t.Fatalf("add closure left operand metadata mismatch: %+v", addClosure.LeafAddReturn.LeftOperand)
+	}
+	if !addClosure.LeafAddReturn.RightOperand.Constant || !addClosure.LeafAddReturn.RightOperand.ConstantValue.RawEqual(IntegerValue(1)) {
+		// 右操作数 K1 应在创建时转换为 runtime integer 值。
+		t.Fatalf("add closure right operand metadata mismatch: %+v", addClosure.LeafAddReturn.RightOperand)
+	}
 
 	upvalueAddProto := &bytecode.Proto{
 		Code: []bytecode.Instruction{

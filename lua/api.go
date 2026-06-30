@@ -3500,7 +3500,6 @@ func tryExecuteLeafAddReturnInCaller(callerVM *runtime.VM, closure *runtime.LuaC
 		// 非单参数单返回或非两指令叶子函数，交给原 direct CALL。
 		return false, nil
 	}
-	proto := closure.Proto
 	var upvalueRegister int
 	var upvalueValue runtime.Value
 	var hasUpvalueRegister bool
@@ -3516,13 +3515,12 @@ func tryExecuteLeafAddReturnInCaller(callerVM *runtime.VM, closure *runtime.LuaC
 		}
 		hasUpvalueRegister = true
 	}
-	addInstruction := leafAddReturn.AddInstruction
-	leftValue, leftOK := luaLeafAddOperandValue(callerVM, proto, callRequest.FunctionIndex+1, addInstruction.B(), upvalueRegister, upvalueValue, hasUpvalueRegister)
+	leftValue, leftOK := luaLeafAddCachedOperandValue(callerVM, callRequest.FunctionIndex+1, leafAddReturn.LeftOperand, upvalueRegister, upvalueValue, hasUpvalueRegister)
 	if !leftOK {
 		// 操作数无法在 caller 侧无副作用读取时回退。
 		return false, nil
 	}
-	rightValue, rightOK := luaLeafAddOperandValue(callerVM, proto, callRequest.FunctionIndex+1, addInstruction.C(), upvalueRegister, upvalueValue, hasUpvalueRegister)
+	rightValue, rightOK := luaLeafAddCachedOperandValue(callerVM, callRequest.FunctionIndex+1, leafAddReturn.RightOperand, upvalueRegister, upvalueValue, hasUpvalueRegister)
 	if !rightOK {
 		// 操作数无法在 caller 侧无副作用读取时回退。
 		return false, nil
@@ -3540,29 +3538,26 @@ func tryExecuteLeafAddReturnInCaller(callerVM *runtime.VM, closure *runtime.LuaC
 	return true, nil
 }
 
-// luaLeafAddOperandValue 读取 caller-side leaf ADD 操作数。
+// luaLeafAddCachedOperandValue 读取 caller-side leaf ADD 预解析操作数。
 //
-// argumentStart 是 caller 中第一个实参寄存器；寄存器操作数映射到 callee Rn 对应的 caller 实参。
-func luaLeafAddOperandValue(callerVM *runtime.VM, proto *bytecode.Proto, argumentStart int, operand int, upvalueRegister int, upvalueValue runtime.Value, hasUpvalueRegister bool) (runtime.Value, bool) {
-	// 常量操作数直接从 callee Proto 常量表读取。
-	if bytecode.IsK(operand) {
-		constantIndex := bytecode.IndexK(operand)
-		if constantIndex < 0 || constantIndex >= len(proto.Constants) {
-			// 损坏常量索引必须回退原路径，由 VM 生成标准错误。
-			return runtime.NilValue(), false
-		}
-		return luaConstantValue(proto.Constants[constantIndex])
+// argumentStart 是 caller 中第一个实参寄存器；常量操作数直接返回缓存值，寄存器操作数映射到
+// caller 实参区；GETUPVAL 前缀写入的寄存器会映射到 closure 当前 upvalue 值。
+func luaLeafAddCachedOperandValue(callerVM *runtime.VM, argumentStart int, operand runtime.LuaLeafAddOperand, upvalueRegister int, upvalueValue runtime.Value, hasUpvalueRegister bool) (runtime.Value, bool) {
+	if operand.Constant {
+		// 常量值在 closure 创建时已经完成转换，可直接复用。
+		return operand.ConstantValue, true
 	}
-	registerIndex := bytecode.IndexK(operand)
-	if registerIndex < 0 {
-		// 非法寄存器操作数回退原路径。
-		return runtime.NilValue(), false
-	}
+	registerIndex := operand.RegisterIndex
 	if hasUpvalueRegister && registerIndex == upvalueRegister {
 		// GETUPVAL 写入的临时寄存器可直接读取 closure 当前 upvalue。
 		return upvalueValue, true
 	}
-	return callerVM.Register(argumentStart + registerIndex)
+	value, ok := callerVM.Register(argumentStart + registerIndex)
+	if !ok {
+		// caller 实参区缺失时回退完整 VM 路径。
+		return runtime.NilValue(), false
+	}
+	return value, true
 }
 
 // luaClosureUpvalueValue 读取 Lua closure 当前 upvalue 值。

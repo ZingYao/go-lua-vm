@@ -178,12 +178,29 @@ type LuaLeafAddReturn struct {
 	AddInstruction bytecode.Instruction
 	// ReturnInstruction 保存 ADD 后的 RETURN 指令。
 	ReturnInstruction bytecode.Instruction
+	// LeftOperand 保存 ADD 左操作数的预解析形态。
+	LeftOperand LuaLeafAddOperand
+	// RightOperand 保存 ADD 右操作数的预解析形态。
+	RightOperand LuaLeafAddOperand
 	// UpvalueRegister 保存可由 upvalue 直接替代的 GETUPVAL 目标寄存器。
 	UpvalueRegister int
 	// UpvalueIndex 保存 GETUPVAL 读取的 upvalue 下标。
 	UpvalueIndex int
 	// HasUpvalueRegister 表示该叶子函数带 GETUPVAL 前缀。
 	HasUpvalueRegister bool
+}
+
+// LuaLeafAddOperand 保存 caller-side 叶子 ADD 操作数形态。
+//
+// Constant 为 true 时直接使用 ConstantValue；否则 RegisterIndex 是 callee 寄存器下标，
+// 调用方需要映射到 caller 实参区或 upvalue 临时寄存器。
+type LuaLeafAddOperand struct {
+	// RegisterIndex 保存寄存器操作数下标。
+	RegisterIndex int
+	// ConstantValue 保存常量操作数转换后的 runtime 值。
+	ConstantValue Value
+	// Constant 表示该操作数来自 Proto 常量表。
+	Constant bool
 }
 
 // NewLuaClosure 创建带运行期缓存属性的 Lua closure。
@@ -251,9 +268,47 @@ func luaProtoLeafAddReturn(proto *bytecode.Proto) *LuaLeafAddReturn {
 		// 只处理返回 ADD 单个结果的形态。
 		return nil
 	}
+	leftOperand, ok := luaLeafAddOperandFromProto(proto, addInstruction.B())
+	if !ok {
+		// 操作数常量索引损坏时回退通用 VM 路径。
+		return nil
+	}
+	rightOperand, ok := luaLeafAddOperandFromProto(proto, addInstruction.C())
+	if !ok {
+		// 操作数常量索引损坏时回退通用 VM 路径。
+		return nil
+	}
 	leaf.AddInstruction = addInstruction
 	leaf.ReturnInstruction = returnInstruction
+	leaf.LeftOperand = leftOperand
+	leaf.RightOperand = rightOperand
 	return &leaf
+}
+
+// luaLeafAddOperandFromProto 预解析 ADD 操作数。
+//
+// operand 是 Lua RK 编码字段；常量操作数会立即转换为 runtime.Value，寄存器操作数只保存下标。
+func luaLeafAddOperandFromProto(proto *bytecode.Proto, operand int) (LuaLeafAddOperand, bool) {
+	if bytecode.IsK(operand) {
+		// 常量操作数需要在 closure 创建时解析并缓存，避免调用热路径重复访问常量表。
+		constantIndex := bytecode.IndexK(operand)
+		if proto == nil || constantIndex < 0 || constantIndex >= len(proto.Constants) {
+			// 损坏常量索引不能缓存快路径。
+			return LuaLeafAddOperand{}, false
+		}
+		value, err := constantToValue(proto.Constants[constantIndex])
+		if err != nil {
+			// 不支持的常量类型交给完整 VM 路径处理。
+			return LuaLeafAddOperand{}, false
+		}
+		return LuaLeafAddOperand{ConstantValue: value, Constant: true}, true
+	}
+	registerIndex := bytecode.IndexK(operand)
+	if registerIndex < 0 {
+		// 非法寄存器操作数不能缓存快路径。
+		return LuaLeafAddOperand{}, false
+	}
+	return LuaLeafAddOperand{RegisterIndex: registerIndex}, true
 }
 
 // UpvalueCell 表示一个可共享的 Lua upvalue 存储槽。
