@@ -11,11 +11,26 @@ import org.jetbrains.annotations.Nullable;
 final class GluaDocumentationTarget implements DocumentationTarget {
     private final String name;
     private final GluaBuiltin builtin;
+    private final String documentation;
+    private final String hint;
+    private final String container;
     private final PsiElement navigationElement;
 
     GluaDocumentationTarget(String name, GluaBuiltin builtin, PsiElement navigationElement) {
         this.name = name;
         this.builtin = builtin;
+        this.documentation = null;
+        this.hint = null;
+        this.container = "GLua builtin";
+        this.navigationElement = navigationElement;
+    }
+
+    GluaDocumentationTarget(String name, String documentation, String hint, String container, PsiElement navigationElement) {
+        this.name = name;
+        this.builtin = null;
+        this.documentation = documentation;
+        this.hint = hint;
+        this.container = container;
         this.navigationElement = navigationElement;
     }
 
@@ -26,7 +41,7 @@ final class GluaDocumentationTarget implements DocumentationTarget {
 
     @Override
     public TargetPresentation computePresentation() {
-        return TargetPresentation.builder(name).containerText("GLua builtin").presentation();
+        return TargetPresentation.builder(name).containerText(container).presentation();
     }
 
     @Override
@@ -36,11 +51,17 @@ final class GluaDocumentationTarget implements DocumentationTarget {
 
     @Override
     public String computeDocumentationHint() {
+        if (hint != null) {
+            return hint;
+        }
         return builtin.quickInfo();
     }
 
     @Override
     public DocumentationResult computeDocumentation() {
+        if (documentation != null) {
+            return DocumentationResult.documentation(documentation);
+        }
         return DocumentationResult.documentation(builtin.markdown(name));
     }
 }

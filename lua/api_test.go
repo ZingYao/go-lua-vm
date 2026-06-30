@@ -1755,6 +1755,33 @@ a[1].alo(a[2] == 10 and b == 10 and c == print)
 	}
 }
 
+// TestDoStringSelfBinaryAssignmentReadsLocalAfterRHSCall 验证自二元赋值对齐 Lua 5.3 求值形态。
+//
+// 官方 Lua 5.3 对 `x = x + f()` 会先执行 RHS 调用，再由 ADD 指令读取当前 open upvalue
+// `x`；如果 f 修改了 x，最终结果应使用修改后的值，而不是调用前提前缓存的旧值。
+func TestDoStringSelfBinaryAssignmentReadsLocalAfterRHSCall(t *testing.T) {
+	// 使用闭包修改 open upvalue，覆盖 codegen 是否提前读取左操作数的差异。
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// assert 由 base 库提供，打开标准库失败则测试无意义。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+	err := DoString(state, `
+local x = 1
+local function f()
+  x = 10
+  return 2
+end
+x = x + f()
+assert(x == 12)
+`)
+	if err != nil {
+		// 自二元赋值必须读取 RHS 调用后的 open upvalue 值。
+		t.Fatalf("DoString self binary assignment failed: %v", err)
+	}
+}
+
 // TestDoStringNumericForBodyLocalsCloseEachIteration 验证 numeric for 体内 local 每轮独立闭合。
 //
 // 官方 closure.lua 在 `for` 循环内创建闭包捕获 `local y`；每次迭代都必须创建并关闭独立
@@ -4959,5 +4986,34 @@ _G.X = nil
 	if err := DoString(state, source); err != nil {
 		// Lua closure __newindex 必须能通过协程 yield 并恢复写入。
 		t.Fatalf("DoString Lua __newindex yield failed: %v", err)
+	}
+}
+
+// TestWriteLuaCallResultsSingleReturnFastPath 验证普通单返回值写回语义。
+//
+// CALL C=2 是 Lua 函数调用最常见形态，快路径必须和通用路径一样覆盖函数槽、缺失返回补 nil，
+// 并清理开放返回边界。
+func TestWriteLuaCallResultsSingleReturnFastPath(t *testing.T) {
+	vm := runtime.NewVM(2)
+	vm.SetOpenTop(2)
+	request := &runtime.CallRequest{FunctionIndex: 1, ReturnCount: 1}
+
+	if err := writeLuaCallResults(vm, request, []runtime.Value{runtime.StringValue("ok")}); err != nil {
+		// 单返回值写回合法寄存器必须成功。
+		t.Fatalf("single return write failed: %v", err)
+	}
+	value, ok := vm.Register(1)
+	if !ok || !value.RawEqual(runtime.StringValue("ok")) {
+		// 函数槽必须被第一个返回值覆盖。
+		t.Fatalf("single return value mismatch: value=%#v ok=%v", value, ok)
+	}
+	if err := writeLuaCallResults(vm, request, nil); err != nil {
+		// 缺失返回值也必须按 Lua 语义补 nil。
+		t.Fatalf("single nil return write failed: %v", err)
+	}
+	value, ok = vm.Register(1)
+	if !ok || !value.IsNil() {
+		// 无实际返回值时固定返回槽必须写入 nil。
+		t.Fatalf("single missing return mismatch: value=%#v ok=%v", value, ok)
 	}
 }

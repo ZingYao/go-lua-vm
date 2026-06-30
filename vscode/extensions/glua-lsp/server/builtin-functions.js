@@ -331,6 +331,7 @@ function getBuiltinFunctionByMethod(methodName, moduleHint) {
     if (byHint) {
       return byHint.qualified;
     }
+    return null;
   }
 
   if (candidates.length === 1) {

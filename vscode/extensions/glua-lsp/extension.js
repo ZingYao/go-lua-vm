@@ -1,7 +1,6 @@
 const path = require("path");
 const fs = require("fs");
 const vscode = require("vscode");
-const { LanguageClient, TransportKind } = require("vscode-languageclient/node");
 const {
   getBuiltinFunction,
   makeBuiltinStubContent,
@@ -15,6 +14,7 @@ const builtinDocScheme = "glua-builtin";
 const DEFAULT_DOC_LANGUAGE = "auto";
 const COMMAND_OPEN_BUILTIN_SIGNATURE_JSON = "glua.openBuiltinSignatureJson";
 const COMMAND_SHOW_BUILTIN_DOC_STATUS = "glua.showBuiltinDocStatus";
+const COMMAND_SHOW_OUTPUT = "glua.showOutput";
 const BUILTIN_SIG_FILE_NAME = "glua-builtin-docs.json";
 
 function isChineseEnvironment() {
@@ -369,7 +369,110 @@ let client;
 let lastDocConfig = null;
 let outputChannelRef = null;
 
+const GLUA_TEXTMATE_COLOR_RULES = [
+  {
+    name: "GLua keyword",
+    scope: [
+      "keyword.control.glua",
+      "keyword.operator.glua",
+      "storage.type.function.glua",
+      "storage.modifier.local.glua",
+    ],
+    settings: {
+      foreground: "#CC7832",
+    },
+  },
+  {
+    name: "GLua function",
+    scope: [
+      "entity.name.function.glua",
+      "entity.name.function.call.glua",
+      "entity.name.function.member.glua",
+    ],
+    settings: {
+      foreground: "#56A8F5",
+    },
+  },
+  {
+    name: "GLua library",
+    scope: [
+      "entity.name.type.library.glua",
+      "support.type.library.glua",
+      "support.class.glua",
+    ],
+    settings: {
+      foreground: "#4EC9B0",
+    },
+  },
+  {
+    name: "GLua string",
+    scope: [
+      "string.quoted.single.glua",
+      "string.quoted.double.glua",
+      "string.quoted.long-bracket.glua",
+    ],
+    settings: {
+      foreground: "#6A8759",
+    },
+  },
+  {
+    name: "GLua number",
+    scope: [
+      "constant.numeric.glua",
+    ],
+    settings: {
+      foreground: "#6897BB",
+    },
+  },
+];
+
+const GLUA_SEMANTIC_COLOR_RULES = {
+  "keyword:glua": "#CC7832",
+  "function:glua": "#56A8F5",
+  "method:glua": "#56A8F5",
+  "namespace:glua": "#4EC9B0",
+};
+
+async function applyGluaEditorColors(outputChannel) {
+  const config = vscode.workspace.getConfiguration();
+  const tokenColors = config.get("editor.tokenColorCustomizations") || {};
+  const currentRules = Array.isArray(tokenColors.textMateRules) ? tokenColors.textMateRules : [];
+  const preservedRules = currentRules.filter((rule) => !rule || typeof rule.name !== "string" || !rule.name.startsWith("GLua "));
+  const nextTokenColors = {
+    ...tokenColors,
+    textMateRules: [
+      ...preservedRules,
+      ...GLUA_TEXTMATE_COLOR_RULES,
+    ],
+  };
+
+  const semanticColors = config.get("editor.semanticTokenColorCustomizations") || {};
+  const nextSemanticColors = {
+    ...semanticColors,
+    enabled: true,
+    rules: {
+      ...(semanticColors.rules || {}),
+      ...GLUA_SEMANTIC_COLOR_RULES,
+    },
+  };
+
+  await config.update("editor.tokenColorCustomizations", nextTokenColors, vscode.ConfigurationTarget.Workspace);
+  await config.update("editor.semanticTokenColorCustomizations", nextSemanticColors, vscode.ConfigurationTarget.Workspace);
+  await config.update("editor.semanticHighlighting.enabled", true, vscode.ConfigurationTarget.Workspace);
+  if (outputChannel) {
+    outputChannel.appendLine("[glua-lsp] applied workspace GLua editor color rules");
+  }
+}
+
 function activate(context) {
+  const outputChannel = vscode.window.createOutputChannel("glua Language Server");
+  outputChannelRef = outputChannel;
+  context.subscriptions.push(outputChannel);
+  outputChannel.appendLine(`[glua-lsp] activate extensionPath=${context.extensionPath}`);
+  applyGluaEditorColors(outputChannel).catch((error) => {
+    outputChannel.appendLine(`[glua-lsp] failed to apply editor color rules: ${error && error.message ? error.message : error}`);
+  });
+
   context.subscriptions.push(
     vscode.commands.registerCommand(COMMAND_OPEN_BUILTIN_SIGNATURE_JSON, () =>
       promptAndOpenBuiltinSignatureFile(context)
@@ -389,11 +492,31 @@ function activate(context) {
       vscode.window.showInformationMessage(message);
     })
   );
+  context.subscriptions.push(
+    vscode.commands.registerCommand(COMMAND_SHOW_OUTPUT, () => {
+      if (outputChannelRef) {
+        outputChannelRef.show(true);
+        outputChannelRef.appendLine("[glua-lsp] output requested");
+      } else {
+        vscode.window.showWarningMessage("glua-lsp output channel is not initialized");
+      }
+    })
+  );
 
   registerBuiltinDocumentProvider(context);
 
-  const outputChannel = vscode.window.createOutputChannel("glua Language Server");
-  outputChannelRef = outputChannel;
+  let languageClientApi;
+  try {
+    languageClientApi = require("vscode-languageclient/node");
+  } catch (error) {
+    const message = `glua-lsp: failed to load vscode-languageclient. Run npm install in ${context.extensionPath}. ${error && error.message ? error.message : error}`;
+    outputChannel.appendLine(`[glua-lsp] ${message}`);
+    outputChannel.show(true);
+    vscode.window.showErrorMessage(message);
+    return;
+  }
+  const { LanguageClient, TransportKind } = languageClientApi;
+
   const config = vscode.workspace.getConfiguration("glua");
   const docConfig = applyBuiltinDocsFromConfig(config);
   lastDocConfig = docConfig;
@@ -441,8 +564,17 @@ function activate(context) {
     clientOptions
   );
 
-  context.subscriptions.push(outputChannel);
-  context.subscriptions.push(client.start());
+  context.subscriptions.push(client);
+  outputChannel.appendLine(`[glua-lsp] starting server=${extensionServerPath}; syntax=${syntax}`);
+  client.start().then(
+    () => outputChannel.appendLine("[glua-lsp] language client started"),
+    (error) => {
+      const message = `glua-lsp: failed to start language client: ${error && error.message ? error.message : error}`;
+      outputChannel.appendLine(`[glua-lsp] ${message}`);
+      outputChannel.show(true);
+      vscode.window.showErrorMessage(message);
+    }
+  );
 
   vscode.workspace.onDidChangeConfiguration((event) => {
     if (!event.affectsConfiguration("glua")) {

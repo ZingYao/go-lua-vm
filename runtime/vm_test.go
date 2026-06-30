@@ -527,6 +527,52 @@ func TestVMSetTable(t *testing.T) {
 		// table 必须保存寄存器 value。
 		t.Fatalf("settable register value mismatch: value=%#v", value)
 	}
+
+	if err := vm.SetRegister(1, IntegerValue(1)); err != nil {
+		// 测试准备阶段写入整数寄存器 key 必须成功。
+		t.Fatalf("set integer key register failed: %v", err)
+	}
+	if err := vm.SetRegister(2, StringValue("first")); err != nil {
+		// 测试准备阶段写入数组区 value 必须成功。
+		t.Fatalf("set array value register failed: %v", err)
+	}
+	if err := vm.Step(bytecode.CreateABC(bytecode.OpSetTable, 0, 1, 2)); err != nil {
+		// SETTABLE 使用整数寄存器 key 写入数组区必须成功。
+		t.Fatalf("settable integer register key failed: %v", err)
+	}
+	value = table.RawGetInteger(1)
+	if !value.RawEqual(StringValue("first")) {
+		// table 必须保存数组区寄存器 value。
+		t.Fatalf("settable integer register value mismatch: value=%#v", value)
+	}
+}
+
+// TestNewLuaClosureCachesDirectCallSafe 验证 Lua closure 创建时缓存 direct CALL 属性。
+//
+// 叶子函数可走 direct CALL；包含 CALL 的函数必须保留完整调用路径，避免裁剪 debug/coroutine 现场。
+func TestNewLuaClosureCachesDirectCallSafe(t *testing.T) {
+	leafProto := &bytecode.Proto{
+		Code: []bytecode.Instruction{
+			bytecode.CreateABC(bytecode.OpReturn, 0, 1, 0),
+		},
+	}
+	leafClosure := NewLuaClosure(leafProto, nil, nil)
+	if !leafClosure.DirectCallSafe {
+		// 只有 RETURN 的叶子函数应被标记为 direct CALL safe。
+		t.Fatalf("leaf closure should be direct-call safe")
+	}
+
+	callingProto := &bytecode.Proto{
+		Code: []bytecode.Instruction{
+			bytecode.CreateABC(bytecode.OpCall, 0, 1, 1),
+			bytecode.CreateABC(bytecode.OpReturn, 0, 1, 0),
+		},
+	}
+	callingClosure := NewLuaClosure(callingProto, nil, nil)
+	if callingClosure.DirectCallSafe {
+		// 含 CALL 的函数不能进入 leaf direct CALL 路径。
+		t.Fatalf("calling closure should not be direct-call safe")
+	}
 }
 
 // TestVMNewTable 验证 NEWTABLE 会创建新的 table 引用。

@@ -1086,12 +1086,30 @@ func (table *Table) ensureArraySize(size int) {
 		return
 	}
 
-	oldSize := len(table.arrayValues)
-	table.arrayValues = append(table.arrayValues, make([]Value, size-oldSize)...)
-	for index := oldSize; index < len(table.arrayValues); index++ {
-		// 新增槽位显式填充 nil，避免零值 Value 被误解为有效值。
-		table.arrayValues[index] = NilValue()
+	if cap(table.arrayValues) >= size {
+		// 容量已预留时只扩展可见长度，避免连续数组写入反复分配。
+		table.arrayValues = table.arrayValues[:size]
+	} else {
+		// 按几何增长预留容量，但 len 仍保持到目标 size，避免预留槽位暴露给 Lua 语义。
+		grownCapacity := nextTableArrayCapacity(cap(table.arrayValues), size)
+		grownValues := make([]Value, size, grownCapacity)
+		copy(grownValues, table.arrayValues)
+		table.arrayValues = grownValues
 	}
+	// Value 的零值就是 KindNil；Go 扩容和 make 已经保证新增槽位为 Lua nil。
+}
+
+// nextTableArrayCapacity 计算数组区下一次预留容量。
+func nextTableArrayCapacity(currentCapacity int, requiredSize int) int {
+	if currentCapacity <= 0 {
+		// 空数组区从 4 个槽位开始，覆盖小 table constructor 和短数组热路径。
+		currentCapacity = 4
+	}
+	for currentCapacity < requiredSize {
+		// 容量按 2 倍增长，保持连续整数写入的摊还 O(1) 扩容成本。
+		currentCapacity *= 2
+	}
+	return currentCapacity
 }
 
 // unboundSearch 从已知 presentIndex 开始向后查找 table 长度边界。

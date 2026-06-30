@@ -17,6 +17,10 @@ public final class GluaDocumentationProvider extends AbstractDocumentationProvid
         if (file == null || file.getFileType() != GluaFileType.INSTANCE) {
             return null;
         }
+        GluaUserDocumentation.Entry userDoc = userDocumentation(file, targetOffset);
+        if (userDoc != null) {
+            return contextElement == null ? file : contextElement;
+        }
         String name = GluaAnalysis.builtinTargetAt(file.getText(), targetOffset);
         GluaBuiltin builtin = name == null ? null : GluaBuiltinCatalog.getInstance().get(name);
         if (builtin == null) {
@@ -31,6 +35,10 @@ public final class GluaDocumentationProvider extends AbstractDocumentationProvid
 
     @Override
     public @Nullable String generateDoc(PsiElement element, @Nullable PsiElement originalElement) {
+        GluaUserDocumentation.Entry userDoc = userDocumentation(originalElement);
+        if (userDoc != null) {
+            return userDoc.html();
+        }
         String name = builtinName(element, originalElement);
         GluaBuiltin builtin = name == null ? null : GluaBuiltinCatalog.getInstance().get(name);
         LOG.info("glua doc " + (builtin == null ? "miss" : "target=" + name));
@@ -39,6 +47,10 @@ public final class GluaDocumentationProvider extends AbstractDocumentationProvid
 
     @Override
     public @Nullable String generateHoverDoc(PsiElement element, @Nullable PsiElement originalElement) {
+        GluaUserDocumentation.Entry userDoc = userDocumentation(originalElement);
+        if (userDoc != null) {
+            return userDoc.quickInfo();
+        }
         String name = builtinName(element, originalElement);
         GluaBuiltin builtin = name == null ? null : GluaBuiltinCatalog.getInstance().get(name);
         LOG.info("glua hover doc " + (builtin == null ? "miss" : "target=" + name));
@@ -47,6 +59,10 @@ public final class GluaDocumentationProvider extends AbstractDocumentationProvid
 
     @Override
     public @Nullable String getQuickNavigateInfo(PsiElement element, PsiElement originalElement) {
+        GluaUserDocumentation.Entry userDoc = userDocumentation(originalElement);
+        if (userDoc != null) {
+            return userDoc.quickInfo();
+        }
         String name = builtinName(element, originalElement);
         GluaBuiltin builtin = name == null ? null : GluaBuiltinCatalog.getInstance().get(name);
         LOG.info("glua quick doc " + (builtin == null ? "miss" : "target=" + name));
@@ -72,5 +88,29 @@ public final class GluaDocumentationProvider extends AbstractDocumentationProvid
 
     private static @Nullable String userDataTarget(@Nullable PsiElement element) {
         return element == null ? null : element.getUserData(BUILTIN_TARGET);
+    }
+
+    private static @Nullable GluaUserDocumentation.Entry userDocumentation(@Nullable PsiElement element) {
+        if (element == null || element.getContainingFile() == null || element.getContainingFile().getFileType() != GluaFileType.INSTANCE) {
+            return null;
+        }
+        int offset = element.getTextRange() == null ? 0 : element.getTextRange().getStartOffset();
+        return userDocumentation(element.getContainingFile(), offset);
+    }
+
+    private static @Nullable GluaUserDocumentation.Entry userDocumentation(PsiFile file, int offset) {
+        GluaRequireSupport.MemberDefinition localMember = GluaRequireSupport.memberDefinitionAt(file.getText(), offset);
+        if (localMember != null) {
+            return GluaUserDocumentation.documentationAt(file.getText(), localMember.start(), localMember.end(), localMember.name());
+        }
+        GluaRequireSupport.MemberDefinition localFunction = GluaRequireSupport.functionDefinitionAt(file.getText(), offset);
+        if (localFunction != null) {
+            return GluaUserDocumentation.documentationAt(file.getText(), localFunction.start(), localFunction.end(), localFunction.name());
+        }
+        GluaRequireSupport.Target requiredMember = GluaRequireSupport.requiredMemberAt(file, offset);
+        if (requiredMember != null) {
+            return GluaUserDocumentation.documentationAt(requiredMember.file().getText(), requiredMember.start(), requiredMember.end(), requiredMember.name());
+        }
+        return null;
     }
 }

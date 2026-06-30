@@ -57,7 +57,11 @@ func Open(state *runtime.State) error {
 	library.RawSetString("byte", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Byte)))
 	library.RawSetString("char", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Char)))
 	library.RawSetString("dump", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Dump)))
-	library.RawSetString("find", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Find)))
+	library.RawSetString("find", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFixedResultsFunction{
+		MaxResults: 2,
+		Function:   FindFixed,
+		Fallback:   Find,
+	}))
 	library.RawSetString("format", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(func(args ...runtime.Value) ([]runtime.Value, error) {
 		// format 的 %s 需要当前 State 才能执行 Lua closure `__tostring` 元方法。
 		return formatWithState(state, args...)
@@ -67,7 +71,7 @@ func Open(state *runtime.State) error {
 		// gsub 的 Lua closure 替换函数需要当前 State 提供 Lua closure runner。
 		return gsubWithState(state, args...)
 	})))
-	library.RawSetString("len", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Len)))
+	library.RawSetString("len", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoUnaryFunction(LenUnaryValue)))
 	library.RawSetString("lower", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Lower)))
 	library.RawSetString("match", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Match)))
 	library.RawSetString("pack", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Pack)))
@@ -221,6 +225,10 @@ func Find(args ...runtime.Value) ([]runtime.Value, error) {
 		// 第四个参数按 Lua truthiness 决定是否禁用 pattern。
 		plain = args[3].Truthy()
 	}
+	if !plain && isPlainPattern(pattern) {
+		// 没有 Lua pattern 魔法字符时，pattern 语义等价于字面查找，可跳过递归 pattern 引擎。
+		return findLiteralRange(source, pattern, startOffset), nil
+	}
 	if !plain {
 		// 默认路径按 Lua pattern 查找，支持官方测试依赖的 `.*` 等模式。
 		matchResult, ok, matchErr := findPattern(source, pattern, startOffset)
@@ -243,16 +251,106 @@ func Find(args ...runtime.Value) ([]runtime.Value, error) {
 		return results, nil
 	}
 
+	return findLiteralRange(source, pattern, startOffset), nil
+}
+
+// FindFixed 实现 `string.find` 的固定上限多返回值快路径。
+//
+// dst 至少需要容纳两个返回值；当 plain=true 或 pattern 不含 magic 字符时，本函数直接写入
+// 1-based 匹配区间并返回 handled=true。包含 Lua pattern 语义时返回 handled=false，由调用方
+// 回退到 Find，避免丢失 capture 等变长返回值语义。
+func FindFixed(dst []runtime.Value, args ...runtime.Value) (int, bool, error) {
+	// 快路径只覆盖两个结果槽，调用方保证 MaxResults 与 dst 容量一致。
+	if len(dst) < 2 {
+		// 调用方提供的结果槽不足时无法安全写入固定两返回值。
+		return 0, false, runtime.ErrRegisterOutOfRange
+	}
+	source, err := stringArgument(args, 1, "find")
+	if err != nil {
+		// 第一个参数不是 string 时直接返回 Lua 参数错误。
+		return 0, true, err
+	}
+	pattern, err := stringArgument(args, 2, "find")
+	if err != nil {
+		// 第二个参数不是 string 时直接返回 Lua 参数错误。
+		return 0, true, err
+	}
+
+	startIndex := int64(1)
+	if len(args) >= 3 {
+		// init 参数存在时必须可转换为 integer。
+		convertedIndex, ok := args[2].ToInteger()
+		if !ok {
+			// 非整数起点无法换算为字节偏移。
+			return 0, true, badArgument("find", 3, "integer expected")
+		}
+		startIndex = convertedIndex
+	}
+	startOffset := normalizeStart(len(source), startIndex)
+	if startOffset > len(source) {
+		// 起点超过字符串尾部时必然找不到匹配。
+		dst[0] = runtime.NilValue()
+		return 1, true, nil
+	}
+
+	plain := false
+	if len(args) >= 4 {
+		// 第四个参数按 Lua truthiness 决定是否禁用 pattern。
+		plain = args[3].Truthy()
+	}
+	if !plain && !isPlainPattern(pattern) {
+		// 存在 Lua pattern magic 时必须回退完整引擎，避免 capture 和特殊模式被截断。
+		return 0, false, nil
+	}
+
+	// 字面量路径直接写入调用方结果槽，避免构造临时 []Value。
+	return findLiteralRangeInto(dst, source, pattern, startOffset), true, nil
+}
+
+// findLiteralRange 执行 string.find 的字面量查找并返回 Lua 1-based 闭区间。
+//
+// source 和 pattern 必须已经由调用方完成参数校验；startOffset 是 Go 0-based 起点。未命中时
+// 返回单个 nil，命中时返回起止位置两个 integer。
+func findLiteralRange(source string, pattern string, startOffset int) []runtime.Value {
+	var results [2]runtime.Value
+	resultCount := findLiteralRangeInto(results[:], source, pattern, startOffset)
+	return append([]runtime.Value(nil), results[:resultCount]...)
+}
+
+// findLiteralRangeInto 执行 string.find 字面量查找并写入调用方提供的结果槽。
+//
+// dst 至少包含两个元素；未命中时写入单个 nil，命中时写入 Lua 1-based 闭区间并返回 2。
+func findLiteralRangeInto(dst []runtime.Value, source string, pattern string, startOffset int) int {
+	// 字面量路径直接复用 Go 标准库的线性查找。
 	matchOffset := strings.Index(source[startOffset:], pattern)
 	if matchOffset < 0 {
 		// literal 查找失败时返回单个 nil。
-		return []runtime.Value{runtime.NilValue()}, nil
+		dst[0] = runtime.NilValue()
+		return 1
 	}
 
 	matchStart := startOffset + matchOffset
 	matchEnd := matchStart + len(pattern)
 	// 返回 Lua 1-based 闭区间起止位置。
-	return []runtime.Value{runtime.IntegerValue(int64(matchStart + 1)), runtime.IntegerValue(int64(matchEnd))}, nil
+	dst[0] = runtime.IntegerValue(int64(matchStart + 1))
+	dst[1] = runtime.IntegerValue(int64(matchEnd))
+	return 2
+}
+
+// isPlainPattern 判断 pattern 是否不含 Lua pattern 魔法字符。
+//
+// 返回 true 表示 find 语义等价于字面字符串查找；`%` 本身也是 magic 字符，因此转义 pattern
+// 会保留给通用 pattern 引擎解释。
+func isPlainPattern(pattern string) bool {
+	for index := 0; index < len(pattern); index++ {
+		// 任一 magic 字节都可能改变 pattern 语义，不能使用字面量快路径。
+		if isPatternMagicLiteral(pattern[index]) {
+			return false
+		}
+	}
+
+	// 没有 magic 字符时可以安全使用字面量查找。
+	return true
 }
 
 // Format 实现 Lua 5.3 `string.format` 的基础格式化语义。
@@ -492,15 +590,45 @@ func gsubWithState(state *runtime.State, args ...runtime.Value) ([]runtime.Value
 //
 // 第一个参数必须是 string；返回值是底层字节数量，不按 Unicode rune 或字符宽度计算。
 func Len(args ...runtime.Value) ([]runtime.Value, error) {
+	// len 首先执行单返回入口，保持导出多返回签名兼容既有调用方。
+	value, err := LenValue(args...)
+	if err != nil {
+		// 参数错误直接返回。
+		return nil, err
+	}
+
+	// 多返回 API 包装为单元素切片。
+	return []runtime.Value{value}, nil
+}
+
+// LenValue 实现 Lua 5.3 `string.len` 的单返回热路径。
+//
+// 第一个参数必须是 string；返回值是底层字节数量，不按 Unicode rune 或字符宽度计算。错误语义
+// 与 Len 保持一致，供 VM 内部 GoFunction 快路径避免结果切片分配。
+func LenValue(args ...runtime.Value) (runtime.Value, error) {
 	// len 首先解析目标字符串。
 	source, err := stringArgument(args, 1, "len")
 	if err != nil {
 		// 第一个参数不是 string 时直接返回 Lua 参数错误。
-		return nil, err
+		return runtime.NilValue(), err
 	}
 
 	// Lua string.len 返回字节长度。
-	return []runtime.Value{runtime.IntegerValue(int64(len(source)))}, nil
+	return runtime.IntegerValue(int64(len(source))), nil
+}
+
+// LenUnaryValue 实现 Lua 5.3 `string.len` 的单参数单返回热路径。
+//
+// value 是调用方已经从 Lua 寄存器读取出的第一个参数；返回语义和错误语义与 LenValue 保持一致。
+func LenUnaryValue(value runtime.Value) (runtime.Value, error) {
+	// len 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
+	if value.Kind != runtime.KindString {
+		// 非 string 类型不做 tostring 隐式转换。
+		return runtime.NilValue(), badArgument("len", 1, "string expected")
+	}
+
+	// Lua string.len 返回字节长度。
+	return runtime.IntegerValue(int64(len(value.String))), nil
 }
 
 // Lower 实现 Lua 5.3 `string.lower` 的基础 ASCII 小写转换。

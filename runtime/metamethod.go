@@ -63,11 +63,30 @@ const (
 // 仍返回 ErrUnsupportedMetamethod。
 type GoFunction func(args ...Value) (Value, error)
 
+// GoUnaryFunction 表示单参数单返回的 Go closure 热路径。
+//
+// 参数按 Lua 调用前已经完成的寄存器布局传入；错误语义与 GoFunction 保持一致。该类型用于
+// 标准库中高频的一元函数，避免 VM CALL 为单参数构造临时参数切片。
+type GoUnaryFunction func(Value) (Value, error)
+
 // GoResultsFunction 表示当前 VM 可直接调用并返回多返回值的 Go 元方法函数。
 //
 // args 按 Lua 调用顺序传入；返回切片按 Lua 多返回值顺序排列。该类型主要服务 `__pairs`、
 // `__ipairs` 和后续 Go bridge 多返回值路径，单返回值元方法仍可使用 GoFunction。
 type GoResultsFunction func(args ...Value) ([]Value, error)
+
+// GoFixedResultsFunction 表示有固定返回值上限的 Go 回调。
+//
+// MaxResults 必须覆盖 Function 快路径可能返回的最大结果数量；Function 将结果写入调用方提供的
+// dst，返回实际结果数量和是否命中快路径。未命中时调用方必须回退到 Fallback，避免截断变长结果。
+type GoFixedResultsFunction struct {
+	// MaxResults 表示 Function 最多写入的返回值数量。
+	MaxResults int
+	// Function 将返回值写入 dst，并返回实际结果数量和是否命中快路径。
+	Function func(dst []Value, args ...Value) (int, bool, error)
+	// Fallback 保存未命中快路径时使用的完整多返回值函数。
+	Fallback GoResultsFunction
+}
 
 // lookupMetamethod 查找一个值的元方法。
 //

@@ -24,6 +24,10 @@
       language="GLua"
       implementationClass="com.glua.jetbrains.GluaParserDefinition"/>
 
+    <lang.commenter
+      language="GLua"
+      implementationClass="com.glua.jetbrains.GluaCommenter"/>
+
     <annotator
       language="GLua"
       implementationClass="com.glua.jetbrains.GluaAnnotator"/>

@@ -17,6 +17,41 @@ public final class GluaDocumentationTargetProvider implements DocumentationTarge
         if (file.getFileType() != GluaFileType.INSTANCE) {
             return List.of();
         }
+        GluaRequireSupport.MemberDefinition localMember = GluaRequireSupport.memberDefinitionAt(file.getText(), offset);
+        if (localMember != null) {
+            GluaUserDocumentation.Entry documentation = GluaUserDocumentation.documentationAt(file.getText(), localMember.start(), localMember.end(), localMember.name());
+            PsiElement navigation = file.findElementAt(localMember.start());
+            return List.of(new GluaDocumentationTarget(
+                documentation.name(),
+                documentation.html(),
+                documentation.quickInfo(),
+                "GLua function",
+                navigation == null ? file : navigation
+            ));
+        }
+        GluaRequireSupport.MemberDefinition localFunction = GluaRequireSupport.functionDefinitionAt(file.getText(), offset);
+        if (localFunction != null) {
+            GluaUserDocumentation.Entry documentation = GluaUserDocumentation.documentationAt(file.getText(), localFunction.start(), localFunction.end(), localFunction.name());
+            PsiElement navigation = file.findElementAt(localFunction.start());
+            return List.of(new GluaDocumentationTarget(
+                documentation.name(),
+                documentation.html(),
+                documentation.quickInfo(),
+                "GLua function",
+                navigation == null ? file : navigation
+            ));
+        }
+        GluaRequireSupport.Target requiredMember = GluaRequireSupport.requiredMemberAt(file, offset);
+        if (requiredMember != null) {
+            GluaUserDocumentation.Entry documentation = GluaUserDocumentation.documentationAt(requiredMember.file().getText(), requiredMember.start(), requiredMember.end(), requiredMember.name());
+            return List.of(new GluaDocumentationTarget(
+                documentation.name(),
+                documentation.html(),
+                documentation.quickInfo(),
+                "GLua function",
+                requiredMember.element()
+            ));
+        }
         String name = GluaAnalysis.builtinTargetAt(file.getText(), offset);
         GluaBuiltin builtin = name == null ? null : GluaBuiltinCatalog.getInstance().get(name);
         if (builtin == null) {

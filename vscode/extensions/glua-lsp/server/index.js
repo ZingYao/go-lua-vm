@@ -13,6 +13,7 @@ const {
   ProposedFeatures,
   TextDocuments,
   CompletionItemKind,
+  InsertTextFormat,
 } = require("vscode-languageserver/node");
 const { TextDocument } = require("vscode-languageserver-textdocument");
 const { DiagnosticSeverity, TextDocumentSyncKind } = require("vscode-languageserver/node");
@@ -96,7 +97,30 @@ const baseKeywords = new Set([
   "default",
 ]);
 
-const standardLibraries = new Set(["string", "math", "table", "io", "os", "coroutine", "debug", "utf8"]);
+const standardLibraries = new Set(["string", "math", "table", "io", "os", "coroutine", "debug", "utf8", "package"]);
+const valueReturnTypes = new Map([
+  ["io.open", "file"],
+  ["io.popen", "file"],
+  ["io.tmpfile", "file"],
+  ["io.input", "file"],
+  ["io.output", "file"],
+  ["io.stdin", "file"],
+  ["io.stdout", "file"],
+  ["io.stderr", "file"],
+  ["file.write", "file"],
+]);
+const typeMethods = new Map([
+  ["file", new Set(["close", "flush", "lines", "read", "seek", "setvbuf", "write"])],
+  ["table", new Set(["concat", "insert", "move", "pack", "remove", "sort", "unpack"])],
+  ["string", new Set(["byte", "char", "dump", "find", "format", "gmatch", "gsub", "len", "lower", "match", "pack", "packsize", "rep", "reverse", "sub", "unpack", "upper"])],
+  ["math", new Set(["abs", "acos", "asin", "atan", "ceil", "cos", "deg", "exp", "floor", "fmod", "log", "max", "min", "modf", "rad", "random", "randomseed", "sin", "sqrt", "tan", "tointeger", "type", "ult"])],
+  ["io", new Set(["close", "flush", "input", "lines", "open", "output", "popen", "read", "tmpfile", "type", "write"])],
+  ["os", new Set(["clock", "date", "difftime", "execute", "exit", "getenv", "remove", "rename", "setlocale", "time", "tmpname"])],
+  ["coroutine", new Set(["create", "resume", "running", "status", "wrap", "yield"])],
+  ["debug", new Set(["debug", "gethook", "getinfo", "getlocal", "getmetatable", "getregistry", "getupvalue", "getuservalue", "sethook", "setlocal", "setmetatable", "setupvalue", "setuservalue", "traceback", "upvalueid", "upvaluejoin"])],
+  ["utf8", new Set(["char", "codes", "codepoint", "len", "offset"])],
+  ["package", new Set(["loadlib", "searchpath"])],
+]);
 
 const baseBuiltinFunctions = new Set(builtinFunctionNames());
 const DEFAULT_DOC_LOCALE = "auto";
@@ -947,9 +971,10 @@ function extractCompletionContext(text, tokens, position) {
       if (before && (before.text === "." || before.text === ":")) {
         const maybeModule = atCursor - 2 >= 0 ? tokens[atCursor - 2] : null;
         if (maybeModule && (maybeModule.type === "identifier" || maybeModule.type === "keyword")) {
+          const moduleName = completionModule(tokens, atCursor - 1, atCursor - 2, position);
           return {
             mode: "method",
-            module: maybeModule.text,
+            module: moduleName,
             prefix: cursorToken.text,
             range: makeRange(position.line, cursorToken.startColumn, position.line, cursorToken.range.end.character),
           };
@@ -976,9 +1001,10 @@ function extractCompletionContext(text, tokens, position) {
   const trimmedLine = lineText.trimEnd();
   if (trimmedLine.endsWith(".") || trimmedLine.endsWith(":")) {
     const tokenIsSeparator = beforeToken && (beforeToken.text === "." || beforeToken.text === ":");
-    const moduleCandidate = tokenIsSeparator ? tokens[before - 1] : beforeToken;
+    const moduleIndex = tokenIsSeparator ? before - 1 : before;
+    const moduleCandidate = tokens[moduleIndex];
     const moduleName = moduleCandidate && (moduleCandidate.type === "identifier" || moduleCandidate.type === "keyword")
-      ? moduleCandidate.text
+      ? completionModule(tokens, before, moduleIndex, position)
       : "";
     const useMethodMode = moduleName !== "";
     return {
@@ -994,6 +1020,215 @@ function extractCompletionContext(text, tokens, position) {
     prefix: "",
     range: makeRange(position.line, position.character, position.line, position.character),
   };
+}
+
+function completionModule(tokens, separatorIndex, receiverIndex, position) {
+  const separator = tokens[separatorIndex];
+  if (separator && separator.text === ":") {
+    const inferred = inferredReceiverType(tokens, receiverIndex, position);
+    if (inferred) {
+      return inferred;
+    }
+  }
+  return tokens[receiverIndex] ? tokens[receiverIndex].text : "";
+}
+
+function inferredReceiverType(tokens, receiverIndex, position) {
+  const receiver = tokens[receiverIndex];
+  if (!isNameToken(receiver)) {
+    return "";
+  }
+  let inferred = "";
+  for (let index = 0; index < receiverIndex; index++) {
+    const token = tokens[index];
+    if (!token || token.text !== receiver.text || !isRangeBeforeOrEqual(token.range, position)) {
+      continue;
+    }
+    const candidate = inferredTypeFromAssignment(tokens, index, position);
+    if (candidate) {
+      inferred = candidate;
+    }
+  }
+  return inferred;
+}
+
+function inferredTypeFromAssignment(tokens, variableIndex, position) {
+  const equals = tokens[variableIndex + 1];
+  const moduleToken = tokens[variableIndex + 2];
+  const separator = tokens[variableIndex + 3];
+  const member = tokens[variableIndex + 4];
+  if (!equals || equals.text !== "=" || !isNameToken(moduleToken) || !separator || separator.text !== "." || !isNameToken(member)) {
+    if (equals && equals.text === "=" && moduleToken && moduleToken.text === "{") {
+      return "table";
+    }
+    if (equals && equals.text === "=" && moduleToken && moduleToken.type === "string") {
+      return "string";
+    }
+    return "";
+  }
+  if (!isRangeBeforeOrEqual(member.range, position)) {
+    return "";
+  }
+  return valueReturnTypes.get(`${moduleToken.text}.${member.text}`) || "";
+}
+
+function collectTypedMethodDiagnostics(tokens) {
+  const diagnostics = [];
+  for (let index = 2; index + 1 < tokens.length; index++) {
+    const receiver = tokens[index - 2];
+    const separator = tokens[index - 1];
+    const method = tokens[index];
+    const call = tokens[index + 1];
+    if (!receiver || !separator || !method || !call || separator.text !== ":" || !isNameToken(receiver) || !isNameToken(method) || call.text !== "(") {
+      continue;
+    }
+    const receiverType = inferredReceiverType(tokens, index - 2, method.range.start);
+    if (!receiverType) {
+      continue;
+    }
+    const methods = typeMethods.get(receiverType);
+    if (!methods || methods.has(method.text)) {
+      continue;
+    }
+    diagnostics.push({
+      range: method.range,
+      severity: DiagnosticSeverity.Error,
+      source: "glua",
+      message: `type '${receiverType}' has no method '${method.text}'`,
+    });
+  }
+  return diagnostics;
+}
+
+function declaredIdentifiers(tokens) {
+  const declared = new Set([
+    "_G",
+    "_VERSION",
+    "_ENV",
+    "false",
+    "nil",
+    "true",
+    ...standardLibraries,
+    ...Array.from(baseBuiltinFunctions).filter((name) => !name.includes(".")),
+  ]);
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (!token || token.type !== "keyword") {
+      continue;
+    }
+    if (token.text === "local") {
+      const next = tokens[index + 1];
+      if (next && next.text === "function" && isNameToken(tokens[index + 2])) {
+        declared.add(tokens[index + 2].text);
+        collectFunctionParameters(tokens, index + 2, declared);
+        continue;
+      }
+      for (let cursor = index + 1; cursor < tokens.length; cursor++) {
+        const current = tokens[cursor];
+        if (!current || current.text === "=" || current.text === "do" || current.range.start.line !== token.range.start.line) {
+          break;
+        }
+        if (isNameToken(current)) {
+          declared.add(current.text);
+        }
+      }
+      continue;
+    }
+    if (token.text === "function" && isNameToken(tokens[index + 1])) {
+      declared.add(tokens[index + 1].text);
+      collectFunctionParameters(tokens, index + 1, declared);
+      continue;
+    }
+    if (token.text === "function" && tokens[index + 1] && tokens[index + 1].text === "(") {
+      collectFunctionExpressionParameters(tokens, index, declared);
+      continue;
+    }
+    if (token.text === "for") {
+      for (let cursor = index + 1; cursor < tokens.length; cursor++) {
+        const current = tokens[cursor];
+        if (!current || current.text === "in" || current.text === "=" || current.text === "do") {
+          break;
+        }
+        if (isNameToken(current)) {
+          declared.add(current.text);
+        }
+      }
+    }
+  }
+  return declared;
+}
+
+function collectFunctionParameters(tokens, functionNameIndex, declared) {
+  let openIndex = -1;
+  for (let cursor = functionNameIndex + 1; cursor < tokens.length; cursor++) {
+    if (tokens[cursor].text === "(") {
+      openIndex = cursor;
+      break;
+    }
+    if (tokens[cursor].range.start.line !== tokens[functionNameIndex].range.start.line) {
+      return;
+    }
+  }
+  if (openIndex < 0) {
+    return;
+  }
+  for (let cursor = openIndex + 1; cursor < tokens.length; cursor++) {
+    const current = tokens[cursor];
+    if (current.text === ")") {
+      return;
+    }
+    if (isNameToken(current)) {
+      declared.add(current.text);
+    }
+  }
+}
+
+function collectFunctionExpressionParameters(tokens, functionIndex, declared) {
+  const openIndex = functionIndex + 1;
+  if (!tokens[openIndex] || tokens[openIndex].text !== "(") {
+    return;
+  }
+  for (let cursor = openIndex + 1; cursor < tokens.length; cursor++) {
+    const current = tokens[cursor];
+    if (current.text === ")") {
+      return;
+    }
+    if (isNameToken(current)) {
+      declared.add(current.text);
+    }
+  }
+}
+
+function collectUndeclaredIdentifierDiagnostics(tokens) {
+  const declared = declaredIdentifiers(tokens);
+  const diagnostics = [];
+  const reported = new Set();
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (!token || token.type !== "identifier" || declared.has(token.text)) {
+      continue;
+    }
+    const previous = index > 0 ? tokens[index - 1] : null;
+    const next = index + 1 < tokens.length ? tokens[index + 1] : null;
+    if (previous && (previous.text === "." || previous.text === ":" || previous.text === "function")) {
+      continue;
+    }
+    if (next && (next.text === "=" || next.text === "." || next.text === ":")) {
+      continue;
+    }
+    const key = `${token.text}:${token.range.start.line}:${token.range.start.character}`;
+    if (reported.has(key)) {
+      continue;
+    }
+    reported.add(key);
+    diagnostics.push({
+      range: token.range,
+      severity: DiagnosticSeverity.Error,
+      source: "glua",
+      message: `undefined identifier '${token.text}'`,
+    });
+  }
+  return diagnostics;
 }
 
 function buildCompletionCandidates(context) {
@@ -1043,7 +1278,53 @@ function buildCompletionCandidates(context) {
     }
   }
 
+  if (context.mode === "global") {
+    items.push(...buildDocSnippetCandidates(context));
+  }
+
   return items;
+}
+
+function buildDocSnippetCandidates(context) {
+  const prefix = String(context.prefix || "").toLowerCase();
+  if (prefix && !["doc", "docs", "func", "function", "glua"].some((item) => item.startsWith(prefix) || prefix.startsWith(item))) {
+    return [];
+  }
+  return [
+    {
+      name: "glua doc comment",
+      kind: CompletionItemKind.Snippet,
+      detail: "GLua JSON-compatible function annotation",
+      documentation: "Insert a standard GLua annotation block that can be parsed into builtin-functions JSON shape.",
+      snippet: [
+        "-- description: ${1:function description}",
+        "-- param: ${2:name} ${3:string} ${4:parameter description}",
+        "-- return: ${5:nil}",
+        "-- example:",
+        "--   ${6:module.function(${2:name})}",
+        "-- output:",
+        "--   ${7:expected output}",
+      ].join("\n"),
+    },
+    {
+      name: "glua documented function",
+      kind: CompletionItemKind.Snippet,
+      detail: "GLua annotation + function assignment",
+      documentation: "Insert a documented table function assignment.",
+      snippet: [
+        "-- description: ${1:function description}",
+        "-- param: ${4:name} ${5:string} ${6:parameter description}",
+        "-- return: ${7:nil}",
+        "-- example:",
+        "--   ${2:module}.${3:functionName}(${4:name})",
+        "-- output:",
+        "--   ${8:expected output}",
+        "${2:module}.${3:functionName} = function(${4:name})",
+        "  ${0:-- body}",
+        "end",
+      ].join("\n"),
+    },
+  ];
 }
 
 function isNameToken(token) {
@@ -1063,7 +1344,9 @@ function resolveBuiltinTarget(tokens, position) {
 
   const candidateWithSeparator = (separator) => {
     if (index > 1 && tokens[index - 1].text === separator && isNameToken(tokens[index - 2])) {
-      const qualified = `${tokens[index - 2].text}.${token.text}`;
+      const receiverType = separator === ":" ? inferredReceiverType(tokens, index - 2, position) : "";
+      const moduleName = receiverType || tokens[index - 2].text;
+      const qualified = `${moduleName}.${token.text}`;
       if (getBuiltinFunction(qualified)) {
         return qualified;
       }
@@ -1085,11 +1368,12 @@ function resolveBuiltinTarget(tokens, position) {
   }
 
   if (index > 1 && isNameToken(tokens[index - 2]) && tokens[index - 1].text === ":") {
-    const receiverHint = tokens[index - 2].text;
-    const byMethod = getBuiltinFunctionByMethod(token.text, receiverHint) || getBuiltinFunctionByMethod(token.text);
+    const receiverHint = inferredReceiverType(tokens, index - 2, position) || tokens[index - 2].text;
+    const byMethod = getBuiltinFunctionByMethod(token.text, receiverHint);
     if (byMethod) {
       return byMethod;
     }
+    return "";
   }
 
   return token.text;
@@ -1164,14 +1448,63 @@ function semanticTokenTypeForToken(tokens, index, syntax) {
   if (token.type !== "identifier") {
     return null;
   }
-  // Function-like identifiers are colored by the TextMate grammar. Returning
-  // semantic function/method tokens here lets some VS Code themes repaint them
-  // as plain text after the grammar highlight has already appeared.
+  const previous = index > 0 ? tokens[index - 1] : null;
+  const next = index + 1 < tokens.length ? tokens[index + 1] : null;
+  if (standardLibraries.has(token.text) && next && (next.text === "." || next.text === ":")) {
+    return semanticTypeNamespace;
+  }
+  if (baseBuiltinFunctions.has(token.text) && next && next.text === "(") {
+    return semanticTypeFunction;
+  }
+  if (previous && (previous.text === "." || previous.text === ":") && next && next.text === "(") {
+    const receiverIndex = index - 2;
+    const receiver = receiverIndex >= 0 ? tokens[receiverIndex] : null;
+    const moduleName = previous.text === ":"
+      ? inferredReceiverType(tokens, receiverIndex, token.range.start) || (receiver ? receiver.text : "")
+      : receiver ? receiver.text : "";
+    const methods = typeMethods.get(moduleName);
+    if (methods && methods.has(token.text)) {
+      return semanticTypeMethod;
+    }
+  }
+  if (previous && previous.text === "function") {
+    return semanticTypeFunction;
+  }
+  if (!previous || (previous.text !== "." && previous.text !== ":")) {
+    if (next && next.text === "(") {
+      return semanticTypeFunction;
+    }
+  }
   return null;
 }
 
 function generateSemanticTokens(text, syntax) {
-  return { data: [] };
+  const tokens = scanTokens(text, syntax).tokens;
+  const data = [];
+  let previousLine = 0;
+  let previousStart = 0;
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    const tokenType = semanticTokenTypeForToken(tokens, index, syntax);
+    if (tokenType === null) {
+      continue;
+    }
+    if (token.range.start.line !== token.range.end.line) {
+      continue;
+    }
+    const line = token.range.start.line;
+    const start = token.range.start.character;
+    const length = Math.max(0, token.range.end.character - token.range.start.character);
+    if (length <= 0) {
+      continue;
+    }
+    const deltaLine = data.length === 0 ? line : line - previousLine;
+    const deltaStart = deltaLine === 0 ? start - previousStart : start;
+    data.push(deltaLine, deltaStart, length, tokenType, 0);
+    previousLine = line;
+    previousStart = start;
+  }
+  return { data };
 }
 
 function collectParseLikeErrors(text, syntax) {
@@ -1264,6 +1597,8 @@ function collectParseLikeErrors(text, syntax) {
     });
   }
 
+  diagnostics.push(...collectTypedMethodDiagnostics(tokens));
+  diagnostics.push(...collectUndeclaredIdentifierDiagnostics(tokens));
   return diagnostics;
 }
 
@@ -1276,6 +1611,7 @@ let builtinExtensionOptions = {
   resolvedLocale: "en",
   builtinExtensions: [],
 };
+let workspaceRoots = [];
 
 function parsePositionOffset(text, position) {
   const lines = text.split("\n");
@@ -1287,6 +1623,411 @@ function parsePositionOffset(text, position) {
   return { line: position.line, character: charPos };
 }
 
+function filePathFromUri(uri) {
+  if (!uri || !uri.startsWith("file://")) {
+    return "";
+  }
+  try {
+    return decodeURIComponent(new URL(uri).pathname);
+  } catch {
+    return "";
+  }
+}
+
+function uriFromFilePath(filePath) {
+  return `file://${encodeURI(filePath).replace(/%2F/g, "/")}`;
+}
+
+function modulePathCandidates(moduleName, baseDir) {
+  const relative = String(moduleName || "").replace(/\./g, path.sep);
+  const roots = [baseDir, ...workspaceRoots].filter(Boolean);
+  const candidates = [];
+  for (const root of roots) {
+    candidates.push(
+      path.join(root, `${relative}.glua`),
+      path.join(root, `${relative}.lua`),
+      path.join(root, relative, "init.glua"),
+      path.join(root, relative, "init.lua")
+    );
+  }
+  return [...new Set(candidates)];
+}
+
+function resolveRequiredModuleFile(moduleName, documentUri) {
+  const documentPath = filePathFromUri(documentUri);
+  const baseDir = documentPath ? path.dirname(documentPath) : "";
+  for (const candidate of modulePathCandidates(moduleName, baseDir)) {
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+      return candidate;
+    }
+  }
+  return "";
+}
+
+function requiredModuleAt(tokens, position, documentUri) {
+  const index = findTokenIndexAtPosition(tokens, position);
+  if (index < 0 || tokens[index].type !== "string") {
+    return null;
+  }
+  if (index < 2 || tokens[index - 1].text !== "(" || tokens[index - 2].text !== "require") {
+    return null;
+  }
+  const moduleName = tokens[index].text.slice(1, -1);
+  const filePath = resolveRequiredModuleFile(moduleName, documentUri);
+  if (!filePath) {
+    return null;
+  }
+  return {
+    uri: uriFromFilePath(filePath),
+    range: makeRange(0, 0, 0, 1),
+  };
+}
+
+function localRequireBindings(tokens, documentUri) {
+  const bindings = new Map();
+  for (let index = 0; index + 5 < tokens.length; index++) {
+    if (tokens[index].text !== "local" || !isNameToken(tokens[index + 1]) || tokens[index + 2].text !== "=" || tokens[index + 3].text !== "require" || tokens[index + 4].text !== "(" || tokens[index + 5].type !== "string") {
+      continue;
+    }
+    const moduleName = tokens[index + 5].text.slice(1, -1);
+    const filePath = resolveRequiredModuleFile(moduleName, documentUri);
+    if (filePath) {
+      bindings.set(tokens[index + 1].text, filePath);
+    }
+  }
+  return bindings;
+}
+
+function exportedMemberDefinition(filePath, receiverName, memberName) {
+  let text = "";
+  try {
+    text = fs.readFileSync(filePath, "utf8");
+  } catch {
+    return null;
+  }
+  const tokens = scanTokens(text, syntax).tokens;
+  for (let index = 0; index + 2 < tokens.length; index++) {
+    if (tokens[index].text === receiverName && tokens[index + 1].text === "." && tokens[index + 2].text === memberName) {
+      return {
+        uri: uriFromFilePath(filePath),
+        range: tokens[index + 2].range,
+      };
+    }
+  }
+  return null;
+}
+
+function commentBlockBeforeLine(text, lineNumber) {
+  const lines = text.split("\n");
+  const comments = [];
+  for (let index = lineNumber - 1; index >= 0; index--) {
+    const line = lines[index] || "";
+    const trimmed = line.trim();
+    if (trimmed === "") {
+      if (comments.length === 0) {
+        continue;
+      }
+      break;
+    }
+    if (!trimmed.startsWith("--")) {
+      break;
+    }
+    comments.unshift(trimmed.replace(/^--\s?/, ""));
+  }
+  return comments.join("\n").trim();
+}
+
+function parseAnnotationComment(comment) {
+  const result = {
+    description: [],
+    params: [],
+    returns: [],
+    example: [],
+    output: [],
+    other: [],
+  };
+  if (!comment) {
+    return result;
+  }
+  const lines = comment.split("\n");
+  let section = "";
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) {
+      continue;
+    }
+    let match = line.match(/^(?:description|desc)\s*:\s*(.*)$/i);
+    if (match) {
+      section = "description";
+      if (match[1]) {
+        result.description.push(match[1].trim());
+      }
+      continue;
+    }
+    match = line.match(/^(?:param|parameter)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*([A-Za-z_][A-Za-z0-9_.<>|?]*)?\s*(.*)$/i);
+    if (match) {
+      section = "";
+      result.params.push({
+        name: match[1],
+        type: match[2] || "",
+        description: match[3] || "",
+      });
+      continue;
+    }
+    match = line.match(/^(?:return|returns)\s*:\s*(.*)$/i);
+    if (match) {
+      section = "returns";
+      if (match[1]) {
+        result.returns.push(match[1].trim());
+      }
+      continue;
+    }
+    match = line.match(/^example\s*:\s*(.*)$/i);
+    if (match) {
+      section = "example";
+      if (match[1]) {
+        result.example.push(match[1].trim());
+      }
+      continue;
+    }
+    match = line.match(/^output\s*:\s*(.*)$/i);
+    if (match) {
+      section = "output";
+      if (match[1]) {
+        result.output.push(match[1].trim());
+      }
+      continue;
+    }
+    if (section && result[section]) {
+      result[section].push(line);
+      continue;
+    }
+    result.other.push(line);
+  }
+  return result;
+}
+
+function annotationLabels() {
+  const locale = String(getBuiltinLocale() || "").toLowerCase();
+  if (locale.startsWith("zh")) {
+    return {
+      parameters: "参数",
+      returns: "返回值",
+      example: "示例",
+      output: "输出",
+      definedAt(line, column) {
+        return `定义于第 ${line} 行，第 ${column} 列。`;
+      },
+      parameterName(name) {
+        return `参数 \`${name}\``;
+      },
+    };
+  }
+  return {
+    parameters: "Parameters",
+    returns: "Returns",
+    example: "Example",
+    output: "Output",
+    definedAt(line, column) {
+      return `Defined at line ${line}, column ${column}.`;
+    },
+    parameterName(name) {
+      return `Parameter \`${name}\``;
+    },
+  };
+}
+
+function formatAnnotationMarkdown(comment) {
+  const annotation = parseAnnotationComment(comment);
+  const labels = annotationLabels();
+  const sections = [];
+  if (annotation.description.length > 0) {
+    sections.push(annotation.description.join(" "));
+  }
+  if (annotation.params.length > 0) {
+    const params = annotation.params.map((param) => {
+      const type = param.type ? ` \`${param.type}\`` : "";
+      const suffix = param.description ? ` - ${param.description}` : "";
+      return `- \`${param.name}\`${type}${suffix}`;
+    });
+    sections.push(`**${labels.parameters}**\n${params.join("\n")}`);
+  }
+  if (annotation.returns.length > 0) {
+    sections.push(`**${labels.returns}**\n${annotation.returns.join(" ")}`);
+  }
+  if (annotation.example.length > 0) {
+    sections.push(`**${labels.example}**\n\`\`\`lua\n${annotation.example.join("\n")}\n\`\`\``);
+  }
+  if (annotation.output.length > 0) {
+    sections.push(`**${labels.output}**\n\`\`\`text\n${annotation.output.join("\n")}\n\`\`\``);
+  }
+  if (annotation.other.length > 0) {
+    sections.push(annotation.other.join("  \n"));
+  }
+  if (sections.length === 0) {
+    return comment.split("\n").join("  \n");
+  }
+  return sections.join("\n\n");
+}
+
+function hoverMarkdownForDefinition(targetName, definitionText, definitionRange) {
+  const comment = commentBlockBeforeLine(definitionText, definitionRange.start.line);
+  const labels = annotationLabels();
+  const location = labels.definedAt(definitionRange.start.line + 1, definitionRange.start.character + 1);
+  if (!comment) {
+    return `\`${targetName}\`\n\n${location}`;
+  }
+  const formattedComment = formatAnnotationMarkdown(comment);
+  return `\`${targetName}\`\n\n${formattedComment}\n\n${location}`;
+}
+
+function paramDocumentationFromComment(comment, paramName) {
+  if (!comment) {
+    return "";
+  }
+  const lines = comment.split("\n");
+  for (const line of lines) {
+    const match = line.match(/^(?:param|parameter)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*(.*)$/i);
+    if (match && match[1] === paramName) {
+      return match[2] ? `${match[1]} ${match[2]}`.trim() : match[1];
+    }
+  }
+  return "";
+}
+
+function functionParameterContext(tokens, tokenIndex) {
+  const token = tokens[tokenIndex];
+  if (!token || !isNameToken(token)) {
+    return null;
+  }
+  for (let functionIndex = tokenIndex - 1; functionIndex >= 0; functionIndex--) {
+    if (tokens[functionIndex].text !== "function") {
+      continue;
+    }
+    let openIndex = -1;
+    for (let cursor = functionIndex + 1; cursor < tokens.length; cursor++) {
+      if (tokens[cursor].text === "(") {
+        openIndex = cursor;
+        break;
+      }
+      if (tokens[cursor].range.start.line > tokens[functionIndex].range.start.line && openIndex < 0) {
+        break;
+      }
+    }
+    if (openIndex < 0 || openIndex > tokenIndex) {
+      continue;
+    }
+    let closeIndex = -1;
+    const params = new Set();
+    for (let cursor = openIndex + 1; cursor < tokens.length; cursor++) {
+      if (tokens[cursor].text === ")") {
+        closeIndex = cursor;
+        break;
+      }
+      if (isNameToken(tokens[cursor])) {
+        params.add(tokens[cursor].text);
+      }
+    }
+    if (closeIndex < 0 || !params.has(token.text)) {
+      continue;
+    }
+    return {
+      name: token.text,
+      functionLine: tokens[functionIndex].range.start.line,
+      range: token.range,
+    };
+  }
+  return null;
+}
+
+function hoverForFunctionParameter(tokens, tokenIndex, text) {
+  const context = functionParameterContext(tokens, tokenIndex);
+  if (!context) {
+    return null;
+  }
+  const comment = commentBlockBeforeLine(text, context.functionLine);
+  const paramDoc = paramDocumentationFromComment(comment, context.name);
+  if (!paramDoc) {
+    return null;
+  }
+  const labels = annotationLabels();
+  return {
+    contents: {
+      kind: "markdown",
+      value: `${labels.parameterName(context.name)}\n\n${paramDoc}`,
+    },
+    range: context.range,
+  };
+}
+
+function hoverForRequiredMember(tokens, position, documentUri) {
+  const target = requiredMemberTarget(tokens, position, documentUri);
+  if (!target) {
+    return null;
+  }
+  const filePath = filePathFromUri(target.uri);
+  let text = "";
+  try {
+    text = fs.readFileSync(filePath, "utf8");
+  } catch {
+    return null;
+  }
+  const tokenIndex = findTokenIndexAtPosition(tokens, position);
+  const targetName = tokenIndex >= 2 && tokens[tokenIndex - 1].text === "." && isNameToken(tokens[tokenIndex - 2])
+    ? `${tokens[tokenIndex - 2].text}.${tokens[tokenIndex].text}`
+    : (tokenIndex >= 0 ? tokens[tokenIndex].text : path.basename(filePath));
+  return {
+    contents: {
+      kind: "markdown",
+      value: hoverMarkdownForDefinition(targetName, text, target.range),
+    },
+    range: target.range,
+  };
+}
+
+function requiredMemberTarget(tokens, position, documentUri) {
+  const index = findTokenIndexAtPosition(tokens, position);
+  if (index < 2 || !isNameToken(tokens[index]) || tokens[index - 1].text !== "." || !isNameToken(tokens[index - 2])) {
+    return null;
+  }
+  const bindings = localRequireBindings(tokens, documentUri);
+  const filePath = bindings.get(tokens[index - 2].text);
+  if (!filePath) {
+    return null;
+  }
+  return exportedMemberDefinition(filePath, tokens[index - 2].text, tokens[index].text);
+}
+
+function memberDefinitionHover(tokens, tokenIndex, text) {
+  if (tokenIndex < 2 || !isNameToken(tokens[tokenIndex]) || tokens[tokenIndex - 1].text !== "." || !isNameToken(tokens[tokenIndex - 2])) {
+    return null;
+  }
+  const line = tokens[tokenIndex].range.start.line;
+  let equalsIndex = -1;
+  let functionIndex = -1;
+  for (let cursor = tokenIndex + 1; cursor < tokens.length && tokens[cursor].range.start.line === line; cursor++) {
+    if (tokens[cursor].text === "=" && equalsIndex < 0) {
+      equalsIndex = cursor;
+      continue;
+    }
+    if (tokens[cursor].text === "function") {
+      functionIndex = cursor;
+      break;
+    }
+  }
+  if (equalsIndex < 0 || functionIndex < 0) {
+    return null;
+  }
+  const targetName = `${tokens[tokenIndex - 2].text}.${tokens[tokenIndex].text}`;
+  return {
+    contents: {
+      kind: "markdown",
+      value: hoverMarkdownForDefinition(targetName, text, tokens[tokenIndex].range),
+    },
+    range: tokens[tokenIndex].range,
+  };
+}
+
 function effectiveBuiltinLocale(rawLocale, resolvedLocale) {
   const raw = rawLocale === undefined || rawLocale === null ? "" : String(rawLocale);
   if (!raw || raw.toLowerCase() === DEFAULT_DOC_LOCALE) {
@@ -1296,6 +2037,19 @@ function effectiveBuiltinLocale(rawLocale, resolvedLocale) {
 }
 
 connection.onInitialize((params) => {
+  workspaceRoots = [];
+  if (Array.isArray(params.workspaceFolders)) {
+    workspaceRoots = params.workspaceFolders
+      .map((folder) => filePathFromUri(folder.uri))
+      .filter(Boolean);
+  } else if (params.rootUri) {
+    const root = filePathFromUri(params.rootUri);
+    if (root) {
+      workspaceRoots = [root];
+    }
+  } else if (params.rootPath) {
+    workspaceRoots = [params.rootPath];
+  }
   if (params.initializationOptions && params.initializationOptions.syntax) {
     syntax = parseSyntaxValue(params.initializationOptions.syntax);
   }
@@ -1326,6 +2080,13 @@ connection.onInitialize((params) => {
       completionProvider: {
         triggerCharacters: [".", ":"],
       },
+      semanticTokensProvider: {
+        legend: {
+          tokenTypes: semanticTokenTypes,
+          tokenModifiers: [],
+        },
+        full: true,
+      },
       documentFormattingProvider: true,
       definitionProvider: true,
       hoverProvider: true,
@@ -1339,6 +2100,7 @@ connection.onInitialize((params) => {
 
 connection.onInitialized(() => {
   connection.console.log("glua language server initialized");
+  validateAllDocuments();
 });
 
 connection.onDidChangeConfiguration((params) => {
@@ -1365,19 +2127,23 @@ connection.onDidChangeConfiguration((params) => {
   for (const builtinName of builtinFunctionNames()) {
     baseBuiltinFunctions.add(builtinName);
   }
+  validateAllDocuments();
 });
 
-documents.onDidOpen((change) => {
-  const document = change.document;
+function validateDocument(document) {
   const diagnostics = collectParseLikeErrors(document.getText(), syntax);
   connection.sendDiagnostics({ uri: document.uri, diagnostics });
-});
+}
 
-documents.onDidChangeContent((change) => {
-  const document = change.document;
-  const diagnostics = collectParseLikeErrors(document.getText(), syntax);
-  connection.sendDiagnostics({ uri: document.uri, diagnostics });
-});
+function validateAllDocuments() {
+  for (const document of documents.all()) {
+    validateDocument(document);
+  }
+}
+
+documents.onDidOpen((change) => validateDocument(change.document));
+
+documents.onDidChangeContent((change) => validateDocument(change.document));
 
 documents.onDidClose((change) => {
   connection.sendDiagnostics({ uri: change.document.uri, diagnostics: [] });
@@ -1389,11 +2155,21 @@ connection.onDefinition((params) => {
     return null;
   }
   const text = doc.getText();
-  const target = resolveBuiltinTarget(scanTokens(text, syntax).tokens, parsePositionOffset(text, params.position));
+  const tokens = scanTokens(text, syntax).tokens;
+  const position = parsePositionOffset(text, params.position);
+  const requiredModule = requiredModuleAt(tokens, position, params.textDocument.uri);
+  if (requiredModule) {
+    return [requiredModule];
+  }
+  const requiredMember = requiredMemberTarget(tokens, position, params.textDocument.uri);
+  if (requiredMember) {
+    return [requiredMember];
+  }
+  const target = resolveBuiltinTarget(tokens, position);
   if (!target) {
     return null;
   }
-  const definition = findDefinition(text, target, parsePositionOffset(text, params.position), syntax);
+  const definition = findDefinition(text, target, position, syntax);
   if (!definition) {
     const builtin = getBuiltinFunction(target);
     if (builtin) {
@@ -1419,15 +2195,16 @@ connection.onCompletion((params) => {
   const candidates = buildCompletionCandidates(context);
   return candidates.map((item) => ({
     label: item.name,
-    kind: CompletionItemKind.Function,
+    kind: item.kind || CompletionItemKind.Function,
     detail: item.detail,
     documentation: {
       kind: "markdown",
       value: item.documentation,
     },
+    insertTextFormat: item.snippet ? InsertTextFormat.Snippet : undefined,
     textEdit: {
       range: context.range,
-      newText: item.name,
+      newText: item.snippet || item.name,
     },
   }));
 });
@@ -1438,11 +2215,26 @@ connection.onHover((params) => {
     return null;
   }
   const text = doc.getText();
-  const target = resolveBuiltinTarget(scanTokens(text, syntax).tokens, parsePositionOffset(text, params.position));
+  const tokens = scanTokens(text, syntax).tokens;
+  const position = parsePositionOffset(text, params.position);
+  const tokenIndex = findTokenIndexAtPosition(tokens, position);
+  const parameterHover = hoverForFunctionParameter(tokens, tokenIndex, text);
+  if (parameterHover) {
+    return parameterHover;
+  }
+  const definitionMemberHover = memberDefinitionHover(tokens, tokenIndex, text);
+  if (definitionMemberHover) {
+    return definitionMemberHover;
+  }
+  const requiredMemberHover = hoverForRequiredMember(tokens, position, params.textDocument.uri);
+  if (requiredMemberHover) {
+    return requiredMemberHover;
+  }
+  const target = resolveBuiltinTarget(tokens, position);
   if (!target) {
     return null;
   }
-  const definition = findDefinition(text, target, parsePositionOffset(text, params.position), syntax);
+  const definition = findDefinition(text, target, position, syntax);
   if (!definition) {
     const builtin = getBuiltinFunction(target);
     if (builtin) {
@@ -1464,7 +2256,7 @@ connection.onHover((params) => {
   return {
     contents: {
       kind: "markdown",
-      value: `\`${target}\`\n\nDefined at line ${definition.start.line + 1}, column ${definition.start.character + 1}.`,
+      value: hoverMarkdownForDefinition(target, text, definition),
     },
     range: definition,
   };
@@ -1488,8 +2280,7 @@ connection.onRequest("textDocument/semanticTokens/full", (params) => {
   if (!doc) {
     return { data: [] };
   }
-  const result = generateSemanticTokens(doc.getText(), syntax);
-  return result;
+  return generateSemanticTokens(doc.getText(), syntax);
 });
 
 documents.listen(connection);

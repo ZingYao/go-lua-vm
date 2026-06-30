@@ -31,8 +31,8 @@ func TestCompileChunkDeduplicatesConstantsAndRegisters(t *testing.T) {
 		// 数字 1 应按 Lua 5.3 integer 常量保存。
 		t.Fatalf("unexpected constant=%+v", proto.Constants[0])
 	}
-	if proto.MaxStackSize != 4 {
-		// 三个 local 加复用目标寄存器后的一个二元表达式临时寄存器，最大栈大小应稳定为 4。
+	if proto.MaxStackSize != 3 {
+		// 三个 local 已覆盖 a+b 的 RK 操作数，不再需要额外二元表达式临时寄存器。
 		t.Fatalf("unexpected max stack=%d", proto.MaxStackSize)
 	}
 	if proto.Code[0].OpCode() != bytecode.OpLoadK || proto.Code[1].OpCode() != bytecode.OpLoadK {
@@ -642,6 +642,219 @@ func TestCompileLocalAssignmentUsesTemporaryRegister(t *testing.T) {
 	if !hasMove(proto, 0, callInstruction.A()) {
 		// 调用完成后必须把临时结果移动回局部 p。
 		t.Fatalf("missing MOVE from call register %d back to local p", callInstruction.A())
+	}
+}
+
+// TestCompileSelfArithmeticAssignmentWritesDirectly 验证 local 自算术赋值直接写回目标寄存器。
+//
+// 数值 for 热循环中的 `acc = acc + i` 不应生成“复制 acc 到临时、计算临时、MOVE 回 acc”的
+// 通用赋值序列；安全右操作数为 local 名称时可以直接生成 `ADD acc, acc, temp`。
+func TestCompileSelfArithmeticAssignmentWritesDirectly(t *testing.T) {
+	chunk := parseChunkForCodegenTest(t, "local acc = 0 for i = 1, 10 do acc = acc + i end")
+
+	proto, err := CompileChunk(chunk, "self-arith-assign")
+	if err != nil {
+		// 自算术赋值样例必须可编译。
+		t.Fatalf("compile self arithmetic assignment failed: %v", err)
+	}
+	foundDirectAdd := false
+	for _, instruction := range proto.Code {
+		// 目标 local acc 使用 R0；优化后 ADD 直接写回 R0 并以 R0 作为左操作数。
+		if instruction.OpCode() == bytecode.OpAdd && instruction.A() == 0 && instruction.B() == 0 && !bytecode.IsK(instruction.C()) {
+			foundDirectAdd = true
+		}
+		if instruction.OpCode() == bytecode.OpMove && instruction.A() == 0 && instruction.B() != 0 {
+			// 旧通用赋值路径会把临时结果 MOVE 回 acc，优化后不应存在该写回。
+			t.Fatalf("unexpected MOVE back to acc from R%d", instruction.B())
+		}
+	}
+	if !foundDirectAdd {
+		// 必须存在直接写回 acc 的 ADD。
+		t.Fatalf("missing direct ADD into acc; code=%v", proto.Code)
+	}
+}
+
+// TestCompileTableReadWriteUsesDirectRegisters 验证 table 热循环复用 local/for 寄存器。
+//
+// 对齐 Lua 5.3 C codegen 的 `t[i] = i` 与 `acc = acc + t[i]` 形态，避免通用赋值路径为
+// table、key、value 和 acc 生成额外临时 MOVE。
+func TestCompileTableReadWriteUsesDirectRegisters(t *testing.T) {
+	chunk := parseChunkForCodegenTest(t, "local t = {} for i = 1, 10 do t[i] = i end local acc = 0 for i = 1, 10 do acc = acc + t[i] end")
+
+	proto, err := CompileChunk(chunk, "table-read-write")
+	if err != nil {
+		// table 读写样例必须可编译。
+		t.Fatalf("compile table read write failed: %v", err)
+	}
+	hasDirectSetTable := false
+	hasDirectGetTable := false
+	hasDirectAdd := false
+	for _, instruction := range proto.Code {
+		switch instruction.OpCode() {
+		case bytecode.OpSetTable:
+			if instruction.A() == 0 && instruction.B() == 4 && instruction.C() == 4 {
+				// 第一段 for 的外部变量 i 位于 R4，table t 位于 R0。
+				hasDirectSetTable = true
+			}
+		case bytecode.OpGetTable:
+			if instruction.B() == 0 && instruction.C() == 5 {
+				// 第二段 for 的外部变量 i 位于 R5，table t 位于 R0。
+				hasDirectGetTable = true
+			}
+		case bytecode.OpAdd:
+			if instruction.A() == 1 && instruction.B() == 1 {
+				// acc 位于 R1，优化后 ADD 直接写回 acc。
+				hasDirectAdd = true
+			}
+		case bytecode.OpMove:
+			if instruction.A() == 1 && instruction.B() != 0 {
+				// 旧通用赋值路径会把临时加法结果 MOVE 回 acc。
+				t.Fatalf("unexpected MOVE back to acc from R%d", instruction.B())
+			}
+		}
+	}
+	if !hasDirectSetTable {
+		// 写入循环必须直接复用 t/i/i。
+		t.Fatalf("missing direct SETTABLE t[i]=i; code=%v", proto.Code)
+	}
+	if !hasDirectGetTable || !hasDirectAdd {
+		// 读取累加循环必须直接 GETTABLE 后 ADD 回 acc。
+		t.Fatalf("missing direct GETTABLE/ADD; get=%v add=%v code=%v", hasDirectGetTable, hasDirectAdd, proto.Code)
+	}
+}
+
+// TestCompileSafeBinaryReturnUsesRKOperands 验证单返回值安全二元表达式直接复用参数寄存器。
+//
+// Lua 5.3 C codegen 对 `return a + b` 生成 `ADD temp, a, b; RETURN temp`，不需要先把 a/b
+// MOVE 到额外临时寄存器。该形态能降低函数调用热循环中 leaf callee 的指令数。
+func TestCompileSafeBinaryReturnUsesRKOperands(t *testing.T) {
+	chunk := parseChunkForCodegenTest(t, "local function add(a, b) return a + b end return add(1, 2)")
+
+	proto, err := CompileChunk(chunk, "safe-binary-return")
+	if err != nil {
+		// 函数调用样例必须可编译。
+		t.Fatalf("compile safe binary return failed: %v", err)
+	}
+	if len(proto.Protos) != 1 {
+		// 测试样例应只生成 add 一个子函数。
+		t.Fatalf("unexpected child proto count: %d", len(proto.Protos))
+	}
+	child := proto.Protos[0]
+	foundDirectAdd := false
+	for _, instruction := range child.Code {
+		switch instruction.OpCode() {
+		case bytecode.OpAdd:
+			if instruction.B() == 0 && instruction.C() == 1 {
+				// a/b 参数分别位于 R0/R1，优化后 ADD 直接读取参数寄存器。
+				foundDirectAdd = true
+			}
+		case bytecode.OpMove:
+			if instruction.A() == 2 || instruction.A() == 3 {
+				// 旧通用 return 路径会把 a/b 移到临时寄存器再 ADD。
+				t.Fatalf("unexpected argument MOVE in child proto: %v", child.Code)
+			}
+		}
+	}
+	if !foundDirectAdd {
+		// 子函数必须包含直接读取参数寄存器的 ADD。
+		t.Fatalf("missing direct ADD for return a + b; code=%v", child.Code)
+	}
+}
+
+// TestCompileSafeBinaryReturnReadsUpvalueDirectly 验证二元 return 快路径复用参数和 upvalue 寄存器。
+//
+// `return x + a` 中 a 为 upvalue 时，Lua 5.3 C codegen 会先 GETUPVAL 到结果寄存器，再用
+// 参数 x 作为左操作数执行 ADD；不需要额外 MOVE x。
+func TestCompileSafeBinaryReturnReadsUpvalueDirectly(t *testing.T) {
+	chunk := parseChunkForCodegenTest(t, "local a = 1 local function f(x) return x + a end return f(2)")
+
+	proto, err := CompileChunk(chunk, "safe-binary-return-upvalue")
+	if err != nil {
+		// upvalue 二元 return 样例必须可编译。
+		t.Fatalf("compile safe binary return upvalue failed: %v", err)
+	}
+	if len(proto.Protos) != 1 {
+		// 测试样例应只生成 f 一个子函数。
+		t.Fatalf("unexpected child proto count: %d", len(proto.Protos))
+	}
+	child := proto.Protos[0]
+	hasGetUpvalueToResult := false
+	hasDirectAdd := false
+	for _, instruction := range child.Code {
+		switch instruction.OpCode() {
+		case bytecode.OpGetUpval:
+			if instruction.A() == 1 {
+				// 结果寄存器 R1 直接承载 upvalue a。
+				hasGetUpvalueToResult = true
+			}
+		case bytecode.OpAdd:
+			if instruction.A() == 1 && instruction.B() == 0 && instruction.C() == 1 {
+				// ADD 直接读取参数 x 和刚载入的 upvalue a。
+				hasDirectAdd = true
+			}
+		case bytecode.OpMove:
+			if instruction.A() == 1 {
+				// 旧通用 return 路径会先把 x MOVE 到结果寄存器。
+				t.Fatalf("unexpected MOVE into result register: %v", child.Code)
+			}
+		}
+	}
+	if !hasGetUpvalueToResult || !hasDirectAdd {
+		// 子函数必须先 GETUPVAL 到结果寄存器，再直接 ADD 参数和 upvalue。
+		t.Fatalf("missing direct upvalue binary return; get=%v add=%v code=%v", hasGetUpvalueToResult, hasDirectAdd, child.Code)
+	}
+}
+
+// TestCompileSingleLocalReturnUsesSourceRegister 验证单 local 返回直接使用源寄存器。
+//
+// `return x` 不需要 MOVE 到临时寄存器；Lua 5.3 C codegen 直接生成 `RETURN x, 1`。
+func TestCompileSingleLocalReturnUsesSourceRegister(t *testing.T) {
+	chunk := parseChunkForCodegenTest(t, "local function id(x) return x end return id(1)")
+
+	proto, err := CompileChunk(chunk, "single-local-return")
+	if err != nil {
+		// 单 local return 样例必须可编译。
+		t.Fatalf("compile single local return failed: %v", err)
+	}
+	if len(proto.Protos) != 1 {
+		// 测试样例应只生成 id 一个子函数。
+		t.Fatalf("unexpected child proto count: %d", len(proto.Protos))
+	}
+	child := proto.Protos[0]
+	if len(child.Code) == 0 || child.Code[0].OpCode() != bytecode.OpReturn || child.Code[0].A() != 0 || child.Code[0].B() != 2 {
+		// 参数 x 位于 R0，应直接作为单返回值起点。
+		t.Fatalf("missing direct RETURN R0; code=%v", child.Code)
+	}
+	for _, instruction := range child.Code {
+		if instruction.OpCode() == bytecode.OpMove {
+			// 旧通用 return 路径会 MOVE x 到临时寄存器。
+			t.Fatalf("unexpected MOVE in single local return: %v", child.Code)
+		}
+	}
+}
+
+// TestCompileCapturedBlockLocalKeepsCloseJump 验证被闭包捕获的 block local 仍生成 close-only JMP。
+//
+// 未捕获 local 的作用域退出可以省略零距离 close-only JMP；一旦内层函数捕获 block local，
+// 退出 block 时必须保留 A>0 的 JMP，以便运行期关闭 open upvalue。
+func TestCompileCapturedBlockLocalKeepsCloseJump(t *testing.T) {
+	chunk := parseChunkForCodegenTest(t, "do local x = 1 local function f() return x end end")
+
+	proto, err := CompileChunk(chunk, "captured-block-local")
+	if err != nil {
+		// 捕获 block local 的样例必须可编译。
+		t.Fatalf("compile captured block local failed: %v", err)
+	}
+	hasCloseOnlyJump := false
+	for _, instruction := range proto.Code {
+		if instruction.OpCode() == bytecode.OpJmp && instruction.A() > 0 && instruction.SBx() == 0 {
+			// A>0 表示从 A-1 起关闭 open upvalue；sBx=0 表示只关闭不跳转。
+			hasCloseOnlyJump = true
+		}
+	}
+	if !hasCloseOnlyJump {
+		// 捕获 block local 时不能省略 close-only JMP。
+		t.Fatalf("missing close-only JMP for captured block local; code=%v", proto.Code)
 	}
 }
 

@@ -2,5 +2,73 @@
   "files.associations": {
     "*.glua": "glua",
     "*.lua": "glua"
-  }
+  },
+  "editor.tokenColorCustomizations": {
+    "textMateRules": [
+      {
+        "name": "GLua keyword",
+        "scope": [
+          "keyword.control.glua",
+          "keyword.operator.glua",
+          "storage.type.function.glua",
+          "storage.modifier.local.glua"
+        ],
+        "settings": {
+          "foreground": "#CC7832"
+        }
+      },
+      {
+        "name": "GLua function",
+        "scope": [
+          "entity.name.function.glua",
+          "entity.name.function.call.glua",
+          "entity.name.function.member.glua"
+        ],
+        "settings": {
+          "foreground": "#56A8F5"
+        }
+      },
+      {
+        "name": "GLua library",
+        "scope": [
+          "entity.name.type.library.glua",
+          "support.type.library.glua",
+          "support.class.glua"
+        ],
+        "settings": {
+          "foreground": "#4EC9B0"
+        }
+      },
+      {
+        "name": "GLua string",
+        "scope": [
+          "string.quoted.single.glua",
+          "string.quoted.double.glua",
+          "string.quoted.long-bracket.glua"
+        ],
+        "settings": {
+          "foreground": "#6A8759"
+        }
+      },
+      {
+        "name": "GLua number",
+        "scope": [
+          "constant.numeric.glua"
+        ],
+        "settings": {
+          "foreground": "#6897BB"
+        }
+      }
+    ]
+  },
+  "editor.semanticTokenColorCustomizations": {
+    "enabled": true,
+    "rules": {
+      "keyword:glua": "#CC7832",
+      "function:glua": "#56A8F5",
+      "method:glua": "#56A8F5",
+      "namespace:glua": "#4EC9B0"
+    }
+  },
+  "editor.semanticHighlighting.enabled": true
 }

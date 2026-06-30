@@ -770,6 +770,7 @@
 - [x] Fuzz smoke 通过。
 - [x] Benchmark 基线记录完成。
 - [x] 完成所有开发后，与官方 `lua` 和 `luac` 跑 benchmark 基准测试，并将对比结论输出到文档中。
+- [ ] 建立 JIT 长期专项 TODO：先完成解释器短期性能优化，再在独立 feature 分支进入默认关闭的实验 JIT 原型；详见 `docs/JIT_TODO.md`。
 - [x] 文档更新完成。
 - [x] `git ls-files --others --exclude-standard | rg '\.go$|_test\.go$'` 无未 add Go 文件。
 

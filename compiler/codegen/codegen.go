@@ -91,6 +91,8 @@ type localBinding struct {
 	localVarIndex int
 	// scopeID 保存声明该局部变量的 parser 作用域编号，用于区分同作用域重名和内层遮蔽。
 	scopeID int
+	// captured 表示该局部变量已被子函数捕获为 open upvalue。
+	captured bool
 }
 
 // pendingGoto 描述 codegen 阶段尚未确定目标 PC 的 goto 跳转。
@@ -446,8 +448,20 @@ func (generator *generator) compileLocalAssignment(statement *parser.LocalAssign
 //
 // 当前阶段左侧支持已经声明的局部变量名称，未知名称按 Lua 5.3 语义写入 `_ENV[name]`。
 func (generator *generator) compileAssignment(statement *parser.AssignmentStatement) error {
+	if handled, err := generator.compileSingleSafeTableAssignment(statement); handled || err != nil {
+		// 单 table 索引赋值在 receiver/key/value 均安全时可直接生成 SETTABLE，避免临时 MOVE。
+		return err
+	}
+	if handled, err := generator.compileSingleLocalSelfBinaryAssignment(statement); handled || err != nil {
+		// 单 local 自二元运算赋值可直接写回目标寄存器，避免通用赋值临时结果和 MOVE。
+		return err
+	}
 	if handled, err := generator.compileSingleLocalSelfConcatAssignment(statement); handled || err != nil {
 		// 单 local 自拼接赋值可直接写回目标寄存器，避免临时结果和 MOVE。
+		return err
+	}
+	if handled, err := generator.compileSingleLocalBinaryAssignment(statement); handled || err != nil {
+		// 单 local 二元表达式赋值可在 RHS 完成后直接写回目标寄存器，避免最终 MOVE。
 		return err
 	}
 
@@ -487,6 +501,485 @@ func (generator *generator) compileAssignment(statement *parser.AssignmentStatem
 
 	// 普通赋值编译完成。
 	return nil
+}
+
+// compileSingleSafeTableAssignment 优化 `tableExpression[keyExpression] = valueExpression`。
+//
+// 该优化只处理单左值、单右值，且 receiver 必须是当前 local 名称；key/value 只允许 local 名称
+// 或字面量。复杂表达式仍走通用赋值路径，以保留 Lua 5.3 的左值和右值求值顺序及副作用语义。
+func (generator *generator) compileSingleSafeTableAssignment(statement *parser.AssignmentStatement) (bool, error) {
+	if len(statement.Left) != 1 || len(statement.Right) != 1 {
+		// 多重赋值必须先求完所有 RHS，再统一写回，不能使用该快路径。
+		return false, nil
+	}
+	indexExpression, ok := statement.Left[0].(*parser.IndexExpression)
+	if !ok {
+		// 只有方括号索引赋值能直接映射到 SETTABLE。
+		return false, nil
+	}
+	receiverName, ok := indexExpression.Receiver.(*parser.NameExpression)
+	if !ok {
+		// receiver 不是名称时可能有调用或索引副作用，回退通用路径。
+		return false, nil
+	}
+	receiverBinding, ok := generator.locals[receiverName.Name]
+	if !ok {
+		// upvalue/global receiver 读取需要额外指令或可能触发环境表访问，回退通用路径。
+		return false, nil
+	}
+
+	firstTempRegister := generator.nextRegister
+	keyOperand, keyOK, err := generator.safeRKOperand(indexExpression.Index)
+	if err != nil {
+		// 安全 key 编译失败时释放临时寄存器并返回。
+		generator.releaseRegistersFrom(firstTempRegister)
+		return true, err
+	}
+	if !keyOK {
+		// key 表达式不满足安全条件时回退通用路径。
+		generator.releaseRegistersFrom(firstTempRegister)
+		return false, nil
+	}
+	valueOperand, valueOK, err := generator.safeRKOperand(statement.Right[0])
+	if err != nil {
+		// 安全 value 编译失败时释放临时寄存器并返回。
+		generator.releaseRegistersFrom(firstTempRegister)
+		return true, err
+	}
+	if !valueOK {
+		// value 表达式不满足安全条件时回退通用路径。
+		generator.releaseRegistersFrom(firstTempRegister)
+		return false, nil
+	}
+
+	if err := generator.withSourceLine(indexExpression.Position, func() error {
+		// receiver/key/value 均已确认无副作用，直接复用寄存器或 RK 常量生成 SETTABLE。
+		generator.emitABC(bytecode.OpSetTable, receiverBinding.register, keyOperand, valueOperand)
+		return nil
+	}); err != nil {
+		generator.releaseRegistersFrom(firstTempRegister)
+		return true, err
+	}
+	generator.releaseRegistersFrom(firstTempRegister)
+
+	// 安全 table 索引赋值已完成。
+	return true, nil
+}
+
+// compileSingleLocalSelfBinaryAssignment 优化 `localName = localName <op> expression`。
+//
+// 该优化只处理单左值、单右值、当前函数 active local 的普通二元运算；右侧表达式必须没有调用、
+// table/global 访问或元方法触发风险，避免破坏 Lua 5.3 对左操作数先于右操作数求值的语义。
+func (generator *generator) compileSingleLocalSelfBinaryAssignment(statement *parser.AssignmentStatement) (bool, error) {
+	if len(statement.Left) != 1 || len(statement.Right) != 1 {
+		// 多重赋值需要先求完所有 RHS，再统一写回，不能使用该快路径。
+		return false, nil
+	}
+	targetName, ok := statement.Left[0].(*parser.NameExpression)
+	if !ok {
+		// 只有普通名称左值能直接写回寄存器。
+		return false, nil
+	}
+	binding, ok := generator.locals[targetName.Name]
+	if !ok {
+		// upvalue/global 写回有额外语义，不能用当前 local 寄存器快路径。
+		return false, nil
+	}
+	binaryExpression, ok := statement.Right[0].(*parser.BinaryExpression)
+	if !ok || binaryExpression.Operator == ".." || binaryExpression.Operator == "and" || binaryExpression.Operator == "or" || isComparisonOperator(binaryExpression.Operator) {
+		// concat、短路和比较已有专门语义，当前优化只处理普通二元运算。
+		return false, nil
+	}
+	if chainHandled, err := generator.compileSelfBinaryChainToTarget(targetName.Name, binding, binaryExpression); chainHandled || err != nil {
+		// 左结合自二元链已直接写回目标 local。
+		return chainHandled, err
+	}
+	if chainHandled, err := generator.compileSelfBinaryChainViaAccumulator(targetName.Name, binding, binaryExpression); chainHandled || err != nil {
+		// 含调用的左结合自二元链使用临时累加器，保持官方 Lua 的求值和写回时机。
+		return chainHandled, err
+	}
+	leftName, ok := binaryExpression.Left.(*parser.NameExpression)
+	if !ok || leftName.Name != targetName.Name {
+		// 只有 `x = x <op> rhs` 能保证左操作数就是目标寄存器当前值。
+		return false, nil
+	}
+	opCode, ok := binaryOpCode(binaryExpression.Operator)
+	if !ok {
+		// 未支持的二元运算回退通用路径，让通用编译器返回原有错误。
+		return false, nil
+	}
+	rightRegister := generator.allocateRegister()
+	rightHandled, err := generator.compileSelfBinaryRightExpressionTo(binaryExpression.Right, rightRegister)
+	if err != nil {
+		// 右操作数失败时释放临时寄存器并返回。
+		generator.releaseRegister(rightRegister)
+		return true, err
+	}
+	if !rightHandled {
+		// 右侧若可能调用函数或触发元方法，就必须先保存左操作数，避免破坏左到右求值语义。
+		generator.releaseRegister(rightRegister)
+		return false, nil
+	}
+	if err := generator.withSourceLine(binaryExpression.Position, func() error {
+		// 左操作数直接读取目标 local 旧值，结果也直接写回该 local。
+		generator.emitABC(opCode, binding.register, binding.register, rightRegister)
+		return nil
+	}); err != nil {
+		generator.releaseRegister(rightRegister)
+		return true, err
+	}
+	generator.releaseRegister(rightRegister)
+
+	// 自二元运算赋值已完成。
+	return true, nil
+}
+
+// compileSelfBinaryChainViaAccumulator 编译 `x = ((x op rhs) op rhs)` 的官方兼容累加器形态。
+//
+// 当 RHS 可能调用函数时，不能提前把 x 读入临时值；Lua 5.3 官方 codegen 会先计算
+// RHS，再在二元 opcode 中读取当前 x，并把中间结果放入临时累加器，直到最后一层才写回 x。
+func (generator *generator) compileSelfBinaryChainViaAccumulator(targetName string, binding localBinding, expression *parser.BinaryExpression) (bool, error) {
+	if !generator.isSelfBinaryChainRoot(targetName, expression) {
+		// 只有左侧最终落到目标 local 的普通二元链可以使用该形态。
+		return false, nil
+	}
+	if !selfBinaryChainContainsCall(expression) {
+		// 不含调用的链路保留既有 table/global 热路径，避免影响 table_rw 字节码形态。
+		return false, nil
+	}
+	accumulatorRegister := -1
+	if _, leftIsBinary := expression.Left.(*parser.BinaryExpression); leftIsBinary {
+		// 只有左侧存在子链时才需要累加器；简单 `x + call()` 可让 call 直接占用下一个临时寄存器。
+		accumulatorRegister = generator.allocateRegister()
+	}
+	handled, err := generator.compileSelfBinaryChainAccumulatorNode(targetName, binding, expression, accumulatorRegister, binding.register)
+	generator.releaseOptionalRegister(accumulatorRegister)
+	return handled, err
+}
+
+// compileSelfBinaryChainAccumulatorNode 递归生成左结合自二元链。
+//
+// accumulatorRegister 保存非最终层的中间结果；finalRegister 是最外层最终写回的目标 local。
+func (generator *generator) compileSelfBinaryChainAccumulatorNode(targetName string, binding localBinding, expression *parser.BinaryExpression, accumulatorRegister int, finalRegister int) (bool, error) {
+	leftOperand := binding.register
+	leftBinary, leftIsBinary := expression.Left.(*parser.BinaryExpression)
+	if leftIsBinary {
+		if accumulatorRegister < 0 {
+			// 左侧存在子链时必须有累加器保存中间结果。
+			return false, nil
+		}
+		// 左子链先写入累加器，但不会提前覆盖目标 local。
+		handled, err := generator.compileSelfBinaryChainAccumulatorNode(targetName, binding, leftBinary, accumulatorRegister, accumulatorRegister)
+		if !handled || err != nil {
+			// 子链失败时直接把信号传给调用方。
+			return handled, err
+		}
+		leftOperand = accumulatorRegister
+	} else {
+		leftName, ok := expression.Left.(*parser.NameExpression)
+		if !ok || leftName.Name != targetName {
+			// 预检已保证该分支理论不可达，保守回退通用路径。
+			return false, nil
+		}
+	}
+
+	rightOperand, rightRegister, err := generator.binaryRightOperand(expression.Right)
+	if err != nil {
+		// 右操作数失败时返回原始编译错误。
+		return true, err
+	}
+	opCode, ok := binaryOpCode(expression.Operator)
+	if !ok {
+		// 预检已保证普通二元 opcode；异常时回退原有错误路径。
+		generator.releaseOptionalRegister(rightRegister)
+		return false, nil
+	}
+	if err := generator.withSourceLine(expression.Position, func() error {
+		// 当前层按官方 Lua 形态：先完成右侧求值，再读取左侧寄存器并写入目标。
+		generator.emitABC(opCode, finalRegister, leftOperand, rightOperand)
+		return nil
+	}); err != nil {
+		generator.releaseOptionalRegister(rightRegister)
+		return true, err
+	}
+	generator.releaseOptionalRegister(rightRegister)
+	return true, nil
+}
+
+// isSelfBinaryChainRoot 判断表达式是否是左侧最终落到 targetName 的普通二元链。
+func (generator *generator) isSelfBinaryChainRoot(targetName string, expression *parser.BinaryExpression) bool {
+	if expression == nil || expression.Operator == ".." || expression.Operator == "and" || expression.Operator == "or" || isComparisonOperator(expression.Operator) {
+		// concat、短路和比较不使用普通二元累加器形态。
+		return false
+	}
+	if _, ok := binaryOpCode(expression.Operator); !ok {
+		// 未支持 opcode 的操作符不能进入快路径。
+		return false
+	}
+	if leftName, ok := expression.Left.(*parser.NameExpression); ok {
+		// 链起点必须是目标 local 自身。
+		return leftName.Name == targetName
+	}
+	leftBinary, ok := expression.Left.(*parser.BinaryExpression)
+	if !ok {
+		// 其他左侧形态不是左结合自二元链。
+		return false
+	}
+	return generator.isSelfBinaryChainRoot(targetName, leftBinary)
+}
+
+// selfBinaryChainContainsCall 判断自二元链中是否包含函数或方法调用。
+func selfBinaryChainContainsCall(expression parser.Expression) bool {
+	switch typedExpression := expression.(type) {
+	case *parser.FunctionCallExpression, *parser.MethodCallExpression:
+		// 调用可能修改 open upvalue，因此需要对齐官方 Lua 的延迟读目标 local 形态。
+		return true
+	case *parser.BinaryExpression:
+		// 二元链左右两侧任意一侧包含调用都需要累加器路径。
+		return selfBinaryChainContainsCall(typedExpression.Left) || selfBinaryChainContainsCall(typedExpression.Right)
+	case *parser.UnaryExpression:
+		// 一元表达式内部继续检查操作数。
+		return selfBinaryChainContainsCall(typedExpression.Operand)
+	case *parser.PrefixExpression:
+		// 括号前缀不改变求值副作用。
+		return selfBinaryChainContainsCall(typedExpression.Inner)
+	case *parser.FieldAccessExpression:
+		// 字段访问的 receiver 子表达式可能包含调用。
+		return selfBinaryChainContainsCall(typedExpression.Receiver)
+	case *parser.IndexExpression:
+		// table/index 子表达式本身可能包含调用。
+		return selfBinaryChainContainsCall(typedExpression.Receiver) || selfBinaryChainContainsCall(typedExpression.Index)
+	default:
+		// 字面量、名称和其他当前表达式没有直接调用。
+		return false
+	}
+}
+
+// compileSelfBinaryChainToTarget 编译 `x = ((x op a) op b)` 形式的左结合自二元链。
+//
+// targetName 必须是当前 local；链路每一层左侧继续指向 targetName，右侧必须是安全表达式，
+// 这样可以直接在目标寄存器上累计结果，避免临时 MOVE 往返。
+func (generator *generator) compileSelfBinaryChainToTarget(targetName string, binding localBinding, expression *parser.BinaryExpression) (bool, error) {
+	if !generator.isSelfBinaryChainExpression(targetName, expression) {
+		// 不是安全左结合链时交回原有自二元快路径。
+		return false, nil
+	}
+	if leftName, ok := expression.Left.(*parser.NameExpression); ok && leftName.Name == targetName {
+		// 链起点就是目标 local，当前寄存器已保存左操作数，无需生成 MOVE。
+	} else {
+		leftBinary, ok := expression.Left.(*parser.BinaryExpression)
+		if !ok {
+			// 预检已保证该分支理论不可达，保守回退通用路径。
+			return false, nil
+		}
+		if handled, err := generator.compileSelfBinaryChainToTarget(targetName, binding, leftBinary); !handled || err != nil {
+			// 左子链无法生成时返回其错误或回退信号。
+			return handled, err
+		}
+	}
+
+	rightOperand, rightRegister, err := generator.selfBinaryRightOperand(expression.Right)
+	if err != nil {
+		// 右操作数失败时直接返回。
+		return true, err
+	}
+	opCode, ok := binaryOpCode(expression.Operator)
+	if !ok {
+		// 预检已保证普通二元 opcode；异常时回退原有错误路径。
+		generator.releaseOptionalRegister(rightRegister)
+		return false, nil
+	}
+	if err := generator.withSourceLine(expression.Position, func() error {
+		// 每一层都直接读写目标 local，保持左结合运算顺序。
+		generator.emitABC(opCode, binding.register, binding.register, rightOperand)
+		return nil
+	}); err != nil {
+		generator.releaseOptionalRegister(rightRegister)
+		return true, err
+	}
+	generator.releaseOptionalRegister(rightRegister)
+	return true, nil
+}
+
+// selfBinaryRightOperand 编译自二元链当前层的右操作数。
+//
+// 字面量和当前 local 直接作为 RK 操作数；更复杂但安全的普通二元树编译到临时寄存器。
+func (generator *generator) selfBinaryRightOperand(expression parser.Expression) (operand int, tempRegister int, err error) {
+	if operand, ok, err := generator.safeRKOperand(expression); err != nil || ok {
+		// 安全 RK 操作数不需要额外临时寄存器；错误保持原编译语义。
+		return operand, -1, err
+	}
+	rightRegister := generator.allocateRegister()
+	rightHandled, err := generator.compileSelfBinaryRightExpressionTo(expression, rightRegister)
+	if err != nil {
+		// 右操作数失败时释放临时寄存器并返回。
+		generator.releaseRegister(rightRegister)
+		return 0, -1, err
+	}
+	if !rightHandled {
+		// 预检已保证该分支理论不可达，保守回退通用路径。
+		generator.releaseRegister(rightRegister)
+		return 0, -1, fmt.Errorf("codegen unsafe self binary right operand")
+	}
+	return rightRegister, rightRegister, nil
+}
+
+// isSelfBinaryChainExpression 判断表达式是否是可直接写回 targetName 的左结合自二元链。
+//
+// 链路左侧必须最终落到 targetName；每层右侧必须是字面量、local/upvalue 名称、局部索引读取
+// 或可 RK 编译的普通二元表达式，避免改变有副作用表达式的求值时机。
+func (generator *generator) isSelfBinaryChainExpression(targetName string, expression *parser.BinaryExpression) bool {
+	if expression == nil || expression.Operator == ".." || expression.Operator == "and" || expression.Operator == "or" || isComparisonOperator(expression.Operator) {
+		// concat、短路和比较不属于普通自二元累计链。
+		return false
+	}
+	if _, ok := binaryOpCode(expression.Operator); !ok {
+		// 未支持 opcode 的操作符不能进入快路径。
+		return false
+	}
+	if !generator.isSelfBinarySafeRightExpression(expression.Right) && !generator.isSafePureBinaryExpression(expression.Right) {
+		// 右侧可能有调用、全局查找或其他副作用时不能改变求值寄存器布局。
+		return false
+	}
+	if leftName, ok := expression.Left.(*parser.NameExpression); ok {
+		// 链起点必须是目标 local 自身。
+		return leftName.Name == targetName
+	}
+	leftBinary, ok := expression.Left.(*parser.BinaryExpression)
+	if !ok {
+		// 其他左侧形态不是左结合自二元链。
+		return false
+	}
+	return generator.isSelfBinaryChainExpression(targetName, leftBinary)
+}
+
+// isSafeRKBinaryExpression 判断表达式是否是可由 RK 快路径处理的普通二元表达式。
+func (generator *generator) isSafeRKBinaryExpression(expression parser.Expression) bool {
+	binaryExpression, ok := expression.(*parser.BinaryExpression)
+	if !ok {
+		// 非二元表达式不属于 RK 二元快路径。
+		return false
+	}
+	if _, ok := binaryOpCode(binaryExpression.Operator); !ok {
+		// 非普通二元 opcode 不属于 RK 二元快路径。
+		return false
+	}
+	return generator.isSafeRKCandidate(binaryExpression.Left) && generator.isSafeRKCandidate(binaryExpression.Right)
+}
+
+// isSafePureBinaryExpression 判断表达式是否只由 local、字面量和普通二元 opcode 组成。
+func (generator *generator) isSafePureBinaryExpression(expression parser.Expression) bool {
+	if generator.isSafeRKCandidate(expression) {
+		// 单个 local 或字面量没有求值副作用。
+		return true
+	}
+	binaryExpression, ok := expression.(*parser.BinaryExpression)
+	if !ok {
+		// 其他表达式可能触发调用、索引或全局表读取。
+		return false
+	}
+	if _, ok := binaryOpCode(binaryExpression.Operator); !ok {
+		// 短路、比较和 concat 不属于普通算术树。
+		return false
+	}
+	return generator.isSafePureBinaryExpression(binaryExpression.Left) && generator.isSafePureBinaryExpression(binaryExpression.Right)
+}
+
+// isSafeRKCandidate 判断表达式是否可无副作用地作为 RK 操作数候选。
+func (generator *generator) isSafeRKCandidate(expression parser.Expression) bool {
+	switch typedExpression := expression.(type) {
+	case *parser.NameExpression:
+		_, exists := generator.locals[typedExpression.Name]
+		return exists
+	case *parser.LiteralExpression:
+		_, ok := literalConstant(typedExpression)
+		return ok
+	default:
+		return false
+	}
+}
+
+// compileSelfBinaryRightExpressionTo 编译自二元赋值中确认安全的右操作数。
+//
+// targetRegister 保存右操作数结果；返回 handled=false 表示表达式不满足快路径安全条件。
+func (generator *generator) compileSelfBinaryRightExpressionTo(expression parser.Expression, targetRegister int) (bool, error) {
+	if generator.isSelfBinarySafeRightExpression(expression) {
+		// 字面量、local 或 upvalue 名称沿用普通表达式编译即可。
+		return true, generator.compileExpressionTo(expression, targetRegister)
+	}
+	if generator.isSafePureBinaryExpression(expression) {
+		// 由 local/字面量组成的普通二元树没有额外调用或索引副作用，可作为右操作数临时值。
+		return true, generator.compileExpressionTo(expression, targetRegister)
+	}
+	indexExpression, ok := expression.(*parser.IndexExpression)
+	if !ok {
+		// 其他复杂表达式可能调用函数或触发未知副作用，回退通用路径。
+		return false, nil
+	}
+	receiverName, ok := indexExpression.Receiver.(*parser.NameExpression)
+	if !ok {
+		// receiver 不是名称时可能有副作用，回退通用路径。
+		return false, nil
+	}
+	receiverBinding, ok := generator.locals[receiverName.Name]
+	if !ok {
+		// upvalue/global receiver 需要额外读取或环境表访问，回退通用路径。
+		return false, nil
+	}
+	firstTempRegister := generator.nextRegister
+	keyOperand, keyOK, err := generator.safeRKOperand(indexExpression.Index)
+	if err != nil {
+		// key 编译失败时释放临时寄存器并返回。
+		generator.releaseRegistersFrom(firstTempRegister)
+		return true, err
+	}
+	if !keyOK {
+		// key 不满足安全条件时回退通用路径。
+		generator.releaseRegistersFrom(firstTempRegister)
+		return false, nil
+	}
+	if err := generator.withSourceLine(indexExpression.Position, func() error {
+		// receiver/key 均无副作用时直接生成 GETTABLE 到右操作数目标寄存器。
+		generator.emitABC(bytecode.OpGetTable, targetRegister, receiverBinding.register, keyOperand)
+		return nil
+	}); err != nil {
+		generator.releaseRegistersFrom(firstTempRegister)
+		return true, err
+	}
+	generator.releaseRegistersFrom(firstTempRegister)
+	return true, nil
+}
+
+// compileSingleLocalBinaryAssignment 优化 `localName = left <op> right`。
+//
+// 该优化只处理单左值、单右值、当前函数 active local 的非短路二元表达式。compileBinaryTo 在目标
+// 是 active local 时会把左右子表达式放到临时寄存器，最终 opcode 才写回目标 local，因此不会提前
+// 覆盖 RHS 后续读取的旧 local 值；相比通用赋值路径可省去最后的 MOVE。
+func (generator *generator) compileSingleLocalBinaryAssignment(statement *parser.AssignmentStatement) (bool, error) {
+	if len(statement.Left) != 1 || len(statement.Right) != 1 {
+		// 多重赋值需要先求完所有 RHS，再统一写回，不能使用该快路径。
+		return false, nil
+	}
+	targetName, ok := statement.Left[0].(*parser.NameExpression)
+	if !ok {
+		// 只有普通名称左值能直接写回寄存器。
+		return false, nil
+	}
+	binding, ok := generator.locals[targetName.Name]
+	if !ok {
+		// upvalue/global 写回有额外语义，不能用当前 local 寄存器快路径。
+		return false, nil
+	}
+	binaryExpression, ok := statement.Right[0].(*parser.BinaryExpression)
+	if !ok || binaryExpression.Operator == "and" || binaryExpression.Operator == "or" {
+		// and/or 会把短路左值先写入目标寄存器，可能提前覆盖同名 local。
+		return false, nil
+	}
+	if err := generator.compileBinaryTo(binaryExpression, binding.register); err != nil {
+		// RHS 编译失败时保留原始错误。
+		return true, err
+	}
+	return true, nil
 }
 
 // compileSingleLocalSelfConcatAssignment 优化 `localName = localName .. expression`。
@@ -594,6 +1087,102 @@ func isSelfConcatSafeRightExpression(expression parser.Expression) bool {
 
 	// 其他表达式保守认为可能有副作用。
 	return false
+}
+
+// isSelfBinarySafeRightExpression 判断自二元运算右侧是否不会修改目标 local。
+//
+// 当前允许字面量、当前 local 名称和已存在的 upvalue 名称；未知名称会走 `_ENV[name]`，可能触发
+// table 元方法，因此不进入快路径。复杂表达式、调用、字段和索引同样回退通用赋值路径。
+func (generator *generator) isSelfBinarySafeRightExpression(expression parser.Expression) bool {
+	if _, ok := expression.(*parser.LiteralExpression); ok {
+		// 字面量求值没有副作用，不会改变左操作数寄存器。
+		return true
+	}
+	nameExpression, ok := expression.(*parser.NameExpression)
+	if !ok {
+		// 非名称表达式可能包含调用、table 访问或嵌套运算，保守回退。
+		return false
+	}
+	if _, ok := generator.locals[nameExpression.Name]; ok {
+		// 当前 local 读取只是寄存器 MOVE，不会触发元方法或调用。
+		return true
+	}
+	if nameExpression.Name == envUpvalueName {
+		// `_ENV` 本身作为 upvalue 读取没有 table 元方法。
+		return true
+	}
+	if _, ok, err := generator.resolveUpvalue(nameExpression.Name, nameExpression.Position); err == nil && ok {
+		// 已捕获或可捕获的 upvalue 读取不会调用 Lua 代码。
+		return true
+	}
+
+	// 未知名称或 upvalue 上限错误交给通用路径保留原错误时机。
+	return false
+}
+
+// safeRKOperand 将无副作用表达式转换为 RK 操作数。
+//
+// 当前只接受当前 local 名称和字面量；local 名称直接复用寄存器，字面量进入常量池并尽量使用
+// RK 常量编码。返回 ok=false 表示表达式不满足安全条件，调用方应回退通用路径。
+func (generator *generator) safeRKOperand(expression parser.Expression) (operand int, ok bool, err error) {
+	switch typedExpression := expression.(type) {
+	case *parser.NameExpression:
+		binding, exists := generator.locals[typedExpression.Name]
+		if !exists {
+			// 非当前 local 名称可能是 upvalue 或全局访问，不能直接作为 RK 寄存器。
+			return 0, false, nil
+		}
+		return binding.register, true, nil
+	case *parser.LiteralExpression:
+		constant, constantOK := literalConstant(typedExpression)
+		if !constantOK {
+			// 当前字面量类型无法放入常量表时回退通用路径。
+			return 0, false, nil
+		}
+		constantIndex := generator.addConstant(constant)
+		rkOperand, _, rkErr := generator.rkOperandForConstantIndex(constantIndex)
+		if rkErr != nil {
+			// 常量载入失败时返回错误，保持原编译错误语义。
+			return 0, true, rkErr
+		}
+		return rkOperand, true, nil
+	default:
+		// 其他表达式可能有副作用，不能作为安全 RK 操作数。
+		return 0, false, nil
+	}
+}
+
+// literalConstant 将可直接放入常量表的字面量转为 bytecode.Constant。
+func literalConstant(expression *parser.LiteralExpression) (bytecode.Constant, bool) {
+	if expression.Kind == lexer.TokenString {
+		// 字符串字面量直接进入常量池。
+		return bytecode.StringConstant(expression.Value), true
+	}
+	if expression.Kind == lexer.TokenNumber {
+		// 数字按 lexer 分类保留 integer/number 双模型。
+		switch expression.Number.Kind {
+		case lexer.NumberDecimalInteger, lexer.NumberHexInteger:
+			return bytecode.IntegerConstant(expression.Number.Integer), true
+		case lexer.NumberDecimalFloat, lexer.NumberHexFloat:
+			return bytecode.NumberConstant(expression.Number.Number), true
+		default:
+			return bytecode.NilConstant(), false
+		}
+	}
+	if expression.Kind == lexer.TokenKeyword {
+		// Lua 关键字字面量支持 nil/true/false。
+		switch expression.Value {
+		case "nil":
+			return bytecode.NilConstant(), true
+		case "true":
+			return bytecode.BooleanConstant(true), true
+		case "false":
+			return bytecode.BooleanConstant(false), true
+		default:
+			return bytecode.NilConstant(), false
+		}
+	}
+	return bytecode.NilConstant(), false
 }
 
 // compileAssignmentTarget 编译普通赋值左值地址。
@@ -1569,6 +2158,14 @@ func (generator *generator) compileReturn(statement *parser.ReturnStatement) err
 		generator.returned = true
 		return nil
 	}
+	if handled, err := generator.compileSingleSafeNameReturn(statement); handled || err != nil {
+		// 单个 local/upvalue 名称 return 可避免额外临时 MOVE。
+		return err
+	}
+	if handled, err := generator.compileSingleSafeBinaryReturn(statement); handled || err != nil {
+		// 单个安全二元表达式 return 可直接使用 RK 操作数，避免为参数 local 生成临时 MOVE。
+		return err
+	}
 	firstTempRegister := generator.nextRegister
 	tempRegisters := make([]int, 0, len(statement.Values))
 	for range statement.Values {
@@ -1592,6 +2189,171 @@ func (generator *generator) compileReturn(statement *parser.ReturnStatement) err
 
 	// return 指令生成完成。
 	return nil
+}
+
+// compileSingleSafeNameReturn 优化 `return localName` 或 `return upvalueName`。
+//
+// 单返回值不会覆盖后续返回表达式，因此当前 local 可直接作为 RETURN 起点；upvalue 读取到结果
+// 寄存器后返回。未知全局名称仍走通用路径，以保留 `_ENV[name]` 访问和元方法语义。
+func (generator *generator) compileSingleSafeNameReturn(statement *parser.ReturnStatement) (bool, error) {
+	if len(statement.Values) != 1 {
+		// 多返回值需要保持完整求值顺序和连续返回区间。
+		return false, nil
+	}
+	nameExpression, ok := statement.Values[0].(*parser.NameExpression)
+	if !ok {
+		// 非名称表达式交给后续快路径或通用 return。
+		return false, nil
+	}
+	if binding, ok := generator.locals[nameExpression.Name]; ok {
+		// 当前 local 已在寄存器中，直接作为单返回值起点。
+		generator.emitABC(bytecode.OpReturn, binding.register, 2, 0)
+		generator.returned = true
+		return true, nil
+	}
+	if nameExpression.Name != envUpvalueName && !generator.canResolveUpvalueName(nameExpression.Name) {
+		// 未知名称会读取当前 `_ENV[name]`，不能当作无副作用 upvalue 处理。
+		return false, nil
+	}
+	resultRegister := generator.allocateRegister()
+	if err := generator.compileExpressionTo(nameExpression, resultRegister); err != nil {
+		// upvalue 读取失败时释放临时寄存器并返回。
+		generator.releaseRegister(resultRegister)
+		return true, err
+	}
+	generator.emitABC(bytecode.OpReturn, resultRegister, 2, 0)
+	generator.releaseRegister(resultRegister)
+	generator.returned = true
+	return true, nil
+}
+
+// compileSingleSafeBinaryReturn 优化 `return localOrLiteral <op> localOrLiteral`。
+//
+// 该路径只处理单返回值和普通二元 opcode；两侧必须能转为安全 RK 操作数，不能包含调用、索引、
+// upvalue/global 读取或其他副作用。复杂表达式保留通用 return 编译路径。
+func (generator *generator) compileSingleSafeBinaryReturn(statement *parser.ReturnStatement) (bool, error) {
+	if len(statement.Values) != 1 {
+		// 多返回值需要保持完整求值和返回区间语义。
+		return false, nil
+	}
+	binaryExpression, ok := statement.Values[0].(*parser.BinaryExpression)
+	if !ok {
+		// 非二元表达式交给通用 return 路径。
+		return false, nil
+	}
+	if binaryExpression.Operator == ".." {
+		// CONCAT 需要连续寄存器区间，不能使用普通 RK 二元快路径。
+		return false, nil
+	}
+	opCode, ok := binaryOpCode(binaryExpression.Operator)
+	if !ok {
+		// 尚未支持的操作符沿用通用路径返回原有错误。
+		return false, nil
+	}
+	if !generator.isSafeBinaryReturnOperand(binaryExpression.Left) || !generator.isSafeBinaryReturnOperand(binaryExpression.Right) {
+		// 任一操作数不满足 local/字面量/upvalue 名称条件时回退通用路径。
+		return false, nil
+	}
+
+	firstTempRegister := generator.nextRegister
+	resultRegister := generator.allocateRegister()
+	resultRegisterInUse := false
+	leftOperand, err := generator.safeBinaryReturnOperand(binaryExpression.Left, resultRegister, &resultRegisterInUse)
+	if err != nil {
+		// 左操作数编译失败时释放临时区并返回。
+		generator.releaseRegistersFrom(firstTempRegister)
+		return true, err
+	}
+	rightOperand, err := generator.safeBinaryReturnOperand(binaryExpression.Right, resultRegister, &resultRegisterInUse)
+	if err != nil {
+		// 右操作数编译失败时释放临时区并返回。
+		generator.releaseRegistersFrom(firstTempRegister)
+		return true, err
+	}
+	if err := generator.withSourceLine(binaryExpression.Position, func() error {
+		// 运算错误归因到操作符所在行；结果寄存器作为单返回值起点。
+		generator.emitABC(opCode, resultRegister, leftOperand, rightOperand)
+		return nil
+	}); err != nil {
+		generator.releaseRegistersFrom(firstTempRegister)
+		return true, err
+	}
+	generator.emitABC(bytecode.OpReturn, resultRegister, 2, 0)
+	generator.releaseRegistersFrom(firstTempRegister)
+	generator.returned = true
+	return true, nil
+}
+
+// isSafeBinaryReturnOperand 判断 return 二元快路径是否支持该操作数。
+func (generator *generator) isSafeBinaryReturnOperand(expression parser.Expression) bool {
+	if _, ok := expression.(*parser.LiteralExpression); ok {
+		// 字面量无副作用，可作为 RK 常量或临时常量寄存器。
+		return true
+	}
+	nameExpression, ok := expression.(*parser.NameExpression)
+	if !ok {
+		// 非名称表达式可能包含索引、调用或其他副作用。
+		return false
+	}
+	if _, ok := generator.locals[nameExpression.Name]; ok {
+		// 当前 local 读取只访问寄存器。
+		return true
+	}
+	return generator.canResolveUpvalueName(nameExpression.Name)
+}
+
+// canResolveUpvalueName 判断名称是否能从外层函数读取为 upvalue，且不修改当前 Proto。
+func (generator *generator) canResolveUpvalueName(name string) bool {
+	if generator.parent == nil {
+		// 顶层函数没有可捕获的外层 local/upvalue。
+		return false
+	}
+	return generator.parent.hasLocalOrUpvalueName(name)
+}
+
+// hasLocalOrUpvalueName 判断当前函数或祖先函数是否存在可捕获名称。
+func (generator *generator) hasLocalOrUpvalueName(name string) bool {
+	if _, ok := generator.locals[name]; ok {
+		// 直接命中当前函数 local。
+		return true
+	}
+	if _, ok := generator.upvalues[name]; ok {
+		// 当前函数已经登记过该 upvalue，子函数可间接捕获。
+		return true
+	}
+	if generator.parent != nil {
+		// 继续向祖先函数查找可捕获名称。
+		return generator.parent.hasLocalOrUpvalueName(name)
+	}
+
+	// 祖先链路没有可捕获名称。
+	return false
+}
+
+// safeBinaryReturnOperand 编译 return 二元快路径的操作数并返回 RK/寄存器操作数。
+func (generator *generator) safeBinaryReturnOperand(expression parser.Expression, resultRegister int, resultRegisterInUse *bool) (int, error) {
+	if operand, ok, err := generator.safeRKOperand(expression); err != nil || ok {
+		// local/字面量可以直接作为 RK 操作数；错误保持原编译语义。
+		return operand, err
+	}
+	nameExpression, ok := expression.(*parser.NameExpression)
+	if !ok {
+		// 调用方已经预检过，理论上不会到达该分支。
+		return 0, fmt.Errorf("codegen unsupported return operand %T", expression)
+	}
+	targetRegister := resultRegister
+	if *resultRegisterInUse {
+		// resultRegister 已保存另一个 upvalue 操作数时，分配额外临时寄存器。
+		targetRegister = generator.allocateRegister()
+	} else {
+		// 优先把单个 upvalue 读入结果寄存器，对齐 Lua 5.3 C codegen 形态。
+		*resultRegisterInUse = true
+	}
+	if err := generator.compileExpressionTo(nameExpression, targetRegister); err != nil {
+		// upvalue 读取失败时返回原编译错误。
+		return 0, err
+	}
+	return targetRegister, nil
 }
 
 // compileOpenReturn 编译末尾为开放表达式的 return 列表。
@@ -2069,22 +2831,18 @@ func (generator *generator) compileNameTo(expression *parser.NameExpression, tar
 //
 // expression.Receiver 必须在运行期得到 table 或支持索引的值；字段名使用字符串常量作为 key。
 func (generator *generator) compileFieldAccessTo(expression *parser.FieldAccessExpression, targetRegister int) error {
-	tableRegister := generator.allocateRegister()
-	if err := generator.compileExpressionTo(expression.Receiver, tableRegister); err != nil {
-		// 接收者表达式失败时释放临时寄存器。
-		generator.releaseRegister(tableRegister)
+	if err := generator.compileExpressionTo(expression.Receiver, targetRegister); err != nil {
+		// 接收者表达式失败时不能继续生成 GETTABLE。
 		return err
 	}
 	keyIndex := generator.addConstant(bytecode.StringConstant(expression.Field))
 	keyOperand, keyRegister, err := generator.rkOperandForConstantIndex(keyIndex)
 	if err != nil {
-		// 字段名常量无法编码或加载时释放接收者寄存器。
-		generator.releaseRegister(tableRegister)
+		// 字段名常量无法编码或加载时停止生成，目标寄存器中保留接收者临时值。
 		return err
 	}
-	generator.emitABC(bytecode.OpGetTable, targetRegister, tableRegister, keyOperand)
+	generator.emitABC(bytecode.OpGetTable, targetRegister, targetRegister, keyOperand)
 	generator.releaseOptionalRegister(keyRegister)
-	generator.releaseRegister(tableRegister)
 
 	// 点号字段访问编译完成。
 	return nil
@@ -2245,6 +3003,10 @@ func (generator *generator) compileBinaryTo(expression *parser.BinaryExpression,
 		// CONCAT 在 Lua 5.3 codegen 中会合并连续右结合表达式，生成单条连续寄存器范围指令。
 		return generator.compileConcatTo(expression, targetRegister)
 	}
+	if handled, err := generator.compileBinaryRKTo(expression, targetRegister); handled || err != nil {
+		// 安全 RK 二元表达式已直接生成；出错时保持原始编译错误。
+		return err
+	}
 	if expression.Operator != ".." && !generator.registerHasActiveLocal(targetRegister) {
 		// 目标寄存器不是当前 local 时，可以安全复用它保存左操作数，降低长表达式寄存器压力。
 		return generator.compileBinaryWithReusableTargetTo(expression, targetRegister)
@@ -2284,6 +3046,36 @@ func (generator *generator) compileBinaryTo(expression *parser.BinaryExpression,
 
 	// 二元表达式编译完成。
 	return nil
+}
+
+// compileBinaryRKTo 使用 RK 操作数编译无副作用二元表达式。
+//
+// expression 左右两侧必须都是当前 local 或字面量；调用、索引、upvalue、全局读取等可能有副作用
+// 或需要运行期查找的表达式会返回 handled=false，由通用路径保持原求值语义。
+func (generator *generator) compileBinaryRKTo(expression *parser.BinaryExpression, targetRegister int) (handled bool, err error) {
+	opCode, ok := binaryOpCode(expression.Operator)
+	if !ok {
+		// 非普通二元 opcode 不属于该快路径。
+		return false, nil
+	}
+	leftOperand, leftOK, err := generator.safeRKOperand(expression.Left)
+	if err != nil || !leftOK {
+		// 左侧无法安全转 RK 时交给通用路径。
+		return false, err
+	}
+	rightOperand, rightOK, err := generator.safeRKOperand(expression.Right)
+	if err != nil || !rightOK {
+		// 右侧无法安全转 RK 时交给通用路径。
+		return false, err
+	}
+	if err := generator.withSourceLine(expression.Position, func() error {
+		// RK 快路径仍把运行期错误归因到二元操作符所在行。
+		generator.emitABC(opCode, targetRegister, leftOperand, rightOperand)
+		return nil
+	}); err != nil {
+		return true, err
+	}
+	return true, nil
 }
 
 // compileConcatTo 编译连续字符串拼接表达式。
@@ -2346,30 +3138,47 @@ func (generator *generator) compileBinaryWithReusableTargetTo(expression *parser
 		// 左操作数失败时不继续生成右操作数，保留原始错误。
 		return err
 	}
-	rightRegister := generator.allocateRegister()
-	if err := generator.compileExpressionTo(expression.Right, rightRegister); err != nil {
-		// 右操作数失败时释放临时寄存器并返回。
-		generator.releaseRegister(rightRegister)
+	rightOperand, rightRegister, err := generator.binaryRightOperand(expression.Right)
+	if err != nil {
+		// 右操作数失败时直接返回，目标寄存器保持已编译的左操作数。
 		return err
 	}
 	opCode, ok := binaryOpCode(expression.Operator)
 	if !ok {
 		// 不支持的二元操作符返回明确错误。
-		generator.releaseRegister(rightRegister)
+		generator.releaseOptionalRegister(rightRegister)
 		return fmt.Errorf("codegen unsupported binary operator %q", expression.Operator)
 	}
 	if err := generator.withSourceLine(expression.Position, func() error {
 		// 复用目标寄存器路径同样需要把运行期错误归因到二元操作符所在行。
-		generator.emitABC(opCode, targetRegister, targetRegister, rightRegister)
+		generator.emitABC(opCode, targetRegister, targetRegister, rightOperand)
 		return nil
 	}); err != nil {
-		generator.releaseRegister(rightRegister)
+		generator.releaseOptionalRegister(rightRegister)
 		return err
 	}
-	generator.releaseRegister(rightRegister)
+	generator.releaseOptionalRegister(rightRegister)
 
 	// 复用目标寄存器的二元表达式编译完成。
 	return nil
+}
+
+// binaryRightOperand 编译可复用目标二元表达式的右操作数。
+//
+// 字面量和当前 local 会直接作为 RK 操作数；其他表达式编译到临时寄存器，并返回该临时寄存器供
+// 调用方在发射 opcode 后释放。
+func (generator *generator) binaryRightOperand(expression parser.Expression) (operand int, tempRegister int, err error) {
+	if operand, ok, err := generator.safeRKOperand(expression); err != nil || ok {
+		// 安全 RK 操作数不需要额外临时寄存器；错误保持原编译语义。
+		return operand, -1, err
+	}
+	rightRegister := generator.allocateRegister()
+	if err := generator.compileExpressionTo(expression, rightRegister); err != nil {
+		// 右操作数失败时释放临时寄存器并返回。
+		generator.releaseRegister(rightRegister)
+		return 0, -1, err
+	}
+	return rightRegister, rightRegister, nil
 }
 
 // registerHasActiveLocal 判断寄存器当前是否承载可见局部变量。
@@ -2704,8 +3513,8 @@ func (generator *generator) beginScope() scopeSnapshot {
 //
 // endPC 是当前 block 结束时的指令位置；本作用域新增的 LocalVars 都会把 EndPC 回填到这里。
 func (generator *generator) endScope(scope scopeSnapshot, endPC int) {
-	if scope.localVarCount < len(generator.proto.LocalVars) {
-		// 退出包含新增 local 的 block 时发出 close-only JMP，运行期据此闭合被捕获的 open upvalue。
+	if generator.hasCapturedLocalSince(scope.localVarCount) {
+		// 退出包含已捕获新增 local 的 block 时发出 close-only JMP，运行期据此闭合 open upvalue。
 		generator.emitAsBx(bytecode.OpJmp, scope.nextRegister+1, 0)
 		endPC = len(generator.proto.Code)
 	}
@@ -2715,6 +3524,19 @@ func (generator *generator) endScope(scope scopeSnapshot, endPC int) {
 	}
 	generator.locals = scope.locals
 	generator.nextRegister = scope.nextRegister
+}
+
+// hasCapturedLocalSince 判断指定 LocalVars 起点之后是否存在被子函数捕获的局部变量。
+func (generator *generator) hasCapturedLocalSince(localVarStart int) bool {
+	for _, binding := range generator.locals {
+		if binding.localVarIndex >= localVarStart && binding.captured {
+			// 只要有新增 local 被捕获，退出作用域就必须关闭对应 open upvalue。
+			return true
+		}
+	}
+
+	// 没有新增 captured local 时可省略 close-only JMP。
+	return false
 }
 
 // closeLocals 将当前函数所有局部变量生命周期结束位置回填为 endPC。
@@ -2749,6 +3571,8 @@ func (generator *generator) resolveUpvalue(name string, position lexer.Position)
 		index := len(generator.proto.Upvalues)
 		generator.proto.Upvalues = append(generator.proto.Upvalues, bytecode.UpvalueDesc{Name: name, InStack: true, Index: uint8(binding.register)})
 		generator.upvalues[name] = index
+		binding.captured = true
+		generator.parent.locals[name] = binding
 		return index, true, nil
 	}
 	parentIndex, exists, err := generator.parent.resolveUpvalue(name, position)
@@ -2804,6 +3628,8 @@ func (generator *generator) envUpvalueIndex() int {
 		// 父函数显式 local _ENV 时，嵌套函数必须捕获该寄存器作为自身环境。
 		generator.proto.Upvalues = append(generator.proto.Upvalues, bytecode.UpvalueDesc{Name: envUpvalueName, InStack: true, Index: uint8(binding.register)})
 		generator.upvalues[envUpvalueName] = index
+		binding.captured = true
+		generator.parent.locals[envUpvalueName] = binding
 		return index
 	}
 	parentIndex := generator.parent.envUpvalueIndex()

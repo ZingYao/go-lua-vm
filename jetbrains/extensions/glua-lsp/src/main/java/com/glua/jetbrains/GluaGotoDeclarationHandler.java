@@ -15,6 +15,24 @@ public final class GluaGotoDeclarationHandler implements GotoDeclarationHandler 
         if (sourceElement == null || sourceElement.getContainingFile().getFileType() != GluaFileType.INSTANCE) {
             return null;
         }
+        GluaRequireSupport.Target requiredModule = GluaRequireSupport.requiredModuleAt(sourceElement.getContainingFile(), offset);
+        if (requiredModule != null) {
+            LOG.info("glua goto required module target=" + requiredModule.path() + ", offset=" + offset);
+            return new PsiElement[]{requiredModule.element()};
+        }
+        GluaRequireSupport.Target requiredMember = GluaRequireSupport.requiredMemberAt(sourceElement.getContainingFile(), offset);
+        if (requiredMember != null) {
+            LOG.info("glua goto required member target=" + requiredMember.path() + ", offset=" + offset);
+            return new PsiElement[]{requiredMember.element()};
+        }
+        GluaRequireSupport.MemberDefinition localMember = GluaRequireSupport.localMemberReferenceDefinitionAt(sourceElement.getContainingFile().getText(), offset);
+        if (localMember != null) {
+            PsiElement element = sourceElement.getContainingFile().findElementAt(localMember.start());
+            if (element != null) {
+                LOG.info("glua goto local member target=" + localMember.name() + ", offset=" + offset);
+                return new PsiElement[]{element};
+            }
+        }
         String target = GluaAnalysis.builtinTargetAt(editor.getDocument(), offset);
         if (target != null && GluaBuiltinCatalog.getInstance().get(target) != null) {
             LOG.info("glua goto builtin target=" + target + ", offset=" + offset);

@@ -4,12 +4,9 @@ import com.intellij.lexer.Lexer;
 import com.intellij.openapi.editor.DefaultLanguageHighlighterColors;
 import com.intellij.openapi.editor.HighlighterColors;
 import com.intellij.openapi.editor.colors.TextAttributesKey;
-import com.intellij.openapi.editor.markup.TextAttributes;
 import com.intellij.openapi.fileTypes.SyntaxHighlighterBase;
 import com.intellij.psi.tree.IElementType;
 import org.jetbrains.annotations.NotNull;
-
-import java.awt.Color;
 
 public final class GluaSyntaxHighlighter extends SyntaxHighlighterBase {
     private static final TextAttributesKey GLUA_KEYWORD = key("GLUA_KEYWORD", 0xCC7832, DefaultLanguageHighlighterColors.KEYWORD);
@@ -79,13 +76,6 @@ public final class GluaSyntaxHighlighter extends SyntaxHighlighterBase {
     }
 
     private static TextAttributesKey key(String externalName, int rgb, TextAttributesKey fallback) {
-        return TextAttributesKey.createTextAttributesKey(externalName, attributes(rgb, fallback));
-    }
-
-    private static TextAttributes attributes(int rgb, TextAttributesKey fallback) {
-        TextAttributes fallbackAttributes = fallback.getDefaultAttributes();
-        TextAttributes attributes = fallbackAttributes == null ? new TextAttributes() : fallbackAttributes.clone();
-        attributes.setForegroundColor(new Color(rgb));
-        return attributes;
+        return TextAttributesKey.createTextAttributesKey(externalName, fallback);
     }
 }

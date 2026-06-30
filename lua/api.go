@@ -342,6 +342,12 @@ const (
 	SyntaxContinue = extensions.SyntaxContinue
 	// SyntaxSwitch 表示 switch/case/default 语句语法糖扩展。
 	SyntaxSwitch = extensions.SyntaxSwitch
+
+	// luaContextCheckInstructionInterval 表示普通 VM 热路径两次 context 检查之间允许跳过的指令数。
+	//
+	// debug hook、协程和 continuation 路径仍逐指令检查，以保持调试和挂起恢复语义；普通路径
+	// 使用固定窗口降低 tight loop 中 atomic/context 查询的固定成本。
+	luaContextCheckInstructionInterval = 64
 )
 
 // 与 runtime 对齐的错误对象。
@@ -1120,7 +1126,7 @@ func loadStringOrBinaryChunk(state *State, chunkBytes []byte, chunkName string) 
 			return runtime.NilValue(), err
 		}
 		upvalues := bindTopLevelUpvalues(state, proto)
-		closure := &runtime.LuaClosure{Proto: proto, Upvalues: upvalues, UpvalueCells: closedUpvalueCells(upvalues)}
+		closure := runtime.NewLuaClosure(proto, upvalues, closedUpvalueCells(upvalues))
 		return runtime.ReferenceValue(runtime.KindLuaClosure, closure), nil
 	}
 	source := lexer.StripInitialShebang(string(chunkBytes))
@@ -1730,7 +1736,7 @@ func compileString(state *State, source string, chunkName string) (Value, error)
 		return runtime.NilValue(), err
 	}
 	upvalues := bindTopLevelUpvalues(state, proto)
-	closure := &runtime.LuaClosure{Proto: proto, Upvalues: upvalues, UpvalueCells: closedUpvalueCells(upvalues)}
+	closure := runtime.NewLuaClosure(proto, upvalues, closedUpvalueCells(upvalues))
 	return runtime.ReferenceValue(runtime.KindLuaClosure, closure), nil
 }
 
@@ -2412,15 +2418,22 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 		previousPreviousPC = continuation.previousPreviousPC
 		pc = resumeNextPC
 	}
+	contextCheckCountdown := 0
 	for pc >= 0 && pc < len(proto.Code) {
 		// 先同步当前 PC，供 collectgarbage 执行时按 local 生命周期裁剪活动寄存器根。
 		vm.SetCurrentPC(pc)
-		// 每条指令前检查 context，支持宿主取消长脚本和协程测试中的中断语义。
-		if err := state.CheckContext(); err != nil {
-			if syncErr := syncCurrentFrame(pc); syncErr != nil {
-				return nil, syncErr
+		if preciseFrameSync || hooksEnabled || contextCheckCountdown <= 0 {
+			// 需要精确调试语义的路径逐指令检查；普通热路径按固定窗口检查，降低 tight loop 固定开销。
+			if err := state.CheckContext(); err != nil {
+				if syncErr := syncCurrentFrame(pc); syncErr != nil {
+					return nil, syncErr
+				}
+				return nil, err
 			}
-			return nil, err
+			contextCheckCountdown = luaContextCheckInstructionInterval
+		} else {
+			// 本轮处于普通热路径窗口内，延后到窗口耗尽再检查 context。
+			contextCheckCountdown--
 		}
 		if preciseFrameSync {
 			if err := syncCurrentFrame(pc); err != nil {
@@ -2440,6 +2453,7 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 			}
 		}
 		instruction := proto.Code[pc]
+		opCode := instruction.OpCode()
 		coroutineThread := currentCoroutineThread(state)
 		if err := vm.Step(instruction); err != nil {
 			if syncErr := syncCurrentFrame(pc); syncErr != nil {
@@ -2476,13 +2490,13 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 				return nil, err
 			}
 		}
-		if instruction.OpCode() == bytecode.OpJmp {
+		if opCode == bytecode.OpJmp {
 			if closeFrom, ok := vm.CloseFrom(); ok {
 				// JMP A 非零表示离开局部作用域，必须闭合对应寄存器及之后的 open upvalue。
 				vm.CloseUpvaluesFrom(closeFrom)
 			}
 		}
-		if instruction.OpCode() == bytecode.OpNewTable || instruction.OpCode() == bytecode.OpClosure || instruction.OpCode() == bytecode.OpConcat {
+		if opCode == bytecode.OpNewTable || opCode == bytecode.OpClosure || opCode == bytecode.OpConcat {
 			// 分配压力指令后给自动 GC 一次推进机会，覆盖 table、closure 和字符串拼接。
 			((*runtime.State)(state)).NoteTableAllocation()
 		}
@@ -2665,6 +2679,165 @@ func callGoClosureWithDebugFrame(state *State, function Value, name string, name
 		}
 	}
 	return results, nil
+}
+
+// callGoFunctionWithDebugFrame 在调试帧保护下执行单返回 Go closure。
+//
+// state 必须非 nil；function 必须是 KindGoClosure 且 goFunction 是其实际入口。该路径用于 VM
+// 内部单返回 CALL 快路径，保留 call/return hook、错误帧和 bad argument 名称重写语义。
+func callGoFunctionWithDebugFrame(state *State, function Value, goFunction runtime.GoFunction, name string, nameWhat string, tailCall bool, args ...Value) (result Value, err error) {
+	// Go closure 帧不占用真实寄存器窗口，只保存函数与调用点名称供 debug API 查询。
+	frame := runtime.NewGoCallFrame(function, state.StackTop()+1, -1)
+	frame.Name = name
+	frame.NameWhat = nameWhat
+	frame.TailCall = tailCall
+	if err := state.PushCallFrame(frame); err != nil {
+		// 调用帧压入失败时无法安全进入 Go 回调。
+		return runtime.NilValue(), err
+	}
+	debugEnvironment, hasDebugEnvironment := debuglib.EnvironmentForState((*runtime.State)(state))
+	if hasDebugEnvironment {
+		// call/tail call hook 在 Go closure 帧入栈后触发，对齐 Lua 5.3 的被调函数可见性。
+		hookErr := error(nil)
+		if tailCall && debugEnvironment.HookEnabledFor(debuglib.HookEventTailCall) {
+			// Go closure 也可能由 TAILCALL 进入，debug hook 需要看到 tail call 事件。
+			hookErr = triggerLuaTailCallHook(state, debugEnvironment)
+		} else if !tailCall && debugEnvironment.HookEnabledFor(debuglib.HookEventCall) {
+			// 普通 Go closure 调用保持 call 事件。
+			hookErr = triggerLuaCallHook(state, debugEnvironment)
+		}
+		if hookErr != nil {
+			// hook 错误时保留帧给 protected call 边界恢复。
+			return runtime.NilValue(), hookErr
+		}
+	}
+	defer func() {
+		if err == nil || errors.Is(err, runtime.ErrCoroutineYield) {
+			// 成功路径和协程 yield 都弹出当前 Go 帧；普通错误路径保留帧以便 ProtectedCall 生成 traceback 后恢复。
+			_, _ = state.PopCallFrame()
+		}
+	}()
+	result, err = goFunction(args...)
+	if err != nil {
+		// Go 回调的参数错误可结合调用点补齐完整库函数名。
+		err = rewriteGoClosureBadArgumentName(err, goClosureBadArgumentName(state, function, name, nameWhat), nameWhat)
+		// Go 回调错误返回后，调用帧保留给上层错误边界。
+		return runtime.NilValue(), err
+	}
+	if hasDebugEnvironment && debugEnvironment.HookEnabledFor(debuglib.HookEventReturn) {
+		// return hook 在 Go closure 帧仍可见时触发。
+		if err := triggerLuaReturnHook(state, debugEnvironment); err != nil {
+			return runtime.NilValue(), err
+		}
+	}
+	return result, nil
+}
+
+// callGoUnaryFunctionWithDebugFrame 在调试帧保护下执行单参数单返回 Go closure。
+//
+// state 必须非 nil；function 必须是 KindGoClosure 且 unaryFunction 是其实际入口。该路径用于
+// 标准库一元函数 CALL 快路径，保留 call/return hook、错误帧和 bad argument 名称重写语义。
+func callGoUnaryFunctionWithDebugFrame(state *State, function Value, unaryFunction runtime.GoUnaryFunction, name string, nameWhat string, tailCall bool, argument Value) (result Value, err error) {
+	// Go closure 帧不占用真实寄存器窗口，只保存函数与调用点名称供 debug API 查询。
+	frame := runtime.NewGoCallFrame(function, state.StackTop()+1, -1)
+	frame.Name = name
+	frame.NameWhat = nameWhat
+	frame.TailCall = tailCall
+	if err := state.PushCallFrame(frame); err != nil {
+		// 调用帧压入失败时无法安全进入 Go 回调。
+		return runtime.NilValue(), err
+	}
+	debugEnvironment, hasDebugEnvironment := debuglib.EnvironmentForState((*runtime.State)(state))
+	if hasDebugEnvironment {
+		// call/tail call hook 在 Go closure 帧入栈后触发，对齐 Lua 5.3 的被调函数可见性。
+		hookErr := error(nil)
+		if tailCall && debugEnvironment.HookEnabledFor(debuglib.HookEventTailCall) {
+			// Go closure 也可能由 TAILCALL 进入，debug hook 需要看到 tail call 事件。
+			hookErr = triggerLuaTailCallHook(state, debugEnvironment)
+		} else if !tailCall && debugEnvironment.HookEnabledFor(debuglib.HookEventCall) {
+			// 普通 Go closure 调用保持 call 事件。
+			hookErr = triggerLuaCallHook(state, debugEnvironment)
+		}
+		if hookErr != nil {
+			// hook 错误时保留帧给 protected call 边界恢复。
+			return runtime.NilValue(), hookErr
+		}
+	}
+	defer func() {
+		if err == nil || errors.Is(err, runtime.ErrCoroutineYield) {
+			// 成功路径和协程 yield 都弹出当前 Go 帧；普通错误路径保留帧以便 ProtectedCall 生成 traceback 后恢复。
+			_, _ = state.PopCallFrame()
+		}
+	}()
+	result, err = unaryFunction(argument)
+	if err != nil {
+		// Go 回调的参数错误可结合调用点补齐完整库函数名。
+		err = rewriteGoClosureBadArgumentName(err, goClosureBadArgumentName(state, function, name, nameWhat), nameWhat)
+		// Go 回调错误返回后，调用帧保留给上层错误边界。
+		return runtime.NilValue(), err
+	}
+	if hasDebugEnvironment && debugEnvironment.HookEnabledFor(debuglib.HookEventReturn) {
+		// return hook 在 Go closure 帧仍可见时触发。
+		if err := triggerLuaReturnHook(state, debugEnvironment); err != nil {
+			return runtime.NilValue(), err
+		}
+	}
+	return result, nil
+}
+
+// callGoFixedResultsFunctionWithDebugFrame 在调试帧保护下执行固定上限多返回 Go closure。
+//
+// dst 由调用方提供且长度至少为 fixedFunction.MaxResults；返回 handled=false 时表示快路径未覆盖，
+// 调用方必须回退通用 GoResultsFunction，不能使用 dst 中的内容。
+func callGoFixedResultsFunctionWithDebugFrame(state *State, function Value, fixedFunction *runtime.GoFixedResultsFunction, dst []Value, name string, nameWhat string, tailCall bool, args ...Value) (resultCount int, handled bool, err error) {
+	// Go closure 帧不占用真实寄存器窗口，只保存函数与调用点名称供 debug API 查询。
+	frame := runtime.NewGoCallFrame(function, state.StackTop()+1, -1)
+	frame.Name = name
+	frame.NameWhat = nameWhat
+	frame.TailCall = tailCall
+	if err := state.PushCallFrame(frame); err != nil {
+		// 调用帧压入失败时无法安全进入 Go 回调。
+		return 0, false, err
+	}
+	debugEnvironment, hasDebugEnvironment := debuglib.EnvironmentForState((*runtime.State)(state))
+	if hasDebugEnvironment {
+		// call/tail call hook 在 Go closure 帧入栈后触发，对齐 Lua 5.3 的被调函数可见性。
+		hookErr := error(nil)
+		if tailCall && debugEnvironment.HookEnabledFor(debuglib.HookEventTailCall) {
+			// Go closure 也可能由 TAILCALL 进入，debug hook 需要看到 tail call 事件。
+			hookErr = triggerLuaTailCallHook(state, debugEnvironment)
+		} else if !tailCall && debugEnvironment.HookEnabledFor(debuglib.HookEventCall) {
+			// 普通 Go closure 调用保持 call 事件。
+			hookErr = triggerLuaCallHook(state, debugEnvironment)
+		}
+		if hookErr != nil {
+			// hook 错误时保留帧给 protected call 边界恢复。
+			return 0, false, hookErr
+		}
+	}
+	defer func() {
+		if err == nil || errors.Is(err, runtime.ErrCoroutineYield) {
+			// 成功路径、快路径未命中和协程 yield 都弹出当前 Go 帧；普通错误路径保留帧给 traceback。
+			_, _ = state.PopCallFrame()
+		}
+	}()
+	if fixedFunction == nil || fixedFunction.Function == nil {
+		// 损坏的固定回调按不可调用错误处理，保持 Go closure 语义。
+		return 0, false, runtime.NewRuntimeError(runtime.StringValue(ErrExpectedCallable.Error()), ErrExpectedCallable)
+	}
+	resultCount, handled, err = fixedFunction.Function(dst, args...)
+	if err != nil {
+		// Go 回调的参数错误可结合调用点补齐完整库函数名。
+		err = rewriteGoClosureBadArgumentName(err, goClosureBadArgumentName(state, function, name, nameWhat), nameWhat)
+		return 0, handled, err
+	}
+	if handled && hasDebugEnvironment && debugEnvironment.HookEnabledFor(debuglib.HookEventReturn) {
+		// return hook 在 Go closure 帧仍可见时触发；未命中快路径时交给回退调用负责触发。
+		if err := triggerLuaReturnHook(state, debugEnvironment); err != nil {
+			return 0, false, err
+		}
+	}
+	return resultCount, handled, nil
 }
 
 // goClosureBadArgumentName 推断 Go 标准库参数错误中应展示的函数名称。
@@ -3054,6 +3227,30 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 		// 固定参数/固定返回的 Lua closure 走 direct CALL，避免构造参数切片。
 		results, directCallVM, err = executeLuaCallRequestDirect(state, vm, functionValue, debugName, debugNameWhat, callRequest)
 	} else {
+		if unaryFunction, ok := functionValue.Ref.(runtime.GoUnaryFunction); ok && callRequest.ArgumentCount == 1 && (callRequest.ReturnCount == 1 || callRequest.ReturnCount < 0) && !callRequest.GenericFor {
+			// 单参数单返回 Go closure 直接读取参数寄存器，避免为标准库一元函数构造参数切片。
+			argument, argumentOK := vm.Register(callRequest.FunctionIndex + 1)
+			if !argumentOK {
+				// 参数寄存器缺失说明 CALL 布局异常。
+				return runtime.ErrRegisterOutOfRange
+			}
+			var result Value
+			result, err = callGoUnaryFunctionWithDebugFrame(state, functionValue, unaryFunction, debugName, debugNameWhat, false, argument)
+			if err == nil {
+				if setErr := vm.SetRegister(callRequest.FunctionIndex, result); setErr != nil {
+					// 写回超过寄存器窗口时返回边界错误。
+					return setErr
+				}
+				if callRequest.ReturnCount < 0 {
+					// CALL C=0 需要记录实际开放返回上界，供后续 CALL B=0 消费单个结果。
+					vm.SetOpenTop(callRequest.FunctionIndex + 1)
+				} else {
+					// 固定单返回不形成开放列表。
+					vm.SetOpenTop(-1)
+				}
+				return nil
+			}
+		}
 		var arguments []Value
 		if functionValue.Kind == runtime.KindLuaClosure {
 			// Lua closure 只在进入前读取参数并写入寄存器，可复用 State scratch 降低 CALL 小切片分配。
@@ -3072,7 +3269,47 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 			// 参数区间读取失败时停止当前调用。
 			return runtime.ErrRegisterOutOfRange
 		}
-		results, err = callWithDebugNameArgs(state, functionValue, debugName, debugNameWhat, arguments)
+		if goFunction, ok := functionValue.Ref.(runtime.GoFunction); ok && callRequest.ReturnCount == 1 && !callRequest.GenericFor {
+			// 单返回 GoFunction 可直接写回调用寄存器，避免为结果构造临时 []Value。
+			var result Value
+			result, err = callGoFunctionWithDebugFrame(state, functionValue, goFunction, debugName, debugNameWhat, false, arguments...)
+			if err == nil {
+				if setErr := vm.SetRegister(callRequest.FunctionIndex, result); setErr != nil {
+					// 写回超过寄存器窗口时返回边界错误。
+					return setErr
+				}
+				vm.SetOpenTop(-1)
+				return nil
+			}
+		} else if fixedFunction, ok := functionValue.Ref.(*runtime.GoFixedResultsFunction); ok && callRequest.ReturnCount >= 0 && !callRequest.GenericFor {
+			// 固定上限多返回 Go closure 可复用栈上结果槽，命中快路径时避免构造临时 []Value。
+			var fixedResults [4]Value
+			resultSlots := fixedResults[:]
+			if fixedFunction.MaxResults > len(resultSlots) {
+				// 超出常见小结果数量时按声明上限分配，保证 writer 不会写越界。
+				resultSlots = make([]Value, fixedFunction.MaxResults)
+			} else {
+				// 小结果数量使用栈上数组，覆盖 string.find 等热点标准库函数。
+				resultSlots = resultSlots[:fixedFunction.MaxResults]
+			}
+			var resultCount int
+			var handled bool
+			resultCount, handled, err = callGoFixedResultsFunctionWithDebugFrame(state, functionValue, fixedFunction, resultSlots, debugName, debugNameWhat, false, arguments...)
+			if err == nil && handled {
+				if writeErr := writeLuaCallResults(vm, callRequest, resultSlots[:resultCount]); writeErr != nil {
+					// 固定结果写回失败时返回寄存器边界错误。
+					return writeErr
+				}
+				return nil
+			}
+			if err == nil && !handled {
+				// 固定 writer 未覆盖当前调用时，回退通用路径以保留 Lua pattern/capture 等完整语义。
+				results, err = callWithDebugNameArgs(state, functionValue, debugName, debugNameWhat, arguments)
+			}
+		} else {
+			// 多返回 Go/Lua 调用仍走通用结果切片路径。
+			results, err = callWithDebugNameArgs(state, functionValue, debugName, debugNameWhat, arguments)
+		}
 	}
 	if err != nil {
 		if isDefaultAssertError(err) {
@@ -3139,27 +3376,9 @@ func canExecuteLuaCallRequestDirect(state *State, functionValue Value, callReque
 		// vararg 和子函数都需要完整调用现场。
 		return false
 	}
-	if !luaProtoDirectCallSafe(closure.Proto) {
-		// 只允许无嵌套调用的叶子函数走 direct CALL。
+	if !closure.DirectCallSafe {
+		// 只允许创建时判定为无嵌套调用的叶子函数走 direct CALL。
 		return false
-	}
-	return true
-}
-
-// luaProtoDirectCallSafe 判断 Proto 是否适合 direct CALL 热路径。
-//
-// direct CALL 当前仅覆盖纯叶子函数，避免嵌套调用、闭包创建和 yield 现场裁剪破坏 coroutine。
-func luaProtoDirectCallSafe(proto *bytecode.Proto) bool {
-	if proto == nil {
-		// 缺少 Proto 时不能进入 direct CALL。
-		return false
-	}
-	for instructionIndex := range proto.Code {
-		switch proto.Code[instructionIndex].OpCode() {
-		case bytecode.OpCall, bytecode.OpTailCall, bytecode.OpTForCall, bytecode.OpClosure:
-			// 任何嵌套调用或闭包创建都交给通用路径。
-			return false
-		}
 	}
 	return true
 }
@@ -3220,11 +3439,8 @@ func executeLuaLeafClosureFast(state *State, proto *bytecode.Proto, vm *runtime.
 	for pc >= 0 && pc < len(proto.Code) {
 		// 叶子 fast path 仍维护 VM 当前 PC，供错误装饰和 GC root 裁剪使用。
 		vm.SetCurrentPC(pc)
-		if err := state.CheckContext(); err != nil {
-			// 宿主取消或中断必须尽快停止当前 Lua 执行。
-			return nil, err
-		}
 		instruction := proto.Code[pc]
+		opCode := instruction.OpCode()
 		if err := vm.Step(instruction); err != nil {
 			if errors.Is(err, runtime.ErrExpectedCallable) {
 				// 理论上 direct leaf 不应产生 CALL 请求；保留调用错误装饰用于防御异常字节码。
@@ -3238,13 +3454,13 @@ func executeLuaLeafClosureFast(state *State, proto *bytecode.Proto, vm *runtime.
 			}
 			return nil, decorateLuaRuntimeErrorAtPC(proto, pc, err)
 		}
-		if instruction.OpCode() == bytecode.OpJmp {
+		if opCode == bytecode.OpJmp {
 			if closeFrom, ok := vm.CloseFrom(); ok {
 				// 离开局部作用域时仍需闭合 open upvalue。
 				vm.CloseUpvaluesFrom(closeFrom)
 			}
 		}
-		if instruction.OpCode() == bytecode.OpNewTable || instruction.OpCode() == bytecode.OpConcat {
+		if opCode == bytecode.OpNewTable || opCode == bytecode.OpConcat {
 			// 分配压力指令后推进自动 GC，保持与完整执行器一致。
 			((*runtime.State)(state)).NoteTableAllocation()
 		}
@@ -3616,7 +3832,7 @@ func inferRegisterDebugNameWithShortCircuit(proto *bytecode.Proto, vm *runtime.V
 			return upvalueDebugName(proto, instruction.B())
 		case bytecode.OpGetTable:
 			// GETTABLE 常见于 table.field 链式访问。
-			if receiverName, _ := inferRegisterDebugNameWithShortCircuit(proto, vm, callPC, instruction.B(), suppressShortCircuit); receiverName == "_ENV" {
+			if receiverName, _ := inferRegisterDebugNameWithShortCircuit(proto, vm, writerPC, instruction.B(), suppressShortCircuit); receiverName == "_ENV" {
 				// 显式 local _ENV 上的字段读取在错误消息中仍按 Lua 5.3 展示为 global。
 				return keyStringDebugName(proto, writerPC, instruction.C(), "global")
 			}
@@ -4176,6 +4392,20 @@ func luaCallArguments(vm *runtime.VM, callRequest *runtime.CallRequest) ([]Value
 // 固定返回数量会用 nil 补齐；开放返回数量写入所有结果，当前由寄存器窗口边界控制。
 func writeLuaCallResults(vm *runtime.VM, callRequest *runtime.CallRequest, results []Value) error {
 	resultCount := callRequest.ReturnCount
+	if resultCount == 1 && !callRequest.GenericFor {
+		// 普通 Lua 函数最常见的单返回值直接覆盖函数槽，避免进入通用结果循环和开放返回分支。
+		resultValue := runtime.NilValue()
+		if len(results) > 0 {
+			// 被调函数实际返回的第一个值优先写入。
+			resultValue = results[0]
+		}
+		if err := vm.SetRegister(callRequest.FunctionIndex, resultValue); err != nil {
+			// 写回超过寄存器窗口时返回边界错误。
+			return err
+		}
+		vm.SetOpenTop(-1)
+		return nil
+	}
 	if resultCount < 0 {
 		// 开放返回写入被调函数实际返回的所有结果。
 		resultCount = len(results)
@@ -4215,14 +4445,34 @@ func writeLuaCallResults(vm *runtime.VM, callRequest *runtime.CallRequest, resul
 
 // callGoClosureValue 执行 Go closure 引用值。
 //
-// function 必须是 KindGoClosure；args 是调用实参快照。支持 GoResultsFunction 和 GoFunction 两类
-// runtime 回调形态，其他引用负载按不可调用运行期错误处理。
+// function 必须是 KindGoClosure；args 是调用实参快照。支持 GoResultsFunction、GoFunction 和
+// GoUnaryFunction 等 runtime 回调形态，其他引用负载按不可调用运行期错误处理。
 func callGoClosureValue(function Value, args ...Value) ([]Value, error) {
 	// 根据 Ref 中保存的实际 Go 回调形态分发。
 	switch callback := function.Ref.(type) {
 	case runtime.GoResultsFunction:
 		// 多返回 Go 回调直接返回结果列表。
 		return callback(args...)
+	case *runtime.GoFixedResultsFunction:
+		// 固定上限多返回回调用声明上限构造结果槽；未命中时回退完整函数，避免截断变长返回。
+		if callback == nil || callback.Function == nil {
+			return nil, runtime.NewRuntimeError(runtime.StringValue(ErrExpectedCallable.Error()), ErrExpectedCallable)
+		}
+		results := make([]Value, callback.MaxResults)
+		resultCount, handled, err := callback.Function(results, args...)
+		if err != nil {
+			// 固定回调错误原样向上传播，外层负责 bad argument 名称重写。
+			return nil, err
+		}
+		if handled {
+			// 命中快路径时只返回实际写入的前缀。
+			return results[:resultCount], nil
+		}
+		if callback.Fallback == nil {
+			// 没有回退函数时按不可调用错误暴露损坏注册。
+			return nil, runtime.NewRuntimeError(runtime.StringValue(ErrExpectedCallable.Error()), ErrExpectedCallable)
+		}
+		return callback.Fallback(args...)
 	case *runtime.GoClosureWithUpvalues:
 		// 带 debug upvalue 元数据的 Go closure 仍通过内部 Function 执行。
 		if callback == nil || callback.Function == nil {
@@ -4232,6 +4482,19 @@ func callGoClosureValue(function Value, args ...Value) ([]Value, error) {
 	case runtime.GoFunction:
 		// 单返回 Go 回调转换成单元素结果列表，保持 Call 总是返回 []Value。
 		result, err := callback(args...)
+		if err != nil {
+			// 回调错误原样向上传播，ProtectedCall 会负责转换为 Lua error object。
+			return nil, err
+		}
+		return []Value{result}, nil
+	case runtime.GoUnaryFunction:
+		// 单参数单返回 Go 回调在通用路径中也需要可调用，覆盖开放参数和公开 Call 入口。
+		argument := runtime.NilValue()
+		if len(args) > 0 {
+			// Lua 标准库允许多余参数；一元入口只读取第一个实参。
+			argument = args[0]
+		}
+		result, err := callback(argument)
 		if err != nil {
 			// 回调错误原样向上传播，ProtectedCall 会负责转换为 Lua error object。
 			return nil, err

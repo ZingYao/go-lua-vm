@@ -2,8 +2,7 @@
 //
 // 本包当前提供 package 表、require 的 loaded/searchers 路径、package.config/path/cpath/loaded、
 // package.preload、package.searchers、package.searchpath、Lua 文件 loader 和 package.loadlib 的
-// 内置无 CGO 策略。该策略用于保持默认构建易跨系统编译；宿主程序仍可自行注册纯 Go、
-// 自带 CGO 或系统动态库适配的 loader 覆盖默认行为。
+// 内置无 CGO 策略。默认 require 只搜索 preload 与 Lua/GLua 文件，不自动尝试动态库。
 package packagelib
 
 import (
@@ -20,11 +19,11 @@ const (
 	// DefaultConfig 是 Lua 5.3 package.config 在 Unix 风格平台下的基础文本。
 	DefaultConfig = "/\n;\n?\n!\n-\n"
 	// DefaultPath 是当前纯 Go package.path 默认模板。
-	DefaultPath = "./?.lua;./?/init.lua"
-	// DefaultCPath 是当前无 CGO 策略下保留的 Unix 风格 C 模块搜索模板。
-	DefaultCPath = "./?.so;./?.dylib;./lua/?.so;./lua/?.dylib"
-	// DefaultWindowsCPath 是 Windows 运行期动态库搜索模板。
-	DefaultWindowsCPath = "./?.dll;./lua/?.dll"
+	DefaultPath = "./?.glua;./?.lua;./?/init.glua;./?/init.lua"
+	// DefaultCPath 是当前无 CGO 策略下的默认 C 模块搜索模板；空值表示 require 不搜索动态库。
+	DefaultCPath = ""
+	// DefaultWindowsCPath 是 Windows 默认 C 模块搜索模板；空值表示 require 不搜索动态库。
+	DefaultWindowsCPath = ""
 	// CLoadingPolicyText 说明当前项目默认 Lua C 动态库 loader 的固定策略。
 	CLoadingPolicyText = "built-in dynamic C library loading is disabled in the default CGO-free build to keep cross-system builds simple; embedding programs may register their own loader"
 	// defaultPathSeparator 是 package.path 多模板之间的分隔符。
@@ -136,7 +135,7 @@ func OpenWithLuaFileLoader(state *runtime.State, luaFileLoader LuaFileLoader) er
 // NewEnvironment 创建 package 标准库运行环境。
 //
 // 返回环境包含 package 表、loaded/preload/searchers 表、path/cpath/config 常量和 loadlib
-// 函数。该函数不访问宿主文件系统，也不启用 C 动态库。
+// 函数。默认 searchers 只注册 preload 与 Lua/GLua 文件搜索器。
 func NewEnvironment() *Environment {
 	// 默认环境不接入 Lua 文件执行器，调用方可使用 NewEnvironmentWithLuaFileLoader 覆盖。
 	return NewEnvironmentWithLuaFileLoader(nil)
@@ -153,8 +152,8 @@ func NewEnvironmentWithLuaFileLoader(luaFileLoader LuaFileLoader) *Environment {
 
 // NewEnvironmentWithLoaders 创建带 Lua 文件和动态库 loader 扩展点的 package 标准库运行环境。
 //
-// luaFileLoader 可以为 nil；dynamicLibraryLoader 为 nil 时 loadlib、C searcher 和 C root searcher
-// 保持默认 CGO-free 兼容错误。非 nil 动态库 loader 由宿主负责平台加载和符号解析。
+// luaFileLoader 可以为 nil；dynamicLibraryLoader 只供 package.loadlib 使用，默认 require 不注册
+// C searcher 和 C root searcher。
 func NewEnvironmentWithLoaders(luaFileLoader LuaFileLoader, dynamicLibraryLoader DynamicLibraryLoader) *Environment {
 	// 兼容旧入口：在历史测试权限基础上接入动态库 loader。
 	return NewEnvironmentWithOptions(luaFileLoader, runtime.Options{
@@ -194,8 +193,6 @@ func NewEnvironmentWithOptions(luaFileLoader LuaFileLoader, options runtime.Opti
 	packageTable.RawSetString("searchpath", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(environment.SearchPath)))
 	searchersTable.RawSetInteger(1, runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(environment.PreloadSearcher)))
 	searchersTable.RawSetInteger(2, runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(environment.LuaSearcher)))
-	searchersTable.RawSetInteger(3, runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(environment.CSearcher)))
-	searchersTable.RawSetInteger(4, runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(environment.CRootSearcher)))
 	return environment
 }
 
