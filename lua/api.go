@@ -4160,6 +4160,20 @@ func luaCallArguments(vm *runtime.VM, callRequest *runtime.CallRequest) ([]Value
 // 固定返回数量会用 nil 补齐；开放返回数量写入所有结果，当前由寄存器窗口边界控制。
 func writeLuaCallResults(vm *runtime.VM, callRequest *runtime.CallRequest, results []Value) error {
 	resultCount := callRequest.ReturnCount
+	if resultCount == 1 && !callRequest.GenericFor {
+		// 普通 Lua 函数最常见的单返回值直接覆盖函数槽，避免进入通用结果循环和开放返回分支。
+		resultValue := runtime.NilValue()
+		if len(results) > 0 {
+			// 被调函数实际返回的第一个值优先写入。
+			resultValue = results[0]
+		}
+		if err := vm.SetRegister(callRequest.FunctionIndex, resultValue); err != nil {
+			// 写回超过寄存器窗口时返回边界错误。
+			return err
+		}
+		vm.SetOpenTop(-1)
+		return nil
+	}
 	if resultCount < 0 {
 		// 开放返回写入被调函数实际返回的所有结果。
 		resultCount = len(results)

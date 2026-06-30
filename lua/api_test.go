@@ -4961,3 +4961,32 @@ _G.X = nil
 		t.Fatalf("DoString Lua __newindex yield failed: %v", err)
 	}
 }
+
+// TestWriteLuaCallResultsSingleReturnFastPath 验证普通单返回值写回语义。
+//
+// CALL C=2 是 Lua 函数调用最常见形态，快路径必须和通用路径一样覆盖函数槽、缺失返回补 nil，
+// 并清理开放返回边界。
+func TestWriteLuaCallResultsSingleReturnFastPath(t *testing.T) {
+	vm := runtime.NewVM(2)
+	vm.SetOpenTop(2)
+	request := &runtime.CallRequest{FunctionIndex: 1, ReturnCount: 1}
+
+	if err := writeLuaCallResults(vm, request, []runtime.Value{runtime.StringValue("ok")}); err != nil {
+		// 单返回值写回合法寄存器必须成功。
+		t.Fatalf("single return write failed: %v", err)
+	}
+	value, ok := vm.Register(1)
+	if !ok || !value.RawEqual(runtime.StringValue("ok")) {
+		// 函数槽必须被第一个返回值覆盖。
+		t.Fatalf("single return value mismatch: value=%#v ok=%v", value, ok)
+	}
+	if err := writeLuaCallResults(vm, request, nil); err != nil {
+		// 缺失返回值也必须按 Lua 语义补 nil。
+		t.Fatalf("single nil return write failed: %v", err)
+	}
+	value, ok = vm.Register(1)
+	if !ok || !value.IsNil() {
+		// 无实际返回值时固定返回槽必须写入 nil。
+		t.Fatalf("single missing return mismatch: value=%#v ok=%v", value, ok)
+	}
+}
