@@ -619,6 +619,24 @@ func TestNewLuaClosureCachesDirectCallSafe(t *testing.T) {
 		// GETUPVAL;ADD;RETURN 形态也应缓存 upvalue 元数据。
 		t.Fatalf("upvalue add closure should cache leaf add metadata")
 	}
+	if !upvalueAddClosure.LeafAddReturn.HasRegisterUpvalueAdd || upvalueAddClosure.LeafAddReturn.UpvalueAddRegisterIndex != 0 {
+		// R0 + upvalue 应额外缓存为实参加 upvalue 专用形态。
+		t.Fatalf("upvalue add closure should cache register upvalue metadata: %+v", upvalueAddClosure.LeafAddReturn)
+	}
+
+	upvalueIntegerProto := &bytecode.Proto{
+		Constants: []bytecode.Constant{bytecode.IntegerConstant(1)},
+		Code: []bytecode.Instruction{
+			bytecode.CreateABC(bytecode.OpGetUpval, 1, 0, 0),
+			bytecode.CreateABC(bytecode.OpAdd, 1, 1, bytecode.RKAsK(0)),
+			bytecode.CreateABC(bytecode.OpReturn, 1, 2, 0),
+		},
+	}
+	upvalueIntegerClosure := NewLuaClosure(upvalueIntegerProto, nil, nil)
+	if upvalueIntegerClosure.LeafAddReturn == nil || !upvalueIntegerClosure.LeafAddReturn.HasRegisterIntegerConstant || upvalueIntegerClosure.LeafAddReturn.IntegerRegisterIndex != 1 || upvalueIntegerClosure.LeafAddReturn.IntegerConstant != 1 {
+		// upvalue + K1 也应缓存为整数常量专用形态。
+		t.Fatalf("upvalue integer add metadata mismatch: %+v", upvalueIntegerClosure.LeafAddReturn)
+	}
 }
 
 // TestVMTryExecuteLeafAddReturn 验证 `ADD; RETURN` 叶子函数快路径。
