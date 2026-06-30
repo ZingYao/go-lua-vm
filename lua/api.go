@@ -2305,11 +2305,13 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 	}
 	debugEnvironment, hasDebugEnvironment := debuglib.EnvironmentForState(runtimeState)
 	hooksEnabled := hasDebugEnvironment && debugEnvironment.HasActiveHook()
-	preciseFrameSync := hasDebugEnvironment || continuation != nil || runtimeState.HasCreatedCoroutines()
+	coroutinesCreated := runtimeState.HasCreatedCoroutines()
+	preciseFrameSync := hasDebugEnvironment || continuation != nil || coroutinesCreated
 	refreshHookState := func() {
+		coroutinesCreated = runtimeState.HasCreatedCoroutines()
 		if !hasDebugEnvironment {
 			// 未打开 debug 库时仍需刷新 coroutine 创建状态。
-			preciseFrameSync = continuation != nil || runtimeState.HasCreatedCoroutines()
+			preciseFrameSync = continuation != nil || coroutinesCreated
 			return
 		}
 		hooksEnabled = debugEnvironment.HasActiveHook()
@@ -2454,7 +2456,11 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 		}
 		instruction := proto.Code[pc]
 		opCode := instruction.OpCode()
-		coroutineThread := currentCoroutineThread(state)
+		var coroutineThread *runtime.Thread
+		if coroutinesCreated {
+			// 只有 State 创建过协程时才需要查询当前运行线程；普通主线程热路径避免每条指令调用 Running。
+			coroutineThread = currentCoroutineThread(state)
+		}
 		if err := vm.Step(instruction); err != nil {
 			if syncErr := syncCurrentFrame(pc); syncErr != nil {
 				return nil, syncErr
