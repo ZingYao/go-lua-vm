@@ -61,7 +61,7 @@ func Open(state *runtime.State) error {
 	library.RawSetString("randomseed", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(RandomSeed)))
 	library.RawSetString("sin", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: SinUnaryValue, AcceptedKinds: numberUnaryKinds}))
 	library.RawSetString("sqrt", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: SqrtUnaryValue, AcceptedKinds: numberUnaryKinds}))
-	library.RawSetString("tan", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Tan)))
+	library.RawSetString("tan", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: TanUnaryValue, AcceptedKinds: numberUnaryKinds}))
 	library.RawSetString("tointeger", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(ToInteger)))
 	library.RawSetString("type", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Type)))
 	library.RawSetString("ult", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(ULT)))
@@ -699,6 +699,25 @@ func Tan(args ...runtime.Value) ([]runtime.Value, error) {
 
 	// 返回正切结果。
 	return []runtime.Value{runtime.NumberValue(math.Tan(value))}, nil
+}
+
+// TanUnaryValue 实现 Lua 5.3 `math.tan` 的单参数单返回热路径。
+//
+// value 必须是 number 或 integer；返回值始终是 Lua float number。该入口服务 VM CALL
+// fast path，避免标准库热点调用构造临时参数和结果切片。
+func TanUnaryValue(value runtime.Value) (runtime.Value, error) {
+	// tan 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
+	if value.Kind != runtime.KindInteger && value.Kind != runtime.KindNumber {
+		// 非 number 入参按 Lua 标准库参数错误返回。
+		return runtime.NilValue(), badArgument("tan", 1, fmt.Sprintf("number expected, got %s", runtime.LuaErrorTypeName(value)))
+	}
+	if value.Kind == runtime.KindInteger {
+		// integer 入参转换为 float64 后计算三角函数。
+		return runtime.NumberValue(math.Tan(float64(value.Integer))), nil
+	}
+
+	// number 入参直接计算三角函数。
+	return runtime.NumberValue(math.Tan(value.Number)), nil
 }
 
 // ToInteger 实现 Lua 5.3 `math.tointeger`。
