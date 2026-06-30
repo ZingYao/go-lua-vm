@@ -1916,6 +1916,16 @@ func (vm *VM) executeSetTable(instruction bytecode.Instruction) error {
 			}
 			keyConstant := vm.constants[keyIndex]
 			if keyConstant.Kind == bytecode.ConstantString {
+				if !bytecode.IsK(instruction.C()) {
+					// value 来自寄存器时直接读取，避免 string key 写入热路径重复进入 RK 分派。
+					valueIndex := bytecode.IndexK(instruction.C())
+					if valueIndex < 0 || valueIndex >= len(vm.registers) {
+						// value 寄存器越界时不能尝试写入 table。
+						return ErrRegisterOutOfRange
+					}
+					table.RawSetString(keyConstant.String, vm.registers[valueIndex])
+					return nil
+				}
 				// string key 写入不会触发元方法；value 仍按 RK 语义读取，保留常量越界错误边界。
 				value, err := vm.rkValue(instruction.C())
 				if err != nil {
@@ -2016,6 +2026,16 @@ func (vm *VM) executeSetTabUp(instruction bytecode.Instruction) error {
 			}
 			keyConstant := vm.constants[keyIndex]
 			if keyConstant.Kind == bytecode.ConstantString {
+				if !bytecode.IsK(instruction.C()) {
+					// value 来自寄存器时直接读取，避免 string key 写入热路径重复进入 RK 分派。
+					valueIndex := bytecode.IndexK(instruction.C())
+					if valueIndex < 0 || valueIndex >= len(vm.registers) {
+						// value 寄存器越界时不能尝试写入 table。
+						return ErrRegisterOutOfRange
+					}
+					table.RawSetString(keyConstant.String, vm.registers[valueIndex])
+					return nil
+				}
 				// string key 写入不会触发元方法；value 仍按 RK 语义读取，保留常量越界错误边界。
 				value, err := vm.rkValue(instruction.C())
 				if err != nil {

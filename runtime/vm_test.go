@@ -887,6 +887,19 @@ func TestVMGetTabUpAndSetTabUp(t *testing.T) {
 		// upvalue table 必须保存 SETTABUP 写入的值。
 		t.Fatalf("settabup value mismatch: value=%#v", value)
 	}
+	if err := vm.SetRegister(1, IntegerValue(54)); err != nil {
+		// 测试寄存器 value 写入路径前必须先准备源寄存器。
+		t.Fatalf("set source register failed: %v", err)
+	}
+	if err := vm.Step(bytecode.CreateABC(bytecode.OpSetTabUp, 0, bytecode.RKAsK(1), 1)); err != nil {
+		// SETTABUP 使用常量 key 和寄存器 value 写入 upvalue table 必须成功。
+		t.Fatalf("settabup register value failed: %v", err)
+	}
+	value = envTable.RawGetString("version")
+	if !value.RawEqual(IntegerValue(54)) {
+		// upvalue table 必须保存寄存器 value 写入的值。
+		t.Fatalf("settabup register value mismatch: value=%#v", value)
+	}
 }
 
 // TestVMGetTabUpAndSetTabUpErrors 验证 upvalue table 指令的主要错误边界。
