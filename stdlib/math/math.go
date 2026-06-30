@@ -42,7 +42,7 @@ func Open(state *runtime.State) error {
 	library.RawSetString("acos", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: ACosUnaryValue, AcceptedKinds: numberUnaryKinds}))
 	library.RawSetString("asin", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: ASinUnaryValue, AcceptedKinds: numberUnaryKinds}))
 	library.RawSetString("atan", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: ATanUnaryValue, AcceptedKinds: numberUnaryKinds}))
-	library.RawSetString("ceil", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Ceil)))
+	library.RawSetString("ceil", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: CeilUnaryValue, AcceptedKinds: numberUnaryKinds}))
 	library.RawSetString("cos", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: CosUnaryValue, AcceptedKinds: numberUnaryKinds}))
 	library.RawSetString("deg", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: DegUnaryValue, AcceptedKinds: numberUnaryKinds}))
 	library.RawSetString("exp", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: ExpUnaryValue, AcceptedKinds: numberUnaryKinds}))
@@ -257,6 +257,31 @@ func Ceil(args ...runtime.Value) ([]runtime.Value, error) {
 
 	// 有限且可表达时返回 Lua integer。
 	return []runtime.Value{runtime.IntegerValue(int64(ceiled))}, nil
+}
+
+// CeilUnaryValue 实现 Lua 5.3 `math.ceil` 的单参数单返回热路径。
+//
+// value 必须是 number 或 integer；integer 入参原样返回，float number 入参按 Lua 5.3
+// 语义向上取整。该入口服务 VM CALL fast path，避免构造临时参数和结果切片。
+func CeilUnaryValue(value runtime.Value) (runtime.Value, error) {
+	// ceil 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
+	if !value.IsNumber() {
+		// 非 number 类型不做字符串转数值隐式转换。
+		return runtime.NilValue(), badArgument("ceil", 1, fmt.Sprintf("number expected, got %s", runtime.LuaErrorTypeName(value)))
+	}
+	if value.Kind == runtime.KindInteger {
+		// integer 已经是整数，直接返回。
+		return value, nil
+	}
+
+	ceiled := math.Ceil(value.Number)
+	if math.IsNaN(ceiled) || math.IsInf(ceiled, 0) || ceiled < float64(math.MinInt64) || ceiled >= -float64(math.MinInt64) {
+		// 非有限或超出 int64 范围时保留 float number。
+		return runtime.NumberValue(ceiled), nil
+	}
+
+	// 有限且可表达时返回 Lua integer。
+	return runtime.IntegerValue(int64(ceiled)), nil
 }
 
 // Cos 实现 Lua 5.3 `math.cos`。
