@@ -2619,12 +2619,7 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 		}
 		previousPreviousPC = previousPC
 		previousPC = pc
-		pc++
-		if vm.SkipNext() {
-			// 测试类指令要求跳过下一条指令。
-			pc++
-		}
-		pc += vm.PCOffset()
+		pc = vm.NextPC(pc)
 	}
 
 	// Proto 正常落出指令数组时按无返回值处理。
@@ -3648,12 +3643,7 @@ func executeLuaLeafClosureFast(state *State, proto *bytecode.Proto, vm *runtime.
 			// RETURN 指令结束当前 leaf closure。
 			return returnValues, nil
 		}
-		pc++
-		if vm.SkipNext() {
-			// 测试类指令要求跳过下一条指令。
-			pc++
-		}
-		pc += vm.PCOffset()
+		pc = vm.NextPC(pc)
 	}
 	return nil, nil
 }

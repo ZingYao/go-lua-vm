@@ -1540,6 +1540,21 @@ func (vm *VM) PCOffset() int {
 	return vm.pcOffset
 }
 
+// NextPC 根据上一条指令的跳过标记和跳转偏移计算下一条 PC。
+//
+// pc 必须是刚执行完成的指令位置；返回值只表达执行循环下一轮入口，不会修改 VM 内部状态。
+// 该方法等价于 `pc + 1 + optional skip + pcOffset`，用于普通热路径合并 SkipNext 和 PCOffset 读取。
+func (vm *VM) NextPC(pc int) int {
+	// 普通路径先前进到下一条顺序指令。
+	nextPC := pc + 1
+	if vm.skipNext {
+		// 测试类指令要求跳过下一条顺序指令。
+		nextPC++
+	}
+	// 控制流指令的偏移在顺序推进后叠加。
+	return nextPC + vm.pcOffset
+}
+
 // CloseFrom 返回上一条 JMP 指令要求关闭 upvalue 的起始寄存器。
 //
 // 第二个返回值为 false 表示上一条 JMP 没有 close 请求。
