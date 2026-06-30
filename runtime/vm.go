@@ -1622,12 +1622,13 @@ func (vm *VM) Step(instruction bytecode.Instruction) error {
 	vm.closeFrom = -1
 	vm.hasCallRequest = false
 	vm.returned = false
-	if (vm.pendingLoadKXTarget >= 0 || vm.pendingSetList != nil) && instruction.OpCode() != bytecode.OpExtraArg {
+	opCode := instruction.OpCode()
+	if (vm.pendingLoadKXTarget >= 0 || vm.pendingSetList != nil) && opCode != bytecode.OpExtraArg {
 		// LOADKX 或 SETLIST 的扩展形态必须紧跟 EXTRAARG，否则无法确定扩展参数。
 		return ErrExpectedExtraArg
 	}
 
-	switch instruction.OpCode() {
+	switch opCode {
 	case bytecode.OpMove:
 		// MOVE 只在寄存器之间复制值，不触发元方法、栈调整或 GC 屏障。
 		return vm.executeMove(instruction)
