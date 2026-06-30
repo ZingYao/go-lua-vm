@@ -2489,12 +2489,31 @@ func (vm *VM) executeDiv(instruction bytecode.Instruction) error {
 		// 右操作数读取失败时不能继续计算，目标寄存器保持原值。
 		return err
 	}
-	leftNumber, leftOK := nativeNumberValue(leftValue)
-	rightNumber, rightOK := nativeNumberValue(rightValue)
-	if leftOK && rightOK {
-		// Lua 5.3 的 `/` 总是返回 float number，零除保留 IEEE-754 Inf/NaN 语义。
-		vm.registers[targetIndex] = NumberValue(leftNumber / rightNumber)
-		return nil
+	switch leftValue.Kind {
+	case KindInteger:
+		// integer 左操作数在 DIV 中先转换为 float64。
+		switch rightValue.Kind {
+		case KindInteger:
+			// integer / integer 也返回 number。
+			vm.registers[targetIndex] = NumberValue(float64(leftValue.Integer) / float64(rightValue.Integer))
+			return nil
+		case KindNumber:
+			// integer / number 直接按 float64 执行。
+			vm.registers[targetIndex] = NumberValue(float64(leftValue.Integer) / rightValue.Number)
+			return nil
+		}
+	case KindNumber:
+		// number 左操作数只需区分右侧原生数值类型。
+		switch rightValue.Kind {
+		case KindInteger:
+			// number / integer 直接按 float64 执行。
+			vm.registers[targetIndex] = NumberValue(leftValue.Number / float64(rightValue.Integer))
+			return nil
+		case KindNumber:
+			// number / number 直接按 float64 执行。
+			vm.registers[targetIndex] = NumberValue(leftValue.Number / rightValue.Number)
+			return nil
+		}
 	}
 
 	// 非原生数值继续使用完整路径，保留字符串数字转换和 __div 元方法。
