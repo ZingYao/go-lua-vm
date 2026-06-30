@@ -2799,6 +2799,11 @@ func (vm *VM) tryCachedNativeNumberAddArithmetic(instruction bytecode.Instructio
 	}
 	leftValue := vm.registers[cacheEntry.leftIndex]
 	rightValue := vm.registers[cacheEntry.rightIndex]
+	if leftValue.Kind == KindNumber && rightValue.Kind == KindNumber {
+		// 双 number 是混合算术循环常见 ADD 形态，直接相加可跳过原生数值拆分。
+		vm.registers[instruction.A()] = NumberValue(leftValue.Number + rightValue.Number)
+		return true, nil
+	}
 	if leftValue.Kind == KindInteger && rightValue.Kind == KindInteger {
 		// 双 integer 必须让 integer ADD 路径处理，保留 integer 结果。
 		vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
