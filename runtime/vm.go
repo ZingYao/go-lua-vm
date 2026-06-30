@@ -592,6 +592,137 @@ func (vm *VM) Register(index int) (Value, bool) {
 	return vm.registers[index], true
 }
 
+// TryExecuteLeafAddReturnInCaller 在 caller VM 中执行 `return x + const` 形态叶子函数。
+//
+// closure 必须是已缓存 LeafAddReturn 的 Lua closure；request 必须是固定单参数、单返回的 CALL。
+// 返回 handled=false 表示需要回退完整 VM 路径以保留字符串转换、元方法和异常语义。
+func (vm *VM) TryExecuteLeafAddReturnInCaller(closure *LuaClosure, request *CallRequest) (bool, error) {
+	// 先校验调用形态和函数体形态，避免对普通 Lua 函数改变执行路径。
+	if vm == nil || closure == nil || closure.Proto == nil || closure.LeafAddReturn == nil || request == nil || request.ArgumentCount != 1 || request.ReturnCount != 1 {
+		// 非单参数单返回或非两指令叶子函数，交给原 direct CALL。
+		return false, nil
+	}
+
+	// 读取预解析的叶子函数形态，后续只在 caller 寄存器窗口内完成操作数映射。
+	leafAddReturn := closure.LeafAddReturn
+	var upvalueValue Value
+	if leafAddReturn.HasUpvalueRegister {
+		// 闭包捕获常量形态可直接读取 upvalue cell，避免每次解释 GETUPVAL。
+		var ok bool
+		upvalueValue, ok = luaClosureUpvalueValue(closure, leafAddReturn.UpvalueIndex)
+		if !ok {
+			// upvalue 状态异常时回退原 VM 路径生成标准错误。
+			return false, nil
+		}
+	}
+
+	argumentStart := request.FunctionIndex + 1
+	leftValue, leftOK := vm.leafAddOperandValue(argumentStart, leafAddReturn.LeftOperand, leafAddReturn.UpvalueRegister, upvalueValue, leafAddReturn.HasUpvalueRegister)
+	if !leftOK {
+		// 操作数无法在 caller 侧无副作用读取时回退。
+		return false, nil
+	}
+	rightValue, rightOK := vm.leafAddOperandValue(argumentStart, leafAddReturn.RightOperand, leafAddReturn.UpvalueRegister, upvalueValue, leafAddReturn.HasUpvalueRegister)
+	if !rightOK {
+		// 操作数无法在 caller 侧无副作用读取时回退。
+		return false, nil
+	}
+	resultValue, ok := leafFastAddValue(leftValue, rightValue)
+	if !ok {
+		// 非原生 number/integer 加法需要保留字符串转换和元方法回退语义。
+		return false, nil
+	}
+	if request.FunctionIndex < 0 || request.FunctionIndex >= len(vm.registers) {
+		// 结果写回失败表示调用寄存器窗口异常。
+		return true, ErrRegisterOutOfRange
+	}
+
+	// 直接写回函数槽并清理开放栈顶，匹配 CALL 消费完成后的 caller VM 状态。
+	vm.registers[request.FunctionIndex] = resultValue
+	vm.openTop = -1
+	return true, nil
+}
+
+// leafAddOperandValue 读取 caller-side leaf ADD 预解析操作数。
+//
+// argumentStart 是 caller 中第一个实参寄存器；常量操作数直接返回缓存值，寄存器操作数映射到
+// caller 实参区；GETUPVAL 前缀写入的寄存器会映射到 closure 当前 upvalue 值。
+func (vm *VM) leafAddOperandValue(argumentStart int, operand LuaLeafAddOperand, upvalueRegister int, upvalueValue Value, hasUpvalueRegister bool) (Value, bool) {
+	if operand.Constant {
+		// 常量值在 closure 创建时已经完成转换，可直接复用。
+		return operand.ConstantValue, true
+	}
+	registerIndex := operand.RegisterIndex
+	if hasUpvalueRegister && registerIndex == upvalueRegister {
+		// GETUPVAL 写入的临时寄存器可直接读取 closure 当前 upvalue。
+		return upvalueValue, true
+	}
+	callerRegisterIndex := argumentStart + registerIndex
+	if callerRegisterIndex < 0 || callerRegisterIndex >= len(vm.registers) {
+		// caller 实参区缺失时回退完整 VM 路径。
+		return NilValue(), false
+	}
+	return vm.registers[callerRegisterIndex], true
+}
+
+// luaClosureUpvalueValue 读取 Lua closure 当前 upvalue 值。
+//
+// 运行期共享 cell 优先于创建时快照；索引越界或 cell 损坏时返回 ok=false 让调用方回退 VM。
+func luaClosureUpvalueValue(closure *LuaClosure, index int) (Value, bool) {
+	// 先读取共享 upvalue cell，保证闭包看到最新外层局部值。
+	if closure == nil || index < 0 {
+		// 非法 closure 或索引不能读取 upvalue。
+		return NilValue(), false
+	}
+	if index < len(closure.UpvalueCells) {
+		cell := closure.UpvalueCells[index]
+		if cell == nil {
+			// 损坏 cell 回退完整 VM，由原路径暴露错误。
+			return NilValue(), false
+		}
+		return cell.Value(), true
+	}
+	if index < len(closure.Upvalues) {
+		// 没有共享 cell 时使用闭包创建时的 upvalue 快照。
+		return closure.Upvalues[index], true
+	}
+	return NilValue(), false
+}
+
+// leafFastAddValue 执行 caller-side 原生 number/integer 加法。
+//
+// 仅覆盖 Lua 5.3 原生双 integer 或双可数值类型；不处理字符串数字和元方法，以便回退完整 VM。
+func leafFastAddValue(leftValue Value, rightValue Value) (Value, bool) {
+	if leftValue.Kind == KindInteger && rightValue.Kind == KindInteger {
+		// 双 integer 加法保持 integer 结果。
+		return IntegerValue(leftValue.Integer + rightValue.Integer), true
+	}
+	leftNumber, leftOK := leafNativeNumberOperand(leftValue)
+	rightNumber, rightOK := leafNativeNumberOperand(rightValue)
+	if !leftOK || !rightOK {
+		// 任一侧不是原生 number/integer 时不能走快路径。
+		return NilValue(), false
+	}
+	return NumberValue(leftNumber + rightNumber), true
+}
+
+// leafNativeNumberOperand 把原生 integer/number 操作数转换为 float64。
+//
+// 字符串数字在 Lua 算术中可转换，但该快路径故意不覆盖，避免复制完整 tonumber 语义。
+func leafNativeNumberOperand(value Value) (float64, bool) {
+	switch value.Kind {
+	case KindInteger:
+		// integer 可作为 float 运算操作数。
+		return float64(value.Integer), true
+	case KindNumber:
+		// number 直接返回浮点负载。
+		return value.Number, true
+	default:
+		// 其他类型需要完整 VM 算术路径。
+		return 0, false
+	}
+}
+
 // CopyRegisters 将连续寄存器区间复制到目标切片。
 //
 // start 是起始寄存器下标；target 的长度决定复制数量。返回 false 表示区间越界，调用方应按
