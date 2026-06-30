@@ -682,6 +682,74 @@ func TestVMTryExecuteLeafAddReturn(t *testing.T) {
 	}
 }
 
+// TestVMTryExecuteLeafAddReturnInCallerTwoArguments 验证 caller-side 二实参加法快路径。
+//
+// `local function add(a,b) return a+b end` 是函数调用热路径的典型形态；快路径必须只在两个
+// 实参都真实存在且为原生数值时写回，缺参场景要回退完整 VM 以保留 nil 算术错误语义。
+func TestVMTryExecuteLeafAddReturnInCallerTwoArguments(t *testing.T) {
+	proto := &bytecode.Proto{
+		Code: []bytecode.Instruction{
+			bytecode.CreateABC(bytecode.OpAdd, 0, 0, 1),
+			bytecode.CreateABC(bytecode.OpReturn, 0, 2, 0),
+		},
+	}
+	closure := NewLuaClosure(proto, nil, nil)
+	if closure.LeafAddReturn == nil {
+		// 二寄存器 ADD;RETURN 必须预解析为叶子加法形态。
+		t.Fatalf("expected leaf add metadata")
+	}
+
+	vm := NewVM(4)
+	if err := vm.SetRegister(0, ReferenceValue(KindLuaClosure, closure)); err != nil {
+		// 调用函数槽写入必须成功。
+		t.Fatalf("set function register failed: %v", err)
+	}
+	if err := vm.SetRegister(1, IntegerValue(40)); err != nil {
+		// 第一个实参写入必须成功。
+		t.Fatalf("set first argument failed: %v", err)
+	}
+	if err := vm.SetRegister(2, IntegerValue(2)); err != nil {
+		// 第二个实参写入必须成功。
+		t.Fatalf("set second argument failed: %v", err)
+	}
+	handled, err := vm.TryExecuteLeafAddReturnInCaller(closure, &CallRequest{
+		FunctionIndex: 0,
+		ArgumentCount: 2,
+		ReturnCount:   1,
+	})
+	if err != nil {
+		// 合法二实参加法不应失败。
+		t.Fatalf("caller leaf add failed: %v", err)
+	}
+	if !handled {
+		// 二实参 ADD;RETURN 应在 caller 侧完成。
+		t.Fatalf("caller leaf add should be handled")
+	}
+	value, ok := vm.Register(0)
+	if !ok || !value.RawEqual(IntegerValue(42)) {
+		// 结果必须直接写回函数槽。
+		t.Fatalf("caller leaf add result mismatch: value=%#v ok=%v", value, ok)
+	}
+
+	if err := vm.SetRegister(0, ReferenceValue(KindLuaClosure, closure)); err != nil {
+		// 重新写回函数槽用于缺参回退验证。
+		t.Fatalf("reset function register failed: %v", err)
+	}
+	if err := vm.SetRegister(2, IntegerValue(99)); err != nil {
+		// 相邻寄存器放置哨兵，确保缺参不会被错误读取。
+		t.Fatalf("set sentinel register failed: %v", err)
+	}
+	handled, err = vm.TryExecuteLeafAddReturnInCaller(closure, &CallRequest{
+		FunctionIndex: 0,
+		ArgumentCount: 1,
+		ReturnCount:   1,
+	})
+	if err != nil || handled {
+		// 第二个实参缺失时必须回退完整 VM，而不是读取 R2 哨兵。
+		t.Fatalf("missing argument should fallback: handled=%v err=%v", handled, err)
+	}
+}
+
 // TestVMNewTable 验证 NEWTABLE 会创建新的 table 引用。
 //
 // Lua 5.3 NEWTABLE 的 B/C 预分配 hint 暂未生效，但创建空 table 的可观察语义必须正确。

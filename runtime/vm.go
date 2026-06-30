@@ -641,14 +641,14 @@ func (vm *VM) Register(index int) (Value, bool) {
 	return vm.registers[index], true
 }
 
-// TryExecuteLeafAddReturnInCaller 在 caller VM 中执行 `return x + const` 形态叶子函数。
+// TryExecuteLeafAddReturnInCaller 在 caller VM 中执行 `return a + b` 形态叶子函数。
 //
-// closure 必须是已缓存 LeafAddReturn 的 Lua closure；request 必须是固定单参数、单返回的 CALL。
+// closure 必须是已缓存 LeafAddReturn 的 Lua closure；request 必须是固定参数、单返回的 CALL。
 // 返回 handled=false 表示需要回退完整 VM 路径以保留字符串转换、元方法和异常语义。
 func (vm *VM) TryExecuteLeafAddReturnInCaller(closure *LuaClosure, request *CallRequest) (bool, error) {
 	// 先校验调用形态和函数体形态，避免对普通 Lua 函数改变执行路径。
-	if vm == nil || closure == nil || closure.Proto == nil || closure.LeafAddReturn == nil || request == nil || request.ArgumentCount != 1 || request.ReturnCount != 1 {
-		// 非单参数单返回或非两指令叶子函数，交给原 direct CALL。
+	if vm == nil || closure == nil || closure.Proto == nil || closure.LeafAddReturn == nil || request == nil || request.ArgumentCount < 0 || request.ReturnCount != 1 {
+		// 非固定参数单返回或非两指令叶子函数，交给原 direct CALL。
 		return false, nil
 	}
 
@@ -674,12 +674,12 @@ func (vm *VM) TryExecuteLeafAddReturnInCaller(closure *LuaClosure, request *Call
 	}
 
 	argumentStart := request.FunctionIndex + 1
-	leftValue, leftOK := vm.leafAddOperandValue(argumentStart, leafAddReturn.LeftOperand, leafAddReturn.UpvalueRegister, upvalueValue, leafAddReturn.HasUpvalueRegister)
+	leftValue, leftOK := vm.leafAddOperandValue(argumentStart, request.ArgumentCount, leafAddReturn.LeftOperand, leafAddReturn.UpvalueRegister, upvalueValue, leafAddReturn.HasUpvalueRegister)
 	if !leftOK {
 		// 操作数无法在 caller 侧无副作用读取时回退。
 		return false, nil
 	}
-	rightValue, rightOK := vm.leafAddOperandValue(argumentStart, leafAddReturn.RightOperand, leafAddReturn.UpvalueRegister, upvalueValue, leafAddReturn.HasUpvalueRegister)
+	rightValue, rightOK := vm.leafAddOperandValue(argumentStart, request.ArgumentCount, leafAddReturn.RightOperand, leafAddReturn.UpvalueRegister, upvalueValue, leafAddReturn.HasUpvalueRegister)
 	if !rightOK {
 		// 操作数无法在 caller 侧无副作用读取时回退。
 		return false, nil
@@ -801,9 +801,9 @@ func (vm *VM) tryLeafRegisterIntegerConstantAdd(closure *LuaClosure, leaf *LuaLe
 
 // leafAddOperandValue 读取 caller-side leaf ADD 预解析操作数。
 //
-// argumentStart 是 caller 中第一个实参寄存器；常量操作数直接返回缓存值，寄存器操作数映射到
-// caller 实参区；GETUPVAL 前缀写入的寄存器会映射到 closure 当前 upvalue 值。
-func (vm *VM) leafAddOperandValue(argumentStart int, operand LuaLeafAddOperand, upvalueRegister int, upvalueValue Value, hasUpvalueRegister bool) (Value, bool) {
+// argumentStart 是 caller 中第一个实参寄存器；argumentCount 是 CALL 固定实参数量。常量操作数
+// 直接返回缓存值；寄存器操作数映射到 caller 实参区；GETUPVAL 前缀写入的寄存器会映射到 closure 当前 upvalue 值。
+func (vm *VM) leafAddOperandValue(argumentStart int, argumentCount int, operand LuaLeafAddOperand, upvalueRegister int, upvalueValue Value, hasUpvalueRegister bool) (Value, bool) {
 	if operand.Constant {
 		// 常量值在 closure 创建时已经完成转换，可直接复用。
 		return operand.ConstantValue, true
@@ -812,6 +812,10 @@ func (vm *VM) leafAddOperandValue(argumentStart int, operand LuaLeafAddOperand, 
 	if hasUpvalueRegister && registerIndex == upvalueRegister {
 		// GETUPVAL 写入的临时寄存器可直接读取 closure 当前 upvalue。
 		return upvalueValue, true
+	}
+	if registerIndex < 0 || registerIndex >= argumentCount {
+		// 缺失实参在 Lua 中应进入 callee 后变为 nil；caller 侧不能读取相邻寄存器的旧值。
+		return NilValue(), false
 	}
 	callerRegisterIndex := argumentStart + registerIndex
 	if callerRegisterIndex < 0 || callerRegisterIndex >= len(vm.registers) {
