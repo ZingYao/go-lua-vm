@@ -1167,6 +1167,48 @@ func TestCompileSingleLocalReturnUsesSourceRegister(t *testing.T) {
 	}
 }
 
+// TestCompileBinaryReturnReusesLeftCallArgumentSlots 验证 return 二元表达式会回收左侧调用实参槽。
+//
+// `return fib(x - 1) + fib(x - 2)` 的左侧 CALL 固定返回一个值；CALL 后 R2 参数槽可被右侧
+// 调用复用，从而对齐 Lua 5.3 官方的 R1/R2 双调用结果形态。
+func TestCompileBinaryReturnReusesLeftCallArgumentSlots(t *testing.T) {
+	chunk := parseChunkForCodegenTest(t, "local function fib(x) if x < 2 then return x end return fib(x - 1) + fib(x - 2) end return fib(4)")
+
+	proto, err := CompileChunk(chunk, "binary-return-left-call")
+	if err != nil {
+		// 递归二元返回样例必须可编译。
+		t.Fatalf("compile binary return left call failed: %v", err)
+	}
+	if len(proto.Protos) != 1 {
+		// 测试样例应只生成 fib 一个子函数。
+		t.Fatalf("unexpected child proto count: %d", len(proto.Protos))
+	}
+	child := proto.Protos[0]
+	if child.MaxStackSize != 4 {
+		// 官方 Lua 5.3 在该形态下只需要 R0 参数、R1/R2 调用结果和 R3 参数槽。
+		t.Fatalf("unexpected child max stack=%d code=%v", child.MaxStackSize, child.Code)
+	}
+	if !hasCall(child, 1, 2, 2) || !hasCall(child, 2, 2, 2) {
+		// 左右两次递归调用应分别复用 R1 和 R2 作为函数/结果寄存器。
+		t.Fatalf("expected CALL R1 and CALL R2; code=%v", child.Code)
+	}
+	hasDirectAdd := false
+	for _, instruction := range child.Code {
+		if instruction.OpCode() == bytecode.OpAdd && instruction.A() == 1 && instruction.B() == 1 && instruction.C() == 2 {
+			// 两个调用结果应直接在 R1/R2 合成返回值。
+			hasDirectAdd = true
+		}
+		if instruction.OpCode() == bytecode.OpGetUpval && instruction.A() == 3 {
+			// 旧形态右侧调用会从 R3 开始，导致 MaxStackSize 被推高到 5。
+			t.Fatalf("unexpected right call at R3; code=%v", child.Code)
+		}
+	}
+	if !hasDirectAdd {
+		// 没有直接 ADD 说明右侧调用结果仍没有复用左侧参数槽。
+		t.Fatalf("missing direct ADD R1 R1 R2; code=%v", child.Code)
+	}
+}
+
 // TestCompileCapturedBlockLocalKeepsCloseJump 验证被闭包捕获的 block local 仍生成 close-only JMP。
 //
 // 未捕获 local 的作用域退出可以省略零距离 close-only JMP；一旦内层函数捕获 block local，

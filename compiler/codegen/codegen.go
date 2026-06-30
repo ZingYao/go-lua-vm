@@ -3566,6 +3566,10 @@ func (generator *generator) compileBinaryWithReusableTargetTo(expression *parser
 		// 左操作数失败时不继续生成右操作数，保留原始错误。
 		return err
 	}
+	if expressionIsFixedSingleResultCall(expression.Left) {
+		// 左侧固定单返回调用只保留 targetRegister 结果，参数槽不再参与后续右侧求值。
+		generator.releaseCallArgumentsAfterFixedResult(targetRegister, 1)
+	}
 	rightOperand, rightRegister, err := generator.binaryRightOperand(expression.Right)
 	if err != nil {
 		// 右操作数失败时直接返回，目标寄存器保持已编译的左操作数。
