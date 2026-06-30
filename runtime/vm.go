@@ -3964,9 +3964,9 @@ func (vm *VM) executeMove(instruction bytecode.Instruction) error {
 // rk 来自 B 或 C 操作数字段；最高位为 1 时按常量表索引读取，为 0 时按寄存器索引读取。
 // 常量或寄存器越界时返回对应错误。
 func (vm *VM) rkValue(rk int) (Value, error) {
-	index := bytecode.IndexK(rk)
 	if bytecode.IsK(rk) {
 		// RK 常量路径从当前 Proto 常量表读取并转换为运行时值。
+		index := bytecode.IndexK(rk)
 		if index < 0 || index >= len(vm.constants) {
 			// 常量索引越界通常表示损坏 chunk 或编译器输出错误。
 			return NilValue(), ErrConstantOutOfRange
@@ -3979,13 +3979,13 @@ func (vm *VM) rkValue(rk int) (Value, error) {
 		return value, nil
 	}
 
-	if index < 0 || index >= len(vm.registers) {
+	if rk < 0 || rk >= len(vm.registers) {
 		// RK 寄存器路径越界时不能读取寄存器窗口。
 		return NilValue(), ErrRegisterOutOfRange
 	}
 
 	// RK 寄存器路径直接返回当前寄存器值。
-	return vm.registers[index], nil
+	return vm.registers[rk], nil
 }
 
 // tableFromValue 从运行时值中解析 table 引用。
