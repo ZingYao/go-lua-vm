@@ -41,7 +41,7 @@ func Open(state *runtime.State) error {
 	library.RawSetString("abs", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: AbsUnaryValue, AcceptedKinds: numberUnaryKinds}))
 	library.RawSetString("acos", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: ACosUnaryValue, AcceptedKinds: numberUnaryKinds}))
 	library.RawSetString("asin", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: ASinUnaryValue, AcceptedKinds: numberUnaryKinds}))
-	library.RawSetString("atan", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(ATan)))
+	library.RawSetString("atan", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: ATanUnaryValue, AcceptedKinds: numberUnaryKinds}))
 	library.RawSetString("ceil", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Ceil)))
 	library.RawSetString("cos", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: CosUnaryValue, AcceptedKinds: numberUnaryKinds}))
 	library.RawSetString("deg", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: DegUnaryValue, AcceptedKinds: numberUnaryKinds}))
@@ -212,6 +212,25 @@ func ATan(args ...runtime.Value) ([]runtime.Value, error) {
 
 	// 返回 atan2(y, x) 结果。
 	return []runtime.Value{runtime.NumberValue(math.Atan2(y, x))}, nil
+}
+
+// ATanUnaryValue 实现 Lua 5.3 `math.atan(y)` 的单参数单返回热路径。
+//
+// value 必须是 number 或 integer；返回值始终是 Lua float number。该入口只覆盖默认
+// x=1 的单参数调用，多参数 `math.atan(y, x)` 仍由通用 Go closure 路径处理。
+func ATanUnaryValue(value runtime.Value) (runtime.Value, error) {
+	// atan 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
+	if value.Kind != runtime.KindInteger && value.Kind != runtime.KindNumber {
+		// 非 number 入参按 Lua 标准库参数错误返回。
+		return runtime.NilValue(), badArgument("atan", 1, fmt.Sprintf("number expected, got %s", runtime.LuaErrorTypeName(value)))
+	}
+	if value.Kind == runtime.KindInteger {
+		// integer 入参转换为 float64，并按 Lua 5.3 默认 x=1 计算 atan2。
+		return runtime.NumberValue(math.Atan2(float64(value.Integer), 1)), nil
+	}
+
+	// number 入参直接按默认 x=1 计算 atan2。
+	return runtime.NumberValue(math.Atan2(value.Number, 1)), nil
 }
 
 // Ceil 实现 Lua 5.3 `math.ceil`。
