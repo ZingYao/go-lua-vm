@@ -723,9 +723,48 @@ func (generator *generator) selfBinaryAccumulatorRightOperand(expression parser.
 			// 右操作数失败时返回原始编译错误。
 			return 0, -1, err
 		}
+		if expressionIsFixedSingleResultCall(expression) {
+			// 自二元累加器路径中的固定单返回调用可立即回收实参槽，贴近 Lua 5.3 codegen 水位。
+			generator.releaseCallArgumentsAfterFixedResult(finalRegister, 1)
+		}
 		return finalRegister, -1, nil
 	}
+	if expressionIsFixedSingleResultCall(expression) {
+		// 外层右侧调用使用一个临时返回槽；CALL 后回收其参数槽，让后续调用复用寄存器。
+		rightRegister := generator.allocateRegister()
+		if err := generator.compileExpressionTo(expression, rightRegister); err != nil {
+			// 右操作数失败时释放临时寄存器并返回。
+			generator.releaseRegister(rightRegister)
+			return 0, -1, err
+		}
+		generator.releaseCallArgumentsAfterFixedResult(rightRegister, 1)
+		return rightRegister, rightRegister, nil
+	}
 	return generator.binaryRightOperand(expression)
+}
+
+// expressionIsFixedSingleResultCall 判断表达式是否会由 compileExpressionTo 生成固定单返回 CALL。
+func expressionIsFixedSingleResultCall(expression parser.Expression) bool {
+	switch typedExpression := expression.(type) {
+	case *parser.FunctionCallExpression:
+		// 普通表达式上下文中的函数调用请求单返回值；尾部开放实参会使用 CALL B=0，不能回收水位。
+		return !callArgumentsEndWithOpenList(typedExpression.Arguments)
+	case *parser.MethodCallExpression:
+		// method 调用同样需要排除尾部开放实参，避免破坏 CALL B=0 参数列表。
+		return !callArgumentsEndWithOpenList(typedExpression.Arguments)
+	default:
+		// 其他表达式没有 CALL 参数槽可回收。
+		return false
+	}
+}
+
+// callArgumentsEndWithOpenList 判断调用实参是否以开放列表表达式结束。
+func callArgumentsEndWithOpenList(arguments []parser.Expression) bool {
+	if len(arguments) == 0 {
+		// 没有实参时固定参数数量为 0。
+		return false
+	}
+	return isOpenListExpression(arguments[len(arguments)-1])
 }
 
 // isSelfBinaryChainRoot 判断表达式是否是左侧最终落到 targetName 的普通二元链。
@@ -3536,6 +3575,22 @@ func (generator *generator) releaseRegistersFrom(startRegister int) {
 		// 只向下回退栈顶，不影响更低位置的长期 local。
 		generator.nextRegister = startRegister
 	}
+}
+
+// releaseCallArgumentsAfterFixedResult 回收固定返回 CALL 的实参寄存器。
+//
+// targetRegister 是 CALL A 字段，resultCount 是固定返回值数量。Lua 5.3 固定返回 CALL 结束后，
+// 函数和实参槽只保留返回区间；但 Go codegen 的 nextRegister 还必须位于所有活跃 local 之后，
+// 否则后续临时寄存器会覆盖 numeric for 控制变量或同作用域后续 local。
+func (generator *generator) releaseCallArgumentsAfterFixedResult(targetRegister int, resultCount int) {
+	releaseFrom := targetRegister + resultCount
+	for _, binding := range generator.locals {
+		if binding.register >= releaseFrom {
+			// 活跃 local 位于返回区间之后时，回收水位必须保留在该 local 后面。
+			releaseFrom = binding.register + 1
+		}
+	}
+	generator.releaseRegistersFrom(releaseFrom)
 }
 
 // defineLocal 登记一个局部变量和调试生命周期。

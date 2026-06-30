@@ -53,6 +53,36 @@ func TestCompileChunkDeduplicatesConstantsAndRegisters(t *testing.T) {
 	}
 }
 
+// TestCompileChunkReleasesFixedCallArguments 验证固定单返回 CALL 后回收参数槽。
+//
+// Lua 5.3 官方 codegen 会在 `x = x + f(i) + g(i)` 中让第二个调用复用前一个调用的参数槽；
+// 回收时仍必须保留 numeric for 的控制变量寄存器，避免后续临时值覆盖循环状态。
+func TestCompileChunkReleasesFixedCallArguments(t *testing.T) {
+	chunk := parseChunkForCodegenTest(t, `
+local function f(i) return i end
+local function g(i) return i end
+local x = 0
+for i = 1, 10 do
+  x = x + f(i) + g(i)
+end
+return x
+`)
+
+	proto, err := CompileChunk(chunk, "call-register-reuse")
+	if err != nil {
+		// 合法函数调用链不应编译失败。
+		t.Fatalf("compile call-register-reuse failed: %v", err)
+	}
+	if proto.MaxStackSize != 10 {
+		// 官方 Lua 5.3 该形态使用 10 个栈槽；多一个槽说明 CALL 实参水位没有及时回收。
+		t.Fatalf("unexpected max stack=%d", proto.MaxStackSize)
+	}
+	if !hasMove(proto, 8, 1) {
+		// 第二个调用应从 R8 放置函数 g，而不是因为前一调用残留参数水位推到 R9。
+		t.Fatalf("expected second call to reuse register 8")
+	}
+}
+
 // TestCompileChunkShortCircuit 验证 and/or 短路表达式生成 TEST/JMP 形态。
 //
 // 当前阶段只验证指令结构，运行时真假语义由 VM 指令测试覆盖。
@@ -718,8 +748,8 @@ func TestCompileSelfBinaryCallChainReusesAccumulator(t *testing.T) {
 		// 自二元调用链样例必须可编译。
 		t.Fatalf("compile self binary call chain failed: %v", err)
 	}
-	if proto.MaxStackSize != 12 {
-		// 第一层调用复用累加器后当前样例只需要 12 个寄存器。
+	if proto.MaxStackSize != 9 {
+		// 固定单返回调用回收实参槽后，当前样例可复用到 9 个寄存器。
 		t.Fatalf("unexpected max stack=%d", proto.MaxStackSize)
 	}
 	for instructionIndex, instruction := range proto.Code {
