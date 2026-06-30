@@ -761,6 +761,50 @@ func TestCompileSafeBinaryReturnUsesRKOperands(t *testing.T) {
 	}
 }
 
+// TestCompileSafeBinaryReturnReadsUpvalueDirectly 验证二元 return 快路径复用参数和 upvalue 寄存器。
+//
+// `return x + a` 中 a 为 upvalue 时，Lua 5.3 C codegen 会先 GETUPVAL 到结果寄存器，再用
+// 参数 x 作为左操作数执行 ADD；不需要额外 MOVE x。
+func TestCompileSafeBinaryReturnReadsUpvalueDirectly(t *testing.T) {
+	chunk := parseChunkForCodegenTest(t, "local a = 1 local function f(x) return x + a end return f(2)")
+
+	proto, err := CompileChunk(chunk, "safe-binary-return-upvalue")
+	if err != nil {
+		// upvalue 二元 return 样例必须可编译。
+		t.Fatalf("compile safe binary return upvalue failed: %v", err)
+	}
+	if len(proto.Protos) != 1 {
+		// 测试样例应只生成 f 一个子函数。
+		t.Fatalf("unexpected child proto count: %d", len(proto.Protos))
+	}
+	child := proto.Protos[0]
+	hasGetUpvalueToResult := false
+	hasDirectAdd := false
+	for _, instruction := range child.Code {
+		switch instruction.OpCode() {
+		case bytecode.OpGetUpval:
+			if instruction.A() == 1 {
+				// 结果寄存器 R1 直接承载 upvalue a。
+				hasGetUpvalueToResult = true
+			}
+		case bytecode.OpAdd:
+			if instruction.A() == 1 && instruction.B() == 0 && instruction.C() == 1 {
+				// ADD 直接读取参数 x 和刚载入的 upvalue a。
+				hasDirectAdd = true
+			}
+		case bytecode.OpMove:
+			if instruction.A() == 1 {
+				// 旧通用 return 路径会先把 x MOVE 到结果寄存器。
+				t.Fatalf("unexpected MOVE into result register: %v", child.Code)
+			}
+		}
+	}
+	if !hasGetUpvalueToResult || !hasDirectAdd {
+		// 子函数必须先 GETUPVAL 到结果寄存器，再直接 ADD 参数和 upvalue。
+		t.Fatalf("missing direct upvalue binary return; get=%v add=%v code=%v", hasGetUpvalueToResult, hasDirectAdd, child.Code)
+	}
+}
+
 // TestCompileCapturedBlockLocalKeepsCloseJump 验证被闭包捕获的 block local 仍生成 close-only JMP。
 //
 // 未捕获 local 的作用域退出可以省略零距离 close-only JMP；一旦内层函数捕获 block local，

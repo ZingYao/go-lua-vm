@@ -1898,30 +1898,25 @@ func (generator *generator) compileSingleSafeBinaryReturn(statement *parser.Retu
 		// 尚未支持的操作符沿用通用路径返回原有错误。
 		return false, nil
 	}
+	if !generator.isSafeBinaryReturnOperand(binaryExpression.Left) || !generator.isSafeBinaryReturnOperand(binaryExpression.Right) {
+		// 任一操作数不满足 local/字面量/upvalue 名称条件时回退通用路径。
+		return false, nil
+	}
 
 	firstTempRegister := generator.nextRegister
 	resultRegister := generator.allocateRegister()
-	leftOperand, leftOK, err := generator.safeRKOperand(binaryExpression.Left)
+	resultRegisterInUse := false
+	leftOperand, err := generator.safeBinaryReturnOperand(binaryExpression.Left, resultRegister, &resultRegisterInUse)
 	if err != nil {
 		// 左操作数编译失败时释放临时区并返回。
 		generator.releaseRegistersFrom(firstTempRegister)
 		return true, err
 	}
-	if !leftOK {
-		// 左操作数不满足无副作用条件时回退通用路径。
-		generator.releaseRegistersFrom(firstTempRegister)
-		return false, nil
-	}
-	rightOperand, rightOK, err := generator.safeRKOperand(binaryExpression.Right)
+	rightOperand, err := generator.safeBinaryReturnOperand(binaryExpression.Right, resultRegister, &resultRegisterInUse)
 	if err != nil {
 		// 右操作数编译失败时释放临时区并返回。
 		generator.releaseRegistersFrom(firstTempRegister)
 		return true, err
-	}
-	if !rightOK {
-		// 右操作数不满足无副作用条件时回退通用路径。
-		generator.releaseRegistersFrom(firstTempRegister)
-		return false, nil
 	}
 	if err := generator.withSourceLine(binaryExpression.Position, func() error {
 		// 运算错误归因到操作符所在行；结果寄存器作为单返回值起点。
@@ -1935,6 +1930,78 @@ func (generator *generator) compileSingleSafeBinaryReturn(statement *parser.Retu
 	generator.releaseRegistersFrom(firstTempRegister)
 	generator.returned = true
 	return true, nil
+}
+
+// isSafeBinaryReturnOperand 判断 return 二元快路径是否支持该操作数。
+func (generator *generator) isSafeBinaryReturnOperand(expression parser.Expression) bool {
+	if _, ok := expression.(*parser.LiteralExpression); ok {
+		// 字面量无副作用，可作为 RK 常量或临时常量寄存器。
+		return true
+	}
+	nameExpression, ok := expression.(*parser.NameExpression)
+	if !ok {
+		// 非名称表达式可能包含索引、调用或其他副作用。
+		return false
+	}
+	if _, ok := generator.locals[nameExpression.Name]; ok {
+		// 当前 local 读取只访问寄存器。
+		return true
+	}
+	return generator.canResolveUpvalueName(nameExpression.Name)
+}
+
+// canResolveUpvalueName 判断名称是否能从外层函数读取为 upvalue，且不修改当前 Proto。
+func (generator *generator) canResolveUpvalueName(name string) bool {
+	if generator.parent == nil {
+		// 顶层函数没有可捕获的外层 local/upvalue。
+		return false
+	}
+	return generator.parent.hasLocalOrUpvalueName(name)
+}
+
+// hasLocalOrUpvalueName 判断当前函数或祖先函数是否存在可捕获名称。
+func (generator *generator) hasLocalOrUpvalueName(name string) bool {
+	if _, ok := generator.locals[name]; ok {
+		// 直接命中当前函数 local。
+		return true
+	}
+	if _, ok := generator.upvalues[name]; ok {
+		// 当前函数已经登记过该 upvalue，子函数可间接捕获。
+		return true
+	}
+	if generator.parent != nil {
+		// 继续向祖先函数查找可捕获名称。
+		return generator.parent.hasLocalOrUpvalueName(name)
+	}
+
+	// 祖先链路没有可捕获名称。
+	return false
+}
+
+// safeBinaryReturnOperand 编译 return 二元快路径的操作数并返回 RK/寄存器操作数。
+func (generator *generator) safeBinaryReturnOperand(expression parser.Expression, resultRegister int, resultRegisterInUse *bool) (int, error) {
+	if operand, ok, err := generator.safeRKOperand(expression); err != nil || ok {
+		// local/字面量可以直接作为 RK 操作数；错误保持原编译语义。
+		return operand, err
+	}
+	nameExpression, ok := expression.(*parser.NameExpression)
+	if !ok {
+		// 调用方已经预检过，理论上不会到达该分支。
+		return 0, fmt.Errorf("codegen unsupported return operand %T", expression)
+	}
+	targetRegister := resultRegister
+	if *resultRegisterInUse {
+		// resultRegister 已保存另一个 upvalue 操作数时，分配额外临时寄存器。
+		targetRegister = generator.allocateRegister()
+	} else {
+		// 优先把单个 upvalue 读入结果寄存器，对齐 Lua 5.3 C codegen 形态。
+		*resultRegisterInUse = true
+	}
+	if err := generator.compileExpressionTo(nameExpression, targetRegister); err != nil {
+		// upvalue 读取失败时返回原编译错误。
+		return 0, err
+	}
+	return targetRegister, nil
 }
 
 // compileOpenReturn 编译末尾为开放表达式的 return 列表。
