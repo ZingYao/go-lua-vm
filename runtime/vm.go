@@ -1164,12 +1164,6 @@ func (vm *VM) executeGetTable(instruction bytecode.Instruction) error {
 		return ErrRegisterOutOfRange
 	}
 
-	key, err := vm.rkValue(instruction.C())
-	if err != nil {
-		// RK key 无法读取时不能执行 table 查询，目标寄存器保持原值。
-		return err
-	}
-
 	if receiverValue := vm.registers[tableIndex]; receiverValue.Kind == KindTable {
 		// 普通无元表 table 读取等价于 raw get，可避开通用 __index 分派。
 		table, err := tableFromValue(receiverValue)
@@ -1178,7 +1172,26 @@ func (vm *VM) executeGetTable(instruction bytecode.Instruction) error {
 			return err
 		}
 		if table.metatable == nil {
+			if !bytecode.IsK(instruction.C()) {
+				// 数值 for 常见的整数寄存器 key 直接查数组区，避免 RK Value 复制和 ToInteger 分派。
+				keyIndex := bytecode.IndexK(instruction.C())
+				if keyIndex < 0 || keyIndex >= len(vm.registers) {
+					// key 寄存器越界时保持目标寄存器不变。
+					return ErrRegisterOutOfRange
+				}
+				keyValue := vm.registers[keyIndex]
+				if keyValue.Kind == KindInteger {
+					// integer key raw get 不会触发元方法，未命中直接返回 nil。
+					vm.registers[targetIndex] = table.RawGetInteger(keyValue.Integer)
+					return nil
+				}
+			}
 			// 无元表时 raw 未命中也直接返回 nil，符合 Lua 5.3 普通 table 读取语义。
+			key, err := vm.rkValue(instruction.C())
+			if err != nil {
+				// RK key 无法读取时不能执行 table 查询，目标寄存器保持原值。
+				return err
+			}
 			value, err := table.RawGet(key)
 			if err != nil {
 				// raw get 的 key 编码错误需要直接返回，目标寄存器保持原值。
@@ -1189,6 +1202,11 @@ func (vm *VM) executeGetTable(instruction bytecode.Instruction) error {
 		}
 	}
 
+	key, err := vm.rkValue(instruction.C())
+	if err != nil {
+		// RK key 无法读取时不能执行 table 查询，目标寄存器保持原值。
+		return err
+	}
 	value, err := vm.indexedValue(vm.registers[tableIndex], key)
 	if err != nil {
 		// 普通读取可能因为 key 编码、不可索引源值或暂不支持的元方法返回错误。
@@ -1216,6 +1234,40 @@ func (vm *VM) executeSetTable(instruction bytecode.Instruction) error {
 		// SETTABLE 只能在 table 值上执行，非 table 值后续会接入元方法错误语义。
 		return err
 	}
+	if table.metatable == nil {
+		if !bytecode.IsK(instruction.B()) {
+			// 数值 for 常见的整数寄存器 key 直接写数组区，避免 RawSet 内部再次解析 key 类型。
+			keyIndex := bytecode.IndexK(instruction.B())
+			if keyIndex < 0 || keyIndex >= len(vm.registers) {
+				// key 寄存器越界时不能执行写入。
+				return ErrRegisterOutOfRange
+			}
+			keyValue := vm.registers[keyIndex]
+			if keyValue.Kind == KindInteger {
+				value, err := vm.rkValue(instruction.C())
+				if err != nil {
+					// value 读取失败时不能尝试写入 table。
+					return err
+				}
+				// integer key raw set 不触发元方法；value 已按 RK 语义读取完成。
+				table.RawSetInteger(keyValue.Integer, value)
+				return nil
+			}
+		}
+		key, err := vm.rkValue(instruction.B())
+		if err != nil {
+			// key 读取失败时不能尝试写入 table。
+			return err
+		}
+		value, err := vm.rkValue(instruction.C())
+		if err != nil {
+			// value 读取失败时不能尝试写入 table。
+			return err
+		}
+		// 无元表 table 写入等价于 raw set，跳过 __newindex 链检查以减少数组/字段写入热路径开销。
+		return table.RawSet(key, value)
+	}
+
 	key, err := vm.rkValue(instruction.B())
 	if err != nil {
 		// key 读取失败时不能尝试写入 table。
@@ -1226,12 +1278,6 @@ func (vm *VM) executeSetTable(instruction bytecode.Instruction) error {
 		// value 读取失败时不能尝试写入 table。
 		return err
 	}
-
-	if table.metatable == nil {
-		// 无元表 table 写入等价于 raw set，跳过 __newindex 链检查以减少数组/字段写入热路径开销。
-		return table.RawSet(key, value)
-	}
-
 	// SETTABLE 使用带 runner 的普通写入，支持 Lua closure 形式 __newindex 元方法。
 	return table.SetWithRunner(key, value, vm.luaMetamethodRunner)
 }
