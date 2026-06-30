@@ -1812,10 +1812,10 @@ func (vm *VM) executeGetTable(instruction bytecode.Instruction) error {
 
 	if receiverValue := vm.registers[tableIndex]; receiverValue.Kind == KindTable {
 		// 普通无元表 table 读取等价于 raw get，可避开通用 __index 分派。
-		table, err := tableFromValue(receiverValue)
-		if err != nil {
+		table, ok := receiverValue.Ref.(*Table)
+		if !ok || table == nil {
 			// table 类型引用损坏时仍返回原有 table 解析错误。
-			return err
+			return ErrExpectedTable
 		}
 		if table.metatable == nil {
 			if bytecode.IsK(instruction.C()) {
@@ -1896,10 +1896,15 @@ func (vm *VM) executeSetTable(instruction bytecode.Instruction) error {
 		return ErrRegisterOutOfRange
 	}
 
-	table, err := tableFromValue(vm.registers[tableIndex])
-	if err != nil {
+	receiverValue := vm.registers[tableIndex]
+	if receiverValue.Kind != KindTable {
 		// SETTABLE 只能在 table 值上执行，非 table 值后续会接入元方法错误语义。
-		return err
+		return ErrExpectedTable
+	}
+	table, ok := receiverValue.Ref.(*Table)
+	if !ok || table == nil {
+		// table 类型引用损坏时仍返回原有 table 解析错误。
+		return ErrExpectedTable
 	}
 	if table.metatable == nil {
 		if bytecode.IsK(instruction.B()) {
