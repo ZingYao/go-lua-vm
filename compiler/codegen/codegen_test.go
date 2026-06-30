@@ -645,6 +645,38 @@ func TestCompileLocalAssignmentUsesTemporaryRegister(t *testing.T) {
 	}
 }
 
+// TestCompileUnaryCallOperandReusesTargetRegister 验证一元表达式复用非 local 目标寄存器。
+//
+// `#string.reverse(s)` 中函数调用结果可以直接写入 LEN 的目标寄存器，避免额外占用一个临时
+// 寄存器；目标寄存器若是活跃 local 时仍由专门保护路径处理。
+func TestCompileUnaryCallOperandReusesTargetRegister(t *testing.T) {
+	chunk := parseChunkForCodegenTest(t, "local s = 'abcDefGHI123' local sum = 0 for i = 1, 10 do sum = sum + #string.reverse(s) end")
+
+	proto, err := CompileChunk(chunk, "unary-call-target")
+	if err != nil {
+		// 一元调用操作数样例必须可编译。
+		t.Fatalf("compile unary call operand failed: %v", err)
+	}
+	callInstruction, ok := firstInstruction(proto, bytecode.OpCall)
+	if !ok {
+		// string.reverse 调用必须生成 CALL。
+		t.Fatalf("expected CALL instruction")
+	}
+	lenInstruction, ok := firstInstruction(proto, bytecode.OpLen)
+	if !ok {
+		// `#` 运算必须生成 LEN。
+		t.Fatalf("expected LEN instruction")
+	}
+	if callInstruction.A() != lenInstruction.A() || lenInstruction.B() != callInstruction.A() {
+		// CALL 结果应直接落在 LEN 的源/目标寄存器上，避免额外临时寄存器。
+		t.Fatalf("CALL/LEN register mismatch: call=%#v len=%#v", callInstruction, lenInstruction)
+	}
+	if proto.MaxStackSize != 8 {
+		// 对齐 Lua 5.3 官方 codegen，该样例不应再需要第 9 个寄存器。
+		t.Fatalf("unexpected max stack=%d", proto.MaxStackSize)
+	}
+}
+
 // TestCompileSelfArithmeticAssignmentWritesDirectly 验证 local 自算术赋值直接写回目标寄存器。
 //
 // 数值 for 热循环中的 `acc = acc + i` 不应生成“复制 acc 到临时、计算临时、MOVE 回 acc”的

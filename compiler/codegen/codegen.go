@@ -2975,10 +2975,19 @@ func (generator *generator) emitSetGlobalName(name string, valueRegister int) er
 //
 // Lua 5.3 一元操作符映射到 UNM、BNOT、NOT 和 LEN。
 func (generator *generator) compileUnaryTo(expression *parser.UnaryExpression, targetRegister int) error {
-	operandRegister := generator.allocateRegister()
+	operandRegister := targetRegister
+	releaseOperandRegister := false
+	if generator.registerHasActiveLocal(targetRegister) {
+		// 目标寄存器承载活跃 local 时不能提前覆盖，避免 `a = #f(a)` 的 RHS 读不到旧值。
+		operandRegister = generator.allocateRegister()
+		releaseOperandRegister = true
+	}
 	if err := generator.compileExpressionTo(expression.Operand, operandRegister); err != nil {
 		// 操作数编译失败时释放临时寄存器后返回。
-		generator.releaseRegister(operandRegister)
+		if releaseOperandRegister {
+			// 只有本函数额外分配的操作数寄存器需要释放。
+			generator.releaseRegister(operandRegister)
+		}
 		return err
 	}
 	if err := generator.withSourceLine(expression.Position, func() error {
@@ -3000,10 +3009,16 @@ func (generator *generator) compileUnaryTo(expression *parser.UnaryExpression, t
 		}
 		return nil
 	}); err != nil {
-		generator.releaseRegister(operandRegister)
+		if releaseOperandRegister {
+			// 指令生成失败时释放额外分配的操作数寄存器。
+			generator.releaseRegister(operandRegister)
+		}
 		return err
 	}
-	generator.releaseRegister(operandRegister)
+	if releaseOperandRegister {
+		// 操作数临时寄存器用完后回退栈顶水位。
+		generator.releaseRegister(operandRegister)
+	}
 
 	// 一元表达式编译完成。
 	return nil
