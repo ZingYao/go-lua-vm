@@ -117,6 +117,8 @@ const (
 	arithmeticIntRegisterCacheSub
 	// arithmeticIntRegisterCacheMul 表示当前 PC 最近命中过 MUL 的双 integer 寄存器路径。
 	arithmeticIntRegisterCacheMul
+	// arithmeticIntRegisterCacheAddNumber 表示当前 PC 最近命中过 ADD 的寄存器 number 路径。
+	arithmeticIntRegisterCacheAddNumber
 )
 
 // arithmeticIntOperandCacheEntry 表示一条 integer 算术 inline cache 的操作数形态。
@@ -2433,6 +2435,7 @@ func (vm *VM) tryNativeNumberAdd(instruction bytecode.Instruction) (bool, error)
 	}
 
 	// 至少一侧为 number 时，Lua 5.3 加法结果为 float number。
+	vm.rememberNativeNumberAdd(instruction)
 	vm.registers[targetIndex] = NumberValue(leftNumber + rightNumber)
 	return true, nil
 }
@@ -2709,7 +2712,16 @@ func (vm *VM) tryCachedIntegerRegisterArithmetic(instruction bytecode.Instructio
 // 回到完整 Lua 算术语义。相比通用缓存路径，它避免二次 helper 调用和 ADD/SUB/MUL 分支选择。
 func (vm *VM) tryCachedIntegerAddArithmetic(instruction bytecode.Instruction) (bool, error) {
 	currentPC := vm.currentPC
-	if currentPC < 0 || currentPC >= len(vm.arithmeticIntRegisterCache) || currentPC >= len(vm.arithmeticIntOperandCache) || vm.arithmeticIntRegisterCache[currentPC] != arithmeticIntRegisterCacheAdd {
+	if currentPC < 0 || currentPC >= len(vm.arithmeticIntRegisterCache) || currentPC >= len(vm.arithmeticIntOperandCache) {
+		// 当前 PC 没有 ADD integer 缓存，调用方继续走普通 RK 路径。
+		return false, nil
+	}
+	cacheKind := vm.arithmeticIntRegisterCache[currentPC]
+	if cacheKind == arithmeticIntRegisterCacheAddNumber {
+		// 当前 PC 最近命中过寄存器 number ADD，优先尝试该路径避免 integer cache miss。
+		return vm.tryCachedNativeNumberAddArithmetic(instruction, currentPC)
+	}
+	if cacheKind != arithmeticIntRegisterCacheAdd {
 		// 当前 PC 没有 ADD integer 缓存，调用方继续走普通 RK 路径。
 		return false, nil
 	}
@@ -2759,6 +2771,40 @@ func (vm *VM) tryCachedIntegerAddArithmetic(instruction bytecode.Instruction) (b
 
 	// ADD 按 64 位补码自然回绕，命中后直接写回目标寄存器。
 	vm.registers[instruction.A()] = IntegerValue(leftInteger + rightInteger)
+	return true, nil
+}
+
+// tryCachedNativeNumberAddArithmetic 尝试执行当前 PC 的寄存器 number ADD 缓存。
+//
+// 该缓存只记录 B/C 都是寄存器、且运行期至少一侧为 number 的 ADD。命中时保持 Lua 5.3
+// number 结果；类型变化为双 integer 或非原生数值时清理缓存并回到完整 ADD 语义。
+func (vm *VM) tryCachedNativeNumberAddArithmetic(instruction bytecode.Instruction, currentPC int) (bool, error) {
+	cacheEntry := vm.arithmeticIntOperandCache[currentPC]
+	if cacheEntry.leftIndex < 0 || cacheEntry.leftIndex >= len(vm.registers) || cacheEntry.rightIndex < 0 || cacheEntry.rightIndex >= len(vm.registers) {
+		// 寄存器窗口变化时清理缓存，并回到通用 RK 路径报出原始错误。
+		vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
+		vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
+		return false, nil
+	}
+	leftValue := vm.registers[cacheEntry.leftIndex]
+	rightValue := vm.registers[cacheEntry.rightIndex]
+	if leftValue.Kind == KindInteger && rightValue.Kind == KindInteger {
+		// 双 integer 必须让 integer ADD 路径处理，保留 integer 结果。
+		vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
+		vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
+		return false, nil
+	}
+	leftNumber, leftOK := nativeNumberValue(leftValue)
+	rightNumber, rightOK := nativeNumberValue(rightValue)
+	if !leftOK || !rightOK {
+		// 字符串数字或元方法相关类型必须回退完整 Lua 算术路径。
+		vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
+		vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
+		return false, nil
+	}
+
+	// 寄存器 number ADD 命中后直接写回 number 结果。
+	vm.registers[instruction.A()] = NumberValue(leftNumber + rightNumber)
 	return true, nil
 }
 
@@ -2930,6 +2976,32 @@ func (vm *VM) rememberIntegerRegisterArithmetic(leftOperand int, rightOperand in
 		rightConstantOperand: rightCache.leftConstantOperand,
 	}
 	vm.arithmeticIntRegisterCache[currentPC] = cacheKind
+}
+
+// rememberNativeNumberAdd 记录当前 PC 的寄存器 number ADD 热路径。
+//
+// 只缓存 B/C 都是寄存器的 ADD；常量、字符串数字和元方法相关路径保留完整 RK 读取与回退语义。
+func (vm *VM) rememberNativeNumberAdd(instruction bytecode.Instruction) {
+	currentPC := vm.currentPC
+	if currentPC < 0 || currentPC >= len(vm.arithmeticIntRegisterCache) || currentPC >= len(vm.arithmeticIntOperandCache) {
+		// 无效 PC 不适合缓存，直接保留完整 RK 路径。
+		return
+	}
+	leftOperand := instruction.B()
+	rightOperand := instruction.C()
+	if bytecode.IsK(leftOperand) || bytecode.IsK(rightOperand) {
+		// 只缓存寄存器操作数，避免常量类型变化和字符串数字转换语义混入窄路径。
+		return
+	}
+	leftIndex := bytecode.IndexK(leftOperand)
+	rightIndex := bytecode.IndexK(rightOperand)
+	if leftIndex < 0 || leftIndex >= len(vm.registers) || rightIndex < 0 || rightIndex >= len(vm.registers) {
+		// 损坏指令或寄存器窗口变化时不建立缓存，后续完整路径会报原始错误。
+		return
+	}
+	// 记录当前 PC 的寄存器 number ADD 热路径，下次可跳过 integer cache miss 和通用 RK helper。
+	vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{leftIndex: leftIndex, rightIndex: rightIndex}
+	vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheAddNumber
 }
 
 // integerArithmeticOperandCacheEntry 为可缓存 integer RK 操作数构造缓存项。

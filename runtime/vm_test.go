@@ -1353,6 +1353,74 @@ func TestVMAddNativeNumberFastPath(t *testing.T) {
 	}
 }
 
+// TestVMAddNativeNumberCacheFallback 验证寄存器 number ADD 缓存命中与类型变化回退。
+//
+// 同一 PC 首次执行 number+number 会建立缓存；第二次应命中缓存并继续返回 number。若后续
+// 操作数变为双 integer，缓存必须失效并回到 integer ADD 语义。
+func TestVMAddNativeNumberCacheFallback(t *testing.T) {
+	// 使用带 Proto 的 VM 启用按 PC 的算术缓存。
+	proto := bytecode.NewProto("number-add-cache")
+	proto.Code = []bytecode.Instruction{bytecode.CreateABC(bytecode.OpAdd, 0, 1, 2)}
+	vm := NewVMWithPrototypeData(3, nil, nil, nil, nil)
+	vm.BindPrototype(proto)
+	vm.SetCurrentPC(0)
+	if err := vm.SetRegister(1, NumberValue(1.25)); err != nil {
+		// 测试准备阶段必须能写入左 number 操作数。
+		t.Fatalf("set first left failed: %v", err)
+	}
+	if err := vm.SetRegister(2, NumberValue(2.75)); err != nil {
+		// 测试准备阶段必须能写入右 number 操作数。
+		t.Fatalf("set first right failed: %v", err)
+	}
+	if err := vm.Step(proto.Code[0]); err != nil {
+		// 首次 number ADD 不应失败。
+		t.Fatalf("first add failed: %v", err)
+	}
+	firstValue, firstOK := vm.Register(0)
+	if !firstOK || !firstValue.RawEqual(NumberValue(4)) {
+		// 首次执行必须得到 number 结果。
+		t.Fatalf("first value mismatch: value=%#v ok=%v", firstValue, firstOK)
+	}
+
+	vm.SetCurrentPC(0)
+	if err := vm.SetRegister(1, NumberValue(10.5)); err != nil {
+		// 第二次执行复用同一 PC，左操作数仍为 number。
+		t.Fatalf("set second left failed: %v", err)
+	}
+	if err := vm.SetRegister(2, IntegerValue(2)); err != nil {
+		// 第二次执行右操作数允许是 integer，结果仍应为 number。
+		t.Fatalf("set second right failed: %v", err)
+	}
+	if err := vm.Step(proto.Code[0]); err != nil {
+		// 缓存命中路径不应失败。
+		t.Fatalf("second add failed: %v", err)
+	}
+	secondValue, secondOK := vm.Register(0)
+	if !secondOK || !secondValue.RawEqual(NumberValue(12.5)) {
+		// number cache 命中后必须保留 Lua number 结果。
+		t.Fatalf("second value mismatch: value=%#v ok=%v", secondValue, secondOK)
+	}
+
+	vm.SetCurrentPC(0)
+	if err := vm.SetRegister(1, IntegerValue(3)); err != nil {
+		// 类型变化为双 integer 后必须允许缓存失效。
+		t.Fatalf("set third left failed: %v", err)
+	}
+	if err := vm.SetRegister(2, IntegerValue(4)); err != nil {
+		// 右操作数同样切换为 integer。
+		t.Fatalf("set third right failed: %v", err)
+	}
+	if err := vm.Step(proto.Code[0]); err != nil {
+		// 双 integer 回退路径不应失败。
+		t.Fatalf("third add failed: %v", err)
+	}
+	thirdValue, thirdOK := vm.Register(0)
+	if !thirdOK || !thirdValue.RawEqual(IntegerValue(7)) {
+		// 双 integer 必须回到 integer ADD 结果，而不是 number 结果。
+		t.Fatalf("third value mismatch: value=%#v ok=%v", thirdValue, thirdOK)
+	}
+}
+
 // TestVMDivNativeNumberFastPath 验证 DIV 的原生 number/integer 窄快路径。
 //
 // Lua 5.3 的 `/` 总是返回 float number；快路径必须覆盖原生数值，并让字符串数字继续走
