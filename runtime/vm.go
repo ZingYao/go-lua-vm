@@ -1440,8 +1440,14 @@ func (vm *VM) executeSetTable(instruction bytecode.Instruction) error {
 						// value 寄存器越界时不能尝试写入 table。
 						return ErrRegisterOutOfRange
 					}
+					value := vm.registers[valueIndex]
+					if keyValue.Integer > 0 && !value.IsNil() {
+						// 正整数非 nil 数组写入走更窄的 table 热路径，跳过删除语义分支。
+						table.RawSetPositiveIntegerNonNil(keyValue.Integer, value)
+						return nil
+					}
 					// integer key raw set 不触发元方法；寄存器值已按 RK 语义读取完成。
-					table.RawSetInteger(keyValue.Integer, vm.registers[valueIndex])
+					table.RawSetInteger(keyValue.Integer, value)
 					return nil
 				}
 				value, err := vm.rkValue(instruction.C())

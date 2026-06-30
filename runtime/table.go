@@ -252,6 +252,40 @@ func (table *Table) RawSetInteger(key int64, value Value) {
 	table.noteMutation()
 }
 
+// RawSetPositiveIntegerNonNil 使用正整数 key 写入非 nil Lua 值。
+//
+// key 必须大于 0，value 必须不是 nil；不满足时回退 RawSetInteger 保持语义。该入口服务
+// VM 中数值 for 数组写入热路径，避免重复执行 nil/delete 分支。
+func (table *Table) RawSetPositiveIntegerNonNil(key int64, value Value) {
+	if key <= 0 || value.IsNil() {
+		// 调用方条件不满足时回退完整整数写入语义。
+		table.RawSetInteger(key, value)
+		return
+	}
+	if table.lengthCacheValid {
+		// 正整数非 nil 写入只需要维护追加、覆盖和稀疏失效三种状态。
+		if key == table.lengthCache+1 {
+			// 连续追加一个非 nil 元素，边界向后移动一位。
+			table.lengthCache = key
+		} else if key > table.lengthCache {
+			// 跳跃写入可能形成新的可选边界，保守失效。
+			table.invalidateLengthCache()
+		}
+	}
+	if key <= maxTableArrayIndex {
+		// 正整数 key 进入数组区，Lua key 从 1 开始。
+		table.ensureArraySize(int(key))
+		table.arrayValues[key-1] = value
+		table.noteMutation()
+		return
+	}
+
+	// 超大稀疏正整数 key 写入 hash 区。
+	table.hashValues[tableKey{kind: KindInteger, integerValue: key}] = value
+	table.hashKeys[tableKey{kind: KindInteger, integerValue: key}] = IntegerValue(key)
+	table.noteMutation()
+}
+
 // RawGetInteger 使用 integer key 读取 Lua 值。
 //
 // key 不存在时返回 Lua nil。
