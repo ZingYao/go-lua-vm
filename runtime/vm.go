@@ -2474,7 +2474,7 @@ func (vm *VM) executeMul(instruction bytecode.Instruction) error {
 		// 目标寄存器越界时不能写入，避免破坏寄存器窗口。
 		return ErrRegisterOutOfRange
 	}
-	if handled, err := vm.tryNumberConstantMul(instruction); handled || err != nil {
+	if handled, err := vm.tryNumberConstantMul(instruction, targetIndex); handled || err != nil {
 		// 混合算术循环常见 `number register * number constant`，命中后跳过通用 RK 和闭包回调。
 		return err
 	}
@@ -2558,7 +2558,7 @@ func (vm *VM) executeDiv(instruction bytecode.Instruction) error {
 //
 // instruction 必须是 MUL；只处理一侧为寄存器、另一侧为 Proto number 常量，且寄存器运行期值是
 // integer 或 number 的场景。字符串数字、非数值和元方法语义返回 handled=false 交给完整算术路径。
-func (vm *VM) tryNumberConstantMul(instruction bytecode.Instruction) (bool, error) {
+func (vm *VM) tryNumberConstantMul(instruction bytecode.Instruction, targetIndex int) (bool, error) {
 	// 先解析 B/C 操作数，只有恰好一侧为常量时才可能命中该窄快路径。
 	leftOperand := instruction.B()
 	rightOperand := instruction.C()
@@ -2607,11 +2607,6 @@ func (vm *VM) tryNumberConstantMul(instruction bytecode.Instruction) (bool, erro
 		return false, nil
 	}
 
-	targetIndex := instruction.A()
-	if targetIndex < 0 || targetIndex >= len(vm.registers) {
-		// 目标寄存器越界时不能写入结果。
-		return true, ErrRegisterOutOfRange
-	}
 	vm.registers[targetIndex] = NumberValue(registerNumber * constant.Number)
 	return true, nil
 }
