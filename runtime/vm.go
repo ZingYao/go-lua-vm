@@ -96,10 +96,40 @@ type VM struct {
 	returnValues []Value
 	// returnInline 保存少量返回值，避免普通 Lua 函数每次 return 都分配切片底层数组。
 	returnInline [2]Value
-	// addIntRegisterCache 按 PC 标记 ADD 指令最近是否命中过寄存器 integer+integer 热路径。
-	addIntRegisterCache []bool
-	// addIntRegisterCacheProto 记录 addIntRegisterCache 对应的 Proto，避免 VM 池复用时误用旧缓存。
-	addIntRegisterCacheProto *bytecode.Proto
+	// arithmeticIntRegisterCache 按 PC 标记算术指令最近命中过的寄存器 integer+integer 热路径。
+	arithmeticIntRegisterCache []byte
+	// arithmeticIntRegisterCacheProto 记录 arithmeticIntRegisterCache 对应的 Proto，避免 VM 池复用时误用旧缓存。
+	arithmeticIntRegisterCacheProto *bytecode.Proto
+	// stringTableReadCache 按 PC 缓存无元表 table 的字符串常量 key 读取结果。
+	stringTableReadCache []stringTableReadCacheEntry
+	// stringTableReadCacheProto 记录 stringTableReadCache 对应的 Proto，避免 VM 池复用时误用旧缓存。
+	stringTableReadCacheProto *bytecode.Proto
+}
+
+const (
+	// arithmeticIntRegisterCacheNone 表示当前 PC 没有可用的 integer 寄存器算术缓存。
+	arithmeticIntRegisterCacheNone byte = iota
+	// arithmeticIntRegisterCacheAdd 表示当前 PC 最近命中过 ADD 的双 integer 寄存器路径。
+	arithmeticIntRegisterCacheAdd
+	// arithmeticIntRegisterCacheSub 表示当前 PC 最近命中过 SUB 的双 integer 寄存器路径。
+	arithmeticIntRegisterCacheSub
+	// arithmeticIntRegisterCacheMul 表示当前 PC 最近命中过 MUL 的双 integer 寄存器路径。
+	arithmeticIntRegisterCacheMul
+)
+
+// stringTableReadCacheEntry 表示一条字符串常量 table 读取 inline cache。
+//
+// table 与 version 共同判定缓存是否仍然匹配；同一 Proto 的同一 PC 固定对应同一个字符串常量 key，
+// 因此 key 不需要重复保存。value 可以是 nil 值，valid 用于区分未初始化缓存。
+type stringTableReadCacheEntry struct {
+	// table 保存上次命中的 Lua table 指针。
+	table *Table
+	// version 保存 table 上次命中时的 raw 写入版本。
+	version uint64
+	// value 保存上次读取到的 Lua 值。
+	value Value
+	// valid 表示当前缓存项是否已经初始化。
+	valid bool
 }
 
 // LuaClosure 表示最小 VM 阶段的 Lua closure 值。
@@ -502,19 +532,31 @@ func (vm *VM) BindPrototype(proto *bytecode.Proto) {
 	vm.proto = proto
 	if proto == nil {
 		// 手工 VM 或测试路径没有 Proto，不启用指令级热路径缓存。
-		vm.addIntRegisterCacheProto = nil
-		vm.addIntRegisterCache = nil
+		vm.arithmeticIntRegisterCacheProto = nil
+		vm.arithmeticIntRegisterCache = nil
+		vm.stringTableReadCacheProto = nil
+		vm.stringTableReadCache = nil
 		return
 	}
-	if vm.addIntRegisterCacheProto != proto || len(vm.addIntRegisterCache) < len(proto.Code) {
+	if vm.arithmeticIntRegisterCacheProto != proto || len(vm.arithmeticIntRegisterCache) < len(proto.Code) {
 		// VM 池复用到不同 Proto 时必须重建缓存，避免 PC 相同但指令不同导致错误命中。
-		vm.addIntRegisterCacheProto = proto
-		vm.addIntRegisterCache = make([]bool, len(proto.Code))
-		return
-	}
-	for pc := len(proto.Code); pc < len(vm.addIntRegisterCache); pc++ {
+		vm.arithmeticIntRegisterCacheProto = proto
+		vm.arithmeticIntRegisterCache = make([]byte, len(proto.Code))
+	} else {
 		// 同一 Proto 理论上 Code 长度稳定；防御异常缩短时清掉越界尾部缓存。
-		vm.addIntRegisterCache[pc] = false
+		for pc := len(proto.Code); pc < len(vm.arithmeticIntRegisterCache); pc++ {
+			vm.arithmeticIntRegisterCache[pc] = arithmeticIntRegisterCacheNone
+		}
+	}
+	if vm.stringTableReadCacheProto != proto || len(vm.stringTableReadCache) < len(proto.Code) {
+		// 字符串 table inline cache 同样按 Proto PC 生效，切换 Proto 时必须丢弃旧命中。
+		vm.stringTableReadCacheProto = proto
+		vm.stringTableReadCache = make([]stringTableReadCacheEntry, len(proto.Code))
+	} else {
+		// 同一 Proto 理论上 Code 长度稳定；防御异常缩短时清掉越界尾部缓存。
+		for pc := len(proto.Code); pc < len(vm.stringTableReadCache); pc++ {
+			vm.stringTableReadCache[pc] = stringTableReadCacheEntry{}
+		}
 	}
 }
 
@@ -543,6 +585,51 @@ func (vm *VM) SetCurrentPC(pc int) {
 
 	// 记录当前 PC，GC 在 collectgarbage 中会据此过滤已离开作用域的寄存器值。
 	vm.currentPC = pc
+}
+
+// cachedStringTableRead 尝试读取当前 PC 的字符串 table inline cache。
+//
+// table 必须是无元表 table；缓存命中还要求 table raw 写入版本未变化。返回 ok=false 时调用方
+// 应执行真实 RawGetString，并通过 rememberStringTableRead 记录新结果。
+func (vm *VM) cachedStringTableRead(table *Table) (Value, bool) {
+	if vm == nil || table == nil {
+		// 缺少 VM 或 table 时不能使用缓存。
+		return NilValue(), false
+	}
+	if vm.currentPC < 0 || vm.currentPC >= len(vm.stringTableReadCache) {
+		// 没有绑定 Proto 或 PC 超出缓存范围时退回普通读取。
+		return NilValue(), false
+	}
+	cacheEntry := vm.stringTableReadCache[vm.currentPC]
+	if !cacheEntry.valid || cacheEntry.table != table {
+		// 缓存尚未初始化或来自其他 table 时不能复用。
+		return NilValue(), false
+	}
+	if cacheEntry.version != table.MutationVersion() {
+		// table 被写入过，旧读取结果必须失效。
+		return NilValue(), false
+	}
+	return cacheEntry.value, true
+}
+
+// rememberStringTableRead 记录当前 PC 的字符串 table inline cache。
+//
+// value 可以是 Lua nil；valid 标记用于区分 nil 命中和未初始化缓存。
+func (vm *VM) rememberStringTableRead(table *Table, value Value) {
+	if vm == nil || table == nil {
+		// 缺少 VM 或 table 时没有可记录对象。
+		return
+	}
+	if vm.currentPC < 0 || vm.currentPC >= len(vm.stringTableReadCache) {
+		// 没有绑定 Proto 或 PC 超出缓存范围时跳过记录。
+		return
+	}
+	vm.stringTableReadCache[vm.currentPC] = stringTableReadCacheEntry{
+		table:   table,
+		version: table.MutationVersion(),
+		value:   value,
+		valid:   true,
+	}
 }
 
 // ActiveRegistersSnapshot 返回当前 PC 下仍处于局部变量生命周期内的寄存器副本。
@@ -899,10 +986,10 @@ func (vm *VM) Step(instruction bytecode.Instruction) error {
 		return vm.executeAdd(instruction)
 	case bytecode.OpSub:
 		// SUB 执行 Lua 5.3 减法，优先保留 integer 结果。
-		return vm.executeBinaryArithmetic(instruction, binaryArithmeticSub, metamethodSub)
+		return vm.executeSub(instruction)
 	case bytecode.OpMul:
 		// MUL 执行 Lua 5.3 乘法，优先保留 integer 结果。
-		return vm.executeBinaryArithmetic(instruction, binaryArithmeticMul, metamethodMul)
+		return vm.executeMul(instruction)
 	case bytecode.OpMod:
 		// MOD 执行 Lua 5.3 取模，使用向下取整语义。
 		return vm.executeBinaryArithmetic(instruction, binaryArithmeticMod, metamethodMod)
@@ -1132,13 +1219,33 @@ func (vm *VM) executeGetTabUp(instruction bytecode.Instruction) error {
 		// GETTABUP 需要 upvalue 保存 table，例如 Lua 5.3 的 _ENV。
 		return err
 	}
-	key, err := vm.rkValue(instruction.C())
-	if err != nil {
-		// RK key 无法读取时不能执行 table 查询，目标寄存器保持原值。
-		return err
-	}
-
 	if table.metatable == nil {
+		if bytecode.IsK(instruction.C()) {
+			// 无元表 upvalue table 使用 string 常量 key 时可直接查 hash，避免构造临时 Value 和通用 key 编码。
+			keyIndex := bytecode.IndexK(instruction.C())
+			if keyIndex < 0 || keyIndex >= len(vm.constants) {
+				// key 常量越界时保持目标寄存器不变。
+				return ErrConstantOutOfRange
+			}
+			keyConstant := vm.constants[keyIndex]
+			if keyConstant.Kind == bytecode.ConstantString {
+				// string 常量 raw get 不会触发元方法，未命中直接返回 nil。
+				if value, ok := vm.cachedStringTableRead(table); ok {
+					// table 版本未变化时复用上一轮同 PC 的读取结果。
+					vm.registers[targetIndex] = value
+					return nil
+				}
+				value := table.RawGetString(keyConstant.String)
+				vm.rememberStringTableRead(table, value)
+				vm.registers[targetIndex] = value
+				return nil
+			}
+		}
+		key, err := vm.rkValue(instruction.C())
+		if err != nil {
+			// RK key 无法读取时不能执行 table 查询，目标寄存器保持原值。
+			return err
+		}
 		// 无元表 table 的普通读取等价于 raw get，跳过 __index 链检查以减少全局变量热路径开销。
 		value, err := table.RawGet(key)
 		if err != nil {
@@ -1149,6 +1256,11 @@ func (vm *VM) executeGetTabUp(instruction bytecode.Instruction) error {
 		return nil
 	}
 
+	key, err := vm.rkValue(instruction.C())
+	if err != nil {
+		// RK key 无法读取时不能执行 table 查询，目标寄存器保持原值。
+		return err
+	}
 	value, err := table.GetWithRunner(key, vm.luaMetamethodRunner)
 	if err != nil {
 		// table 普通读取可能因为 key 编码、不可索引源值或 Lua closure 元方法返回错误。
@@ -1206,6 +1318,27 @@ func (vm *VM) executeGetTable(instruction bytecode.Instruction) error {
 			return err
 		}
 		if table.metatable == nil {
+			if bytecode.IsK(instruction.C()) {
+				// 无元表 table 使用 string 常量 key 时可直接查 hash，避免构造临时 Value 和通用 key 编码。
+				keyIndex := bytecode.IndexK(instruction.C())
+				if keyIndex < 0 || keyIndex >= len(vm.constants) {
+					// key 常量越界时保持目标寄存器不变。
+					return ErrConstantOutOfRange
+				}
+				keyConstant := vm.constants[keyIndex]
+				if keyConstant.Kind == bytecode.ConstantString {
+					// string 常量 raw get 不会触发元方法，未命中直接返回 nil。
+					if value, ok := vm.cachedStringTableRead(table); ok {
+						// table 版本未变化时复用上一轮同 PC 的读取结果。
+						vm.registers[targetIndex] = value
+						return nil
+					}
+					value := table.RawGetString(keyConstant.String)
+					vm.rememberStringTableRead(table, value)
+					vm.registers[targetIndex] = value
+					return nil
+				}
+			}
 			if !bytecode.IsK(instruction.C()) {
 				// 数值 for 常见的整数寄存器 key 直接查数组区，避免 RK Value 复制和 ToInteger 分派。
 				keyIndex := bytecode.IndexK(instruction.C())
@@ -1476,34 +1609,59 @@ func (vm *VM) executeBinaryArithmetic(instruction bytecode.Instruction, operatio
 // instruction 的 A 是目标寄存器，B/C 使用 RK 编码读取操作数。普通 integer/number 加法
 // 直接在本函数完成，转换失败时仍按 Lua 5.3 规则尝试 `__add` 元方法。
 func (vm *VM) executeAdd(instruction bytecode.Instruction) error {
+	// ADD 复用整数寄存器缓存，同时保留 number、字符串数字和元方法回退语义。
+	return vm.executeFastArithmetic(instruction, arithmeticIntRegisterCacheAdd, func(left int64, right int64) int64 {
+		return left + right
+	}, func(left float64, right float64) float64 {
+		return left + right
+	}, metamethodAdd)
+}
+
+// executeSub 执行 Lua 5.3 OP_SUB 指令。
+//
+// instruction 的 A 是目标寄存器，B/C 使用 RK 编码读取操作数。连续 integer 寄存器减法
+// 会记录当前 PC 的热路径缓存；类型变化时回退完整 Lua 算术和 `__sub` 元方法语义。
+func (vm *VM) executeSub(instruction bytecode.Instruction) error {
+	// SUB 复用整数寄存器缓存，同时保留 number、字符串数字和元方法回退语义。
+	return vm.executeFastArithmetic(instruction, arithmeticIntRegisterCacheSub, func(left int64, right int64) int64 {
+		return left - right
+	}, func(left float64, right float64) float64 {
+		return left - right
+	}, metamethodSub)
+}
+
+// executeMul 执行 Lua 5.3 OP_MUL 指令。
+//
+// instruction 的 A 是目标寄存器，B/C 使用 RK 编码读取操作数。连续 integer 寄存器乘法
+// 会记录当前 PC 的热路径缓存；类型变化时回退完整 Lua 算术和 `__mul` 元方法语义。
+func (vm *VM) executeMul(instruction bytecode.Instruction) error {
+	// MUL 复用整数寄存器缓存，同时保留 number、字符串数字和元方法回退语义。
+	return vm.executeFastArithmetic(instruction, arithmeticIntRegisterCacheMul, func(left int64, right int64) int64 {
+		return left * right
+	}, func(left float64, right float64) float64 {
+		return left * right
+	}, metamethodMul)
+}
+
+// executeFastArithmetic 执行 ADD/SUB/MUL 的低风险热路径。
+//
+// instruction 的 A 是目标寄存器，B/C 使用 RK 编码读取操作数；integerOperation 处理双
+// integer 结果，numberOperation 处理 float number 结果。缓存覆盖寄存器 integer 与 integer
+// 常量组合；类型变化、字符串数字或元方法都会走完整 Lua 语义。
+func (vm *VM) executeFastArithmetic(instruction bytecode.Instruction, cacheKind byte, integerOperation func(int64, int64) int64, numberOperation func(float64, float64) float64, metamethodName string) error {
 	targetIndex := instruction.A()
 	if targetIndex < 0 || targetIndex >= len(vm.registers) {
 		// 目标寄存器越界时不能写入，避免破坏寄存器窗口。
 		return ErrRegisterOutOfRange
 	}
 
-	leftOperand := instruction.B()
-	rightOperand := instruction.C()
-	if vm.currentPC >= 0 && vm.currentPC < len(vm.addIntRegisterCache) && vm.addIntRegisterCache[vm.currentPC] {
-		// 命中过 ADD 寄存器 integer 缓存时仍逐次检查类型，保证动态改写局部变量可回退。
-		leftIndex := bytecode.IndexK(leftOperand)
-		rightIndex := bytecode.IndexK(rightOperand)
-		if bytecode.IsK(leftOperand) || bytecode.IsK(rightOperand) || leftIndex < 0 || leftIndex >= len(vm.registers) || rightIndex < 0 || rightIndex >= len(vm.registers) {
-			// 指令形态或寄存器窗口变化时清理缓存，并回到通用 RK 路径报出原始错误。
-			vm.addIntRegisterCache[vm.currentPC] = false
-		} else {
-			leftRegisterValue := vm.registers[leftIndex]
-			rightRegisterValue := vm.registers[rightIndex]
-			if leftRegisterValue.Kind == KindInteger && rightRegisterValue.Kind == KindInteger {
-				// 双 integer 加法保留 integer 结果，并按 64 位补码自然回绕。
-				vm.registers[targetIndex] = IntegerValue(leftRegisterValue.Integer + rightRegisterValue.Integer)
-				return nil
-			}
-			// 类型不再匹配时清理缓存，后续走完整 Lua 算术和元方法语义。
-			vm.addIntRegisterCache[vm.currentPC] = false
-		}
+	if handled, err := vm.tryCachedIntegerRegisterArithmetic(instruction, cacheKind, integerOperation); handled || err != nil {
+		// 缓存命中已完成写回；缓存形态损坏时返回原始寄存器错误。
+		return err
 	}
 
+	leftOperand := instruction.B()
+	rightOperand := instruction.C()
 	leftValue, err := vm.rkValue(leftOperand)
 	if err != nil {
 		// 左操作数读取失败时不能继续计算，目标寄存器保持原值。
@@ -1516,23 +1674,20 @@ func (vm *VM) executeAdd(instruction bytecode.Instruction) error {
 	}
 
 	if leftValue.Kind == KindInteger && rightValue.Kind == KindInteger {
-		if !bytecode.IsK(leftOperand) && !bytecode.IsK(rightOperand) && vm.currentPC >= 0 && vm.currentPC < len(vm.addIntRegisterCache) {
-			// 记录当前 PC 的寄存器 integer 热路径，下次同一 ADD 可跳过通用 RK 读取和 number fallback。
-			vm.addIntRegisterCache[vm.currentPC] = true
-		}
-		// 双 integer 加法保留 integer 结果，并按 64 位补码自然回绕。
-		vm.registers[targetIndex] = IntegerValue(leftValue.Integer + rightValue.Integer)
+		// 双 integer 算术保留 integer 结果，并按 64 位补码自然回绕。
+		vm.rememberIntegerRegisterArithmetic(leftOperand, rightOperand, cacheKind)
+		vm.registers[targetIndex] = IntegerValue(integerOperation(leftValue.Integer, rightValue.Integer))
 		return nil
 	}
 	leftNumber, leftOK := valueToLuaNumber(leftValue)
 	rightNumber, rightOK := valueToLuaNumber(rightValue)
 	if leftOK && rightOK {
 		// 任一侧为 float 或可转数字字符串时，按 Lua 5.3 number 语义计算。
-		vm.registers[targetIndex] = NumberValue(leftNumber + rightNumber)
+		vm.registers[targetIndex] = NumberValue(numberOperation(leftNumber, rightNumber))
 		return nil
 	}
 
-	metamethodResult, found, metamethodErr := vm.callBinaryMetamethod(leftValue, rightValue, metamethodAdd)
+	metamethodResult, found, metamethodErr := vm.callBinaryMetamethod(leftValue, rightValue, metamethodName)
 	if metamethodErr != nil {
 		// 元方法被找到但调用失败时，返回调用错误并保持目标寄存器原值。
 		return metamethodErr
@@ -1543,6 +1698,88 @@ func (vm *VM) executeAdd(instruction bytecode.Instruction) error {
 		return nil
 	}
 	return ErrArithmeticOperand
+}
+
+// tryCachedIntegerRegisterArithmetic 尝试执行当前 PC 的双 integer 寄存器算术缓存。
+//
+// 返回 handled 表示指令已经成功写回；当缓存记录存在但操作数形态或类型不再匹配时会清除
+// 缓存并返回 handled=false，让调用方回到完整 Lua 语义。
+func (vm *VM) tryCachedIntegerRegisterArithmetic(instruction bytecode.Instruction, cacheKind byte, integerOperation func(int64, int64) int64) (bool, error) {
+	if vm.currentPC < 0 || vm.currentPC >= len(vm.arithmeticIntRegisterCache) || vm.arithmeticIntRegisterCache[vm.currentPC] != cacheKind {
+		// 当前 PC 没有目标算术缓存，调用方继续走普通 RK 路径。
+		return false, nil
+	}
+
+	leftOperand := instruction.B()
+	rightOperand := instruction.C()
+	leftInteger, leftOK, leftErr := vm.cachedIntegerArithmeticOperand(leftOperand)
+	rightInteger, rightOK, rightErr := vm.cachedIntegerArithmeticOperand(rightOperand)
+	if leftErr != nil || rightErr != nil {
+		// 指令形态或寄存器窗口变化时清理缓存，并回到通用 RK 路径报出原始错误。
+		vm.arithmeticIntRegisterCache[vm.currentPC] = arithmeticIntRegisterCacheNone
+		return false, nil
+	}
+	if !leftOK || !rightOK {
+		// 类型不再匹配时清理缓存，后续走完整 Lua 算术和元方法语义。
+		vm.arithmeticIntRegisterCache[vm.currentPC] = arithmeticIntRegisterCacheNone
+		return false, nil
+	}
+
+	// 双 integer 算术保留 integer 结果，并按 64 位补码自然回绕。
+	vm.registers[instruction.A()] = IntegerValue(integerOperation(leftInteger, rightInteger))
+	return true, nil
+}
+
+// rememberIntegerRegisterArithmetic 记录当前 PC 的 integer 算术热路径。
+//
+// 只有 B/C 都是寄存器或 integer 常量时才记录缓存；其他 RK 常量保留通用读取路径。
+func (vm *VM) rememberIntegerRegisterArithmetic(leftOperand int, rightOperand int, cacheKind byte) {
+	if vm.currentPC < 0 || vm.currentPC >= len(vm.arithmeticIntRegisterCache) {
+		// 无效 PC 不适合缓存，直接保留完整 RK 路径。
+		return
+	}
+	if _, ok, err := vm.cachedIntegerArithmeticOperand(leftOperand); err != nil || !ok {
+		// 左操作数不是可缓存 integer 时保留完整 RK 路径。
+		return
+	}
+	if _, ok, err := vm.cachedIntegerArithmeticOperand(rightOperand); err != nil || !ok {
+		// 右操作数不是可缓存 integer 时保留完整 RK 路径。
+		return
+	}
+
+	// 记录当前 PC 的 integer 热路径，下次同类算术可跳过通用 RK 读取和 number fallback。
+	vm.arithmeticIntRegisterCache[vm.currentPC] = cacheKind
+}
+
+// cachedIntegerArithmeticOperand 读取已确认可缓存算术指令的 integer 操作数。
+//
+// rk 可指向寄存器或 integer 常量；返回 ok=false 表示运行期类型发生变化，需要清理缓存并回到
+// 完整 Lua 算术语义。
+func (vm *VM) cachedIntegerArithmeticOperand(rk int) (int64, bool, error) {
+	index := bytecode.IndexK(rk)
+	if bytecode.IsK(rk) {
+		// RK 常量路径只接受 Proto 中的 integer 常量，其他常量交给通用算术路径处理。
+		if index < 0 || index >= len(vm.constants) {
+			// 常量索引越界通常表示损坏 chunk 或编译器输出错误。
+			return 0, false, ErrConstantOutOfRange
+		}
+		constant := vm.constants[index]
+		if constant.Kind != bytecode.ConstantInteger {
+			// 非 integer 常量不能走整数算术快路径。
+			return 0, false, nil
+		}
+		return constant.Integer, true, nil
+	}
+	if index < 0 || index >= len(vm.registers) {
+		// RK 寄存器路径越界时不能读取寄存器窗口。
+		return 0, false, ErrRegisterOutOfRange
+	}
+	value := vm.registers[index]
+	if value.Kind != KindInteger {
+		// 非 integer 寄存器值需要回到完整 number/string/metamethod 语义。
+		return 0, false, nil
+	}
+	return value.Integer, true, nil
 }
 
 // executeBinaryBitwise 执行 Lua 5.3 二元位运算指令。

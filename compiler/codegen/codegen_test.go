@@ -31,8 +31,8 @@ func TestCompileChunkDeduplicatesConstantsAndRegisters(t *testing.T) {
 		// 数字 1 应按 Lua 5.3 integer 常量保存。
 		t.Fatalf("unexpected constant=%+v", proto.Constants[0])
 	}
-	if proto.MaxStackSize != 4 {
-		// 三个 local 加复用目标寄存器后的一个二元表达式临时寄存器，最大栈大小应稳定为 4。
+	if proto.MaxStackSize != 3 {
+		// 三个 local 已覆盖 a+b 的 RK 操作数，不再需要额外二元表达式临时寄存器。
 		t.Fatalf("unexpected max stack=%d", proto.MaxStackSize)
 	}
 	if proto.Code[0].OpCode() != bytecode.OpLoadK || proto.Code[1].OpCode() != bytecode.OpLoadK {

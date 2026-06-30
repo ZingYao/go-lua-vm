@@ -470,25 +470,25 @@ func TestCLoadingPolicyDocumentsUnsupportedDynamicLibraries(t *testing.T) {
 	}
 }
 
-// TestDefaultCPathDocumentsPlatformCandidates 验证动态库默认候选和 Windows .lib 边界。
+// TestDefaultCPathDocumentsPlatformCandidates 验证默认无 CGO 策略下不自动搜索动态库。
 //
-// Linux/macOS 默认候选包含 .so 与 .dylib；Windows 只把 .dll 作为运行期加载候选，并明确 .lib
-// 是链接期/import library，不是 require 运行期路径。
+// 默认 package.cpath 为空，表示 require 不搜索 C 模块；Windows 诊断仍说明 .dll 与 .lib/import
+// library 的运行期和链接期边界，供宿主自定义 loader 时参考。
 func TestDefaultCPathDocumentsPlatformCandidates(t *testing.T) {
-	// Unix 默认 cpath 必须同时覆盖 .so 和 .dylib。
+	// Unix 默认 cpath 为空，默认 require 不搜索动态库。
 	unixCPath := DefaultCPathForGOOS("linux")
-	if !strings.Contains(unixCPath, "?.so") || !strings.Contains(unixCPath, "?.dylib") {
-		// Linux/macOS 候选必须包含两类常见动态库后缀。
+	if unixCPath != "" {
+		// 无 CGO 默认策略下 Linux 不应自动搜索 .so 或 .dylib。
 		t.Fatalf("unix cpath = %q", unixCPath)
 	}
 	darwinCPath := DefaultCPathForGOOS("darwin")
-	if !strings.Contains(darwinCPath, "?.so") || !strings.Contains(darwinCPath, "?.dylib") {
-		// macOS 也必须保留 .so 兼容候选和 .dylib 原生候选。
+	if darwinCPath != "" {
+		// 无 CGO 默认策略下 macOS 不应自动搜索 .so 或 .dylib。
 		t.Fatalf("darwin cpath = %q", darwinCPath)
 	}
 	windowsCPath := DefaultCPathForGOOS("windows")
-	if !strings.Contains(windowsCPath, "?.dll") || strings.Contains(windowsCPath, "?.lib") {
-		// Windows 运行期 require 只搜索 .dll，不搜索 .lib。
+	if windowsCPath != "" {
+		// 无 CGO 默认策略下 Windows 不应自动搜索 .dll。
 		t.Fatalf("windows cpath = %q", windowsCPath)
 	}
 	windowsNote := DynamicLibraryPlatformNote("windows")
@@ -498,21 +498,21 @@ func TestDefaultCPathDocumentsPlatformCandidates(t *testing.T) {
 	}
 }
 
-// TestSearchersAreRegistered 验证 package.searchers 的四个 Lua 5.3 标准搜索器槽位。
+// TestSearchersAreRegistered 验证 package.searchers 的默认无 CGO 搜索器槽位。
 //
-// 当前四个槽位分别对应 preload、Lua 文件、C 动态库和 C root 动态库搜索策略。
+// 默认只注册 preload 与 Lua/GLua 文件搜索器；C 动态库搜索器不进入 require 默认链路。
 func TestSearchersAreRegistered(t *testing.T) {
 	// 新建环境后 searchers 应立即可用。
 	environment := NewEnvironment()
-	for index := int64(1); index <= 4; index++ {
-		// 每个标准 searcher 都必须是 Go closure。
+	for index := int64(1); index <= 2; index++ {
+		// 默认启用的 searcher 都必须是 Go closure。
 		if got := environment.Searchers().RawGetInteger(index); got.Kind != runtime.KindGoClosure {
 			t.Fatalf("searcher[%d] kind = %v, want Go closure", index, got.Kind)
 		}
 	}
-	if got := environment.Searchers().RawGetInteger(5); !got.IsNil() {
-		// 第五个槽位当前未注册，保持 Lua 数组结束语义。
-		t.Fatalf("searcher[5] = %#v, want nil", got)
+	if got := environment.Searchers().RawGetInteger(3); !got.IsNil() {
+		// 第三个槽位不注册 C searcher，避免默认 require 尝试动态库。
+		t.Fatalf("searcher[3] = %#v, want nil", got)
 	}
 }
 

@@ -1,22 +1,21 @@
-main <sample:0,0> params=0 vararg=true maxstack=7
+main <sample:0,0> params=0 vararg=true maxstack=6
   [0000] line=1 LOADK     A=0 Bx=0
   [0001] line=1 CLOSURE   A=1 Bx=0
   [0002] line=1 LOADK     A=2 Bx=0
   [0003] line=1 LOADK     A=3 Bx=1
   [0004] line=1 LOADK     A=4 Bx=0
-  [0005] line=1 FORPREP   A=2 sBx=2
-  [0006] line=1 MOVE      A=6 B=5 C=0
-  [0007] line=1 ADD       A=0 B=R(0) C=R(6)
-  [0008] line=1 FORLOOP   A=2 sBx=-3
-  [0009] line=1 JMP       A=0 sBx=0
-  [0010] line=0 RETURN    A=0 B=1 C=0
+  [0005] line=1 FORPREP   A=2 sBx=1
+  [0006] line=1 ADD       A=0 B=R(0) C=R(5)
+  [0007] line=1 FORLOOP   A=2 sBx=-2
+  [0008] line=1 JMP       A=0 sBx=0
+  [0009] line=0 RETURN    A=0 B=1 C=0
   constants (2):
     [0] integer(1)
     [1] integer(2)
   locals (3):
-    [0] name="a" pc=[1,11)
-    [1] name="f" pc=[1,11)
-    [2] name="i" pc=[5,10)
+    [0] name="a" pc=[1,10)
+    [1] name="f" pc=[1,10)
+    [2] name="i" pc=[5,9)
   child[0] <sample:1,1> params=1 vararg=false maxstack=2
     [0000] line=1 GETUPVAL  A=1 B=0 C=0
     [0001] line=1 ADD       A=1 B=R(0) C=R(1)

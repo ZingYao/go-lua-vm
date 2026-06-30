@@ -69,6 +69,19 @@ type GoFunction func(args ...Value) (Value, error)
 // `__ipairs` 和后续 Go bridge 多返回值路径，单返回值元方法仍可使用 GoFunction。
 type GoResultsFunction func(args ...Value) ([]Value, error)
 
+// GoFixedResultsFunction 表示有固定返回值上限的 Go 回调。
+//
+// MaxResults 必须覆盖 Function 快路径可能返回的最大结果数量；Function 将结果写入调用方提供的
+// dst，返回实际结果数量和是否命中快路径。未命中时调用方必须回退到 Fallback，避免截断变长结果。
+type GoFixedResultsFunction struct {
+	// MaxResults 表示 Function 最多写入的返回值数量。
+	MaxResults int
+	// Function 将返回值写入 dst，并返回实际结果数量和是否命中快路径。
+	Function func(dst []Value, args ...Value) (int, bool, error)
+	// Fallback 保存未命中快路径时使用的完整多返回值函数。
+	Fallback GoResultsFunction
+}
+
 // lookupMetamethod 查找一个值的元方法。
 //
 // 当前阶段支持 table 与 userdata 的专属元表，以及 nil、boolean、number、string 的类型级

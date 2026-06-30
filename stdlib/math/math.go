@@ -45,7 +45,7 @@ func Open(state *runtime.State) error {
 	library.RawSetString("cos", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Cos)))
 	library.RawSetString("deg", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Deg)))
 	library.RawSetString("exp", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Exp)))
-	library.RawSetString("floor", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Floor)))
+	library.RawSetString("floor", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoFunction(FloorValue)))
 	library.RawSetString("fmod", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(FMod)))
 	library.RawSetString("huge", runtime.NumberValue(math.Inf(1)))
 	library.RawSetString("log", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Log)))
@@ -59,7 +59,7 @@ func Open(state *runtime.State) error {
 	library.RawSetString("random", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Random)))
 	library.RawSetString("randomseed", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(RandomSeed)))
 	library.RawSetString("sin", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Sin)))
-	library.RawSetString("sqrt", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Sqrt)))
+	library.RawSetString("sqrt", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoFunction(SqrtValue)))
 	library.RawSetString("tan", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Tan)))
 	library.RawSetString("tointeger", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(ToInteger)))
 	library.RawSetString("type", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Type)))
@@ -230,25 +230,41 @@ func Exp(args ...runtime.Value) ([]runtime.Value, error) {
 // 第一个参数必须是 number；integer 入参原样返回，float number 入参返回向下取整后的
 // integer。若结果超出 int64 或为 NaN/Inf，则返回 float number，避免 Go 整数转换溢出。
 func Floor(args ...runtime.Value) ([]runtime.Value, error) {
+	// floor 首先执行单返回入口，保持导出多返回签名兼容既有调用方。
+	value, err := FloorValue(args...)
+	if err != nil {
+		// 参数错误直接返回。
+		return nil, err
+	}
+
+	// 多返回 API 包装为单元素切片。
+	return []runtime.Value{value}, nil
+}
+
+// FloorValue 实现 Lua 5.3 `math.floor` 的单返回热路径。
+//
+// 第一个参数必须是 number；integer 入参原样返回，float number 入参返回向下取整后的
+// integer。错误语义与 Floor 保持一致，供 VM 内部 GoFunction 快路径避免结果切片分配。
+func FloorValue(args ...runtime.Value) (runtime.Value, error) {
 	// floor 首先解析 number 参数。
 	value, err := numberValueArgument(args, 1, "floor")
 	if err != nil {
 		// 第一个参数不是 number 时直接返回 Lua 参数错误。
-		return nil, err
+		return runtime.NilValue(), err
 	}
 	if value.Kind == runtime.KindInteger {
 		// integer 已经是整数，直接返回。
-		return []runtime.Value{value}, nil
+		return value, nil
 	}
 
 	floored := math.Floor(value.Number)
 	if math.IsNaN(floored) || math.IsInf(floored, 0) || floored < float64(math.MinInt64) || floored >= -float64(math.MinInt64) {
 		// 非有限或超出 int64 范围时保留 float number。
-		return []runtime.Value{runtime.NumberValue(floored)}, nil
+		return runtime.NumberValue(floored), nil
 	}
 
 	// 有限且可表达时返回 Lua integer。
-	return []runtime.Value{runtime.IntegerValue(int64(floored))}, nil
+	return runtime.IntegerValue(int64(floored)), nil
 }
 
 // FMod 实现 Lua 5.3 `math.fmod`。
@@ -525,15 +541,31 @@ func Sin(args ...runtime.Value) ([]runtime.Value, error) {
 // 第一个参数必须是 number；integer 会转换为 float64。返回值是平方根 float number，
 // 负数定义域由 Go math.Sqrt 返回 NaN。
 func Sqrt(args ...runtime.Value) ([]runtime.Value, error) {
+	// sqrt 首先执行单返回入口，保持导出多返回签名兼容既有调用方。
+	value, err := SqrtValue(args...)
+	if err != nil {
+		// 参数错误直接返回。
+		return nil, err
+	}
+
+	// 多返回 API 包装为单元素切片。
+	return []runtime.Value{value}, nil
+}
+
+// SqrtValue 实现 Lua 5.3 `math.sqrt` 的单返回热路径。
+//
+// 第一个参数必须是 number；integer 会转换为 float64。错误语义与 Sqrt 保持一致，供 VM
+// 内部 GoFunction 快路径避免结果切片分配。
+func SqrtValue(args ...runtime.Value) (runtime.Value, error) {
 	// sqrt 首先解析 number 参数。
 	value, err := numberArgument(args, 1, "sqrt")
 	if err != nil {
 		// 第一个参数不是 number 时直接返回 Lua 参数错误。
-		return nil, err
+		return runtime.NilValue(), err
 	}
 
 	// 返回平方根结果。
-	return []runtime.Value{runtime.NumberValue(math.Sqrt(value))}, nil
+	return runtime.NumberValue(math.Sqrt(value)), nil
 }
 
 // Tan 实现 Lua 5.3 `math.tan`。
