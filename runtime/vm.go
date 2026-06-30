@@ -932,10 +932,8 @@ func (vm *VM) Step(instruction bytecode.Instruction) error {
 	vm.skipNext = false
 	vm.pcOffset = 0
 	vm.closeFrom = -1
-	vm.callRequest = CallRequest{}
 	vm.hasCallRequest = false
 	vm.returned = false
-	vm.returnValues = nil
 	if (vm.pendingLoadKXTarget >= 0 || vm.pendingSetList != nil) && instruction.OpCode() != bytecode.OpExtraArg {
 		// LOADKX 或 SETLIST 的扩展形态必须紧跟 EXTRAARG，否则无法确定扩展参数。
 		return ErrExpectedExtraArg
