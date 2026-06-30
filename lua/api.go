@@ -3227,7 +3227,7 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 		// 固定参数/固定返回的 Lua closure 走 direct CALL，避免构造参数切片。
 		results, directCallVM, err = executeLuaCallRequestDirect(state, vm, functionValue, debugName, debugNameWhat, callRequest)
 	} else {
-		if unaryFunction, ok := functionValue.Ref.(runtime.GoUnaryFunction); ok && callRequest.ArgumentCount == 1 && callRequest.ReturnCount == 1 && !callRequest.GenericFor {
+		if unaryFunction, ok := functionValue.Ref.(runtime.GoUnaryFunction); ok && callRequest.ArgumentCount == 1 && (callRequest.ReturnCount == 1 || callRequest.ReturnCount < 0) && !callRequest.GenericFor {
 			// 单参数单返回 Go closure 直接读取参数寄存器，避免为标准库一元函数构造参数切片。
 			argument, argumentOK := vm.Register(callRequest.FunctionIndex + 1)
 			if !argumentOK {
@@ -3241,7 +3241,13 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 					// 写回超过寄存器窗口时返回边界错误。
 					return setErr
 				}
-				vm.SetOpenTop(-1)
+				if callRequest.ReturnCount < 0 {
+					// CALL C=0 需要记录实际开放返回上界，供后续 CALL B=0 消费单个结果。
+					vm.SetOpenTop(callRequest.FunctionIndex + 1)
+				} else {
+					// 固定单返回不形成开放列表。
+					vm.SetOpenTop(-1)
+				}
 				return nil
 			}
 		}
