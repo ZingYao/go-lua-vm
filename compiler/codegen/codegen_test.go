@@ -242,6 +242,31 @@ func TestCompileChunkIfLocalConditionReusesRegister(t *testing.T) {
 	}
 }
 
+// TestCompileChunkIfComparisonConditionDirect 验证 if 比较条件直译为测试跳转。
+//
+// Lua 5.3 官方 codegen 对安全有序比较条件直接生成 LT/LE 加失败 JMP；不需要先物化 boolean。
+func TestCompileChunkIfComparisonConditionDirect(t *testing.T) {
+	chunk := parseChunkForCodegenTest(t, "local i = 1 local out = 0 if i < 3 then out = i end return out")
+
+	proto, err := CompileChunk(chunk, "if-comparison-direct")
+	if err != nil {
+		// 合法 if 比较条件不应编译失败。
+		t.Fatalf("compile if comparison failed: %v", err)
+	}
+	if countOpCode(proto, bytecode.OpLt) != 1 {
+		// i < 3 应直译为一条 LT 测试指令。
+		t.Fatalf("expected one LT instruction")
+	}
+	if countOpCode(proto, bytecode.OpTest) != 0 || countOpCode(proto, bytecode.OpLoadBool) != 0 {
+		// if 比较条件不应先写入 boolean 临时值。
+		t.Fatalf("unexpected boolean materialization: test=%d loadbool=%d", countOpCode(proto, bytecode.OpTest), countOpCode(proto, bytecode.OpLoadBool))
+	}
+	if countOpCode(proto, bytecode.OpJmp) < 1 {
+		// 条件失败路径必须保留一条跳过 then 分支的 JMP。
+		t.Fatalf("expected false branch JMP instruction")
+	}
+}
+
 // TestCompileChunkWhileStatement 验证 while 语句生成 TEST 和回跳 JMP。
 //
 // 当前测试覆盖官方 main.lua 早期使用的条件循环形态，运行时跳转语义由 VM JMP/TEST 测试承担。

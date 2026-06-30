@@ -1781,49 +1781,57 @@ func (generator *generator) compileFunctionStatement(statement *parser.FunctionS
 
 // compileIfStatement 编译 if/elseif/else 条件分支语句。
 //
-// 每个条件先生成到临时寄存器，TEST C=0 搭配 JMP 表示 false/nil 时跳到下一分支。
+// 安全有序比较条件直译为 LT/LE 加失败跳转；其他条件先生成到临时寄存器，
+// TEST C=0 搭配 JMP 表示 false/nil 时跳到下一分支。
 func (generator *generator) compileIfStatement(statement *parser.IfStatement) error {
 	var endJumpPCs []int
 	for clauseIndex := range statement.Clauses {
 		// 每个 if/elseif 条件失败时跳到下一 clause 或 else。
 		clause := statement.Clauses[clauseIndex]
-		conditionRegister, releaseConditionRegister := generator.ifConditionRegister(clause.Condition)
-		if err := generator.withSourceLine(clause.Condition.Pos(), func() error {
-			// 条件表达式自身归属表达式起始行；简单 local 名称可直接复用寄存器。
-			return generator.compileIfConditionTo(clause.Condition, conditionRegister, releaseConditionRegister)
-		}); err != nil {
-			// 条件表达式编译失败时释放临时寄存器并返回。
-			if releaseConditionRegister {
-				generator.releaseRegister(conditionRegister)
-			}
-			return err
-		}
-		if err := generator.withSourceLine(clause.ThenPosition, func() error {
-			// TEST 表示进入 then 检查；多行 if 条件需要暴露 then 所在行给 line hook。
-			generator.emitABC(bytecode.OpTest, conditionRegister, 0, 0)
-			return nil
-		}); err != nil {
-			// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
-			if releaseConditionRegister {
-				generator.releaseRegister(conditionRegister)
-			}
-			return err
-		}
 		falseTargetPosition := generator.ifFalseTargetPosition(statement, clauseIndex)
 		falseJumpPC := 0
-		if err := generator.withSourceLine(falseTargetPosition, func() error {
-			// 条件失败时执行该 JMP，因此它的行号应指向下一分支、else 或 end。
-			falseJumpPC = generator.emitJump(0)
-			return nil
-		}); err != nil {
-			// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
+		if handled, err := generator.compileIfComparisonCondition(clause, falseTargetPosition, &falseJumpPC); err != nil || handled {
+			if err != nil {
+				// 条件比较编译失败时返回错误，避免生成不完整分支。
+				return err
+			}
+		} else {
+			conditionRegister, releaseConditionRegister := generator.ifConditionRegister(clause.Condition)
+			if err := generator.withSourceLine(clause.Condition.Pos(), func() error {
+				// 条件表达式自身归属表达式起始行；简单 local 名称可直接复用寄存器。
+				return generator.compileIfConditionTo(clause.Condition, conditionRegister, releaseConditionRegister)
+			}); err != nil {
+				// 条件表达式编译失败时释放临时寄存器并返回。
+				if releaseConditionRegister {
+					generator.releaseRegister(conditionRegister)
+				}
+				return err
+			}
+			if err := generator.withSourceLine(clause.ThenPosition, func() error {
+				// TEST 表示进入 then 检查；多行 if 条件需要暴露 then 所在行给 line hook。
+				generator.emitABC(bytecode.OpTest, conditionRegister, 0, 0)
+				return nil
+			}); err != nil {
+				// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
+				if releaseConditionRegister {
+					generator.releaseRegister(conditionRegister)
+				}
+				return err
+			}
+			if err := generator.withSourceLine(falseTargetPosition, func() error {
+				// 条件失败时执行该 JMP，因此它的行号应指向下一分支、else 或 end。
+				falseJumpPC = generator.emitJump(0)
+				return nil
+			}); err != nil {
+				// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
+				if releaseConditionRegister {
+					generator.releaseRegister(conditionRegister)
+				}
+				return err
+			}
 			if releaseConditionRegister {
 				generator.releaseRegister(conditionRegister)
 			}
-			return err
-		}
-		if releaseConditionRegister {
-			generator.releaseRegister(conditionRegister)
 		}
 		if err := generator.compileScopedBlock(clause.Block); err != nil {
 			// 分支 block 编译失败时返回错误。
@@ -1868,6 +1876,26 @@ func (generator *generator) compileIfStatement(statement *parser.IfStatement) er
 
 	// if 语句编译完成。
 	return nil
+}
+
+// compileIfComparisonCondition 将安全 if/elseif 有序比较条件直译成 Lua 5.3 测试跳转。
+//
+// 仅当条件是有序比较表达式，且左右操作数都是当前 local 或字面量时启用；等值比较暂保留通用
+// boolean 物化路径，避免 debug return hook 中 `event == "return"` 的栈层级推断发生变化。
+func (generator *generator) compileIfComparisonCondition(clause parser.IfClause, falseJumpPosition lexer.Position, falseJumpPC *int) (bool, error) {
+	expression, ok := clause.Condition.(*parser.BinaryExpression)
+	if !ok {
+		// 非二元表达式继续走通用 TEST 路径。
+		return false, nil
+	}
+	switch expression.Operator {
+	case "<", "<=", ">", ">=":
+		// 有序比较可以直译为条件跳转，递归和算术分支可减少 boolean 临时值。
+	default:
+		// 等值比较可能影响 return hook 内基于当前 PC 的调试名/层级推断，暂不直译。
+		return false, nil
+	}
+	return generator.compileComparisonConditionJump(clause.Condition, clause.Condition.Pos(), falseJumpPosition, falseJumpPC)
 }
 
 // ifConditionRegister 选择 if 条件 TEST 使用的寄存器。
