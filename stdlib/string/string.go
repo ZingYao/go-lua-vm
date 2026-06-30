@@ -77,7 +77,7 @@ func Open(state *runtime.State) error {
 	library.RawSetString("pack", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Pack)))
 	library.RawSetString("packsize", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(PackSize)))
 	library.RawSetString("rep", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Rep)))
-	library.RawSetString("reverse", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Reverse)))
+	library.RawSetString("reverse", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: ReverseUnaryValue, AcceptedKinds: runtime.UnaryKindMask(runtime.KindString)}))
 	library.RawSetString("sub", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Sub)))
 	library.RawSetString("unpack", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Unpack)))
 	library.RawSetString("upper", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: UpperUnaryValue, AcceptedKinds: runtime.UnaryKindMask(runtime.KindString)}))
@@ -789,6 +789,25 @@ func Reverse(args ...runtime.Value) ([]runtime.Value, error) {
 		bytes[leftIndex], bytes[rightIndex] = bytes[rightIndex], bytes[leftIndex]
 	}
 	return []runtime.Value{runtime.StringValue(string(bytes))}, nil
+}
+
+// ReverseUnaryValue 实现 Lua 5.3 `string.reverse` 的单参数单返回热路径。
+//
+// value 必须是 string；返回值按底层字节反向排列，不按 Unicode rune 反转。该入口服务
+// VM CALL fast path，避免标准库热点调用构造临时参数和结果切片。
+func ReverseUnaryValue(value runtime.Value) (runtime.Value, error) {
+	// reverse 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
+	if value.Kind != runtime.KindString {
+		// 非 string 类型不做 tostring 隐式转换。
+		return runtime.NilValue(), badArgument("reverse", 1, "string expected")
+	}
+
+	bytes := []byte(value.String)
+	for leftIndex, rightIndex := 0, len(bytes)-1; leftIndex < rightIndex; leftIndex, rightIndex = leftIndex+1, rightIndex-1 {
+		// 交换两端字节，直到左右游标相遇。
+		bytes[leftIndex], bytes[rightIndex] = bytes[rightIndex], bytes[leftIndex]
+	}
+	return runtime.StringValue(string(bytes)), nil
 }
 
 // Sub 实现 Lua 5.3 `string.sub` 的字节切片语义。
