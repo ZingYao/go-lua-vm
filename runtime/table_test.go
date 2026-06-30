@@ -82,6 +82,42 @@ func TestTableResizeBehavior(t *testing.T) {
 	}
 }
 
+// TestTableArrayGrowthKeepsVisibleSize 验证数组区扩容只预留容量不暴露额外长度。
+//
+// 连续整数写入应按几何容量增长以降低分配次数，但 len(arrayValues) 仍必须等于最高可见数组槽位，
+// 预留容量不能影响 RawGet、RawNext 或 Len 的 Lua 可观察语义。
+func TestTableArrayGrowthKeepsVisibleSize(t *testing.T) {
+	table := NewTable()
+	table.RawSetInteger(1, StringValue("first"))
+
+	if table.ArraySize() != 1 {
+		// 可见数组区长度必须只到已写入的最高 key。
+		t.Fatalf("array visible size mismatch: got %d", table.ArraySize())
+	}
+	if cap(table.arrayValues) <= table.ArraySize() {
+		// 首次写入应预留后续连续写入容量。
+		t.Fatalf("array capacity was not reserved: len=%d cap=%d", table.ArraySize(), cap(table.arrayValues))
+	}
+	if got := table.RawGetInteger(2); !got.IsNil() {
+		// 未进入可见长度的预留槽位必须按 nil 读取。
+		t.Fatalf("reserved slot should read nil: %#v", got)
+	}
+	if length := table.Len(); length != 1 {
+		// 长度边界不能被预留容量影响。
+		t.Fatalf("reserved capacity affected length: got %d", length)
+	}
+	nextKey, nextValue, ok, err := table.RawNext(NilValue())
+	if err != nil || !ok || !nextKey.RawEqual(IntegerValue(1)) || !nextValue.RawEqual(StringValue("first")) {
+		// RawNext 只能遍历可见数组区的真实元素。
+		t.Fatalf("first raw next mismatch: key=%#v value=%#v ok=%v err=%v", nextKey, nextValue, ok, err)
+	}
+	nextKey, nextValue, ok, err = table.RawNext(IntegerValue(1))
+	if err != nil || ok || !nextKey.IsNil() || !nextValue.IsNil() {
+		// 预留容量中的 nil 槽位不能产生迭代项。
+		t.Fatalf("reserved capacity leaked into raw next: key=%#v value=%#v ok=%v err=%v", nextKey, nextValue, ok, err)
+	}
+}
+
 // TestTableHashPart 验证非数组 key 会进入 hash 区。
 //
 // 当前 hash 区支持 string、boolean、非正 integer 和非整数 number。
