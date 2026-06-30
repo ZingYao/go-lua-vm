@@ -3219,7 +3219,7 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 		// 函数寄存器缺失说明 codegen 或 VM 状态异常。
 		return runtime.ErrRegisterOutOfRange
 	}
-	directCall := canExecuteLuaCallRequestDirect(state, functionValue, callRequest)
+	directClosure, directCall := canExecuteLuaCallRequestDirect(state, functionValue, callRequest)
 	debugName := ""
 	debugNameWhat := ""
 	if !directCall || hooksEnabled {
@@ -3232,7 +3232,7 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 	var err error
 	if directCall {
 		// 固定参数/固定返回的 Lua closure 走 direct CALL，避免构造参数切片。
-		results, directCallVM, directResultsWritten, err = executeLuaCallRequestDirect(state, vm, functionValue, debugName, debugNameWhat, callRequest)
+		results, directCallVM, directResultsWritten, err = executeLuaCallRequestDirect(state, vm, directClosure, debugName, debugNameWhat, callRequest)
 	} else {
 		if fastUnaryFunction, ok := functionValue.Ref.(*runtime.GoFastUnaryFunction); ok && callRequest.ArgumentCount == 1 && (callRequest.ReturnCount == 1 || callRequest.ReturnCount < 0) && !callRequest.GenericFor {
 			// 显式 opt-in 的标准库一元函数在无 hook 且参数类型已确认时跳过 Go 调用帧。
@@ -3409,42 +3409,41 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 // canExecuteLuaCallRequestDirect 判断 CALL 请求是否可使用 Lua closure direct 路径。
 //
 // direct 路径只覆盖固定参数、固定返回、非泛型 for 的普通 Lua closure；复杂开放调用仍走通用路径。
-func canExecuteLuaCallRequestDirect(state *State, functionValue Value, callRequest *runtime.CallRequest) bool {
+func canExecuteLuaCallRequestDirect(state *State, functionValue Value, callRequest *runtime.CallRequest) (*runtime.LuaClosure, bool) {
 	if state == nil || callRequest == nil || callRequest.GenericFor || callRequest.ReturnCount < 0 || callRequest.ArgumentCount < 0 {
 		// 缺少 State 或调用请求时不能进入 direct CALL。
-		return false
+		return nil, false
 	}
 	if functionValue.Kind != runtime.KindLuaClosure {
 		// 非 Lua closure 仍走通用调用路径。
-		return false
+		return nil, false
 	}
 	if ((*runtime.State)(state)).HasCreatedCoroutines() {
 		// 已创建 coroutine 后，调用现场可能被 continuation 持有，保留完整通用路径。
-		return false
+		return nil, false
 	}
 	closure, ok := functionValue.Ref.(*runtime.LuaClosure)
 	if !ok || closure == nil || closure.Proto == nil {
 		// 损坏 closure 交给通用路径生成原有错误。
-		return false
+		return nil, false
 	}
 	if closure.Proto.IsVararg || len(closure.Proto.Protos) > 0 {
 		// vararg 和子函数都需要完整调用现场。
-		return false
+		return nil, false
 	}
 	if !closure.DirectCallSafe {
 		// 只允许创建时判定为无嵌套调用的叶子函数走 direct CALL。
-		return false
+		return nil, false
 	}
-	return true
+	return closure, true
 }
 
 // executeLuaCallRequestDirect 执行固定参数/固定返回的 Lua closure CALL。
 //
-// callerVM 是当前调用方 VM；functionValue 必须是合法 Lua closure。该路径直接把 caller 参数寄存器
+// callerVM 是当前调用方 VM；closure 必须是合法 Lua closure。该路径直接把 caller 参数寄存器
 // 写入 callee R0..，避免为 CALL 构造参数切片。
-func executeLuaCallRequestDirect(state *State, callerVM *runtime.VM, functionValue Value, debugName string, debugNameWhat string, callRequest *runtime.CallRequest) ([]Value, *runtime.VM, bool, error) {
-	closure, ok := functionValue.Ref.(*runtime.LuaClosure)
-	if !ok || closure == nil || closure.Proto == nil {
+func executeLuaCallRequestDirect(state *State, callerVM *runtime.VM, closure *runtime.LuaClosure, debugName string, debugNameWhat string, callRequest *runtime.CallRequest) ([]Value, *runtime.VM, bool, error) {
+	if closure == nil || closure.Proto == nil {
 		// 防御损坏 closure，保持不可调用错误语义。
 		return nil, nil, false, runtime.NewRuntimeError(runtime.StringValue(ErrExpectedCallable.Error()), ErrExpectedCallable)
 	}
@@ -3477,6 +3476,7 @@ func executeLuaCallRequestDirect(state *State, callerVM *runtime.VM, functionVal
 		results, err = executeLuaLeafClosureFast(state, proto, calleeVM)
 	} else {
 		// 可被 hook/debug 观察的调用保留完整执行器。
+		functionValue := runtime.ReferenceValue(runtime.KindLuaClosure, closure)
 		results, err = executePreparedLuaClosureWithDebugNameTailFromArgs(state, functionValue, debugName, debugNameWhat, false, nil, closure, proto, calleeVM, registerCount, nil, nil)
 	}
 	if err != nil {
