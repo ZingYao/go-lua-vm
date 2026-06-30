@@ -637,6 +637,22 @@ func TestNewLuaClosureCachesDirectCallSafe(t *testing.T) {
 		// upvalue + K1 也应缓存为整数常量专用形态。
 		t.Fatalf("upvalue integer add metadata mismatch: %+v", upvalueIntegerClosure.LeafAddReturn)
 	}
+
+	upvalueAddSetProto := &bytecode.Proto{
+		Constants: []bytecode.Constant{bytecode.IntegerConstant(1)},
+		Code: []bytecode.Instruction{
+			bytecode.CreateABC(bytecode.OpGetUpval, 0, 0, 0),
+			bytecode.CreateABC(bytecode.OpAdd, 0, 0, bytecode.RKAsK(0)),
+			bytecode.CreateABC(bytecode.OpSetupVal, 0, 0, 0),
+			bytecode.CreateABC(bytecode.OpGetUpval, 0, 0, 0),
+			bytecode.CreateABC(bytecode.OpReturn, 0, 2, 0),
+		},
+	}
+	upvalueAddSetClosure := NewLuaClosure(upvalueAddSetProto, nil, nil)
+	if upvalueAddSetClosure.LeafUpvalueAddSetReturn == nil || upvalueAddSetClosure.LeafUpvalueAddSetReturn.UpvalueIndex != 0 || upvalueAddSetClosure.LeafUpvalueAddSetReturn.IntegerConstant != 1 {
+		// upvalue 自增并返回同一 upvalue 的闭包叶子函数应缓存专用元数据。
+		t.Fatalf("upvalue add-set metadata mismatch: %+v", upvalueAddSetClosure.LeafUpvalueAddSetReturn)
+	}
 }
 
 // TestVMTryExecuteLeafAddReturn 验证 `ADD; RETURN` 叶子函数快路径。
@@ -862,6 +878,69 @@ func TestVMTryExecuteLeafAddReturnInCallerFirstArgumentConstant(t *testing.T) {
 	if err != nil || handled {
 		// 缺参必须回退完整 VM，避免把旧 R1 当作参数。
 		t.Fatalf("missing argument should fallback: handled=%v err=%v", handled, err)
+	}
+}
+
+// TestVMTryExecuteLeafUpvalueAddSetReturnInCaller 验证 upvalue 自增闭包 caller-side 快路径。
+//
+// `local function inc() x = x + 1; return x end` 是 closure_upvalue benchmark 的热点形态；
+// 快路径必须同步写回共享 upvalue cell，并且只覆盖 integer upvalue，其他类型回退完整 VM。
+func TestVMTryExecuteLeafUpvalueAddSetReturnInCaller(t *testing.T) {
+	proto := &bytecode.Proto{
+		Constants: []bytecode.Constant{bytecode.IntegerConstant(1)},
+		Code: []bytecode.Instruction{
+			bytecode.CreateABC(bytecode.OpGetUpval, 0, 0, 0),
+			bytecode.CreateABC(bytecode.OpAdd, 0, 0, bytecode.RKAsK(0)),
+			bytecode.CreateABC(bytecode.OpSetupVal, 0, 0, 0),
+			bytecode.CreateABC(bytecode.OpGetUpval, 0, 0, 0),
+			bytecode.CreateABC(bytecode.OpReturn, 0, 2, 0),
+		},
+	}
+	cell := NewClosedUpvalueCell(IntegerValue(41))
+	closure := NewLuaClosure(proto, []Value{IntegerValue(41)}, []*UpvalueCell{cell})
+	if closure.LeafUpvalueAddSetReturn == nil {
+		// 目标闭包必须预解析为 upvalue 自增写回形态。
+		t.Fatalf("expected upvalue add-set metadata")
+	}
+
+	vm := NewVM(1)
+	if err := vm.SetRegister(0, ReferenceValue(KindLuaClosure, closure)); err != nil {
+		// 调用函数槽写入必须成功。
+		t.Fatalf("set function register failed: %v", err)
+	}
+	handled, err := vm.TryExecuteLeafUpvalueAddSetReturnInCaller(closure, &CallRequest{
+		FunctionIndex: 0,
+		ArgumentCount: 0,
+		ReturnCount:   1,
+	})
+	if err != nil || !handled {
+		// integer upvalue 自增应在 caller 侧完成。
+		t.Fatalf("upvalue add-set mismatch: handled=%v err=%v", handled, err)
+	}
+	value, ok := vm.Register(0)
+	if !ok || !value.RawEqual(IntegerValue(42)) {
+		// 返回值必须直接写回函数槽。
+		t.Fatalf("upvalue add-set result mismatch: value=%#v ok=%v", value, ok)
+	}
+	if !cell.Value().RawEqual(IntegerValue(42)) || !closure.Upvalues[0].RawEqual(IntegerValue(42)) {
+		// 共享 cell 和 upvalue 快照都应同步更新，避免后续读取旧值。
+		t.Fatalf("upvalue add-set did not update cell/snapshot: cell=%#v snapshot=%#v", cell.Value(), closure.Upvalues[0])
+	}
+
+	cell.Set(StringValue("41"))
+	closure.Upvalues[0] = StringValue("41")
+	if err := vm.SetRegister(0, ReferenceValue(KindLuaClosure, closure)); err != nil {
+		// 重新写回函数槽用于非 integer 回退验证。
+		t.Fatalf("reset function register failed: %v", err)
+	}
+	handled, err = vm.TryExecuteLeafUpvalueAddSetReturnInCaller(closure, &CallRequest{
+		FunctionIndex: 0,
+		ArgumentCount: 0,
+		ReturnCount:   1,
+	})
+	if err != nil || handled {
+		// 字符串数字必须回退完整 VM，保留 Lua 算术转换和错误语义。
+		t.Fatalf("string upvalue should fallback: handled=%v err=%v", handled, err)
 	}
 }
 

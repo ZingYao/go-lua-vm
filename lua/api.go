@@ -3537,6 +3537,10 @@ func executeLuaCallRequestDirect(state *State, callerVM *runtime.VM, closure *ru
 	}
 	proto := closure.Proto
 	if debugName == "" && debugNameWhat == "" {
+		if handled, err := tryExecuteLeafUpvalueAddSetReturnInCaller(callerVM, closure, callRequest); handled || err != nil {
+			// 极小 upvalue 自增闭包可直接在 caller 侧完成；未命中时回退原 direct CALL。
+			return nil, nil, handled, err
+		}
 		if handled, err := tryExecuteLeafAddReturnInCaller(callerVM, closure, callRequest); handled || err != nil {
 			// 极小加法叶子函数可直接在 caller 寄存器上完成；未命中时回退原 direct CALL。
 			return nil, nil, handled, err
@@ -3572,6 +3576,15 @@ func executeLuaCallRequestDirect(state *State, callerVM *runtime.VM, closure *ru
 		return nil, nil, false, err
 	}
 	return results, calleeVM, false, nil
+}
+
+// tryExecuteLeafUpvalueAddSetReturnInCaller 在 caller VM 中执行 upvalue 自增闭包叶子函数。
+//
+// 该快路径只覆盖无 debug/hook、无参数、固定单返回的 direct CALL；仅处理 integer upvalue
+// 与 integer 常量加法，字符串数字和元方法语义回退原 VM 执行路径。
+func tryExecuteLeafUpvalueAddSetReturnInCaller(callerVM *runtime.VM, closure *runtime.LuaClosure, callRequest *runtime.CallRequest) (bool, error) {
+	// upvalue 写回由 runtime 在 closure cell 上完成，避免 lua 层重复创建 callee VM。
+	return callerVM.TryExecuteLeafUpvalueAddSetReturnInCaller(closure, callRequest)
 }
 
 // tryExecuteLeafAddReturnInCaller 在 caller VM 中执行 `return x + const` 形态叶子函数。

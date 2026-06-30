@@ -167,6 +167,8 @@ type LuaClosure struct {
 	DirectCallSafe bool
 	// LeafAddReturn 保存 ADD;RETURN 叶子函数的预解析形态，nil 表示不能走 caller-side 加法快路径。
 	LeafAddReturn *LuaLeafAddReturn
+	// LeafUpvalueAddSetReturn 保存 upvalue 自增叶子函数的预解析形态，nil 表示不能走 caller-side 写回快路径。
+	LeafUpvalueAddSetReturn *LuaLeafUpvalueAddSetReturn
 }
 
 // LuaLeafAddReturn 保存 `ADD;RETURN` 或 `GETUPVAL;ADD;RETURN` 叶子函数快路径元数据。
@@ -219,6 +221,16 @@ type LuaLeafAddOperand struct {
 	Constant bool
 }
 
+// LuaLeafUpvalueAddSetReturn 保存 `upvalue = upvalue + Kint; return upvalue` 叶子函数快路径元数据。
+//
+// UpvalueIndex 指向被读取和写回的 closure upvalue；IntegerConstant 是参与加法的 Lua integer 常量。
+type LuaLeafUpvalueAddSetReturn struct {
+	// UpvalueIndex 保存 GETUPVAL/SETUPVAL 访问的 upvalue 下标。
+	UpvalueIndex int
+	// IntegerConstant 保存 `upvalue + integer` 中的 integer 常量。
+	IntegerConstant int64
+}
+
 // NewLuaClosure 创建带运行期缓存属性的 Lua closure。
 //
 // proto 必须是不可变 Lua 函数原型；upvalues/upvalueCells 由调用方按捕获语义准备。返回 closure
@@ -226,11 +238,12 @@ type LuaLeafAddOperand struct {
 func NewLuaClosure(proto *bytecode.Proto, upvalues []Value, upvalueCells []*UpvalueCell) *LuaClosure {
 	// 创建 closure 时一次性计算不可变 Proto 的 direct CALL 属性。
 	return &LuaClosure{
-		Proto:          proto,
-		Upvalues:       upvalues,
-		UpvalueCells:   upvalueCells,
-		DirectCallSafe: luaProtoDirectCallSafe(proto),
-		LeafAddReturn:  luaProtoLeafAddReturn(proto),
+		Proto:                   proto,
+		Upvalues:                upvalues,
+		UpvalueCells:            upvalueCells,
+		DirectCallSafe:          luaProtoDirectCallSafe(proto),
+		LeafAddReturn:           luaProtoLeafAddReturn(proto),
+		LeafUpvalueAddSetReturn: luaProtoLeafUpvalueAddSetReturn(proto),
 	}
 }
 
@@ -300,6 +313,57 @@ func luaProtoLeafAddReturn(proto *bytecode.Proto) *LuaLeafAddReturn {
 	leaf.RightOperand = rightOperand
 	leaf.cacheRegisterIntegerConstantAdd()
 	return &leaf
+}
+
+// luaProtoLeafUpvalueAddSetReturn 预解析 upvalue 自增并返回 upvalue 的叶子函数形态。
+//
+// proto 必须是不可变函数原型；仅识别 Lua 编译器生成的 GETUPVAL/ADD/SETUPVAL/GETUPVAL/RETURN
+// 精确形态，返回 nil 表示保持完整 VM 路径。
+func luaProtoLeafUpvalueAddSetReturn(proto *bytecode.Proto) *LuaLeafUpvalueAddSetReturn {
+	// 先校验指令数量，避免对普通函数做宽松猜测。
+	if proto == nil || len(proto.Code) != 5 {
+		// 缺少 Proto 或不是精确五指令形态时不能启用快路径。
+		return nil
+	}
+	getBeforeInstruction := proto.Code[0]
+	addInstruction := proto.Code[1]
+	setInstruction := proto.Code[2]
+	getAfterInstruction := proto.Code[3]
+	returnInstruction := proto.Code[4]
+	if getBeforeInstruction.OpCode() != bytecode.OpGetUpval || addInstruction.OpCode() != bytecode.OpAdd || setInstruction.OpCode() != bytecode.OpSetupVal || getAfterInstruction.OpCode() != bytecode.OpGetUpval || returnInstruction.OpCode() != bytecode.OpReturn {
+		// 当前只处理 upvalue 自增后返回同一 upvalue 的闭包叶子函数。
+		return nil
+	}
+	addRegister := addInstruction.A()
+	upvalueRegister := getBeforeInstruction.A()
+	upvalueIndex := getBeforeInstruction.B()
+	if addRegister != upvalueRegister || setInstruction.A() != addRegister || setInstruction.B() != upvalueIndex || getAfterInstruction.B() != upvalueIndex {
+		// ADD、SETUPVAL 和第二次 GETUPVAL 必须访问同一寄存器和同一 upvalue。
+		return nil
+	}
+	if getAfterInstruction.A() != returnInstruction.A() || returnInstruction.B() != 2 {
+		// 只处理返回第二次 GETUPVAL 单个结果的形态。
+		return nil
+	}
+	leftOperand, ok := luaLeafAddOperandFromProto(proto, addInstruction.B())
+	if !ok {
+		// 操作数损坏时回退完整 VM。
+		return nil
+	}
+	rightOperand, ok := luaLeafAddOperandFromProto(proto, addInstruction.C())
+	if !ok {
+		// 操作数损坏时回退完整 VM。
+		return nil
+	}
+	if !leftOperand.Constant && leftOperand.RegisterIndex == upvalueRegister && rightOperand.Constant && rightOperand.ConstantValue.Kind == KindInteger {
+		// `upvalue + Kint` 是闭包计数器热路径的常见输出。
+		return &LuaLeafUpvalueAddSetReturn{UpvalueIndex: upvalueIndex, IntegerConstant: rightOperand.ConstantValue.Integer}
+	}
+	if leftOperand.Constant && leftOperand.ConstantValue.Kind == KindInteger && !rightOperand.Constant && rightOperand.RegisterIndex == upvalueRegister {
+		// `Kint + upvalue` 在原生 integer 上等价，也可复用同一写回路径。
+		return &LuaLeafUpvalueAddSetReturn{UpvalueIndex: upvalueIndex, IntegerConstant: leftOperand.ConstantValue.Integer}
+	}
+	return nil
 }
 
 // cacheRegisterIntegerConstantAdd 缓存 `register + integer constant` 叶子加法形态。
@@ -721,6 +785,42 @@ func (vm *VM) TryExecuteLeafAddReturnInCaller(closure *LuaClosure, request *Call
 	return true, nil
 }
 
+// TryExecuteLeafUpvalueAddSetReturnInCaller 在 caller VM 中执行 upvalue 自增闭包叶子函数。
+//
+// closure 必须缓存 LeafUpvalueAddSetReturn；request 必须是无参数、单返回 CALL。该快路径仅处理
+// integer upvalue 加 integer 常量，其他类型回退完整 VM 以保留字符串转换、元方法和错误语义。
+func (vm *VM) TryExecuteLeafUpvalueAddSetReturnInCaller(closure *LuaClosure, request *CallRequest) (bool, error) {
+	// 先校验调用形态，避免误处理带参数或多返回函数。
+	if vm == nil || closure == nil || closure.LeafUpvalueAddSetReturn == nil || request == nil || request.ArgumentCount != 0 || request.ReturnCount != 1 {
+		// 非精确无参单返回形态必须走原 direct CALL。
+		return false, nil
+	}
+	if request.FunctionIndex < 0 || request.FunctionIndex >= len(vm.registers) {
+		// 函数槽越界时返回寄存器错误，匹配 caller-side 快路径现有语义。
+		return true, ErrRegisterOutOfRange
+	}
+	leaf := closure.LeafUpvalueAddSetReturn
+	upvalueValue, ok := luaClosureUpvalueValue(closure, leaf.UpvalueIndex)
+	if !ok {
+		// upvalue 状态异常时回退原 VM 路径生成标准错误。
+		return false, nil
+	}
+	if upvalueValue.Kind != KindInteger {
+		// 非 integer upvalue 需要完整 Lua 算术转换和元方法处理。
+		return false, nil
+	}
+	resultValue := IntegerValue(upvalueValue.Integer + leaf.IntegerConstant)
+	if !luaClosureSetUpvalueValue(closure, leaf.UpvalueIndex, resultValue) {
+		// 写回失败时回退完整 VM，由原路径暴露 upvalue 状态。
+		return false, nil
+	}
+
+	// 直接写回函数槽并清理开放栈顶，匹配 CALL 消费完成后的 caller VM 状态。
+	vm.registers[request.FunctionIndex] = resultValue
+	vm.openTop = -1
+	return true, nil
+}
+
 // tryLeafFirstArgumentIntegerConstantAdd 执行 `return arg1 + integer` 叶子函数专用快路径。
 //
 // request 必须已由 TryExecuteLeafAddReturnInCaller 校验为固定单返回；该分支只处理第一个实参
@@ -963,6 +1063,32 @@ func luaClosureUpvalueValue(closure *LuaClosure, index int) (Value, bool) {
 		return closure.Upvalues[index], true
 	}
 	return NilValue(), false
+}
+
+// luaClosureSetUpvalueValue 写入 Lua closure 当前 upvalue 值。
+//
+// 运行期共享 cell 优先承载真实外层局部变量；Upvalues 快照存在时同步更新，避免后续无 cell 路径读取旧值。
+func luaClosureSetUpvalueValue(closure *LuaClosure, index int, value Value) bool {
+	// 先校验 closure 与索引，避免损坏 upvalue 状态被快路径吞掉。
+	if closure == nil || index < 0 {
+		// 非法 closure 或索引不能写入 upvalue。
+		return false
+	}
+	written := false
+	if index < len(closure.UpvalueCells) {
+		cell := closure.UpvalueCells[index]
+		if cell == nil {
+			// 损坏 cell 回退完整 VM，由原路径暴露错误。
+			return false
+		}
+		cell.Set(value)
+		written = true
+	}
+	if index < len(closure.Upvalues) {
+		closure.Upvalues[index] = value
+		written = true
+	}
+	return written
 }
 
 // leafFastAddValue 执行 caller-side 原生 number/integer 加法。
