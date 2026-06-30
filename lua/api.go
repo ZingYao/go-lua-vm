@@ -3359,14 +3359,14 @@ func executeLuaCallRequestDirect(state *State, callerVM *runtime.VM, functionVal
 // 该路径不压入 Lua 调试帧，只用于没有 active hook 的热路径。返回值切片可能引用 vm 内部数组，
 // 调用方必须在写回 caller 后再归还 vm。
 func executeLuaLeafClosureFast(state *State, proto *bytecode.Proto, vm *runtime.VM) ([]Value, error) {
+	if err := state.CheckContext(); err != nil {
+		// direct leaf 调用入口仍检查宿主取消；叶子函数内部无 CALL/yield，循环内无需逐指令重复检查。
+		return nil, err
+	}
 	pc := 0
 	for pc >= 0 && pc < len(proto.Code) {
 		// 叶子 fast path 仍维护 VM 当前 PC，供错误装饰和 GC root 裁剪使用。
 		vm.SetCurrentPC(pc)
-		if err := state.CheckContext(); err != nil {
-			// 宿主取消或中断必须尽快停止当前 Lua 执行。
-			return nil, err
-		}
 		instruction := proto.Code[pc]
 		opCode := instruction.OpCode()
 		if err := vm.Step(instruction); err != nil {
