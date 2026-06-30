@@ -1017,6 +1017,58 @@ func TestCompileTableReadWriteUsesDirectRegisters(t *testing.T) {
 	}
 }
 
+// TestCompileFieldReadWriteUsesDirectRegisters 验证字段读写热循环复用 local receiver。
+//
+// 对齐 Lua 5.3 C codegen 的 `t.a = t.a + 1` 与 `sum = sum + t.a` 形态，避免为 receiver 或
+// 累加器生成额外 MOVE。
+func TestCompileFieldReadWriteUsesDirectRegisters(t *testing.T) {
+	chunk := parseChunkForCodegenTest(t, `
+local t = {a = 1}
+local sum = 0
+for i = 1, 10 do
+  t.a = t.a + 1
+  sum = sum + t.a
+end
+return sum
+`)
+
+	proto, err := CompileChunk(chunk, "field-read-write")
+	if err != nil {
+		// 字段读写样例必须可编译。
+		t.Fatalf("compile field read write failed: %v", err)
+	}
+	if proto.MaxStackSize != 7 {
+		// 官方 Lua 5.3 该形态使用 7 个槽；8 个槽说明仍有 receiver 临时 MOVE。
+		t.Fatalf("unexpected max stack=%d code=%v", proto.MaxStackSize, proto.Code)
+	}
+	hasFieldUpdate := false
+	hasFieldAccumulation := false
+	for instructionIndex, instruction := range proto.Code {
+		switch instruction.OpCode() {
+		case bytecode.OpGetTable:
+			if instruction.A() == 6 && instruction.B() == 0 && bytecode.IsK(instruction.C()) {
+				if instructionIndex+2 < len(proto.Code) && proto.Code[instructionIndex+1].OpCode() == bytecode.OpAdd && proto.Code[instructionIndex+2].OpCode() == bytecode.OpSetTable {
+					// t.a 自增应生成 GETTABLE R6, t, "a"; ADD R6; SETTABLE t, "a", R6。
+					hasFieldUpdate = true
+				}
+				if instructionIndex+1 < len(proto.Code) && proto.Code[instructionIndex+1].OpCode() == bytecode.OpAdd && proto.Code[instructionIndex+1].A() == 1 {
+					// sum 自累加应直接把 t.a 读入 R6，再 ADD 回 sum。
+					hasFieldAccumulation = true
+				}
+			}
+		case bytecode.OpMove:
+			if instruction.A() == 6 || instruction.A() == 7 {
+				// 旧形态会把 t 或 sum 复制到 R6/R7 后再 GETTABLE/ADD。
+				t.Fatalf("unexpected hot-loop MOVE: %v code=%v", instruction, proto.Code)
+			}
+		}
+	}
+	if !hasFieldUpdate || !hasFieldAccumulation {
+		// 字段自增和字段累加两个热路径都必须命中。
+		t.Fatalf("missing direct field paths: update=%v accumulation=%v code=%v", hasFieldUpdate, hasFieldAccumulation, proto.Code)
+	}
+}
+
 // TestCompileSelfBinaryGlobalRightAvoidsLeftMove 验证自二元赋值的全局右操作数对齐官方字节码。
 //
 // 官方 Lua 5.3 对 `sum = sum + x` 会先把全局 `x` 读取到临时寄存器，再直接生成

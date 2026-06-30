@@ -448,6 +448,10 @@ func (generator *generator) compileLocalAssignment(statement *parser.LocalAssign
 //
 // 当前阶段左侧支持已经声明的局部变量名称，未知名称按 Lua 5.3 语义写入 `_ENV[name]`。
 func (generator *generator) compileAssignment(statement *parser.AssignmentStatement) error {
+	if handled, err := generator.compileSingleLocalFieldSelfBinaryAssignment(statement); handled || err != nil {
+		// 单 local table 字段自二元赋值可直接生成 GETTABLE/op/SETTABLE，避免 receiver 临时 MOVE。
+		return err
+	}
 	if handled, err := generator.compileSingleSafeTableAssignment(statement); handled || err != nil {
 		// 单 table 索引赋值在 receiver/key/value 均安全时可直接生成 SETTABLE，避免临时 MOVE。
 		return err
@@ -664,6 +668,96 @@ func (generator *generator) compileSingleSafeTableAssignment(statement *parser.A
 	generator.releaseRegistersFrom(firstTempRegister)
 
 	// 安全 table 索引赋值已完成。
+	return true, nil
+}
+
+// compileSingleLocalFieldSelfBinaryAssignment 优化 `localTable.field = localTable.field <op> rhs`。
+//
+// 该优化只处理单左值、单右值、receiver 为当前 local 且字段名完全一致的点号字段访问；rhs 必须
+// 是 local 或字面量。该形态没有调用、全局读取或动态 key 副作用，可直接对齐 Lua 5.3 官方
+// GETTABLE/op/SETTABLE codegen。
+func (generator *generator) compileSingleLocalFieldSelfBinaryAssignment(statement *parser.AssignmentStatement) (bool, error) {
+	if len(statement.Left) != 1 || len(statement.Right) != 1 {
+		// 多重赋值必须先求完所有 RHS，再统一写回，不能使用该快路径。
+		return false, nil
+	}
+	targetField, ok := statement.Left[0].(*parser.FieldAccessExpression)
+	if !ok {
+		// 只有点号字段左值能复用字段常量 key。
+		return false, nil
+	}
+	targetReceiver, ok := targetField.Receiver.(*parser.NameExpression)
+	if !ok {
+		// receiver 不是名称时可能包含调用或索引副作用，回退通用路径。
+		return false, nil
+	}
+	receiverBinding, ok := generator.locals[targetReceiver.Name]
+	if !ok {
+		// upvalue/global receiver 读取需要额外指令或可能触发环境表访问，回退通用路径。
+		return false, nil
+	}
+	binaryExpression, ok := statement.Right[0].(*parser.BinaryExpression)
+	if !ok || binaryExpression.Operator == ".." || binaryExpression.Operator == "and" || binaryExpression.Operator == "or" || isComparisonOperator(binaryExpression.Operator) {
+		// concat、短路和比较不属于普通二元 opcode。
+		return false, nil
+	}
+	sourceField, ok := binaryExpression.Left.(*parser.FieldAccessExpression)
+	if !ok || !sameLocalFieldAccess(targetField, sourceField) {
+		// 只有 RHS 左操作数读取同一个 local 字段时，才能直接复用 GETTABLE 结果。
+		return false, nil
+	}
+	opCode, ok := binaryOpCode(binaryExpression.Operator)
+	if !ok {
+		// 未支持的二元运算回退通用路径，让通用编译器返回原有错误。
+		return false, nil
+	}
+	if !generator.isSafeRKCandidate(binaryExpression.Right) {
+		// 右操作数若可能访问 table/global 或调用函数，必须回退通用路径保持求值顺序。
+		return false, nil
+	}
+
+	firstTempRegister := generator.nextRegister
+	keyIndex := generator.addConstant(bytecode.StringConstant(targetField.Field))
+	keyOperand, _, err := generator.rkOperandForConstantIndex(keyIndex)
+	if err != nil {
+		// 字段名常量无法编码或加载时释放临时寄存器并返回。
+		generator.releaseRegistersFrom(firstTempRegister)
+		return true, err
+	}
+	rightOperand, _, err := generator.safeRKOperandWithRegister(binaryExpression.Right)
+	if err != nil {
+		// 右操作数常量无法编码或加载时释放临时寄存器并返回。
+		generator.releaseRegistersFrom(firstTempRegister)
+		return true, err
+	}
+	valueRegister := generator.allocateRegister()
+	if err := generator.withSourceLine(sourceField.Position, func() error {
+		// 同字段读取直接写入值临时寄存器。
+		generator.emitABC(bytecode.OpGetTable, valueRegister, receiverBinding.register, keyOperand)
+		return nil
+	}); err != nil {
+		generator.releaseRegistersFrom(firstTempRegister)
+		return true, err
+	}
+	if err := generator.withSourceLine(binaryExpression.Position, func() error {
+		// 二元结果继续保存在值临时寄存器，后续 SETTABLE 直接使用。
+		generator.emitABC(opCode, valueRegister, valueRegister, rightOperand)
+		return nil
+	}); err != nil {
+		generator.releaseRegistersFrom(firstTempRegister)
+		return true, err
+	}
+	if err := generator.withSourceLine(targetField.Position, func() error {
+		// 写回同一个 local receiver 的同一个字段。
+		generator.emitABC(bytecode.OpSetTable, receiverBinding.register, keyOperand, valueRegister)
+		return nil
+	}); err != nil {
+		generator.releaseRegistersFrom(firstTempRegister)
+		return true, err
+	}
+	generator.releaseRegistersFrom(firstTempRegister)
+
+	// local table 字段自二元赋值已完成。
 	return true, nil
 }
 
@@ -1061,6 +1155,23 @@ func (generator *generator) isSafeRKCandidate(expression parser.Expression) bool
 	}
 }
 
+// sameLocalFieldAccess 判断两个点号字段访问是否读取同一个 local receiver 的同一个字段。
+func sameLocalFieldAccess(left *parser.FieldAccessExpression, right *parser.FieldAccessExpression) bool {
+	// 任一表达式缺失都不能认定为同字段访问。
+	if left == nil || right == nil || left.Field != right.Field {
+		return false
+	}
+	leftReceiver, leftOK := left.Receiver.(*parser.NameExpression)
+	rightReceiver, rightOK := right.Receiver.(*parser.NameExpression)
+	if !leftOK || !rightOK {
+		// receiver 不是名称时可能有副作用，不能走同字段快路径。
+		return false
+	}
+
+	// receiver 名称完全一致时才允许复用同字段假设。
+	return leftReceiver.Name == rightReceiver.Name
+}
+
 // compileSelfBinaryRightExpressionTo 编译自二元赋值中确认安全的右操作数。
 //
 // targetRegister 保存右操作数结果；返回 handled=false 表示表达式不满足快路径安全条件。
@@ -1072,6 +1183,10 @@ func (generator *generator) compileSelfBinaryRightExpressionTo(expression parser
 	if generator.isSafePureBinaryExpression(expression) {
 		// 由 local/字面量组成的普通二元树没有额外调用或索引副作用，可作为右操作数临时值。
 		return true, generator.compileExpressionTo(expression, targetRegister)
+	}
+	if fieldExpression, ok := expression.(*parser.FieldAccessExpression); ok {
+		// receiver/key 均无副作用的点号字段访问可直接生成 GETTABLE 到右操作数目标寄存器。
+		return generator.compileSafeLocalFieldAccessTo(fieldExpression, targetRegister)
 	}
 	indexExpression, ok := expression.(*parser.IndexExpression)
 	if !ok {
@@ -1102,6 +1217,41 @@ func (generator *generator) compileSelfBinaryRightExpressionTo(expression parser
 	}
 	if err := generator.withSourceLine(indexExpression.Position, func() error {
 		// receiver/key 均无副作用时直接生成 GETTABLE 到右操作数目标寄存器。
+		generator.emitABC(bytecode.OpGetTable, targetRegister, receiverBinding.register, keyOperand)
+		return nil
+	}); err != nil {
+		generator.releaseRegistersFrom(firstTempRegister)
+		return true, err
+	}
+	generator.releaseRegistersFrom(firstTempRegister)
+	return true, nil
+}
+
+// compileSafeLocalFieldAccessTo 编译 receiver 为当前 local 的点号字段读取。
+//
+// 字段名固定为字符串常量，receiver 当前 local 读取无副作用；若 receiver 不是 local 则返回
+// handled=false，让调用方回退通用路径保持 Lua 5.3 求值顺序。
+func (generator *generator) compileSafeLocalFieldAccessTo(expression *parser.FieldAccessExpression, targetRegister int) (bool, error) {
+	receiverName, ok := expression.Receiver.(*parser.NameExpression)
+	if !ok {
+		// receiver 不是名称时可能包含调用或索引副作用，回退通用路径。
+		return false, nil
+	}
+	receiverBinding, ok := generator.locals[receiverName.Name]
+	if !ok {
+		// upvalue/global receiver 需要额外读取或环境表访问，回退通用路径。
+		return false, nil
+	}
+	firstTempRegister := generator.nextRegister
+	keyIndex := generator.addConstant(bytecode.StringConstant(expression.Field))
+	keyOperand, _, err := generator.rkOperandForConstantIndex(keyIndex)
+	if err != nil {
+		// 字段名常量无法编码或加载时释放临时寄存器并返回。
+		generator.releaseRegistersFrom(firstTempRegister)
+		return true, err
+	}
+	if err := generator.withSourceLine(expression.Position, func() error {
+		// receiver/key 均无副作用时直接生成 GETTABLE 到目标寄存器。
 		generator.emitABC(bytecode.OpGetTable, targetRegister, receiverBinding.register, keyOperand)
 		return nil
 	}); err != nil {
