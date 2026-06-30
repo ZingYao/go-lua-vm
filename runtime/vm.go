@@ -1649,9 +1649,7 @@ func (vm *VM) executeBinaryArithmetic(instruction bytecode.Instruction, operatio
 // 直接在本函数完成，转换失败时仍按 Lua 5.3 规则尝试 `__add` 元方法。
 func (vm *VM) executeAdd(instruction bytecode.Instruction) error {
 	// ADD 复用整数寄存器缓存，同时保留 number、字符串数字和元方法回退语义。
-	return vm.executeFastArithmetic(instruction, arithmeticIntRegisterCacheAdd, func(left int64, right int64) int64 {
-		return left + right
-	}, func(left float64, right float64) float64 {
+	return vm.executeFastArithmetic(instruction, arithmeticIntRegisterCacheAdd, func(left float64, right float64) float64 {
 		return left + right
 	}, metamethodAdd)
 }
@@ -1662,9 +1660,7 @@ func (vm *VM) executeAdd(instruction bytecode.Instruction) error {
 // 会记录当前 PC 的热路径缓存；类型变化时回退完整 Lua 算术和 `__sub` 元方法语义。
 func (vm *VM) executeSub(instruction bytecode.Instruction) error {
 	// SUB 复用整数寄存器缓存，同时保留 number、字符串数字和元方法回退语义。
-	return vm.executeFastArithmetic(instruction, arithmeticIntRegisterCacheSub, func(left int64, right int64) int64 {
-		return left - right
-	}, func(left float64, right float64) float64 {
+	return vm.executeFastArithmetic(instruction, arithmeticIntRegisterCacheSub, func(left float64, right float64) float64 {
 		return left - right
 	}, metamethodSub)
 }
@@ -1675,26 +1671,24 @@ func (vm *VM) executeSub(instruction bytecode.Instruction) error {
 // 会记录当前 PC 的热路径缓存；类型变化时回退完整 Lua 算术和 `__mul` 元方法语义。
 func (vm *VM) executeMul(instruction bytecode.Instruction) error {
 	// MUL 复用整数寄存器缓存，同时保留 number、字符串数字和元方法回退语义。
-	return vm.executeFastArithmetic(instruction, arithmeticIntRegisterCacheMul, func(left int64, right int64) int64 {
-		return left * right
-	}, func(left float64, right float64) float64 {
+	return vm.executeFastArithmetic(instruction, arithmeticIntRegisterCacheMul, func(left float64, right float64) float64 {
 		return left * right
 	}, metamethodMul)
 }
 
 // executeFastArithmetic 执行 ADD/SUB/MUL 的低风险热路径。
 //
-// instruction 的 A 是目标寄存器，B/C 使用 RK 编码读取操作数；integerOperation 处理双
-// integer 结果，numberOperation 处理 float number 结果。缓存覆盖寄存器 integer 与 integer
+// instruction 的 A 是目标寄存器，B/C 使用 RK 编码读取操作数；cacheKind 决定双 integer
+// 结果，numberOperation 处理 float number 结果。缓存覆盖寄存器 integer 与 integer
 // 常量组合；类型变化、字符串数字或元方法都会走完整 Lua 语义。
-func (vm *VM) executeFastArithmetic(instruction bytecode.Instruction, cacheKind byte, integerOperation func(int64, int64) int64, numberOperation func(float64, float64) float64, metamethodName string) error {
+func (vm *VM) executeFastArithmetic(instruction bytecode.Instruction, cacheKind byte, numberOperation func(float64, float64) float64, metamethodName string) error {
 	targetIndex := instruction.A()
 	if targetIndex < 0 || targetIndex >= len(vm.registers) {
 		// 目标寄存器越界时不能写入，避免破坏寄存器窗口。
 		return ErrRegisterOutOfRange
 	}
 
-	if handled, err := vm.tryCachedIntegerRegisterArithmetic(instruction, cacheKind, integerOperation); handled || err != nil {
+	if handled, err := vm.tryCachedIntegerRegisterArithmetic(instruction, cacheKind); handled || err != nil {
 		// 缓存命中已完成写回；缓存形态损坏时返回原始寄存器错误。
 		return err
 	}
@@ -1715,7 +1709,7 @@ func (vm *VM) executeFastArithmetic(instruction bytecode.Instruction, cacheKind 
 	if leftValue.Kind == KindInteger && rightValue.Kind == KindInteger {
 		// 双 integer 算术保留 integer 结果，并按 64 位补码自然回绕。
 		vm.rememberIntegerRegisterArithmetic(leftOperand, rightOperand, cacheKind)
-		vm.registers[targetIndex] = IntegerValue(integerOperation(leftValue.Integer, rightValue.Integer))
+		vm.registers[targetIndex] = IntegerValue(integerArithmeticByCacheKind(cacheKind, leftValue.Integer, rightValue.Integer))
 		return nil
 	}
 	leftNumber, leftOK := valueToLuaNumber(leftValue)
@@ -1743,7 +1737,7 @@ func (vm *VM) executeFastArithmetic(instruction bytecode.Instruction, cacheKind 
 //
 // 返回 handled 表示指令已经成功写回；当缓存记录存在但操作数形态或类型不再匹配时会清除
 // 缓存并返回 handled=false，让调用方回到完整 Lua 语义。
-func (vm *VM) tryCachedIntegerRegisterArithmetic(instruction bytecode.Instruction, cacheKind byte, integerOperation func(int64, int64) int64) (bool, error) {
+func (vm *VM) tryCachedIntegerRegisterArithmetic(instruction bytecode.Instruction, cacheKind byte) (bool, error) {
 	currentPC := vm.currentPC
 	if currentPC < 0 || currentPC >= len(vm.arithmeticIntRegisterCache) || currentPC >= len(vm.arithmeticIntOperandCache) || vm.arithmeticIntRegisterCache[currentPC] != cacheKind {
 		// 当前 PC 没有目标算术缓存，调用方继续走普通 RK 路径。
@@ -1767,8 +1761,28 @@ func (vm *VM) tryCachedIntegerRegisterArithmetic(instruction bytecode.Instructio
 	}
 
 	// 双 integer 算术保留 integer 结果，并按 64 位补码自然回绕。
-	vm.registers[instruction.A()] = IntegerValue(integerOperation(leftInteger, rightInteger))
+	vm.registers[instruction.A()] = IntegerValue(integerArithmeticByCacheKind(cacheKind, leftInteger, rightInteger))
 	return true, nil
+}
+
+// integerArithmeticByCacheKind 执行 ADD/SUB/MUL 的 integer 热路径。
+//
+// cacheKind 必须来自当前算术指令；未知类型返回 0 仅作为损坏缓存的防御兜底，正常路径不会触发。
+func integerArithmeticByCacheKind(cacheKind byte, left int64, right int64) int64 {
+	switch cacheKind {
+	case arithmeticIntRegisterCacheAdd:
+		// ADD 按 64 位补码自然回绕。
+		return left + right
+	case arithmeticIntRegisterCacheSub:
+		// SUB 按 64 位补码自然回绕。
+		return left - right
+	case arithmeticIntRegisterCacheMul:
+		// MUL 按 64 位补码自然回绕。
+		return left * right
+	default:
+		// 未知缓存类型不应出现，返回 0 让测试暴露异常路径。
+		return 0
+	}
 }
 
 // rememberIntegerRegisterArithmetic 记录当前 PC 的 integer 算术热路径。
