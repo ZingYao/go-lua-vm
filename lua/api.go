@@ -3314,6 +3314,56 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 				return nil
 			}
 		}
+		if fixedFunction, ok := functionValue.Ref.(*runtime.GoFixedResultsFunction); ok && callRequest.ReturnCount >= 0 && !callRequest.GenericFor && !hooksEnabled && fixedFunction.Function4 != nil && callRequest.ArgumentCount <= 4 {
+			// 固定结果函数的最多四实参热路径直接读取寄存器，避免先构造参数切片。
+			var arg0 Value
+			var arg1 Value
+			var arg2 Value
+			var arg3 Value
+			for argumentOffset := 0; argumentOffset < callRequest.ArgumentCount; argumentOffset++ {
+				// 参数寄存器按 CALL 布局紧跟函数槽。
+				argument, argumentOK := vm.Register(callRequest.FunctionIndex + 1 + argumentOffset)
+				if !argumentOK {
+					// 参数寄存器缺失说明 CALL 布局异常。
+					return runtime.ErrRegisterOutOfRange
+				}
+				switch argumentOffset {
+				case 0:
+					// 第一个实参传给 Function4 的 arg0。
+					arg0 = argument
+				case 1:
+					// 第二个实参传给 Function4 的 arg1。
+					arg1 = argument
+				case 2:
+					// 第三个实参传给 Function4 的 arg2。
+					arg2 = argument
+				case 3:
+					// 第四个实参传给 Function4 的 arg3。
+					arg3 = argument
+				}
+			}
+			var fixedResults [4]Value
+			resultSlots := fixedResults[:]
+			if fixedFunction.MaxResults > len(resultSlots) {
+				// 超出常见小结果数量时按声明上限分配，保证 writer 不会写越界。
+				resultSlots = make([]Value, fixedFunction.MaxResults)
+			} else {
+				// 小结果数量使用栈上数组，覆盖 string.find 等热点标准库函数。
+				resultSlots = resultSlots[:fixedFunction.MaxResults]
+			}
+			resultCount, handled, callErr := fixedFunction.Function4(resultSlots, arg0, arg1, arg2, arg3, callRequest.ArgumentCount)
+			if callErr == nil && handled {
+				if writeErr := writeLuaCallResults(vm, callRequest, resultSlots[:resultCount]); writeErr != nil {
+					// 固定结果写回失败时返回寄存器边界错误。
+					return writeErr
+				}
+				return nil
+			}
+			if callErr != nil {
+				// 参数错误等慢路径交给下方 debug-frame 回退，保持 traceback 和调用名可见性。
+				err = callErr
+			}
+		}
 		var arguments []Value
 		if functionValue.Kind == runtime.KindLuaClosure {
 			// Lua closure 只在进入前读取参数并写入寄存器，可复用 State scratch 降低 CALL 小切片分配。

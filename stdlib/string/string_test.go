@@ -208,6 +208,43 @@ func TestFindReturnsLiteralAndPatternRange(t *testing.T) {
 	}
 }
 
+// TestFindFixed4CoversLiteralFastPath 验证 string.find 四实参固定返回快路径。
+//
+// plain=true 与普通 literal pattern 都可直接写入结果槽；复杂 Lua pattern 必须回退完整 Find。
+func TestFindFixed4CoversLiteralFastPath(t *testing.T) {
+	// 快路径使用栈上结果槽模拟 VM 固定返回调用。
+	var slots [2]runtime.Value
+	resultCount, handled, err := FindFixed4(slots[:], runtime.StringValue("ab-ab"), runtime.StringValue("ab"), runtime.IntegerValue(3), runtime.BooleanValue(true), 4)
+	if err != nil {
+		// 合法 literal 查找不应失败。
+		t.Fatalf("FindFixed4 literal failed: %v", err)
+	}
+	if !handled || resultCount != 2 || slots[0].Integer != 4 || slots[1].Integer != 5 {
+		// plain=true 必须直接返回第二次命中的 1-based 闭区间。
+		t.Fatalf("FindFixed4 literal mismatch: handled=%v count=%d slots=%#v", handled, resultCount, slots)
+	}
+
+	resultCount, handled, err = FindFixed4(slots[:], runtime.StringValue("abc"), runtime.StringValue("z"), runtime.NilValue(), runtime.NilValue(), 2)
+	if err != nil {
+		// 未命中 literal 查找不应失败。
+		t.Fatalf("FindFixed4 miss failed: %v", err)
+	}
+	if !handled || resultCount != 1 || !slots[0].IsNil() {
+		// 未命中应返回单个 nil。
+		t.Fatalf("FindFixed4 miss mismatch: handled=%v count=%d slots=%#v", handled, resultCount, slots)
+	}
+
+	resultCount, handled, err = FindFixed4(slots[:], runtime.StringValue("aloaloalo"), runtime.StringValue("alo.*alo.*alo"), runtime.NilValue(), runtime.NilValue(), 2)
+	if err != nil {
+		// 复杂 pattern 不应在快路径报错。
+		t.Fatalf("FindFixed4 pattern failed before fallback: %v", err)
+	}
+	if handled || resultCount != 0 {
+		// 含 magic 的 pattern 必须回退完整引擎，避免截断 capture 等变长语义。
+		t.Fatalf("FindFixed4 pattern should fallback: handled=%v count=%d", handled, resultCount)
+	}
+}
+
 // TestFormatSupportsBasicVerbs 验证 string.format 当前支持的基础格式项。
 //
 // 用例覆盖字符串、整数、浮点、quote、字面百分号，以及官方测试入口依赖的浮点精度格式。

@@ -59,6 +59,7 @@ func Open(state *runtime.State) error {
 	library.RawSetString("dump", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Dump)))
 	library.RawSetString("find", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFixedResultsFunction{
 		MaxResults: 2,
+		Function4:  FindFixed4,
 		Function:   FindFixed,
 		Fallback:   Find,
 	}))
@@ -306,6 +307,64 @@ func FindFixed(dst []runtime.Value, args ...runtime.Value) (int, bool, error) {
 		// 第四个参数按 Lua truthiness 决定是否禁用 pattern。
 		plain = args[3].Truthy()
 	}
+	if !plain && !isPlainPattern(pattern) {
+		// 存在 Lua pattern magic 时必须回退完整引擎，避免 capture 和特殊模式被截断。
+		return 0, false, nil
+	}
+
+	// 字面量路径直接写入调用方结果槽，避免构造临时 []Value。
+	return findLiteralRangeInto(dst, source, pattern, startOffset), true, nil
+}
+
+// FindFixed4 实现 `string.find` 最多四实参的固定返回快路径。
+//
+// dst 至少需要容纳两个返回值；argCount 表示调用方实际提供的参数数量。该入口用于 VM 无 hook
+// 热路径，直接接收寄存器值，避免构造参数切片和 variadic 调用。未覆盖 Lua pattern/capture 时
+// 返回 handled=false，由调用方回退完整 Find 语义。
+func FindFixed4(dst []runtime.Value, arg0 runtime.Value, arg1 runtime.Value, arg2 runtime.Value, arg3 runtime.Value, argCount int) (int, bool, error) {
+	// 固定结果入口只写两个返回槽，调用方按 MaxResults 分配 dst。
+	if len(dst) < 2 {
+		// 结果槽不足时不能安全写入。
+		return 0, false, runtime.ErrRegisterOutOfRange
+	}
+	if argCount < 2 {
+		// 缺少必选参数时回退通用路径生成标准参数错误和调试帧。
+		return 0, false, nil
+	}
+	if arg0.Kind != runtime.KindString {
+		// 第一个参数不是 string 时直接返回 Lua 参数错误。
+		return 0, true, badArgument("find", 1, "string expected")
+	}
+	if arg1.Kind != runtime.KindString {
+		// 第二个参数不是 string 时直接返回 Lua 参数错误。
+		return 0, true, badArgument("find", 2, "string expected")
+	}
+
+	startIndex := int64(1)
+	if argCount >= 3 {
+		// init 参数存在时必须可转换为 integer。
+		convertedIndex, ok := arg2.ToInteger()
+		if !ok {
+			// 非整数起点无法换算为字节偏移。
+			return 0, true, badArgument("find", 3, "integer expected")
+		}
+		startIndex = convertedIndex
+	}
+
+	source := arg0.String
+	startOffset := normalizeStart(len(source), startIndex)
+	if startOffset > len(source) {
+		// 起点超过字符串尾部时必然找不到匹配。
+		dst[0] = runtime.NilValue()
+		return 1, true, nil
+	}
+
+	plain := false
+	if argCount >= 4 {
+		// 第四个参数按 Lua truthiness 决定是否禁用 pattern。
+		plain = arg3.Truthy()
+	}
+	pattern := arg1.String
 	if !plain && !isPlainPattern(pattern) {
 		// 存在 Lua pattern magic 时必须回退完整引擎，避免 capture 和特殊模式被截断。
 		return 0, false, nil
