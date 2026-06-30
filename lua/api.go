@@ -2485,6 +2485,13 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 			// VM 单步错误或 yield 交给 protected call / coroutine 边界处理。
 			return nil, err
 		}
+		if !hooksEnabled && isLuaHotNoPostProcessOpcode(opCode) {
+			// 普通无 hook 热路径中的算术和 FORLOOP 不会产生 CALL/RETURN/JMP close/分配后处理，直接推进 PC。
+			previousPreviousPC = previousPC
+			previousPC = pc
+			pc = vm.NextPC(pc)
+			continue
+		}
 		if hooksEnabled && debugEnvironment.HookEnabledFor(debuglib.HookEventCount) && shouldTriggerLuaCountHook(proto, pc) {
 			if err := syncCurrentFrame(pc); err != nil {
 				// count hook 需要当前调用帧 PC 与刚执行指令一致。
@@ -2628,6 +2635,21 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 		return nil, err
 	}
 	return nil, nil
+}
+
+// isLuaHotNoPostProcessOpcode 判断 opcode 成功执行后能否跳过通用后处理。
+//
+// 只允许不会生成 CALL/RETURN 请求、不会触发 JMP close、不会产生自动 GC 推进机会的高频 opcode。
+// debug hook 路径不使用本 helper，确保 count hook、line hook 和调试帧同步语义保持完整。
+func isLuaHotNoPostProcessOpcode(opCode bytecode.OpCode) bool {
+	switch opCode {
+	case bytecode.OpAdd, bytecode.OpMul, bytecode.OpDiv, bytecode.OpForLoop:
+		// 算术和数值 for 步进只影响寄存器与 pcOffset；成功后可直接进入下一条 PC 计算。
+		return true
+	default:
+		// 其他 opcode 仍走通用 CALL/RETURN/JMP/GC 后处理，避免遗漏语义副作用。
+		return false
+	}
 }
 
 // callGoClosureWithDebugFrame 在调试帧保护下执行 Go closure。
