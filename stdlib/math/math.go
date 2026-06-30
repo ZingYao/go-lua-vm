@@ -49,7 +49,7 @@ func Open(state *runtime.State) error {
 	library.RawSetString("floor", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: FloorUnaryValue, AcceptedKinds: numberUnaryKinds}))
 	library.RawSetString("fmod", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(FMod)))
 	library.RawSetString("huge", runtime.NumberValue(math.Inf(1)))
-	library.RawSetString("log", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Log)))
+	library.RawSetString("log", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: LogUnaryValue, AcceptedKinds: numberUnaryKinds}))
 	library.RawSetString("max", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Max)))
 	library.RawSetString("maxinteger", runtime.IntegerValue(math.MaxInt64))
 	library.RawSetString("min", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Min)))
@@ -521,6 +521,25 @@ func Log(args ...runtime.Value) ([]runtime.Value, error) {
 
 	// 其他 base 使用换底公式，NaN/Inf 语义由 Go math.Log 承接。
 	return []runtime.Value{runtime.NumberValue(math.Log(value) / math.Log(base))}, nil
+}
+
+// LogUnaryValue 实现 Lua 5.3 `math.log(x)` 的单参数单返回热路径。
+//
+// value 必须是 number 或 integer；返回值始终是 Lua float number。该入口只覆盖默认
+// 自然对数调用，带 base 的 `math.log(x, base)` 仍由通用 Go closure 路径处理。
+func LogUnaryValue(value runtime.Value) (runtime.Value, error) {
+	// log 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
+	if value.Kind != runtime.KindInteger && value.Kind != runtime.KindNumber {
+		// 非 number 入参按 Lua 标准库参数错误返回。
+		return runtime.NilValue(), badArgument("log", 1, fmt.Sprintf("number expected, got %s", runtime.LuaErrorTypeName(value)))
+	}
+	if value.Kind == runtime.KindInteger {
+		// integer 入参转换为 float64 后计算自然对数。
+		return runtime.NumberValue(math.Log(float64(value.Integer))), nil
+	}
+
+	// number 入参直接计算自然对数。
+	return runtime.NumberValue(math.Log(value.Number)), nil
 }
 
 // Max 实现 Lua 5.3 `math.max`。
