@@ -198,6 +198,12 @@ type LuaLeafAddReturn struct {
 	UpvalueAddRegisterIndex int
 	// HasRegisterUpvalueAdd 表示该叶子函数可走实参加 upvalue 专用快路径。
 	HasRegisterUpvalueAdd bool
+	// LeftRegisterIndex 保存 `R + R` 快路径中的左侧实参寄存器下标。
+	LeftRegisterIndex int
+	// RightRegisterIndex 保存 `R + R` 快路径中的右侧实参寄存器下标。
+	RightRegisterIndex int
+	// HasRegisterRegisterAdd 表示该叶子函数可走双实参寄存器专用快路径。
+	HasRegisterRegisterAdd bool
 }
 
 // LuaLeafAddOperand 保存 caller-side 叶子 ADD 操作数形态。
@@ -317,6 +323,13 @@ func (leaf *LuaLeafAddReturn) cacheRegisterIntegerConstantAdd() {
 		leaf.IntegerRegisterIndex = leaf.RightOperand.RegisterIndex
 		leaf.IntegerConstant = leaf.LeftOperand.ConstantValue.Integer
 		leaf.HasRegisterIntegerConstant = true
+		return
+	}
+	if !leaf.LeftOperand.Constant && !leaf.RightOperand.Constant && (!leaf.HasUpvalueRegister || (leaf.LeftOperand.RegisterIndex != leaf.UpvalueRegister && leaf.RightOperand.RegisterIndex != leaf.UpvalueRegister)) {
+		// `R + R` 是固定二实参函数调用的常见形态，缓存寄存器下标以跳过通用操作数解析。
+		leaf.LeftRegisterIndex = leaf.LeftOperand.RegisterIndex
+		leaf.RightRegisterIndex = leaf.RightOperand.RegisterIndex
+		leaf.HasRegisterRegisterAdd = true
 		return
 	}
 	if leaf.HasUpvalueRegister && !leaf.LeftOperand.Constant && !leaf.RightOperand.Constant {
@@ -654,6 +667,10 @@ func (vm *VM) TryExecuteLeafAddReturnInCaller(closure *LuaClosure, request *Call
 
 	// 读取预解析的叶子函数形态，后续只在 caller 寄存器窗口内完成操作数映射。
 	leafAddReturn := closure.LeafAddReturn
+	if handled, err := vm.tryLeafRegisterRegisterAdd(leafAddReturn, request); handled || err != nil {
+		// 命中特化 `R + R` 形态时直接返回；未命中时继续通用叶子加法路径。
+		return handled, err
+	}
 	if handled, err := vm.tryLeafRegisterIntegerConstantAdd(closure, leafAddReturn, request); handled || err != nil {
 		// 命中特化 `R + integer` 形态时直接返回；未命中时继续通用叶子加法路径。
 		return handled, err
@@ -698,6 +715,64 @@ func (vm *VM) TryExecuteLeafAddReturnInCaller(closure *LuaClosure, request *Call
 	vm.registers[request.FunctionIndex] = resultValue
 	vm.openTop = -1
 	return true, nil
+}
+
+// tryLeafRegisterRegisterAdd 执行 `return R + R` 叶子函数专用快路径。
+//
+// request 必须已由 TryExecuteLeafAddReturnInCaller 校验为固定参数单返回；该函数仅处理两个实参
+// 均真实存在且为原生 integer/number 的场景，缺参、字符串转换和元方法都回退完整 VM。
+func (vm *VM) tryLeafRegisterRegisterAdd(leaf *LuaLeafAddReturn, request *CallRequest) (bool, error) {
+	if leaf == nil || !leaf.HasRegisterRegisterAdd {
+		// 没有专用形态时交给后续叶子加法路径。
+		return false, nil
+	}
+	if request.FunctionIndex < 0 || request.FunctionIndex >= len(vm.registers) {
+		// 结果写回失败表示调用寄存器窗口异常。
+		return true, ErrRegisterOutOfRange
+	}
+	if leaf.LeftRegisterIndex < 0 || leaf.LeftRegisterIndex >= request.ArgumentCount || leaf.RightRegisterIndex < 0 || leaf.RightRegisterIndex >= request.ArgumentCount {
+		// 缺失实参在 Lua 中应进入 callee 后变为 nil；caller 侧必须回退避免读取相邻旧寄存器。
+		return false, nil
+	}
+	leftIndex := request.FunctionIndex + 1 + leaf.LeftRegisterIndex
+	rightIndex := request.FunctionIndex + 1 + leaf.RightRegisterIndex
+	if leftIndex < 0 || leftIndex >= len(vm.registers) || rightIndex < 0 || rightIndex >= len(vm.registers) {
+		// caller 实参区缺失时回退完整 VM 路径。
+		return false, nil
+	}
+	leftValue := vm.registers[leftIndex]
+	rightValue := vm.registers[rightIndex]
+	if leftValue.Kind == KindInteger && rightValue.Kind == KindInteger {
+		// 双 integer 加法保持 integer 结果。
+		vm.registers[request.FunctionIndex] = IntegerValue(leftValue.Integer + rightValue.Integer)
+		vm.openTop = -1
+		return true, nil
+	}
+	switch leftValue.Kind {
+	case KindInteger:
+		// integer 与 number 混合时按 Lua number 结果写回。
+		if rightValue.Kind == KindNumber {
+			// 右侧 number 可直接参与浮点加法。
+			vm.registers[request.FunctionIndex] = NumberValue(float64(leftValue.Integer) + rightValue.Number)
+			vm.openTop = -1
+			return true, nil
+		}
+	case KindNumber:
+		// number 左操作数可与原生 number/integer 右操作数相加。
+		switch rightValue.Kind {
+		case KindInteger:
+			// 右侧 integer 转为 number 后写回浮点结果。
+			vm.registers[request.FunctionIndex] = NumberValue(leftValue.Number + float64(rightValue.Integer))
+			vm.openTop = -1
+			return true, nil
+		case KindNumber:
+			// 双 number 加法保持 number 结果。
+			vm.registers[request.FunctionIndex] = NumberValue(leftValue.Number + rightValue.Number)
+			vm.openTop = -1
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // tryLeafRegisterUpvalueAdd 执行 `return R + upvalue` 叶子函数专用快路径。

@@ -698,6 +698,10 @@ func TestVMTryExecuteLeafAddReturnInCallerTwoArguments(t *testing.T) {
 		// 二寄存器 ADD;RETURN 必须预解析为叶子加法形态。
 		t.Fatalf("expected leaf add metadata")
 	}
+	if !closure.LeafAddReturn.HasRegisterRegisterAdd {
+		// 双实参寄存器形态应命中专用缓存，避免热路径重复解析操作数。
+		t.Fatalf("expected register-register leaf add metadata")
+	}
 
 	vm := NewVM(4)
 	if err := vm.SetRegister(0, ReferenceValue(KindLuaClosure, closure)); err != nil {
@@ -729,6 +733,33 @@ func TestVMTryExecuteLeafAddReturnInCallerTwoArguments(t *testing.T) {
 	if !ok || !value.RawEqual(IntegerValue(42)) {
 		// 结果必须直接写回函数槽。
 		t.Fatalf("caller leaf add result mismatch: value=%#v ok=%v", value, ok)
+	}
+
+	if err := vm.SetRegister(0, ReferenceValue(KindLuaClosure, closure)); err != nil {
+		// 重新写回函数槽用于 number 混合路径验证。
+		t.Fatalf("reset function register for number path failed: %v", err)
+	}
+	if err := vm.SetRegister(1, NumberValue(40.5)); err != nil {
+		// 第一个 number 实参写入必须成功。
+		t.Fatalf("set number argument failed: %v", err)
+	}
+	if err := vm.SetRegister(2, IntegerValue(1)); err != nil {
+		// 第二个 integer 实参写入必须成功。
+		t.Fatalf("set integer argument failed: %v", err)
+	}
+	handled, err = vm.TryExecuteLeafAddReturnInCaller(closure, &CallRequest{
+		FunctionIndex: 0,
+		ArgumentCount: 2,
+		ReturnCount:   1,
+	})
+	if err != nil || !handled {
+		// 原生 number/integer 混合加法也应由双寄存器快路径覆盖。
+		t.Fatalf("number caller leaf add mismatch: handled=%v err=%v", handled, err)
+	}
+	value, ok = vm.Register(0)
+	if !ok || !value.RawEqual(NumberValue(41.5)) {
+		// number 混合路径必须写回浮点结果。
+		t.Fatalf("number caller leaf add result mismatch: value=%#v ok=%v", value, ok)
 	}
 
 	if err := vm.SetRegister(0, ReferenceValue(KindLuaClosure, closure)); err != nil {
