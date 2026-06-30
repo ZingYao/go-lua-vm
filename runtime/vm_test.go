@@ -1293,6 +1293,66 @@ func TestVMMulNumberConstantFastPath(t *testing.T) {
 	}
 }
 
+// TestVMAddNativeNumberFastPath 验证 ADD 的原生 number 窄快路径。
+//
+// 快路径只覆盖至少一侧为真实 number 的加法；双 integer 结果仍应保持 integer，字符串数字
+// 继续回退完整算术转换路径。
+func TestVMAddNativeNumberFastPath(t *testing.T) {
+	tests := []struct {
+		name          string
+		leftValue     Value
+		rightValue    Value
+		expectedValue Value
+	}{
+		{
+			name:          "number plus integer",
+			leftValue:     NumberValue(1.5),
+			rightValue:    IntegerValue(2),
+			expectedValue: NumberValue(3.5),
+		},
+		{
+			name:          "number plus number",
+			leftValue:     NumberValue(1.25),
+			rightValue:    NumberValue(2.75),
+			expectedValue: NumberValue(4),
+		},
+		{
+			name:          "integer plus integer keeps integer",
+			leftValue:     IntegerValue(1),
+			rightValue:    IntegerValue(2),
+			expectedValue: IntegerValue(3),
+		},
+		{
+			name:          "string number falls back",
+			leftValue:     StringValue("1.5"),
+			rightValue:    StringValue("2.25"),
+			expectedValue: NumberValue(3.75),
+		},
+	}
+
+	for _, testCase := range tests {
+		// 每个形态独立构造寄存器窗口，避免整数缓存影响后续用例。
+		vm := NewVM(3)
+		if err := vm.SetRegister(1, testCase.leftValue); err != nil {
+			// 测试准备阶段必须能写入左操作数。
+			t.Fatalf("%s set left register failed: %v", testCase.name, err)
+		}
+		if err := vm.SetRegister(2, testCase.rightValue); err != nil {
+			// 测试准备阶段必须能写入右操作数。
+			t.Fatalf("%s set right register failed: %v", testCase.name, err)
+		}
+		if err := vm.Step(bytecode.CreateABC(bytecode.OpAdd, 0, 1, 2)); err != nil {
+			// 合法加法不应失败。
+			t.Fatalf("%s failed: %v", testCase.name, err)
+		}
+		value, ok := vm.Register(0)
+		if !ok || !value.RawEqual(testCase.expectedValue) {
+			// 目标寄存器必须保存加法结果。
+			t.Fatalf("%s value mismatch: value=%#v ok=%v", testCase.name, value, ok)
+		}
+	}
+}
+
 // TestVMDivNativeNumberFastPath 验证 DIV 的原生 number/integer 窄快路径。
 //
 // Lua 5.3 的 `/` 总是返回 float number；快路径必须覆盖原生数值，并让字符串数字继续走

@@ -2374,11 +2374,52 @@ func (vm *VM) executeAdd(instruction bytecode.Instruction) error {
 		// ADD 专用缓存命中已完成写回；缓存形态损坏时返回原始寄存器错误。
 		return err
 	}
+	if handled, err := vm.tryNativeNumberAdd(instruction); handled || err != nil {
+		// 原生 number 参与的加法可跳过通用 RK 和字符串转换检查；双 integer 仍走整数路径。
+		return err
+	}
 
 	// ADD 复用整数寄存器缓存，同时保留 number、字符串数字和元方法回退语义。
 	return vm.executeFastArithmetic(instruction, arithmeticIntRegisterCacheAdd, func(left float64, right float64) float64 {
 		return left + right
 	}, metamethodAdd)
+}
+
+// tryNativeNumberAdd 执行至少一侧为原生 number 的 ADD 窄快路径。
+//
+// 该路径只处理 integer/number 两类真实数值，且排除双 integer 以保留 Lua 5.3 integer
+// 加法结果；字符串数字、非数值和元方法语义返回 handled=false 交给完整算术路径。
+func (vm *VM) tryNativeNumberAdd(instruction bytecode.Instruction) (bool, error) {
+	targetIndex := instruction.A()
+	if targetIndex < 0 || targetIndex >= len(vm.registers) {
+		// 目标寄存器越界时不能写入，避免破坏寄存器窗口。
+		return true, ErrRegisterOutOfRange
+	}
+
+	leftValue, err := vm.rkValue(instruction.B())
+	if err != nil {
+		// 左操作数读取失败时保持原错误语义。
+		return true, err
+	}
+	rightValue, err := vm.rkValue(instruction.C())
+	if err != nil {
+		// 右操作数读取失败时保持原错误语义。
+		return true, err
+	}
+	if leftValue.Kind == KindInteger && rightValue.Kind == KindInteger {
+		// 双 integer 必须保留 integer 结果和现有 integer inline cache 行为。
+		return false, nil
+	}
+	leftNumber, leftOK := nativeNumberValue(leftValue)
+	rightNumber, rightOK := nativeNumberValue(rightValue)
+	if !leftOK || !rightOK {
+		// 字符串数字或元方法相关类型必须回退完整 Lua 算术路径。
+		return false, nil
+	}
+
+	// 至少一侧为 number 时，Lua 5.3 加法结果为 float number。
+	vm.registers[targetIndex] = NumberValue(leftNumber + rightNumber)
+	return true, nil
 }
 
 // executeSub 执行 Lua 5.3 OP_SUB 指令。
