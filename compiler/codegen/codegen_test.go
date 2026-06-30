@@ -224,6 +224,31 @@ func TestCompileChunkWhileStatement(t *testing.T) {
 	}
 }
 
+// TestCompileChunkRepeatComparisonConditionDirect 验证 repeat-until 比较条件直译为测试回跳。
+//
+// repeat 的 until 条件可以访问循环体 local；直译比较条件时仍必须避免 LOADBOOL/TEST 临时值。
+func TestCompileChunkRepeatComparisonConditionDirect(t *testing.T) {
+	chunk := parseChunkForCodegenTest(t, "local i = 0 repeat i = i + 1 until i >= 10 return i")
+
+	proto, err := CompileChunk(chunk, "repeat-comparison-direct")
+	if err != nil {
+		// 合法 repeat 比较条件不应编译失败。
+		t.Fatalf("compile repeat comparison failed: %v", err)
+	}
+	if countOpCode(proto, bytecode.OpLe) != 1 {
+		// i >= 10 应交换操作数后复用 LE 测试指令。
+		t.Fatalf("expected one LE instruction")
+	}
+	if countOpCode(proto, bytecode.OpTest) != 0 || countOpCode(proto, bytecode.OpLoadBool) != 0 {
+		// repeat 比较条件不应先写入 boolean 临时值。
+		t.Fatalf("unexpected boolean materialization: test=%d loadbool=%d", countOpCode(proto, bytecode.OpTest), countOpCode(proto, bytecode.OpLoadBool))
+	}
+	if !hasBackwardJump(proto) {
+		// until 条件失败时仍必须回跳到 repeat 体起点。
+		t.Fatalf("expected backward JMP for repeat")
+	}
+}
+
 // TestCompileChunkContinueAndSwitch 验证扩展 continue/switch 生成现有跳转与比较指令。
 //
 // continue 应降级为 JMP；switch 多值 case 应生成 EQ/JMP 匹配检查，不新增 VM opcode。

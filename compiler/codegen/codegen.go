@@ -2008,7 +2008,36 @@ func (generator *generator) compileWhileStatement(statement *parser.WhileStateme
 // 仅当 while 条件是比较表达式，且左右操作数都是当前 local 或字面量时启用；其他表达式继续走
 // 通用 boolean 物化路径，避免改变调用、索引、全局读取、短路逻辑和元方法错误时机。
 func (generator *generator) compileWhileComparisonCondition(statement *parser.WhileStatement, falseJumpPC *int) (bool, error) {
-	expression, ok := statement.Condition.(*parser.BinaryExpression)
+	return generator.compileComparisonConditionJump(statement.Condition, statement.Condition.Pos(), statement.EndPosition, falseJumpPC)
+}
+
+// compileComparisonConditionJump 将安全比较条件直译为“真时跳过 false JMP”的控制流。
+//
+// condition 只在比较表达式且左右操作数都是当前 local 或字面量时启用；其他表达式返回
+// handled=false，由调用方继续使用通用 boolean 物化路径。
+func (generator *generator) compileComparisonConditionJump(condition parser.Expression, conditionPosition lexer.Position, falseJumpPosition lexer.Position, falseJumpPC *int) (bool, error) {
+	handled, err := generator.compileComparisonConditionTest(condition, conditionPosition)
+	if err != nil || !handled {
+		// 调用方需要知道是否已消费该条件；错误保持原始编译错误。
+		return handled, err
+	}
+	if err := generator.withSourceLine(falseJumpPosition, func() error {
+		// 条件为 false 时不跳过该 JMP，从而进入调用方指定的 false 分支。
+		*falseJumpPC = generator.emitJump(0)
+		return nil
+	}); err != nil {
+		// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
+		return true, err
+	}
+	return true, nil
+}
+
+// compileComparisonConditionTest 只生成安全比较条件的测试指令。
+//
+// 生成的 EQ/LT/LE 指令在条件为 true 时跳过下一条指令；调用方负责紧跟 false JMP 或
+// repeat-until 的回跳 JMP。
+func (generator *generator) compileComparisonConditionTest(condition parser.Expression, conditionPosition lexer.Position) (bool, error) {
+	expression, ok := condition.(*parser.BinaryExpression)
 	if !ok || !isComparisonOperator(expression.Operator) {
 		// 非比较条件仍使用通用 TEST 路径。
 		return false, nil
@@ -2033,19 +2062,9 @@ func (generator *generator) compileWhileComparisonCondition(statement *parser.Wh
 		// `>` 和 `>=` 通过交换左右操作数复用 LT/LE。
 		leftOperand, rightOperand = rightOperand, leftOperand
 	}
-	if err := generator.withSourceLine(statement.Condition.Pos(), func() error {
+	if err := generator.withSourceLine(conditionPosition, func() error {
 		// 比较测试指令直接决定是否跳过后续 false JMP。
 		generator.emitABC(opCode, skipOnTrueA, leftOperand, rightOperand)
-		return nil
-	}); err != nil {
-		// 当前闭包只生成指令，不预期返回错误；释放临时寄存器后返回。
-		generator.releaseOptionalRegister(rightRegister)
-		generator.releaseOptionalRegister(leftRegister)
-		return true, err
-	}
-	if err := generator.withSourceLine(statement.EndPosition, func() error {
-		// 条件为 false 时不跳过该 JMP，从而跳出 while。
-		*falseJumpPC = generator.emitJump(0)
 		return nil
 	}); err != nil {
 		// 当前闭包只生成指令，不预期返回错误；释放临时寄存器后返回。
@@ -2072,49 +2091,68 @@ func (generator *generator) compileRepeatUntilStatement(statement *parser.Repeat
 		return err
 	}
 	conditionPC := len(generator.proto.Code)
-	conditionRegister := generator.allocateRegister()
-	if err := generator.withSourceLine(statement.Condition.Pos(), func() error {
-		// until 后置条件表达式归属条件起始行。
-		return generator.compileExpressionTo(statement.Condition, conditionRegister)
-	}); err != nil {
-		// 条件表达式编译失败时释放寄存器、恢复 repeat 作用域并丢弃循环状态。
-		generator.releaseRegister(conditionRegister)
-		generator.endScope(scope, len(generator.proto.Code))
-		generator.discardLoop(loopIndex)
-		return err
-	}
-	// repeat-until 的条件表达式可以访问循环体 local；条件求值完成后立即闭合本轮作用域，
-	// 让回跳进入下一轮时重新创建 local/upvalue cell。
-	generator.endScope(scope, len(generator.proto.Code))
-	if err := generator.withSourceLine(statement.UntilPosition, func() error {
-		// TEST/JMP 都属于 until 条件检查，line hook 应报告 until 所在行。
-		generator.emitABC(bytecode.OpTest, conditionRegister, 0, 0)
-		return nil
-	}); err != nil {
-		// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
-		generator.releaseRegister(conditionRegister)
-		generator.discardLoop(loopIndex)
-		return err
-	}
 	backJumpPC := 0
-	if err := generator.withSourceLine(statement.UntilPosition, func() error {
-		// 条件失败时执行回跳，保持与 until 行一致。
-		backJumpPC = generator.emitJump(0)
-		return nil
-	}); err != nil {
-		// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
+	if handled, err := generator.compileComparisonConditionTest(statement.Condition, statement.Condition.Pos()); err != nil || handled {
+		if err != nil {
+			// 条件比较编译失败时恢复 repeat 作用域、丢弃循环状态并返回。
+			generator.endScope(scope, len(generator.proto.Code))
+			generator.discardLoop(loopIndex)
+			return err
+		}
+		// repeat-until 的条件表达式可以访问循环体 local；条件求值完成后立即闭合本轮作用域。
+		generator.endScope(scope, len(generator.proto.Code))
+		if err := generator.withSourceLine(statement.UntilPosition, func() error {
+			// 条件失败时执行回跳，保持与 until 行一致。
+			backJumpPC = generator.emitJump(0)
+			return nil
+		}); err != nil {
+			// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
+			generator.discardLoop(loopIndex)
+			return err
+		}
+	} else {
+		conditionRegister := generator.allocateRegister()
+		if err := generator.withSourceLine(statement.Condition.Pos(), func() error {
+			// until 后置条件表达式归属条件起始行。
+			return generator.compileExpressionTo(statement.Condition, conditionRegister)
+		}); err != nil {
+			// 条件表达式编译失败时释放寄存器、恢复 repeat 作用域并丢弃循环状态。
+			generator.releaseRegister(conditionRegister)
+			generator.endScope(scope, len(generator.proto.Code))
+			generator.discardLoop(loopIndex)
+			return err
+		}
+		// repeat-until 的条件表达式可以访问循环体 local；条件求值完成后立即闭合本轮作用域，
+		// 让回跳进入下一轮时重新创建 local/upvalue cell。
+		generator.endScope(scope, len(generator.proto.Code))
+		if err := generator.withSourceLine(statement.UntilPosition, func() error {
+			// TEST/JMP 都属于 until 条件检查，line hook 应报告 until 所在行。
+			generator.emitABC(bytecode.OpTest, conditionRegister, 0, 0)
+			return nil
+		}); err != nil {
+			// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
+			generator.releaseRegister(conditionRegister)
+			generator.discardLoop(loopIndex)
+			return err
+		}
+		if err := generator.withSourceLine(statement.UntilPosition, func() error {
+			// 条件失败时执行回跳，保持与 until 行一致。
+			backJumpPC = generator.emitJump(0)
+			return nil
+		}); err != nil {
+			// 当前闭包只生成指令，不预期返回错误；保留分支便于未来扩展。
+			generator.releaseRegister(conditionRegister)
+			generator.discardLoop(loopIndex)
+			return err
+		}
 		generator.releaseRegister(conditionRegister)
-		generator.discardLoop(loopIndex)
-		return err
 	}
 	if err := generator.patchJumpChecked(backJumpPC, bodyPC); err != nil {
 		// repeat-until 循环体过长时，回跳无法编码为 sBx，必须停止编译。
-		generator.releaseRegister(conditionRegister)
 		generator.discardLoop(loopIndex)
 		return err
 	}
 	generator.patchLoopContinues(loopIndex, conditionPC)
-	generator.releaseRegister(conditionRegister)
 	generator.patchLoopBreaks(loopIndex, len(generator.proto.Code))
 
 	// repeat-until 语句编译完成。
