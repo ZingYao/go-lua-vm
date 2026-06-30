@@ -482,6 +482,15 @@ func TestSinSqrtAndTan(t *testing.T) {
 		// sin(0) 必须返回 float number 0。
 		t.Fatalf("Sin result mismatch: %#v", sinResults)
 	}
+	sinUnaryResult, err := SinUnaryValue(runtime.IntegerValue(0))
+	if err != nil {
+		// 一元 fast path 对合法 integer 入参不应失败。
+		t.Fatalf("SinUnaryValue failed: %v", err)
+	}
+	if sinUnaryResult.Kind != runtime.KindNumber || sinUnaryResult.Number != 0 {
+		// fast path 必须保持 math.sin 返回 float number 的语义。
+		t.Fatalf("SinUnaryValue result mismatch: %#v", sinUnaryResult)
+	}
 
 	sqrtResults, err := Sqrt(runtime.IntegerValue(9))
 	if err != nil {

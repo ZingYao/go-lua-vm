@@ -58,7 +58,7 @@ func Open(state *runtime.State) error {
 	library.RawSetString("rad", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Rad)))
 	library.RawSetString("random", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Random)))
 	library.RawSetString("randomseed", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(RandomSeed)))
-	library.RawSetString("sin", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Sin)))
+	library.RawSetString("sin", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoUnaryFunction(SinUnaryValue)))
 	library.RawSetString("sqrt", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoUnaryFunction(SqrtUnaryValue)))
 	library.RawSetString("tan", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Tan)))
 	library.RawSetString("tointeger", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(ToInteger)))
@@ -549,15 +549,49 @@ func RandomSeed(args ...runtime.Value) ([]runtime.Value, error) {
 // 第一个参数必须是 number；integer 会转换为 float64。返回值是 float number，入参单位为
 // 弧度，定义域和 NaN/Inf 行为由 Go math.Sin 承接。
 func Sin(args ...runtime.Value) ([]runtime.Value, error) {
-	// sin 首先解析弧度参数。
-	value, err := numberArgument(args, 1, "sin")
+	// sin 首先执行单返回入口，保持导出多返回签名兼容既有调用方。
+	value, err := SinValue(args...)
 	if err != nil {
-		// 第一个参数不是 number 时直接返回 Lua 参数错误。
+		// 参数错误直接返回给调用方。
 		return nil, err
 	}
 
 	// 返回正弦结果。
-	return []runtime.Value{runtime.NumberValue(math.Sin(value))}, nil
+	return []runtime.Value{value}, nil
+}
+
+// SinValue 实现 Lua 5.3 `math.sin` 的单返回热路径。
+//
+// args 必须提供第一个 number 参数；返回值始终是 Lua float number，错误语义与 Sin 保持一致。
+func SinValue(args ...runtime.Value) (runtime.Value, error) {
+	// sin 首先解析弧度参数。
+	value, err := numberArgument(args, 1, "sin")
+	if err != nil {
+		// 第一个参数不是 number 时直接返回 Lua 参数错误。
+		return runtime.NilValue(), err
+	}
+
+	// 返回正弦结果。
+	return runtime.NumberValue(math.Sin(value)), nil
+}
+
+// SinUnaryValue 实现 Lua 5.3 `math.sin` 的单参数单返回热路径。
+//
+// value 必须是 number 或 integer；返回值始终是 Lua float number。该入口服务 VM CALL
+// fast path，避免标准库热点调用构造临时参数切片。
+func SinUnaryValue(value runtime.Value) (runtime.Value, error) {
+	// sin 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
+	if value.Kind != runtime.KindInteger && value.Kind != runtime.KindNumber {
+		// 非 number 入参按 Lua 标准库参数错误返回。
+		return runtime.NilValue(), badArgument("sin", 1, fmt.Sprintf("number expected, got %s", runtime.LuaErrorTypeName(value)))
+	}
+	if value.Kind == runtime.KindInteger {
+		// integer 入参转换为 float64 后计算三角函数。
+		return runtime.NumberValue(math.Sin(float64(value.Integer))), nil
+	}
+
+	// number 入参直接计算三角函数。
+	return runtime.NumberValue(math.Sin(value.Number)), nil
 }
 
 // Sqrt 实现 Lua 5.3 `math.sqrt`。
