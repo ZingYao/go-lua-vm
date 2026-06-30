@@ -674,6 +674,55 @@ func TestCompileSelfArithmeticAssignmentWritesDirectly(t *testing.T) {
 	}
 }
 
+// TestCompileTableReadWriteUsesDirectRegisters 验证 table 热循环复用 local/for 寄存器。
+//
+// 对齐 Lua 5.3 C codegen 的 `t[i] = i` 与 `acc = acc + t[i]` 形态，避免通用赋值路径为
+// table、key、value 和 acc 生成额外临时 MOVE。
+func TestCompileTableReadWriteUsesDirectRegisters(t *testing.T) {
+	chunk := parseChunkForCodegenTest(t, "local t = {} for i = 1, 10 do t[i] = i end local acc = 0 for i = 1, 10 do acc = acc + t[i] end")
+
+	proto, err := CompileChunk(chunk, "table-read-write")
+	if err != nil {
+		// table 读写样例必须可编译。
+		t.Fatalf("compile table read write failed: %v", err)
+	}
+	hasDirectSetTable := false
+	hasDirectGetTable := false
+	hasDirectAdd := false
+	for _, instruction := range proto.Code {
+		switch instruction.OpCode() {
+		case bytecode.OpSetTable:
+			if instruction.A() == 0 && instruction.B() == 4 && instruction.C() == 4 {
+				// 第一段 for 的外部变量 i 位于 R4，table t 位于 R0。
+				hasDirectSetTable = true
+			}
+		case bytecode.OpGetTable:
+			if instruction.B() == 0 && instruction.C() == 5 {
+				// 第二段 for 的外部变量 i 位于 R5，table t 位于 R0。
+				hasDirectGetTable = true
+			}
+		case bytecode.OpAdd:
+			if instruction.A() == 1 && instruction.B() == 1 {
+				// acc 位于 R1，优化后 ADD 直接写回 acc。
+				hasDirectAdd = true
+			}
+		case bytecode.OpMove:
+			if instruction.A() == 1 && instruction.B() != 0 {
+				// 旧通用赋值路径会把临时加法结果 MOVE 回 acc。
+				t.Fatalf("unexpected MOVE back to acc from R%d", instruction.B())
+			}
+		}
+	}
+	if !hasDirectSetTable {
+		// 写入循环必须直接复用 t/i/i。
+		t.Fatalf("missing direct SETTABLE t[i]=i; code=%v", proto.Code)
+	}
+	if !hasDirectGetTable || !hasDirectAdd {
+		// 读取累加循环必须直接 GETTABLE 后 ADD 回 acc。
+		t.Fatalf("missing direct GETTABLE/ADD; get=%v add=%v code=%v", hasDirectGetTable, hasDirectAdd, proto.Code)
+	}
+}
+
 // TestCompileAssignmentExpandsLastCallResults 验证普通赋值会展开最后一个调用的多返回值。
 //
 // 官方 gc.lua 的 `s, i = string.gsub(...)` 依赖 CALL C 字段请求两个返回值；否则第二个左值

@@ -446,6 +446,10 @@ func (generator *generator) compileLocalAssignment(statement *parser.LocalAssign
 //
 // 当前阶段左侧支持已经声明的局部变量名称，未知名称按 Lua 5.3 语义写入 `_ENV[name]`。
 func (generator *generator) compileAssignment(statement *parser.AssignmentStatement) error {
+	if handled, err := generator.compileSingleSafeTableAssignment(statement); handled || err != nil {
+		// 单 table 索引赋值在 receiver/key/value 均安全时可直接生成 SETTABLE，避免临时 MOVE。
+		return err
+	}
 	if handled, err := generator.compileSingleLocalSelfBinaryAssignment(statement); handled || err != nil {
 		// 单 local 自二元运算赋值可直接写回目标寄存器，避免通用赋值临时结果和 MOVE。
 		return err
@@ -493,6 +497,69 @@ func (generator *generator) compileAssignment(statement *parser.AssignmentStatem
 	return nil
 }
 
+// compileSingleSafeTableAssignment 优化 `tableExpression[keyExpression] = valueExpression`。
+//
+// 该优化只处理单左值、单右值，且 receiver 必须是当前 local 名称；key/value 只允许 local 名称
+// 或字面量。复杂表达式仍走通用赋值路径，以保留 Lua 5.3 的左值和右值求值顺序及副作用语义。
+func (generator *generator) compileSingleSafeTableAssignment(statement *parser.AssignmentStatement) (bool, error) {
+	if len(statement.Left) != 1 || len(statement.Right) != 1 {
+		// 多重赋值必须先求完所有 RHS，再统一写回，不能使用该快路径。
+		return false, nil
+	}
+	indexExpression, ok := statement.Left[0].(*parser.IndexExpression)
+	if !ok {
+		// 只有方括号索引赋值能直接映射到 SETTABLE。
+		return false, nil
+	}
+	receiverName, ok := indexExpression.Receiver.(*parser.NameExpression)
+	if !ok {
+		// receiver 不是名称时可能有调用或索引副作用，回退通用路径。
+		return false, nil
+	}
+	receiverBinding, ok := generator.locals[receiverName.Name]
+	if !ok {
+		// upvalue/global receiver 读取需要额外指令或可能触发环境表访问，回退通用路径。
+		return false, nil
+	}
+
+	firstTempRegister := generator.nextRegister
+	keyOperand, keyOK, err := generator.safeRKOperand(indexExpression.Index)
+	if err != nil {
+		// 安全 key 编译失败时释放临时寄存器并返回。
+		generator.releaseRegistersFrom(firstTempRegister)
+		return true, err
+	}
+	if !keyOK {
+		// key 表达式不满足安全条件时回退通用路径。
+		generator.releaseRegistersFrom(firstTempRegister)
+		return false, nil
+	}
+	valueOperand, valueOK, err := generator.safeRKOperand(statement.Right[0])
+	if err != nil {
+		// 安全 value 编译失败时释放临时寄存器并返回。
+		generator.releaseRegistersFrom(firstTempRegister)
+		return true, err
+	}
+	if !valueOK {
+		// value 表达式不满足安全条件时回退通用路径。
+		generator.releaseRegistersFrom(firstTempRegister)
+		return false, nil
+	}
+
+	if err := generator.withSourceLine(indexExpression.Position, func() error {
+		// receiver/key/value 均已确认无副作用，直接复用寄存器或 RK 常量生成 SETTABLE。
+		generator.emitABC(bytecode.OpSetTable, receiverBinding.register, keyOperand, valueOperand)
+		return nil
+	}); err != nil {
+		generator.releaseRegistersFrom(firstTempRegister)
+		return true, err
+	}
+	generator.releaseRegistersFrom(firstTempRegister)
+
+	// 安全 table 索引赋值已完成。
+	return true, nil
+}
+
 // compileSingleLocalSelfBinaryAssignment 优化 `localName = localName <op> expression`。
 //
 // 该优化只处理单左值、单右值、当前函数 active local 的普通二元运算；右侧表达式必须没有调用、
@@ -522,10 +589,6 @@ func (generator *generator) compileSingleLocalSelfBinaryAssignment(statement *pa
 		// 只有 `x = x <op> rhs` 能保证左操作数就是目标寄存器当前值。
 		return false, nil
 	}
-	if !generator.isSelfBinarySafeRightExpression(binaryExpression.Right) {
-		// 右侧若可能调用函数或触发元方法，就必须先保存左操作数，避免破坏左到右求值语义。
-		return false, nil
-	}
 	opCode, ok := binaryOpCode(binaryExpression.Operator)
 	if !ok {
 		// 未支持的二元运算回退通用路径，让通用编译器返回原有错误。
@@ -533,10 +596,16 @@ func (generator *generator) compileSingleLocalSelfBinaryAssignment(statement *pa
 	}
 
 	rightRegister := generator.allocateRegister()
-	if err := generator.compileExpressionTo(binaryExpression.Right, rightRegister); err != nil {
+	rightHandled, err := generator.compileSelfBinaryRightExpressionTo(binaryExpression.Right, rightRegister)
+	if err != nil {
 		// 右操作数失败时释放临时寄存器并返回。
 		generator.releaseRegister(rightRegister)
 		return true, err
+	}
+	if !rightHandled {
+		// 右侧若可能调用函数或触发元方法，就必须先保存左操作数，避免破坏左到右求值语义。
+		generator.releaseRegister(rightRegister)
+		return false, nil
 	}
 	if err := generator.withSourceLine(binaryExpression.Position, func() error {
 		// 左操作数直接读取目标 local 旧值，结果也直接写回该 local。
@@ -549,6 +618,53 @@ func (generator *generator) compileSingleLocalSelfBinaryAssignment(statement *pa
 	generator.releaseRegister(rightRegister)
 
 	// 自二元运算赋值已完成。
+	return true, nil
+}
+
+// compileSelfBinaryRightExpressionTo 编译自二元赋值中确认安全的右操作数。
+//
+// targetRegister 保存右操作数结果；返回 handled=false 表示表达式不满足快路径安全条件。
+func (generator *generator) compileSelfBinaryRightExpressionTo(expression parser.Expression, targetRegister int) (bool, error) {
+	if generator.isSelfBinarySafeRightExpression(expression) {
+		// 字面量、local 或 upvalue 名称沿用普通表达式编译即可。
+		return true, generator.compileExpressionTo(expression, targetRegister)
+	}
+	indexExpression, ok := expression.(*parser.IndexExpression)
+	if !ok {
+		// 其他复杂表达式可能调用函数或触发未知副作用，回退通用路径。
+		return false, nil
+	}
+	receiverName, ok := indexExpression.Receiver.(*parser.NameExpression)
+	if !ok {
+		// receiver 不是名称时可能有副作用，回退通用路径。
+		return false, nil
+	}
+	receiverBinding, ok := generator.locals[receiverName.Name]
+	if !ok {
+		// upvalue/global receiver 需要额外读取或环境表访问，回退通用路径。
+		return false, nil
+	}
+	firstTempRegister := generator.nextRegister
+	keyOperand, keyOK, err := generator.safeRKOperand(indexExpression.Index)
+	if err != nil {
+		// key 编译失败时释放临时寄存器并返回。
+		generator.releaseRegistersFrom(firstTempRegister)
+		return true, err
+	}
+	if !keyOK {
+		// key 不满足安全条件时回退通用路径。
+		generator.releaseRegistersFrom(firstTempRegister)
+		return false, nil
+	}
+	if err := generator.withSourceLine(indexExpression.Position, func() error {
+		// receiver/key 均无副作用时直接生成 GETTABLE 到右操作数目标寄存器。
+		generator.emitABC(bytecode.OpGetTable, targetRegister, receiverBinding.register, keyOperand)
+		return nil
+	}); err != nil {
+		generator.releaseRegistersFrom(firstTempRegister)
+		return true, err
+	}
+	generator.releaseRegistersFrom(firstTempRegister)
 	return true, nil
 }
 
@@ -688,6 +804,71 @@ func (generator *generator) isSelfBinarySafeRightExpression(expression parser.Ex
 
 	// 未知名称或 upvalue 上限错误交给通用路径保留原错误时机。
 	return false
+}
+
+// safeRKOperand 将无副作用表达式转换为 RK 操作数。
+//
+// 当前只接受当前 local 名称和字面量；local 名称直接复用寄存器，字面量进入常量池并尽量使用
+// RK 常量编码。返回 ok=false 表示表达式不满足安全条件，调用方应回退通用路径。
+func (generator *generator) safeRKOperand(expression parser.Expression) (operand int, ok bool, err error) {
+	switch typedExpression := expression.(type) {
+	case *parser.NameExpression:
+		binding, exists := generator.locals[typedExpression.Name]
+		if !exists {
+			// 非当前 local 名称可能是 upvalue 或全局访问，不能直接作为 RK 寄存器。
+			return 0, false, nil
+		}
+		return binding.register, true, nil
+	case *parser.LiteralExpression:
+		constant, constantOK := literalConstant(typedExpression)
+		if !constantOK {
+			// 当前字面量类型无法放入常量表时回退通用路径。
+			return 0, false, nil
+		}
+		constantIndex := generator.addConstant(constant)
+		rkOperand, _, rkErr := generator.rkOperandForConstantIndex(constantIndex)
+		if rkErr != nil {
+			// 常量载入失败时返回错误，保持原编译错误语义。
+			return 0, true, rkErr
+		}
+		return rkOperand, true, nil
+	default:
+		// 其他表达式可能有副作用，不能作为安全 RK 操作数。
+		return 0, false, nil
+	}
+}
+
+// literalConstant 将可直接放入常量表的字面量转为 bytecode.Constant。
+func literalConstant(expression *parser.LiteralExpression) (bytecode.Constant, bool) {
+	if expression.Kind == lexer.TokenString {
+		// 字符串字面量直接进入常量池。
+		return bytecode.StringConstant(expression.Value), true
+	}
+	if expression.Kind == lexer.TokenNumber {
+		// 数字按 lexer 分类保留 integer/number 双模型。
+		switch expression.Number.Kind {
+		case lexer.NumberDecimalInteger, lexer.NumberHexInteger:
+			return bytecode.IntegerConstant(expression.Number.Integer), true
+		case lexer.NumberDecimalFloat, lexer.NumberHexFloat:
+			return bytecode.NumberConstant(expression.Number.Number), true
+		default:
+			return bytecode.NilConstant(), false
+		}
+	}
+	if expression.Kind == lexer.TokenKeyword {
+		// Lua 关键字字面量支持 nil/true/false。
+		switch expression.Value {
+		case "nil":
+			return bytecode.NilConstant(), true
+		case "true":
+			return bytecode.BooleanConstant(true), true
+		case "false":
+			return bytecode.BooleanConstant(false), true
+		default:
+			return bytecode.NilConstant(), false
+		}
+	}
+	return bytecode.NilConstant(), false
 }
 
 // compileAssignmentTarget 编译普通赋值左值地址。
