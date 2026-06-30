@@ -547,6 +547,34 @@ func TestVMSetTable(t *testing.T) {
 	}
 }
 
+// TestNewLuaClosureCachesDirectCallSafe 验证 Lua closure 创建时缓存 direct CALL 属性。
+//
+// 叶子函数可走 direct CALL；包含 CALL 的函数必须保留完整调用路径，避免裁剪 debug/coroutine 现场。
+func TestNewLuaClosureCachesDirectCallSafe(t *testing.T) {
+	leafProto := &bytecode.Proto{
+		Code: []bytecode.Instruction{
+			bytecode.CreateABC(bytecode.OpReturn, 0, 1, 0),
+		},
+	}
+	leafClosure := NewLuaClosure(leafProto, nil, nil)
+	if !leafClosure.DirectCallSafe {
+		// 只有 RETURN 的叶子函数应被标记为 direct CALL safe。
+		t.Fatalf("leaf closure should be direct-call safe")
+	}
+
+	callingProto := &bytecode.Proto{
+		Code: []bytecode.Instruction{
+			bytecode.CreateABC(bytecode.OpCall, 0, 1, 1),
+			bytecode.CreateABC(bytecode.OpReturn, 0, 1, 0),
+		},
+	}
+	callingClosure := NewLuaClosure(callingProto, nil, nil)
+	if callingClosure.DirectCallSafe {
+		// 含 CALL 的函数不能进入 leaf direct CALL 路径。
+		t.Fatalf("calling closure should not be direct-call safe")
+	}
+}
+
 // TestVMNewTable 验证 NEWTABLE 会创建新的 table 引用。
 //
 // Lua 5.3 NEWTABLE 的 B/C 预分配 hint 暂未生效，但创建空 table 的可观察语义必须正确。

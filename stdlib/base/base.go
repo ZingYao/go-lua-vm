@@ -1272,7 +1272,7 @@ func loadChunkClosure(chunkBytes []byte, sourceName string, state *runtime.State
 			return runtime.NilValue(), err
 		}
 		upvalues := loadedClosureUpvalues(state, proto, envValue)
-		return runtime.ReferenceValue(runtime.KindLuaClosure, &runtime.LuaClosure{Proto: proto, Upvalues: upvalues, UpvalueCells: loadedClosureUpvalueCells(upvalues)}), nil
+		return runtime.ReferenceValue(runtime.KindLuaClosure, runtime.NewLuaClosure(proto, upvalues, loadedClosureUpvalueCells(upvalues))), nil
 	}
 
 	// 非 binary 签名输入按 Lua 源码 chunk 编译。
@@ -1322,7 +1322,7 @@ func compileLuaClosure(source string, sourceName string, state *runtime.State, e
 
 	// Lua closure 当前只保存 Proto 和 upvalue 快照，执行链路由后续 VM 调用任务接入。
 	upvalues := loadedClosureUpvalues(state, proto, envValue)
-	return runtime.ReferenceValue(runtime.KindLuaClosure, &runtime.LuaClosure{Proto: proto, Upvalues: upvalues, UpvalueCells: loadedClosureUpvalueCells(upvalues)}), nil
+	return runtime.ReferenceValue(runtime.KindLuaClosure, runtime.NewLuaClosure(proto, upvalues, loadedClosureUpvalueCells(upvalues))), nil
 }
 
 // loadedClosureUpvalues 为 load/loadfile 生成的顶层 closure 绑定 upvalue。

@@ -112,6 +112,40 @@ type LuaClosure struct {
 	Upvalues []Value
 	// UpvalueCells 保存运行期共享 upvalue 槽；存在时优先于 Upvalues 执行读写。
 	UpvalueCells []*UpvalueCell
+	// DirectCallSafe 表示该 closure 的 Proto 可走 Lua 叶子函数 direct CALL 快路径。
+	DirectCallSafe bool
+}
+
+// NewLuaClosure 创建带运行期缓存属性的 Lua closure。
+//
+// proto 必须是不可变 Lua 函数原型；upvalues/upvalueCells 由调用方按捕获语义准备。返回 closure
+// 会缓存 direct CALL 安全性，避免热循环中每次 CALL 重复扫描 Proto 指令。
+func NewLuaClosure(proto *bytecode.Proto, upvalues []Value, upvalueCells []*UpvalueCell) *LuaClosure {
+	// 创建 closure 时一次性计算不可变 Proto 的 direct CALL 属性。
+	return &LuaClosure{
+		Proto:          proto,
+		Upvalues:       upvalues,
+		UpvalueCells:   upvalueCells,
+		DirectCallSafe: luaProtoDirectCallSafe(proto),
+	}
+}
+
+// luaProtoDirectCallSafe 判断 Proto 是否适合 Lua closure direct CALL 热路径。
+//
+// direct CALL 当前仅覆盖纯叶子函数，避免嵌套调用、闭包创建和 yield 现场裁剪破坏 coroutine。
+func luaProtoDirectCallSafe(proto *bytecode.Proto) bool {
+	if proto == nil {
+		// 缺少 Proto 时不能进入 direct CALL。
+		return false
+	}
+	for instructionIndex := range proto.Code {
+		switch proto.Code[instructionIndex].OpCode() {
+		case bytecode.OpCall, bytecode.OpTailCall, bytecode.OpTForCall, bytecode.OpClosure:
+			// 任何嵌套调用或闭包创建都交给通用路径。
+			return false
+		}
+	}
+	return true
 }
 
 // UpvalueCell 表示一个可共享的 Lua upvalue 存储槽。
@@ -2372,8 +2406,8 @@ func (vm *VM) executeClosure(instruction bytecode.Instruction) error {
 		upvalues = append(upvalues, capturedCell.Value())
 	}
 
-	// 写入 Lua closure 引用值。
-	vm.registers[targetIndex] = ReferenceValue(KindLuaClosure, &LuaClosure{Proto: proto, Upvalues: upvalues, UpvalueCells: upvalueCells})
+	// 写入 Lua closure 引用值，并缓存 Proto 的 direct CALL 属性。
+	vm.registers[targetIndex] = ReferenceValue(KindLuaClosure, NewLuaClosure(proto, upvalues, upvalueCells))
 	return nil
 }
 

@@ -1120,7 +1120,7 @@ func loadStringOrBinaryChunk(state *State, chunkBytes []byte, chunkName string) 
 			return runtime.NilValue(), err
 		}
 		upvalues := bindTopLevelUpvalues(state, proto)
-		closure := &runtime.LuaClosure{Proto: proto, Upvalues: upvalues, UpvalueCells: closedUpvalueCells(upvalues)}
+		closure := runtime.NewLuaClosure(proto, upvalues, closedUpvalueCells(upvalues))
 		return runtime.ReferenceValue(runtime.KindLuaClosure, closure), nil
 	}
 	source := lexer.StripInitialShebang(string(chunkBytes))
@@ -1730,7 +1730,7 @@ func compileString(state *State, source string, chunkName string) (Value, error)
 		return runtime.NilValue(), err
 	}
 	upvalues := bindTopLevelUpvalues(state, proto)
-	closure := &runtime.LuaClosure{Proto: proto, Upvalues: upvalues, UpvalueCells: closedUpvalueCells(upvalues)}
+	closure := runtime.NewLuaClosure(proto, upvalues, closedUpvalueCells(upvalues))
 	return runtime.ReferenceValue(runtime.KindLuaClosure, closure), nil
 }
 
@@ -3140,27 +3140,9 @@ func canExecuteLuaCallRequestDirect(state *State, functionValue Value, callReque
 		// vararg 和子函数都需要完整调用现场。
 		return false
 	}
-	if !luaProtoDirectCallSafe(closure.Proto) {
-		// 只允许无嵌套调用的叶子函数走 direct CALL。
+	if !closure.DirectCallSafe {
+		// 只允许创建时判定为无嵌套调用的叶子函数走 direct CALL。
 		return false
-	}
-	return true
-}
-
-// luaProtoDirectCallSafe 判断 Proto 是否适合 direct CALL 热路径。
-//
-// direct CALL 当前仅覆盖纯叶子函数，避免嵌套调用、闭包创建和 yield 现场裁剪破坏 coroutine。
-func luaProtoDirectCallSafe(proto *bytecode.Proto) bool {
-	if proto == nil {
-		// 缺少 Proto 时不能进入 direct CALL。
-		return false
-	}
-	for instructionIndex := range proto.Code {
-		switch proto.Code[instructionIndex].OpCode() {
-		case bytecode.OpCall, bytecode.OpTailCall, bytecode.OpTForCall, bytecode.OpClosure:
-			// 任何嵌套调用或闭包创建都交给通用路径。
-			return false
-		}
 	}
 	return true
 }
