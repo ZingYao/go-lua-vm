@@ -1086,7 +1086,6 @@ func (table *Table) ensureArraySize(size int) {
 		return
 	}
 
-	oldSize := len(table.arrayValues)
 	if cap(table.arrayValues) >= size {
 		// 容量已预留时只扩展可见长度，避免连续数组写入反复分配。
 		table.arrayValues = table.arrayValues[:size]
@@ -1097,10 +1096,7 @@ func (table *Table) ensureArraySize(size int) {
 		copy(grownValues, table.arrayValues)
 		table.arrayValues = grownValues
 	}
-	for index := oldSize; index < len(table.arrayValues); index++ {
-		// 新增槽位显式填充 nil，避免零值 Value 被误解为有效值。
-		table.arrayValues[index] = NilValue()
-	}
+	// Value 的零值就是 KindNil；Go 扩容和 make 已经保证新增槽位为 Lua nil。
 }
 
 // nextTableArrayCapacity 计算数组区下一次预留容量。
