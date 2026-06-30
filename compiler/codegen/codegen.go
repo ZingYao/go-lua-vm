@@ -3632,6 +3632,26 @@ func (generator *generator) compileComparisonTo(expression *parser.BinaryExpress
 //
 // 当前实现使用 TEST/JMP/MOVE 形态保留右侧惰性求值，后续跳转回填任务会扩展为公共 patch list。
 func (generator *generator) compileShortCircuitTo(expression *parser.BinaryExpression, targetRegister int) error {
+	if leftName, ok := expression.Left.(*parser.NameExpression); ok {
+		// local 左操作数可用 TESTSET 合并复制和真假测试，对齐 Lua 5.3 官方 codegen。
+		if binding, found := generator.locals[leftName.Name]; found && binding.register != targetRegister {
+			// TESTSET 条件满足时把左侧 local 复制到目标寄存器，随后 JMP 跳过右侧表达式。
+			if expression.Operator == "and" {
+				// and 在左侧为 false/nil 时保留左侧结果并跳过右侧。
+				generator.emitABC(bytecode.OpTestSet, targetRegister, binding.register, 0)
+			} else {
+				// or 在左侧为 truthy 时保留左侧结果并跳过右侧。
+				generator.emitABC(bytecode.OpTestSet, targetRegister, binding.register, 1)
+			}
+			jumpPC := generator.emitJump(0)
+			if err := generator.compileExpressionTo(expression.Right, targetRegister); err != nil {
+				// 右侧表达式失败时返回错误，保持原有编译失败语义。
+				return err
+			}
+			generator.patchJump(jumpPC, len(generator.proto.Code))
+			return nil
+		}
+	}
 	if err := generator.compileExpressionTo(expression.Left, targetRegister); err != nil {
 		// 左侧表达式决定是否短路，必须先生成到目标寄存器。
 		return err

@@ -83,7 +83,7 @@ return x
 	}
 }
 
-// TestCompileChunkShortCircuit 验证 and/or 短路表达式生成 TEST/JMP 形态。
+// TestCompileChunkShortCircuit 验证 and/or 短路表达式生成 TESTSET/JMP 形态。
 //
 // 当前阶段只验证指令结构，运行时真假语义由 VM 指令测试覆盖。
 func TestCompileChunkShortCircuit(t *testing.T) {
@@ -95,18 +95,42 @@ func TestCompileChunkShortCircuit(t *testing.T) {
 		t.Fatalf("compile short circuit failed: %v", err)
 	}
 	testCount := countOpCode(proto, bytecode.OpTest)
+	testSetCount := countOpCode(proto, bytecode.OpTestSet)
 	jumpCount := countOpCode(proto, bytecode.OpJmp)
-	if testCount != 4 || jumpCount != 4 {
-		// and/or 每个短路节点各自应生成一组 TEST/JMP。
-		t.Fatalf("unexpected short circuit shape: test=%d jump=%d", testCount, jumpCount)
+	if testCount != 0 || testSetCount != 4 || jumpCount != 4 {
+		// local 左操作数短路节点应使用 TESTSET/JMP，避免 MOVE+TEST 额外指令。
+		t.Fatalf("unexpected short circuit shape: test=%d testset=%d jump=%d", testCount, testSetCount, jumpCount)
 	}
-	if !hasTestWithC(proto, 0) || !hasTestWithC(proto, 1) {
+	if !hasTestSetWithC(proto, 0) || !hasTestSetWithC(proto, 1) {
 		// and 使用 C=0，or 使用 C=1，二者都应出现。
-		t.Fatalf("expected TEST instructions for both and/or")
+		t.Fatalf("expected TESTSET instructions for both and/or")
 	}
 	if !hasJumpBeyondOne(proto) {
 		// 嵌套短路右侧包含多条指令，至少一个 jump 应由回填得到大于 1 的偏移。
 		t.Fatalf("expected patched jump beyond one instruction")
+	}
+}
+
+// TestCompileChunkShortCircuitLocalNameUsesTestSet 验证 local 左操作数短路对齐 Lua 5.3 TESTSET。
+func TestCompileChunkShortCircuitLocalNameUsesTestSet(t *testing.T) {
+	chunk := parseChunkForCodegenTest(t, "local a = true local b = false local c = a or 0 local d = b and 1 return c, d")
+
+	proto, err := CompileChunk(chunk, "short-testset")
+	if err != nil {
+		// 合法短路表达式不应编译失败。
+		t.Fatalf("compile short-testset failed: %v", err)
+	}
+	if countOpCode(proto, bytecode.OpTestSet) != 2 || countOpCode(proto, bytecode.OpTest) != 0 {
+		// 两个 local 左操作数短路表达式应各生成一条 TESTSET，不再生成 MOVE+TEST。
+		t.Fatalf("unexpected testset shape: testset=%d test=%d", countOpCode(proto, bytecode.OpTestSet), countOpCode(proto, bytecode.OpTest))
+	}
+	if hasMove(proto, 2, 0) || hasMove(proto, 3, 1) {
+		// 官方 Lua 5.3 该形态不需要先 MOVE 左侧 local 到目标寄存器。
+		t.Fatalf("unexpected MOVE before short-circuit TESTSET")
+	}
+	if len(proto.Code) != 11 {
+		// 本项目显式 return 后不补不可达默认 RETURN；主体指令应比官方 Lua 5.3 少一条。
+		t.Fatalf("unexpected instruction count=%d code=%v", len(proto.Code), proto.Code)
 	}
 }
 
@@ -1591,6 +1615,21 @@ func hasTestWithC(proto *bytecode.Proto, c int) bool {
 	}
 
 	// 没有找到匹配 TEST 指令。
+	return false
+}
+
+// hasTestSetWithC 判断 Proto 中是否存在指定 C 字段的 TESTSET 指令。
+//
+// local 左操作数短路表达式使用 TESTSET 合并复制和测试，and/or 分别依赖 C=0/C=1。
+func hasTestSetWithC(proto *bytecode.Proto, c int) bool {
+	for _, instruction := range proto.Code {
+		// 只检查 TESTSET 指令的 C 字段。
+		if instruction.OpCode() == bytecode.OpTestSet && instruction.C() == c {
+			return true
+		}
+	}
+
+	// 没有找到匹配 TESTSET 指令。
 	return false
 }
 
