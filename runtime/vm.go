@@ -2499,9 +2499,14 @@ func (vm *VM) executeDiv(instruction bytecode.Instruction) error {
 		// 目标寄存器越界时不能写入，避免破坏寄存器窗口。
 		return ErrRegisterOutOfRange
 	}
-	if handled, err := vm.tryCachedNativeNumberDivArithmetic(instruction); handled || err != nil {
-		// DIV number 缓存命中已完成写回；缓存形态损坏时返回原始寄存器错误。
-		return err
+	currentPC := vm.currentPC
+	if currentPC >= 0 && currentPC < len(vm.arithmeticIntRegisterCache) && currentPC < len(vm.arithmeticIntOperandCache) && vm.arithmeticIntRegisterCache[currentPC] == arithmeticIntRegisterCacheDivNumber {
+		// 当前 PC 命中过 DIV number 缓存时，直接进入窄路径，避免普通未命中路径重复读取 PC。
+		handled, err := vm.tryCachedNativeNumberDivArithmetic(instruction, currentPC)
+		if handled || err != nil {
+			// DIV number 缓存命中已完成写回；缓存形态损坏时返回原始寄存器错误。
+			return err
+		}
 	}
 
 	leftValue, err := vm.rkValue(instruction.B())
@@ -2823,12 +2828,7 @@ func (vm *VM) tryCachedNativeNumberAddArithmetic(instruction bytecode.Instructio
 //
 // 该缓存只记录 B/C 都是寄存器且运行期值为 integer/number 的 DIV。命中时始终写回 Lua
 // number；类型变化为字符串数字或元方法相关类型时清理缓存并回到完整 DIV 语义。
-func (vm *VM) tryCachedNativeNumberDivArithmetic(instruction bytecode.Instruction) (bool, error) {
-	currentPC := vm.currentPC
-	if currentPC < 0 || currentPC >= len(vm.arithmeticIntRegisterCache) || currentPC >= len(vm.arithmeticIntOperandCache) || vm.arithmeticIntRegisterCache[currentPC] != arithmeticIntRegisterCacheDivNumber {
-		// 当前 PC 没有 DIV number 缓存，调用方继续走普通 RK 路径。
-		return false, nil
-	}
+func (vm *VM) tryCachedNativeNumberDivArithmetic(instruction bytecode.Instruction, currentPC int) (bool, error) {
 	cacheEntry := vm.arithmeticIntOperandCache[currentPC]
 	if cacheEntry.leftIndex < 0 || cacheEntry.leftIndex >= len(vm.registers) || cacheEntry.rightIndex < 0 || cacheEntry.rightIndex >= len(vm.registers) {
 		// 寄存器窗口变化时清理缓存，并回到通用 RK 路径报出原始错误。
