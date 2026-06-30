@@ -69,6 +69,41 @@ type GoFunction func(args ...Value) (Value, error)
 // 标准库中高频的一元函数，避免 VM CALL 为单参数构造临时参数切片。
 type GoUnaryFunction func(Value) (Value, error)
 
+// GoFastUnaryFunction 表示可在无 hook 成功路径跳过 Go 调用帧的一元 Go closure。
+//
+// Function 必须在 AcceptedKinds 覆盖的参数类型下不依赖 Go 调用帧副作用；未命中类型时调用方
+// 必须回退 GoUnaryFunction 的完整 debug-frame 路径，以保留参数错误 traceback 语义。
+type GoFastUnaryFunction struct {
+	// Function 保存真实一元函数入口。
+	Function GoUnaryFunction
+	// AcceptedKinds 用 bit mask 表示允许跳过 debug frame 的参数类型集合。
+	AcceptedKinds uint64
+}
+
+// UnaryKindMask 构造 GoFastUnaryFunction 使用的 ValueKind bit mask。
+//
+// kinds 是允许走无 frame 成功路径的 Lua 值类型；重复类型会自然合并。
+func UnaryKindMask(kinds ...ValueKind) uint64 {
+	// 使用 uint64 bit mask 避免热路径 map 查询和额外分配。
+	var mask uint64
+	for _, kind := range kinds {
+		// ValueKind 当前远小于 64，越界值忽略以防外部构造异常枚举。
+		if kind < 64 {
+			mask |= 1 << uint(kind)
+		}
+	}
+	return mask
+}
+
+// Accepts 判断 value 是否满足 fast unary 的无 frame 调用类型约束。
+func (function *GoFastUnaryFunction) Accepts(value Value) bool {
+	// nil 函数或空 mask 不能走无 frame 快路径。
+	if function == nil || function.Function == nil || value.Kind >= 64 {
+		return false
+	}
+	return function.AcceptedKinds&(1<<uint(value.Kind)) != 0
+}
+
 // GoResultsFunction 表示当前 VM 可直接调用并返回多返回值的 Go 元方法函数。
 //
 // args 按 Lua 调用顺序传入；返回切片按 Lua 多返回值顺序排列。该类型主要服务 `__pairs`、

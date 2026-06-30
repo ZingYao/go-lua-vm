@@ -71,7 +71,7 @@ func Open(state *runtime.State) error {
 		// gsub 的 Lua closure 替换函数需要当前 State 提供 Lua closure runner。
 		return gsubWithState(state, args...)
 	})))
-	library.RawSetString("len", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoUnaryFunction(LenUnaryValue)))
+	library.RawSetString("len", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: LenUnaryValue, AcceptedKinds: runtime.UnaryKindMask(runtime.KindString)}))
 	library.RawSetString("lower", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Lower)))
 	library.RawSetString("match", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Match)))
 	library.RawSetString("pack", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Pack)))

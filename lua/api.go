@@ -3234,7 +3234,51 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 		// 固定参数/固定返回的 Lua closure 走 direct CALL，避免构造参数切片。
 		results, directCallVM, directResultsWritten, err = executeLuaCallRequestDirect(state, vm, functionValue, debugName, debugNameWhat, callRequest)
 	} else {
-		if unaryFunction, ok := functionValue.Ref.(runtime.GoUnaryFunction); ok && callRequest.ArgumentCount == 1 && (callRequest.ReturnCount == 1 || callRequest.ReturnCount < 0) && !callRequest.GenericFor {
+		if fastUnaryFunction, ok := functionValue.Ref.(*runtime.GoFastUnaryFunction); ok && callRequest.ArgumentCount == 1 && (callRequest.ReturnCount == 1 || callRequest.ReturnCount < 0) && !callRequest.GenericFor {
+			// 显式 opt-in 的标准库一元函数在无 hook 且参数类型已确认时跳过 Go 调用帧。
+			argument, argumentOK := vm.Register(callRequest.FunctionIndex + 1)
+			if !argumentOK {
+				// 参数寄存器缺失说明 CALL 布局异常。
+				return runtime.ErrRegisterOutOfRange
+			}
+			if !hooksEnabled && fastUnaryFunction.Accepts(argument) {
+				result, callErr := fastUnaryFunction.Function(argument)
+				if callErr == nil {
+					if setErr := vm.SetRegister(callRequest.FunctionIndex, result); setErr != nil {
+						// 写回超过寄存器窗口时返回边界错误。
+						return setErr
+					}
+					if callRequest.ReturnCount < 0 {
+						// CALL C=0 需要记录实际开放返回上界，供后续 CALL B=0 消费单个结果。
+						vm.SetOpenTop(callRequest.FunctionIndex + 1)
+					} else {
+						// 固定单返回不形成开放列表。
+						vm.SetOpenTop(-1)
+					}
+					return nil
+				}
+				// opt-in 函数在 accepted 类型下理论上不应失败；失败时保留错误并走统一错误处理。
+				err = callErr
+			} else {
+				// 参数类型未命中或存在 hook 时必须保留完整 Go 调用帧语义。
+				result, callErr := callGoUnaryFunctionWithDebugFrame(state, functionValue, fastUnaryFunction.Function, debugName, debugNameWhat, false, argument)
+				if callErr == nil {
+					if setErr := vm.SetRegister(callRequest.FunctionIndex, result); setErr != nil {
+						// 写回超过寄存器窗口时返回边界错误。
+						return setErr
+					}
+					if callRequest.ReturnCount < 0 {
+						// CALL C=0 需要记录实际开放返回上界，供后续 CALL B=0 消费单个结果。
+						vm.SetOpenTop(callRequest.FunctionIndex + 1)
+					} else {
+						// 固定单返回不形成开放列表。
+						vm.SetOpenTop(-1)
+					}
+					return nil
+				}
+				err = callErr
+			}
+		} else if unaryFunction, ok := functionValue.Ref.(runtime.GoUnaryFunction); ok && callRequest.ArgumentCount == 1 && (callRequest.ReturnCount == 1 || callRequest.ReturnCount < 0) && !callRequest.GenericFor {
 			// 单参数单返回 Go closure 直接读取参数寄存器，避免为标准库一元函数构造参数切片。
 			argument, argumentOK := vm.Register(callRequest.FunctionIndex + 1)
 			if !argumentOK {
@@ -4646,8 +4690,8 @@ func writeLuaCallResults(vm *runtime.VM, callRequest *runtime.CallRequest, resul
 
 // callGoClosureValue 执行 Go closure 引用值。
 //
-// function 必须是 KindGoClosure；args 是调用实参快照。支持 GoResultsFunction、GoFunction 和
-// GoUnaryFunction 等 runtime 回调形态，其他引用负载按不可调用运行期错误处理。
+// function 必须是 KindGoClosure；args 是调用实参快照。支持 GoResultsFunction、GoFunction、
+// GoUnaryFunction 和 GoFastUnaryFunction 等 runtime 回调形态，其他引用负载按不可调用运行期错误处理。
 func callGoClosureValue(function Value, args ...Value) ([]Value, error) {
 	// 根据 Ref 中保存的实际 Go 回调形态分发。
 	switch callback := function.Ref.(type) {
@@ -4696,6 +4740,23 @@ func callGoClosureValue(function Value, args ...Value) ([]Value, error) {
 			argument = args[0]
 		}
 		result, err := callback(argument)
+		if err != nil {
+			// 回调错误原样向上传播，ProtectedCall 会负责转换为 Lua error object。
+			return nil, err
+		}
+		return []Value{result}, nil
+	case *runtime.GoFastUnaryFunction:
+		// fast unary 包装在通用调用路径仍按普通一元函数执行，保留外层 debug frame 语义。
+		if callback == nil || callback.Function == nil {
+			// 损坏注册不能进入 nil 函数调用，按不可调用错误暴露。
+			return nil, runtime.NewRuntimeError(runtime.StringValue(ErrExpectedCallable.Error()), ErrExpectedCallable)
+		}
+		argument := runtime.NilValue()
+		if len(args) > 0 {
+			// Lua 标准库允许多余参数；一元入口只读取第一个实参。
+			argument = args[0]
+		}
+		result, err := callback.Function(argument)
 		if err != nil {
 			// 回调错误原样向上传播，ProtectedCall 会负责转换为 Lua error object。
 			return nil, err
