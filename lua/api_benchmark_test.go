@@ -133,3 +133,32 @@ return sum
 		state.Close()
 	}
 }
+
+// BenchmarkDoStringRecursion 度量完整 Lua VM 路径下的递归 Lua closure 调用。
+func BenchmarkDoStringRecursion(b *testing.B) {
+	source := `
+local function fib(n)
+  if n < 2 then return n end
+  return fib(n - 1) + fib(n - 2)
+end
+local sum = 0
+for i = 1, 16 do
+  sum = sum + fib(15)
+end
+return sum
+`
+	b.ReportAllocs()
+	for benchmarkIndex := 0; benchmarkIndex < b.N; benchmarkIndex++ {
+		// 每轮创建独立 State，覆盖源码编译、加载和执行的端到端路径。
+		state := NewState()
+		if err := OpenLibs(state); err != nil {
+			state.Close()
+			b.Fatalf("OpenLibs failed: %v", err)
+		}
+		if err := DoString(state, source); err != nil {
+			state.Close()
+			b.Fatalf("DoString failed: %v", err)
+		}
+		state.Close()
+	}
+}

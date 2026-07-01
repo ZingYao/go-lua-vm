@@ -430,8 +430,8 @@ func (state *State) ReturnLuaVMToPool(vm *VM) {
 	if state.pooledLuaVMCached == nil {
 		state.pooledLuaVMCached = make(map[int][]*VM)
 	}
-	// 限制池容量避免异常调用场景将少见的极大窗口长期持有；32 可覆盖常见递归深度，减少反复分配。
-	const maxPooledVMSPerBucket = 32
+	// 限制池容量避免异常调用场景将少见的极大窗口长期持有；64 可覆盖当前递归基准的活跃深度。
+	const maxPooledVMSPerBucket = 64
 	pooledVMSlice := state.pooledLuaVMCached[registerCount]
 	if len(pooledVMSlice) >= maxPooledVMSPerBucket {
 		// 超过配额的条目直接丢弃，保持内存上限。
