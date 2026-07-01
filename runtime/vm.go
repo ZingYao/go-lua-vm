@@ -3907,6 +3907,19 @@ func (vm *VM) executeEqualityTest(instruction bytecode.Instruction) error {
 // 指令语义为 if ((RK(B) op RK(C)) ~= A) then pc++。operation 决定小于或小于等于；
 // 当前最小 VM 没有完整 pc，因此把是否跳过下一条指令记录到 skipNext。
 func (vm *VM) executeOrderTest(instruction bytecode.Instruction, operation orderCompareOperation, metamethodName string) error {
+	if metamethodName == metamethodLt {
+		// 高频递归边界通常是 `R < integer-constant`；命中时直接完成测试，避免每次经由 RK 常量转换和通用比较分发。
+		handled, err := vm.tryIntegerRegisterLessThanConstantTest(instruction)
+		if err != nil {
+			// 操作数越界仍按原 RK 读取语义返回错误，不进入比较 fallback。
+			return err
+		}
+		if handled {
+			// 专用路径已经按 Lua 测试指令语义写入 skipNext。
+			return nil
+		}
+	}
+
 	leftValue, err := vm.rkValue(instruction.B())
 	if err != nil {
 		// 左操作数读取失败时不能完成比较。
@@ -3960,6 +3973,38 @@ func (vm *VM) executeOrderTest(instruction bytecode.Instruction, operation order
 	}
 	vm.skipNext = comparisonResult != (instruction.A() != 0)
 	return nil
+}
+
+// tryIntegerRegisterLessThanConstantTest 执行 `OP_LT R, Kinteger` 的窄热路径。
+//
+// 仅当左操作数是寄存器、右操作数是 integer 常量且运行期左值仍为 integer 时返回 handled=true；
+// 其他形态必须回到通用比较路径，以保留 float、string、元方法和错误语义。
+func (vm *VM) tryIntegerRegisterLessThanConstantTest(instruction bytecode.Instruction) (bool, error) {
+	leftRegister := instruction.B()
+	if bytecode.IsK(leftRegister) || !bytecode.IsK(instruction.C()) {
+		// 只处理寄存器小于 integer 常量，其他 RK 组合继续走通用路径。
+		return false, nil
+	}
+	if leftRegister < 0 || leftRegister >= len(vm.registers) {
+		// 左侧寄存器越界必须与 rkValue 的错误语义保持一致。
+		return false, ErrRegisterOutOfRange
+	}
+	constantIndex := bytecode.IndexK(instruction.C())
+	if constantIndex < 0 || constantIndex >= len(vm.constants) {
+		// 右侧常量越界必须与 rkValue 的错误语义保持一致。
+		return false, ErrConstantOutOfRange
+	}
+
+	leftValue := vm.registers[leftRegister]
+	rightConstant := vm.constants[constantIndex]
+	if leftValue.Kind != KindInteger || rightConstant.Kind != bytecode.ConstantInteger {
+		// 非双 integer 形态不能走专用比较，避免绕过 Lua 5.3 的混合数字、字符串或元方法语义。
+		return false, nil
+	}
+
+	comparisonResult := leftValue.Integer < rightConstant.Integer
+	vm.skipNext = comparisonResult != (instruction.A() != 0)
+	return true, nil
 }
 
 // executeJump 执行 Lua 5.3 OP_JMP 指令。

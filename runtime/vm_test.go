@@ -2076,6 +2076,41 @@ func TestVMComparisonInstructions(t *testing.T) {
 	}
 }
 
+// TestVMComparisonRegisterIntegerConstantLT 验证寄存器 integer 小于 integer 常量的测试语义。
+//
+// 该形态覆盖递归边界判断 `n < constant` 的热路径，同时要求 A 字段仍按 Lua 5.3 测试指令规则控制 skipNext。
+func TestVMComparisonRegisterIntegerConstantLT(t *testing.T) {
+	tests := []struct {
+		name     string
+		a        int
+		left     Value
+		right    bytecode.Constant
+		skipNext bool
+	}{
+		{name: "expected false matched", a: 0, left: IntegerValue(1), right: bytecode.IntegerConstant(2), skipNext: true},
+		{name: "expected true matched", a: 1, left: IntegerValue(1), right: bytecode.IntegerConstant(2), skipNext: false},
+		{name: "expected false mismatched", a: 0, left: IntegerValue(3), right: bytecode.IntegerConstant(2), skipNext: false},
+		{name: "float fallback", a: 1, left: NumberValue(1.5), right: bytecode.IntegerConstant(2), skipNext: false},
+	}
+
+	for _, testCase := range tests {
+		// 每个子用例独立构造 VM，避免寄存器和 skipNext 状态互相影响。
+		vm := NewVMWithConstants(1, []bytecode.Constant{testCase.right})
+		if err := vm.SetRegister(0, testCase.left); err != nil {
+			// 测试寄存器初始化失败表示 VM 构造不符合用例预期。
+			t.Fatalf("%s set register failed: %v", testCase.name, err)
+		}
+		if err := vm.Step(bytecode.CreateABC(bytecode.OpLt, testCase.a, 0, bytecode.RKAsK(0))); err != nil {
+			// 合法 LT 指令必须执行成功。
+			t.Fatalf("%s failed: %v", testCase.name, err)
+		}
+		if vm.SkipNext() != testCase.skipNext {
+			// skipNext 必须与 Lua 5.3 `comparison ~= A` 的跳转语义一致。
+			t.Fatalf("%s skip mismatch: got=%v want=%v", testCase.name, vm.SkipNext(), testCase.skipNext)
+		}
+	}
+}
+
 // TestVMComparisonErrors 验证 LT/LE 遇到不可比较类型时返回错误。
 //
 // 当前阶段不触发 `__lt` 或 `__le` 元方法，因此非 number/string 有序比较必须失败。
