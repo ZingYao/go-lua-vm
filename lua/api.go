@@ -2643,7 +2643,7 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 // debug hook 路径不使用本 helper，确保 count hook、line hook 和调试帧同步语义保持完整。
 func isLuaHotNoPostProcessOpcode(opCode bytecode.OpCode) bool {
 	switch opCode {
-	case bytecode.OpAdd, bytecode.OpMul, bytecode.OpDiv, bytecode.OpForLoop:
+	case bytecode.OpAdd, bytecode.OpSub, bytecode.OpMul, bytecode.OpMod, bytecode.OpDiv, bytecode.OpIDiv, bytecode.OpForLoop:
 		// 算术和数值 for 步进只影响寄存器与 pcOffset；成功后可直接进入下一条 PC 计算。
 		return true
 	default:
