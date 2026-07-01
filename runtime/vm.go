@@ -3116,8 +3116,7 @@ func (vm *VM) tryCachedIntegerSubArithmetic(instruction bytecode.Instruction, ta
 			vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
 			return false, nil
 		}
-		leftValue := registers[leftIndex]
-		if leftValue.Kind != KindInteger {
+		if registers[leftIndex].Kind != KindInteger {
 			// 左操作数类型变化时缓存失效，后续走完整 Lua 算术和元方法语义。
 			vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
 			vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
@@ -3125,7 +3124,7 @@ func (vm *VM) tryCachedIntegerSubArithmetic(instruction bytecode.Instruction, ta
 		}
 
 		// SUB 按 64 位补码自然回绕，右侧 integer 常量直接复用缓存值。
-		registers[targetIndex] = IntegerValue(leftValue.Integer - cacheEntry.rightConstant)
+		registers[targetIndex] = IntegerValue(registers[leftIndex].Integer - cacheEntry.rightConstant)
 		return true, nil
 	}
 	if cacheKind != arithmeticIntRegisterCacheSub {
@@ -3161,8 +3160,7 @@ func (vm *VM) tryCachedIntegerMulArithmetic(instruction bytecode.Instruction, ta
 			vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
 			return false, nil
 		}
-		leftValue := registers[leftIndex]
-		if leftValue.Kind != KindInteger {
+		if registers[leftIndex].Kind != KindInteger {
 			// 左操作数类型变化时缓存失效，后续走完整 Lua 算术和元方法语义。
 			vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
 			vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
@@ -3170,7 +3168,7 @@ func (vm *VM) tryCachedIntegerMulArithmetic(instruction bytecode.Instruction, ta
 		}
 
 		// MUL 按 64 位补码自然回绕，右侧 integer 常量直接复用缓存值。
-		registers[targetIndex] = IntegerValue(leftValue.Integer * cacheEntry.rightConstant)
+		registers[targetIndex] = IntegerValue(registers[leftIndex].Integer * cacheEntry.rightConstant)
 		return true, nil
 	}
 	if cacheKind != arithmeticIntRegisterCacheMul {
