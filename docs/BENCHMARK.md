@@ -113,21 +113,35 @@ GLUAC_BIN=./bin/gluac \
 
 | 用例 | 官方工具中位数 | 本项目中位数 | 本项目/官方 |
 | --- | ---: | ---: | ---: |
-| `arith_add_loop` | 0.007554s | 0.022568s | 2.99x |
-| `arith_mix_loop` | 0.011144s | 0.034461s | 3.09x |
-| `arith_chain_temp` | 0.012485s | 0.040379s | 3.23x |
-| `table_rw` | 0.007026s | 0.021510s | 3.06x |
-| `function_call` | 0.006525s | 0.018090s | 2.77x |
-| `string_concat` | 0.004523s | 0.008403s | 1.86x |
-| `closure_upvalue` | 0.007895s | 0.021140s | 2.68x |
-| `stdlib_math_string` | 0.019118s | 0.044361s | 2.32x |
-| `recursion` | 0.003553s | 0.012209s | 3.44x |
-| `compile_3000_functions` | 0.005287s | 0.013950s | 2.64x |
+| `arith_add_loop` | 0.009289s | 0.026670s | 2.87x |
+| `arith_mix_loop` | 0.011380s | 0.035516s | 3.12x |
+| `arith_chain_temp` | 0.013078s | 0.041289s | 3.16x |
+| `table_rw` | 0.007125s | 0.021823s | 3.06x |
+| `function_call` | 0.007153s | 0.018927s | 2.65x |
+| `string_concat` | 0.004917s | 0.008663s | 1.76x |
+| `closure_upvalue` | 0.008431s | 0.021713s | 2.58x |
+| `stdlib_math_string` | 0.019141s | 0.045263s | 2.36x |
+| `recursion` | 0.003771s | 0.012585s | 3.34x |
+| `compile_3000_functions` | 0.005150s | 0.014213s | 2.76x |
 
 本轮完整口径下仍高于 3x 的路径为 `arith_mix_loop`、临时补充的 `arith_chain_temp`、`table_rw` 与 `recursion`。
 其中 `arith_chain_temp` 覆盖 `sum = sum + i * 3 - 7` 这类左结合自二元链，用于区分截图中
 一度混用的 `arith_add_loop` 与混合算术链；该 fixture 已固化到 `scripts/benchmark-official.sh`，后续继续
-作为长期回归项。`arith_add_loop` 本轮复测已低于 3x，但距离目标线很近，仍必须作为回归观察项。
+作为长期回归项。`function_call` 本轮复测为 2.65x，低于 3x；`arith_add_loop` 与 `compile_3000_functions`
+随官方工具中位数波动继续作为回归观察项。
+
+#### 2026-07-01 table 连续数组追加复核
+
+本轮只调整无元表 table 的正整数非 nil 写入路径：当 Lua 数组区是连续追加且已有预留容量时，
+`RawSetPositiveIntegerNonNil` 直接 `append` 扩展一格，避免热循环每轮进入 `ensureArraySize`。
+该改动不改变 codegen；`table_rw` 的两个热循环仍与官方 Lua 5.3.6 一致：写入循环为
+`SETTABLE; FORLOOP`，读取循环为 `GETTABLE; ADD; FORLOOP`。项目额外的两个零距离 `JMP` 位于
+循环退出后，只服务 line hook。
+
+Go 端缩小版 table benchmark 复跑 5 次，`BenchmarkDoStringTableReadWrite` 从改动前约
+`1.68 ms/op` 降到约 `1.49-1.61 ms/op`，alloc/op 不变。完整官方脚本中 `table_rw` 项目绝对耗时
+较上一轮 `0.021510s` 到本轮两次复测的 `0.021020s` / `0.021823s`，受官方基线波动影响，
+比值仍约 3.06x，需要继续作为短期目标。
 
 #### 2026-07-01 MUL integer cache 顺序复核
 
@@ -225,10 +239,11 @@ xychart-beta
 | `BenchmarkGoLuaCallback` | 约 255 ns/op，约 584-590 B/op，5 allocs |
 | `BenchmarkDoStringStringConcat` | 约 0.475 ms/op，约 2.23 MB/op，2317 allocs |
 | `BenchmarkDoStringFunctionCall` | 约 0.534 ms/op，约 109 KB/op，372 allocs |
+| `BenchmarkDoStringTableReadWrite` | 约 1.49-1.61 ms/op，约 3.79 MB/op，380 allocs |
 
 ### 结论
 
-- CLI 冷启动和小脚本差距较小，历史冷启动约 1.25x 到 1.35x；本轮 `compile_3000_functions` 为 2.64x，仍低于当前 3x 目标线。
-- 按当前完整 benchmark 复核口径，`arith_mix_loop`、`arith_chain_temp`、`table_rw` 与 `recursion` 仍高于 3x，需要继续作为短期优化目标；`arith_add_loop` 当前为 2.99x，低于 3x 但余量很小，必须继续回归观察。
+- CLI 冷启动和小脚本差距较小，历史冷启动约 1.25x 到 1.35x；本轮 `compile_3000_functions` 为 2.76x，仍低于当前 3x 目标线。
+- 按当前完整 benchmark 复核口径，`arith_mix_loop`、`arith_chain_temp`、`table_rw` 与 `recursion` 仍高于 3x，需要继续作为短期优化目标；`function_call` 为 2.65x，低于 3x 但仍需回归观察。
 - 字符串拼接已较 2026-06-29 旧基线明显改善，从约 92x 收窄到约 1.86x。
 - 后续优先优化方向应集中在算术链 `ADD`/`SUB`/`MUL` 与 `FORLOOP` 成本、递归函数调用边界、表读写热路径、VM dispatch code size 对无关路径的影响，以及标准库函数调用边界。

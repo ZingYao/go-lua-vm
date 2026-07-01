@@ -274,7 +274,14 @@ func (table *Table) RawSetPositiveIntegerNonNil(key int64, value Value) {
 	}
 	if key <= maxTableArrayIndex {
 		// 正整数 key 进入数组区，Lua key 从 1 开始。
-		table.ensureArraySize(int(key))
+		arrayIndex := int(key)
+		if arrayIndex == len(table.arrayValues)+1 && len(table.arrayValues) < cap(table.arrayValues) {
+			// 连续追加且已有预留容量时直接扩展一格，避免热循环每次进入 ensureArraySize。
+			table.arrayValues = append(table.arrayValues, value)
+			table.noteMutation()
+			return
+		}
+		table.ensureArraySize(arrayIndex)
 		table.arrayValues[key-1] = value
 		table.noteMutation()
 		return

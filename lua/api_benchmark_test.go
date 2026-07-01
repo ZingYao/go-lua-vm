@@ -52,6 +52,35 @@ return sum
 	}
 }
 
+// BenchmarkDoStringTableReadWrite 度量完整 Lua VM 路径下的连续整数 table 写入和读取。
+func BenchmarkDoStringTableReadWrite(b *testing.B) {
+	source := `
+local t = {}
+for i = 1, 20000 do
+  t[i] = i
+end
+local sum = 0
+for i = 1, 20000 do
+  sum = sum + t[i]
+end
+return sum
+	`
+	b.ReportAllocs()
+	for benchmarkIndex := 0; benchmarkIndex < b.N; benchmarkIndex++ {
+		// 每轮创建独立 State，覆盖源码编译、加载和执行的端到端路径。
+		state := NewState()
+		if err := OpenLibs(state); err != nil {
+			state.Close()
+			b.Fatalf("OpenLibs failed: %v", err)
+		}
+		if err := DoString(state, source); err != nil {
+			state.Close()
+			b.Fatalf("DoString failed: %v", err)
+		}
+		state.Close()
+	}
+}
+
 // BenchmarkDoStringStringConcat 度量完整 Lua VM 路径下的循环字符串拼接。
 func BenchmarkDoStringStringConcat(b *testing.B) {
 	source := `
