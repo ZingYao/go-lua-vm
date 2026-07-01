@@ -1279,10 +1279,10 @@ func (vm *VM) BindPrototype(proto *bytecode.Proto) {
 			vm.arithmeticIntOperandCache[pc] = arithmeticIntOperandCacheEntry{}
 		}
 	}
-	if vm.stringTableReadCacheProto != proto || len(vm.stringTableReadCache) < len(proto.Code) {
-		// 字符串 table inline cache 同样按 Proto PC 生效，切换 Proto 时必须丢弃旧命中。
+	if vm.stringTableReadCacheProto != proto {
+		// 字符串 table inline cache 只在实际遇到字符串 key 读取时懒分配；切换 Proto 时先丢弃旧命中。
 		vm.stringTableReadCacheProto = proto
-		vm.stringTableReadCache = make([]stringTableReadCacheEntry, len(proto.Code))
+		vm.stringTableReadCache = nil
 	} else {
 		// 同一 Proto 理论上 Code 长度稳定；防御异常缩短时清掉越界尾部缓存。
 		for pc := len(proto.Code); pc < len(vm.stringTableReadCache); pc++ {
@@ -1351,7 +1351,7 @@ func (vm *VM) rememberStringTableRead(table *Table, value Value) {
 		// 缺少 VM 或 table 时没有可记录对象。
 		return
 	}
-	if vm.currentPC < 0 || vm.currentPC >= len(vm.stringTableReadCache) {
+	if !vm.ensureStringTableReadCache() {
 		// 没有绑定 Proto 或 PC 超出缓存范围时跳过记录。
 		return
 	}
@@ -1361,6 +1361,27 @@ func (vm *VM) rememberStringTableRead(table *Table, value Value) {
 		value:   value,
 		valid:   true,
 	}
+}
+
+// ensureStringTableReadCache 确保当前 Proto 的字符串 table 读缓存已经可写。
+//
+// 只有遇到无元表 table 的字符串常量 key 读取时才需要该缓存；递归与纯算术函数没有此类指令，
+// 因此延迟分配可以避免每个 Lua 调用帧进入时创建一段用不到的缓存数组。
+func (vm *VM) ensureStringTableReadCache() bool {
+	if vm == nil || vm.proto == nil {
+		// 缺少 VM 或 Proto 时无法按 PC 建立缓存。
+		return false
+	}
+	if vm.currentPC < 0 || vm.currentPC >= len(vm.proto.Code) {
+		// PC 超出当前 Proto 指令范围时不能写入缓存，保持普通读取语义。
+		return false
+	}
+	if vm.stringTableReadCacheProto != vm.proto || len(vm.stringTableReadCache) < len(vm.proto.Code) {
+		// 首次使用或 Proto 切换后按当前指令数量建立缓存，PC 与 Lua 5.3 指令一一对应。
+		vm.stringTableReadCacheProto = vm.proto
+		vm.stringTableReadCache = make([]stringTableReadCacheEntry, len(vm.proto.Code))
+	}
+	return true
 }
 
 // ActiveRegistersSnapshot 返回当前 PC 下仍处于局部变量生命周期内的寄存器副本。
@@ -2014,7 +2035,7 @@ func (vm *VM) executeGetTabUp(instruction bytecode.Instruction) error {
 					}
 				}
 				value := table.RawGetString(keyConstant.String)
-				if vm.currentPC >= 0 && vm.currentPC < len(vm.stringTableReadCache) {
+				if vm.ensureStringTableReadCache() {
 					// 记录当前 PC 的读取结果，下一轮相同字段可直接命中。
 					vm.stringTableReadCache[vm.currentPC] = stringTableReadCacheEntry{table: table, version: table.mutationVersion, value: value, valid: true}
 				}
@@ -2119,7 +2140,7 @@ func (vm *VM) executeGetTable(instruction bytecode.Instruction) error {
 						}
 					}
 					value := table.RawGetString(keyConstant.String)
-					if vm.currentPC >= 0 && vm.currentPC < len(vm.stringTableReadCache) {
+					if vm.ensureStringTableReadCache() {
 						// 记录当前 PC 的读取结果，下一轮相同字段可直接命中。
 						vm.stringTableReadCache[vm.currentPC] = stringTableReadCacheEntry{table: table, version: table.mutationVersion, value: value, valid: true}
 					}
