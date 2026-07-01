@@ -2957,17 +2957,17 @@ func (vm *VM) tryCachedIntegerAddArithmetic(instruction bytecode.Instruction, ta
 			vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
 			return false, nil
 		}
-		leftValue := registers[leftIndex]
-		rightValue := registers[rightIndex]
-		if leftValue.Kind != KindInteger || rightValue.Kind != KindInteger {
+		if registers[leftIndex].Kind != KindInteger || registers[rightIndex].Kind != KindInteger {
 			// 任一操作数类型变化时缓存失效，后续走完整 Lua 算术和元方法语义。
 			vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
 			vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
 			return false, nil
 		}
+		leftInteger := registers[leftIndex].Integer
+		rightInteger := registers[rightIndex].Integer
 
 		// ADD 按 64 位补码自然回绕，命中后直接写回目标寄存器。
-		registers[targetIndex] = IntegerValue(leftValue.Integer + rightValue.Integer)
+		registers[targetIndex] = IntegerValue(leftInteger + rightInteger)
 		return true, nil
 	}
 
