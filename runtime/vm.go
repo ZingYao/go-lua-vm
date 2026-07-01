@@ -835,6 +835,17 @@ func (vm *VM) TryExecuteLeafUpvalueAddSetReturnInCaller(closure *LuaClosure, req
 			// 参数数量不匹配时交给完整 VM 处理多余参数语义。
 			return false, nil
 		}
+		if upvalueValue.Kind == KindInteger {
+			// upvalue 自增计数器热路径直接执行 integer 加法，避免构造临时 Value 和通用叶子加法分发。
+			resultValue := IntegerValue(upvalueValue.Integer + leaf.IntegerConstant)
+			if !luaClosureSetUpvalueValue(closure, leaf.UpvalueIndex, resultValue) {
+				// 写回失败时回退完整 VM，由原路径暴露 upvalue 状态。
+				return false, nil
+			}
+			vm.registers[request.FunctionIndex] = resultValue
+			vm.openTop = -1
+			return true, nil
+		}
 		operandValue = IntegerValue(leaf.IntegerConstant)
 	} else if leaf.HasRegisterOperand {
 		// 参数寄存器形态按 CALL 布局读取对应实参。
