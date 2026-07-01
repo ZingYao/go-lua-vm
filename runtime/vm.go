@@ -2458,7 +2458,7 @@ func (vm *VM) executeAdd(instruction bytecode.Instruction) error {
 		// 目标寄存器越界时不能写入，避免破坏寄存器窗口。
 		return ErrRegisterOutOfRange
 	}
-	if handled, err := vm.tryCachedIntegerAddArithmetic(instruction); handled || err != nil {
+	if handled, err := vm.tryCachedIntegerAddArithmetic(instruction, targetIndex); handled || err != nil {
 		// ADD 专用缓存命中已完成写回；缓存形态损坏时返回原始寄存器错误。
 		return err
 	}
@@ -2873,7 +2873,7 @@ func (vm *VM) tryCachedIntegerRegisterArithmetic(instruction bytecode.Instructio
 //
 // 该函数只处理 ADD 热路径；缓存不存在、类型变化或指令形态变化时返回 handled=false，让调用方
 // 回到完整 Lua 算术语义。相比通用缓存路径，它避免二次 helper 调用和 ADD/SUB/MUL 分支选择。
-func (vm *VM) tryCachedIntegerAddArithmetic(instruction bytecode.Instruction) (bool, error) {
+func (vm *VM) tryCachedIntegerAddArithmetic(instruction bytecode.Instruction, targetIndex int) (bool, error) {
 	currentPC := vm.currentPC
 	if currentPC < 0 || currentPC >= len(vm.arithmeticIntRegisterCache) || currentPC >= len(vm.arithmeticIntOperandCache) {
 		// 当前 PC 没有 ADD integer 缓存，调用方继续走普通 RK 路径。
@@ -2933,7 +2933,7 @@ func (vm *VM) tryCachedIntegerAddArithmetic(instruction bytecode.Instruction) (b
 	}
 
 	// ADD 按 64 位补码自然回绕，命中后直接写回目标寄存器。
-	vm.registers[instruction.A()] = IntegerValue(leftInteger + rightInteger)
+	vm.registers[targetIndex] = IntegerValue(leftInteger + rightInteger)
 	return true, nil
 }
 
