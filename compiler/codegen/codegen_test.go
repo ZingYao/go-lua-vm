@@ -900,6 +900,43 @@ func TestCompileUnaryCallOperandReusesTargetRegister(t *testing.T) {
 	}
 }
 
+// TestCompileUnaryLocalOperandUsesSourceRegister 验证一元 local 操作数直接使用源寄存器。
+//
+// `#s` 是 stdlib_math_string benchmark 的热循环形态；Lua 5.3 官方 codegen 直接生成
+// `LEN target, s`，不需要先把 s MOVE 到 target 再取长度。
+func TestCompileUnaryLocalOperandUsesSourceRegister(t *testing.T) {
+	chunk := parseChunkForCodegenTest(t, "local sum = 0 local s = 'abcdefghijklmnopqrstuvwxyz' for i = 1, 10 do sum = sum + string.byte(s, (i % #s) + 1) end")
+
+	proto, err := CompileChunk(chunk, "unary-local-source")
+	if err != nil {
+		// benchmark 片段必须可编译。
+		t.Fatalf("compile unary local operand failed: %v", err)
+	}
+	var lenInstruction bytecode.Instruction
+	lenFound := false
+	for _, instruction := range proto.Code {
+		// 查找热循环中的 LEN 指令。
+		if instruction.OpCode() == bytecode.OpLen {
+			// 记录第一条 LEN，样例中只会生成一条。
+			lenInstruction = instruction
+			lenFound = true
+			break
+		}
+	}
+	if !lenFound {
+		// `#s` 必须生成 LEN。
+		t.Fatalf("expected LEN instruction")
+	}
+	if lenInstruction.B() != 1 {
+		// local s 是第二个声明的 local，对应寄存器 R1；LEN 应直接读取该寄存器。
+		t.Fatalf("LEN should read local s register R1 directly: %#v", lenInstruction)
+	}
+	if hasMove(proto, lenInstruction.A(), 1) {
+		// 旧形态会先 MOVE s 到 LEN 目标寄存器。
+		t.Fatalf("unexpected MOVE before LEN local operand: code=%v", proto.Code)
+	}
+}
+
 // TestCompileSelfArithmeticAssignmentWritesDirectly 验证 local 自算术赋值直接写回目标寄存器。
 //
 // 数值 for 热循环中的 `acc = acc + i` 不应生成“复制 acc 到临时、计算临时、MOVE 回 acc”的

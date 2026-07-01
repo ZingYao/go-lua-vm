@@ -3499,18 +3499,25 @@ func (generator *generator) emitSetGlobalNameOperand(name string, valueOperand i
 func (generator *generator) compileUnaryTo(expression *parser.UnaryExpression, targetRegister int) error {
 	operandRegister := targetRegister
 	releaseOperandRegister := false
-	if generator.registerHasActiveLocal(targetRegister) {
+	if localRegister, ok := generator.unaryLocalOperandRegister(expression.Operand); ok {
+		// 一元操作数是当前 local 时，可直接以该 local 寄存器作为源操作数，匹配 Lua 5.3 codegen。
+		operandRegister = localRegister
+	} else if generator.registerHasActiveLocal(targetRegister) {
 		// 目标寄存器承载活跃 local 时不能提前覆盖，避免 `a = #f(a)` 的 RHS 读不到旧值。
 		operandRegister = generator.allocateRegister()
 		releaseOperandRegister = true
 	}
-	if err := generator.compileExpressionTo(expression.Operand, operandRegister); err != nil {
-		// 操作数编译失败时释放临时寄存器后返回。
-		if releaseOperandRegister {
-			// 只有本函数额外分配的操作数寄存器需要释放。
-			generator.releaseRegister(operandRegister)
+	if !releaseOperandRegister && operandRegister != targetRegister {
+		// 源操作数已是可见 local 寄存器，无需重新生成 MOVE。
+	} else {
+		if err := generator.compileExpressionTo(expression.Operand, operandRegister); err != nil {
+			// 操作数编译失败时释放临时寄存器后返回。
+			if releaseOperandRegister {
+				// 只有本函数额外分配的操作数寄存器需要释放。
+				generator.releaseRegister(operandRegister)
+			}
+			return err
 		}
-		return err
 	}
 	if err := generator.withSourceLine(expression.Position, func() error {
 		switch expression.Operator {
@@ -3544,6 +3551,23 @@ func (generator *generator) compileUnaryTo(expression *parser.UnaryExpression, t
 
 	// 一元表达式编译完成。
 	return nil
+}
+
+// unaryLocalOperandRegister 返回一元表达式操作数可直接读取的当前 local 寄存器。
+//
+// 仅名称表达式可跳过操作数编译；全局、upvalue、索引和调用仍走普通路径以保留访问语义与副作用。
+func (generator *generator) unaryLocalOperandRegister(expression parser.Expression) (int, bool) {
+	nameExpression, ok := expression.(*parser.NameExpression)
+	if !ok {
+		// 非名称操作数不能直接映射寄存器。
+		return 0, false
+	}
+	binding, ok := generator.locals[nameExpression.Name]
+	if !ok {
+		// 只有当前函数可见 local 能直接复用寄存器。
+		return 0, false
+	}
+	return binding.register, true
 }
 
 // compileBinaryTo 编译二元表达式。
