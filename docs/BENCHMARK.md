@@ -101,6 +101,15 @@ BenchmarkGoLuaCallback-10                        509391    268.5 ns/op       492
 Lua 5.5，而是在临时目录下载 `lua-5.3.6.tar.gz`、校验 SHA256 后构建出的官方 Lua 5.3.6 `lua` /
 `luac`；本项目使用当前源码临时构建出的 `glua` / `gluac`。每个脚本 warmup 后交替运行 40 次，取
 wall-clock 中位数；`compile_3000_functions` 运行 30 次；本项目构建仍使用 `CGO_ENABLED=0`。
+该口径已固化到 `scripts/benchmark-official.sh`，执行时显式传入官方 Lua 5.3.6 与本项目二进制：
+
+```bash
+LUA_BIN=<lua-5.3.6>/src/lua \
+LUAC_BIN=<lua-5.3.6>/src/luac \
+GLUA_BIN=./bin/glua \
+GLUAC_BIN=./bin/gluac \
+./scripts/benchmark-official.sh
+```
 
 | 用例 | 官方工具中位数 | 本项目中位数 | 本项目/官方 |
 | --- | ---: | ---: | ---: |
