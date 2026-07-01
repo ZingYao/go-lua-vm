@@ -3370,6 +3370,20 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 			}
 			resultCount, handled, callErr := fixedFunction.Function4(resultSlots, arg0, arg1, arg2, arg3, callRequest.ArgumentCount)
 			if callErr == nil && handled {
+				if callRequest.ReturnCount == 1 {
+					// 固定单返回热点直接覆盖函数槽，避免再次进入通用结果写回分派。
+					resultValue := runtime.NilValue()
+					if resultCount > 0 {
+						// 被调函数实际返回一个值时使用固定结果槽，否则按 Lua 固定返回语义补 nil。
+						resultValue = resultSlots[0]
+					}
+					if setErr := vm.SetRegister(callRequest.FunctionIndex, resultValue); setErr != nil {
+						// 写回超过寄存器窗口时返回边界错误。
+						return setErr
+					}
+					vm.SetOpenTop(-1)
+					return nil
+				}
 				if writeErr := writeLuaCallResults(vm, callRequest, resultSlots[:resultCount]); writeErr != nil {
 					// 固定结果写回失败时返回寄存器边界错误。
 					return writeErr
