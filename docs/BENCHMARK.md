@@ -113,22 +113,38 @@ GLUAC_BIN=./bin/gluac \
 
 | 用例 | 官方工具中位数 | 本项目中位数 | 本项目/官方 |
 | --- | ---: | ---: | ---: |
-| `arith_add_loop` | 0.007942s | 0.022809s | 2.87x |
-| `arith_mix_loop` | 0.011283s | 0.035235s | 3.12x |
-| `arith_chain_temp` | 0.013086s | 0.041061s | 3.14x |
-| `table_rw` | 0.006863s | 0.021250s | 3.10x |
-| `function_call` | 0.006831s | 0.018695s | 2.74x |
-| `string_concat` | 0.004699s | 0.008410s | 1.79x |
-| `closure_upvalue` | 0.007954s | 0.021236s | 2.67x |
-| `stdlib_math_string` | 0.019025s | 0.045182s | 2.37x |
-| `recursion` | 0.003473s | 0.012268s | 3.53x |
-| `compile_3000_functions` | 0.005222s | 0.013888s | 2.66x |
+| `arith_add_loop` | 0.008125s | 0.024231s | 2.98x |
+| `arith_mix_loop` | 0.012174s | 0.036501s | 3.00x |
+| `arith_chain_temp` | 0.013802s | 0.041891s | 3.04x |
+| `table_rw` | 0.007676s | 0.023035s | 3.00x |
+| `function_call` | 0.007268s | 0.019788s | 2.72x |
+| `string_concat` | 0.005179s | 0.009950s | 1.92x |
+| `closure_upvalue` | 0.008654s | 0.022226s | 2.57x |
+| `stdlib_math_string` | 0.020103s | 0.047565s | 2.37x |
+| `recursion` | 0.004126s | 0.013822s | 3.35x |
+| `compile_3000_functions` | 0.005795s | 0.015426s | 2.66x |
 
-本轮完整口径下仍高于 3x 的路径为 `arith_mix_loop`、临时补充的 `arith_chain_temp`、`table_rw` 与 `recursion`。
+本轮完整口径下仍高于 3x 的明确路径为 `arith_chain_temp` 与 `recursion`，`arith_mix_loop` 和
+`table_rw` 位于 3.00x 边缘，需要继续作为回归观察项。
 其中 `arith_chain_temp` 覆盖 `sum = sum + i * 3 - 7` 这类左结合自二元链，用于区分截图中
 一度混用的 `arith_add_loop` 与混合算术链；该 fixture 已固化到 `scripts/benchmark-official.sh`，后续继续
-作为长期回归项。`function_call` 本轮复测为 2.74x，低于 3x；`arith_add_loop` 与 `compile_3000_functions`
+作为长期回归项。`function_call` 本轮复测为 2.72x，低于 3x；`arith_add_loop` 与 `compile_3000_functions`
 随官方工具中位数波动继续作为回归观察项。
+
+#### 2026-07-01 SUB/MUL 右常量 integer cache 复核
+
+本轮只调整 `SUB` / `MUL` integer inline cache：当首次完整执行确认形态为 `R - Kint` 或
+`R * Kint` 后，后续命中直接复用右侧不可变 Proto integer 常量，只校验左侧寄存器仍为 integer。
+若左侧类型变化或寄存器窗口变化，缓存会立即清空并回到完整 Lua 算术、字符串数字转换和元方法语义。
+该改动不改变 codegen；`arith_chain_temp` 的热循环仍与官方 Lua 5.3.6 一致：
+`MUL; ADD; SUB; FORLOOP`，项目额外的循环退出零距离 `JMP` 仍只服务 line hook。
+
+Go 端 `BenchmarkDoStringArithChainTemp` 复跑 5 次后从本轮初始约 `3.82-4.35 ms/op`
+降到约 `3.74-3.82 ms/op`，alloc/op 不变。完整官方脚本两次复跑中，
+`arith_chain_temp` 项目绝对耗时为 `0.042499s` / `0.041891s`，较上一轮复核表中的
+`0.041061s` 受构建和系统负载波动影响没有单调下降；但和同轮 helper 形态的
+`0.044673s` / `0.043650s` 相比，内联右常量缓存降低了链式算术路径成本。后续仍需继续压低
+`arith_chain_temp` 和递归路径。
 
 #### 2026-07-01 递归 VM 池容量复核
 

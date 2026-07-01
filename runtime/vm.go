@@ -117,6 +117,10 @@ const (
 	arithmeticIntRegisterCacheSub
 	// arithmeticIntRegisterCacheMul 表示当前 PC 最近命中过 MUL 的双 integer 寄存器路径。
 	arithmeticIntRegisterCacheMul
+	// arithmeticIntRegisterCacheSubRightConstant 表示当前 PC 最近命中过 SUB 的左寄存器右 integer 常量路径。
+	arithmeticIntRegisterCacheSubRightConstant
+	// arithmeticIntRegisterCacheMulRightConstant 表示当前 PC 最近命中过 MUL 的左寄存器右 integer 常量路径。
+	arithmeticIntRegisterCacheMulRightConstant
 	// arithmeticIntRegisterCacheAddNumber 表示当前 PC 最近命中过 ADD 的寄存器 number 路径。
 	arithmeticIntRegisterCacheAddNumber
 	// arithmeticIntRegisterCacheDivNumber 表示当前 PC 最近命中过 DIV 的寄存器原生数值路径。
@@ -3015,7 +3019,33 @@ func (vm *VM) tryCachedNativeNumberDivArithmetic(instruction bytecode.Instructio
 // 回到完整 Lua 算术语义。相比通用缓存路径，它避免二次 helper 调用和 ADD/SUB/MUL 分支选择。
 func (vm *VM) tryCachedIntegerSubArithmetic(instruction bytecode.Instruction) (bool, error) {
 	currentPC := vm.currentPC
-	if currentPC < 0 || currentPC >= len(vm.arithmeticIntRegisterCache) || currentPC >= len(vm.arithmeticIntOperandCache) || vm.arithmeticIntRegisterCache[currentPC] != arithmeticIntRegisterCacheSub {
+	if currentPC < 0 || currentPC >= len(vm.arithmeticIntRegisterCache) || currentPC >= len(vm.arithmeticIntOperandCache) {
+		// 当前 PC 没有 SUB integer 缓存，调用方继续走普通 RK 路径。
+		return false, nil
+	}
+	cacheKind := vm.arithmeticIntRegisterCache[currentPC]
+	if cacheKind == arithmeticIntRegisterCacheSubRightConstant {
+		// 左寄存器右常量是算术链路常见形态，命中时只需校验左寄存器类型。
+		cacheEntry := vm.arithmeticIntOperandCache[currentPC]
+		if cacheEntry.leftIndex < 0 || cacheEntry.leftIndex >= len(vm.registers) {
+			// 寄存器窗口变化时清理缓存，并回到通用 RK 路径报出原始错误。
+			vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
+			vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
+			return false, nil
+		}
+		leftValue := vm.registers[cacheEntry.leftIndex]
+		if leftValue.Kind != KindInteger {
+			// 左操作数类型变化时缓存失效，后续走完整 Lua 算术和元方法语义。
+			vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
+			vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
+			return false, nil
+		}
+
+		// SUB 按 64 位补码自然回绕，右侧 integer 常量直接复用缓存值。
+		vm.registers[instruction.A()] = IntegerValue(leftValue.Integer - cacheEntry.rightConstant)
+		return true, nil
+	}
+	if cacheKind != arithmeticIntRegisterCacheSub {
 		// 当前 PC 没有 SUB integer 缓存，调用方继续走普通 RK 路径。
 		return false, nil
 	}
@@ -3074,7 +3104,33 @@ func (vm *VM) tryCachedIntegerSubArithmetic(instruction bytecode.Instruction) (b
 // 回到完整 Lua 算术语义。相比通用缓存路径，它避免二次 helper 调用和 ADD/SUB/MUL 分支选择。
 func (vm *VM) tryCachedIntegerMulArithmetic(instruction bytecode.Instruction) (bool, error) {
 	currentPC := vm.currentPC
-	if currentPC < 0 || currentPC >= len(vm.arithmeticIntRegisterCache) || currentPC >= len(vm.arithmeticIntOperandCache) || vm.arithmeticIntRegisterCache[currentPC] != arithmeticIntRegisterCacheMul {
+	if currentPC < 0 || currentPC >= len(vm.arithmeticIntRegisterCache) || currentPC >= len(vm.arithmeticIntOperandCache) {
+		// 当前 PC 没有 MUL integer 缓存，调用方继续走普通 RK 路径。
+		return false, nil
+	}
+	cacheKind := vm.arithmeticIntRegisterCache[currentPC]
+	if cacheKind == arithmeticIntRegisterCacheMulRightConstant {
+		// 左寄存器右常量是算术链路常见形态，命中时只需校验左寄存器类型。
+		cacheEntry := vm.arithmeticIntOperandCache[currentPC]
+		if cacheEntry.leftIndex < 0 || cacheEntry.leftIndex >= len(vm.registers) {
+			// 寄存器窗口变化时清理缓存，并回到通用 RK 路径报出原始错误。
+			vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
+			vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
+			return false, nil
+		}
+		leftValue := vm.registers[cacheEntry.leftIndex]
+		if leftValue.Kind != KindInteger {
+			// 左操作数类型变化时缓存失效，后续走完整 Lua 算术和元方法语义。
+			vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
+			vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
+			return false, nil
+		}
+
+		// MUL 按 64 位补码自然回绕，右侧 integer 常量直接复用缓存值。
+		vm.registers[instruction.A()] = IntegerValue(leftValue.Integer * cacheEntry.rightConstant)
+		return true, nil
+	}
+	if cacheKind != arithmeticIntRegisterCacheMul {
 		// 当前 PC 没有 MUL integer 缓存，调用方继续走普通 RK 路径。
 		return false, nil
 	}
@@ -3315,8 +3371,14 @@ func integerArithmeticByCacheKind(cacheKind byte, left int64, right int64) int64
 	case arithmeticIntRegisterCacheSub:
 		// SUB 按 64 位补码自然回绕。
 		return left - right
+	case arithmeticIntRegisterCacheSubRightConstant:
+		// 右常量 SUB 与普通 SUB 使用相同算术语义。
+		return left - right
 	case arithmeticIntRegisterCacheMul:
 		// MUL 按 64 位补码自然回绕。
+		return left * right
+	case arithmeticIntRegisterCacheMulRightConstant:
+		// 右常量 MUL 与普通 MUL 使用相同算术语义。
 		return left * right
 	default:
 		// 未知缓存类型不应出现，返回 0 让测试暴露异常路径。
@@ -3342,6 +3404,18 @@ func (vm *VM) rememberIntegerRegisterArithmetic(leftOperand int, rightOperand in
 	if err != nil || !ok {
 		// 右操作数不是可缓存 integer 时保留完整 RK 路径。
 		return
+	}
+
+	if !leftCache.leftConstantOperand && rightCache.leftConstantOperand {
+		// `R op Kint` 是算术循环常见形态，单独记录缓存类型以减少命中时的分支和常量读取。
+		switch cacheKind {
+		case arithmeticIntRegisterCacheSub:
+			// SUB 右常量缓存保持 `R - Kint` 的 Lua 5.3 integer 回绕语义。
+			cacheKind = arithmeticIntRegisterCacheSubRightConstant
+		case arithmeticIntRegisterCacheMul:
+			// MUL 右常量缓存保持 `R * Kint` 的 Lua 5.3 integer 回绕语义。
+			cacheKind = arithmeticIntRegisterCacheMulRightConstant
+		}
 	}
 
 	// 记录当前 PC 的 integer 热路径，下次同类算术可跳过通用 RK 读取和 number fallback。
