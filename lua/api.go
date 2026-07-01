@@ -3164,6 +3164,14 @@ func luaClosureRegisterCount(proto *bytecode.Proto, argumentCount int, varargCou
 		// 固定参数需要写入 R0..，寄存器窗口必须覆盖它们。
 		registerCount = fixedArgumentCount
 	}
+	if !proto.IsVararg {
+		// 固定参数函数不会执行开放 VARARG，避免递归调用每帧扫描 Proto 指令。
+		if registerCount < 1 {
+			// 允许空 Proto 执行，但 VM 至少保留一个寄存器便于错误路径和 RETURN R0。
+			registerCount = 1
+		}
+		return registerCount
+	}
 	for _, instruction := range proto.Code {
 		// 开放 VARARG 的实际写入数量只有运行期才知道，需要按当前调用的 vararg 数扩展窗口。
 		if instruction.OpCode() == bytecode.OpVararg && instruction.B() == 0 {

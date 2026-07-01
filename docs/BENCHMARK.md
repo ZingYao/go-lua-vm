@@ -113,19 +113,19 @@ GLUAC_BIN=./bin/gluac \
 
 | 用例 | 官方工具中位数 | 本项目中位数 | 本项目/官方 |
 | --- | ---: | ---: | ---: |
-| `arith_add_loop` | 0.007560s | 0.022641s | 2.99x |
-| `arith_mix_loop` | 0.011019s | 0.034397s | 3.12x |
-| `arith_chain_temp` | 0.012503s | 0.039760s | 3.18x |
-| `table_rw` | 0.006911s | 0.021114s | 3.06x |
-| `function_call` | 0.006609s | 0.018405s | 2.78x |
-| `string_concat` | 0.004538s | 0.008383s | 1.85x |
-| `closure_upvalue` | 0.007985s | 0.020355s | 2.55x |
-| `stdlib_math_string` | 0.019079s | 0.043471s | 2.28x |
-| `recursion` | 0.003543s | 0.011269s | 3.18x |
-| `compile_3000_functions` | 0.005070s | 0.013713s | 2.70x |
+| `arith_add_loop` | 0.007978s / 0.008171s | 0.024147s / 0.024050s | 3.03x / 2.94x |
+| `arith_mix_loop` | 0.012123s / 0.012069s | 0.036264s / 0.036110s | 2.99x / 2.99x |
+| `arith_chain_temp` | 0.013671s / 0.013745s | 0.041615s / 0.041806s | 3.04x / 3.04x |
+| `table_rw` | 0.007561s / 0.007591s | 0.022541s / 0.022655s | 2.98x / 2.98x |
+| `function_call` | 0.007370s / 0.007454s | 0.019381s / 0.019380s | 2.63x / 2.60x |
+| `string_concat` | 0.005279s / 0.005360s | 0.009566s / 0.009634s | 1.81x / 1.80x |
+| `closure_upvalue` | 0.009135s / 0.008513s | 0.021918s / 0.022009s | 2.40x / 2.59x |
+| `stdlib_math_string` | 0.019856s / 0.020147s | 0.046101s / 0.046123s | 2.32x / 2.29x |
+| `recursion` | 0.004164s / 0.004191s | 0.012543s / 0.012411s | 3.01x / 2.96x |
+| `compile_3000_functions` | 0.005939s / 0.005624s | 0.015169s / 0.015002s | 2.55x / 2.67x |
 
-本轮完整口径下仍高于 3x 的明确路径为 `arith_chain_temp`、`arith_mix_loop`、`table_rw` 与
-`recursion`；`arith_add_loop` 本轮复跑为 `2.99x`，已经回到 3x 以下但仍需作为边缘观察项。
+本轮完整口径下仍高于 3x 的明确路径为 `arith_chain_temp`；`arith_add_loop` 与 `recursion`
+受官方基线波动在 3x 附近，需要继续作为边缘观察项。`arith_mix_loop`、`table_rw`、
 `function_call`、`closure_upvalue`、`stdlib_math_string` 与 `compile_3000_functions` 当前低于 3x，
 但仍需作为回归观察项。
 其中 `arith_chain_temp` 覆盖 `sum = sum + i * 3 - 7` 这类左结合自二元链，用于区分截图中
@@ -298,6 +298,23 @@ wall-clock 仍受当前 VM dispatch 与算术/调用成本主导。
 当前仍需优先关注 `arith_chain_temp`、`arith_mix_loop` 与 `recursion`；`table_rw`、`arith_add_loop`
 已低于 3x 但仍接近边缘，继续作为回归观察项。
 
+#### 2026-07-01 固定参数函数寄存器数量早退复核
+
+本轮只调整 Lua closure 调用前的寄存器窗口数量计算：非 vararg 函数不再逐次扫描 Proto 指令查找
+开放 `VARARG`，直接按 `MaxStackSize`、固定参数数量和实参数量计算寄存器窗口。该逻辑与 Lua 5.3
+固定参数函数语义一致，不改变 vararg 函数、debug 帧、协程 continuation、upvalue 或返回值行为。
+
+该改动不改变 codegen。使用官方 Lua 5.3.6 反汇编复核，`recursion` 的 `fib` 子函数热体仍为
+`LT; JMP; RETURN; GETUPVAL; SUB; CALL; GETUPVAL; SUB; CALL; ADD; RETURN`；
+`arith_chain_temp` 热循环仍为 `MUL; ADD; SUB; FORLOOP`。项目主函数在循环退出处仍有一次额外
+零距离 `JMP`，但不在递归 `fib` 热体内。
+
+Go 端 micro benchmark 复跑 5 次后，`BenchmarkDoStringRecursion` 从本轮 profile 基线约
+`7.68 ms/op` 降到约 `7.53-7.56 ms/op`，alloc/op 维持 `489`；`BenchmarkDoStringArithChainTemp`
+维持约 `3.72-3.73 ms/op`，未出现算术链回归。完整官方脚本两次复跑中，`recursion` 为
+`3.01x` / `2.96x`，`function_call` 为 `2.63x` / `2.60x`；`arith_chain_temp` 仍为 `3.04x`，
+下一轮继续优先优化算术链与 3x 边缘项。
+
 #### 短期性能优化复核历史
 
 下表保留 2026-07-01 较窄短期目标脚本口径的历史复核结果。由于完整脚本口径覆盖的循环规模和标准库
@@ -384,6 +401,6 @@ xychart-beta
 ### 结论
 
 - CLI 冷启动和小脚本差距较小，历史冷启动约 1.25x 到 1.35x；本轮 `compile_3000_functions` 为 2.63x / 2.61x，仍低于当前 3x 目标线。
-- 按当前完整 benchmark 复核口径，`arith_chain_temp`、`arith_mix_loop` 与 `recursion` 仍高于或贴近 3x，需要继续作为短期优化目标；`table_rw`、`arith_add_loop` 已回到 3x 以下但仍在边缘，`function_call`、`closure_upvalue` 与 `stdlib_math_string` 低于 3x，仍需回归观察。
+- 按当前完整 benchmark 复核口径，`arith_chain_temp` 仍高于 3x；`arith_add_loop` 与 `recursion` 贴近 3x，需要继续作为短期优化目标；`arith_mix_loop`、`table_rw`、`function_call`、`closure_upvalue` 与 `stdlib_math_string` 低于 3x，仍需回归观察。
 - 字符串拼接已较 2026-06-29 旧基线明显改善，从约 92x 收窄到约 1.86x。
 - 后续优先优化方向应集中在算术链 `ADD`/`SUB`/`MUL` 与 `FORLOOP` 成本、递归函数调用边界、表读写热路径、VM dispatch code size 对无关路径的影响，以及标准库函数调用边界。
