@@ -1960,13 +1960,20 @@ func (vm *VM) executeGetTabUp(instruction bytecode.Instruction) error {
 			keyConstant := vm.constants[keyIndex]
 			if keyConstant.Kind == bytecode.ConstantString {
 				// string 常量 raw get 不会触发元方法，未命中直接返回 nil。
-				if value, ok := vm.cachedStringTableRead(table); ok {
-					// table 版本未变化时复用上一轮同 PC 的读取结果。
-					vm.registers[targetIndex] = value
-					return nil
+				if vm.currentPC >= 0 && vm.currentPC < len(vm.stringTableReadCache) {
+					// 热路径直接检查当前 PC 的 table/version，避免每次全局读取进入 helper。
+					cacheEntry := vm.stringTableReadCache[vm.currentPC]
+					if cacheEntry.valid && cacheEntry.table == table && cacheEntry.version == table.mutationVersion {
+						// table 版本未变化时复用上一轮同 PC 的读取结果。
+						vm.registers[targetIndex] = cacheEntry.value
+						return nil
+					}
 				}
 				value := table.RawGetString(keyConstant.String)
-				vm.rememberStringTableRead(table, value)
+				if vm.currentPC >= 0 && vm.currentPC < len(vm.stringTableReadCache) {
+					// 记录当前 PC 的读取结果，下一轮相同字段可直接命中。
+					vm.stringTableReadCache[vm.currentPC] = stringTableReadCacheEntry{table: table, version: table.mutationVersion, value: value, valid: true}
+				}
 				vm.registers[targetIndex] = value
 				return nil
 			}
@@ -2058,13 +2065,20 @@ func (vm *VM) executeGetTable(instruction bytecode.Instruction) error {
 				keyConstant := vm.constants[keyIndex]
 				if keyConstant.Kind == bytecode.ConstantString {
 					// string 常量 raw get 不会触发元方法，未命中直接返回 nil。
-					if value, ok := vm.cachedStringTableRead(table); ok {
-						// table 版本未变化时复用上一轮同 PC 的读取结果。
-						vm.registers[targetIndex] = value
-						return nil
+					if vm.currentPC >= 0 && vm.currentPC < len(vm.stringTableReadCache) {
+						// 热路径直接检查当前 PC 的 table/version，避免每次字段读取进入 helper。
+						cacheEntry := vm.stringTableReadCache[vm.currentPC]
+						if cacheEntry.valid && cacheEntry.table == table && cacheEntry.version == table.mutationVersion {
+							// table 版本未变化时复用上一轮同 PC 的读取结果。
+							vm.registers[targetIndex] = cacheEntry.value
+							return nil
+						}
 					}
 					value := table.RawGetString(keyConstant.String)
-					vm.rememberStringTableRead(table, value)
+					if vm.currentPC >= 0 && vm.currentPC < len(vm.stringTableReadCache) {
+						// 记录当前 PC 的读取结果，下一轮相同字段可直接命中。
+						vm.stringTableReadCache[vm.currentPC] = stringTableReadCacheEntry{table: table, version: table.mutationVersion, value: value, valid: true}
+					}
 					vm.registers[targetIndex] = value
 					return nil
 				}
