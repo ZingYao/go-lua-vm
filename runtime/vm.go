@@ -2929,11 +2929,13 @@ func (vm *VM) tryCachedIntegerRegisterArithmetic(instruction bytecode.Instructio
 // 回到完整 Lua 算术语义。相比通用缓存路径，它避免二次 helper 调用和 ADD/SUB/MUL 分支选择。
 func (vm *VM) tryCachedIntegerAddArithmetic(instruction bytecode.Instruction, targetIndex int) (bool, error) {
 	currentPC := vm.currentPC
-	if currentPC < 0 || currentPC >= len(vm.arithmeticIntRegisterCache) || currentPC >= len(vm.arithmeticIntOperandCache) {
+	registerCache := vm.arithmeticIntRegisterCache
+	operandCache := vm.arithmeticIntOperandCache
+	if uint(currentPC) >= uint(len(registerCache)) || uint(currentPC) >= uint(len(operandCache)) {
 		// 当前 PC 没有 ADD integer 缓存，调用方继续走普通 RK 路径。
 		return false, nil
 	}
-	cacheKind := vm.arithmeticIntRegisterCache[currentPC]
+	cacheKind := registerCache[currentPC]
 	if cacheKind == arithmeticIntRegisterCacheAddNumber {
 		// 当前 PC 最近命中过寄存器 number ADD，优先尝试该路径避免 integer cache miss。
 		return vm.tryCachedNativeNumberAddArithmetic(instruction, currentPC)
@@ -2943,7 +2945,7 @@ func (vm *VM) tryCachedIntegerAddArithmetic(instruction bytecode.Instruction, ta
 		return false, nil
 	}
 
-	cacheEntry := vm.arithmeticIntOperandCache[currentPC]
+	cacheEntry := operandCache[currentPC]
 	registers := vm.registers
 	var leftInteger int64
 	if cacheEntry.leftConstantOperand {
@@ -3072,14 +3074,16 @@ func (vm *VM) tryCachedNativeNumberDivArithmetic(instruction bytecode.Instructio
 // 回到完整 Lua 算术语义。相比通用缓存路径，它避免二次 helper 调用和 ADD/SUB/MUL 分支选择。
 func (vm *VM) tryCachedIntegerSubArithmetic(instruction bytecode.Instruction, targetIndex int) (bool, error) {
 	currentPC := vm.currentPC
-	if currentPC < 0 || currentPC >= len(vm.arithmeticIntRegisterCache) || currentPC >= len(vm.arithmeticIntOperandCache) {
+	registerCache := vm.arithmeticIntRegisterCache
+	operandCache := vm.arithmeticIntOperandCache
+	if uint(currentPC) >= uint(len(registerCache)) || uint(currentPC) >= uint(len(operandCache)) {
 		// 当前 PC 没有 SUB integer 缓存，调用方继续走普通 RK 路径。
 		return false, nil
 	}
-	cacheKind := vm.arithmeticIntRegisterCache[currentPC]
+	cacheKind := registerCache[currentPC]
 	if cacheKind == arithmeticIntRegisterCacheSubRightConstant {
 		// 左寄存器右常量是算术链路常见形态，命中时只需校验左寄存器类型。
-		cacheEntry := vm.arithmeticIntOperandCache[currentPC]
+		cacheEntry := operandCache[currentPC]
 		registers := vm.registers
 		leftIndex := cacheEntry.leftIndex
 		if uint(leftIndex) >= uint(len(registers)) {
@@ -3115,14 +3119,16 @@ func (vm *VM) tryCachedIntegerSubArithmetic(instruction bytecode.Instruction, ta
 // 回到完整 Lua 算术语义。相比通用缓存路径，它避免二次 helper 调用和 ADD/SUB/MUL 分支选择。
 func (vm *VM) tryCachedIntegerMulArithmetic(instruction bytecode.Instruction, targetIndex int) (bool, error) {
 	currentPC := vm.currentPC
-	if currentPC < 0 || currentPC >= len(vm.arithmeticIntRegisterCache) || currentPC >= len(vm.arithmeticIntOperandCache) {
+	registerCache := vm.arithmeticIntRegisterCache
+	operandCache := vm.arithmeticIntOperandCache
+	if uint(currentPC) >= uint(len(registerCache)) || uint(currentPC) >= uint(len(operandCache)) {
 		// 当前 PC 没有 MUL integer 缓存，调用方继续走普通 RK 路径。
 		return false, nil
 	}
-	cacheKind := vm.arithmeticIntRegisterCache[currentPC]
+	cacheKind := registerCache[currentPC]
 	if cacheKind == arithmeticIntRegisterCacheMulRightConstant {
 		// 左寄存器右常量是算术链路常见形态，命中时只需校验左寄存器类型。
-		cacheEntry := vm.arithmeticIntOperandCache[currentPC]
+		cacheEntry := operandCache[currentPC]
 		registers := vm.registers
 		leftIndex := cacheEntry.leftIndex
 		if uint(leftIndex) >= uint(len(registers)) {
