@@ -2018,7 +2018,7 @@ func prepareLuaExecutionStateArgs(state *State, function Value, continuation *lu
 	registerCount := luaClosureRegisterCount(proto, len(args), len(varargs))
 	vm := ((*runtime.State)(state)).BorrowLuaVMAfterReset(registerCount, proto.Constants, closure.Upvalues, proto.Protos, varargs)
 	vm.BindPrototype(proto)
-	vm.BindUpvalueCells(closure.UpvalueCells)
+	vm.BindBorrowedUpvalueCells(closure.UpvalueCells)
 	vm.BindLuaMetamethodRunner(((*runtime.State)(state)).LuaMetamethodRunner())
 	return closure, proto, vm, registerCount, varargs, nil
 }
@@ -3604,7 +3604,7 @@ func executeLuaCallRequestDirect(state *State, callerVM *runtime.VM, closure *ru
 	registerCount := luaClosureRegisterCount(proto, callRequest.ArgumentCount, 0)
 	calleeVM := ((*runtime.State)(state)).BorrowLuaVMAfterReset(registerCount, proto.Constants, closure.Upvalues, proto.Protos, nil)
 	calleeVM.BindPrototype(proto)
-	calleeVM.BindUpvalueCells(closure.UpvalueCells)
+	calleeVM.BindBorrowedUpvalueCells(closure.UpvalueCells)
 	calleeVM.BindLuaMetamethodRunner(((*runtime.State)(state)).LuaMetamethodRunner())
 	fixedArgumentCount := luaClosureFixedArgumentCount(proto, callRequest.ArgumentCount)
 	if !callerVM.CopyRegistersTo(callRequest.FunctionIndex+1, calleeVM, 0, fixedArgumentCount) {

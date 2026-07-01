@@ -1496,6 +1496,21 @@ func (vm *VM) BindUpvalueCells(cells []*UpvalueCell) {
 	vm.upvalueCells = append([]*UpvalueCell(nil), cells...)
 }
 
+// BindBorrowedUpvalueCells 绑定执行期 Lua closure 的共享 upvalue 槽。
+//
+// cells 必须来自不可变 LuaClosure.UpvalueCells 切片头；VM 只读取切片并通过 cell 写入值，不得
+// 修改切片结构。该方法对齐 Lua 5.3 closure 持有 UpVal 指针的模型，避免递归调用每帧复制 upvalue
+// cell 切片；公开或测试路径需要隔离调用方切片时仍应使用 BindUpvalueCells。
+func (vm *VM) BindBorrowedUpvalueCells(cells []*UpvalueCell) {
+	if vm == nil {
+		// nil VM 无法保存绑定。
+		return
+	}
+
+	// 执行期 closure 的 upvalue cell 切片结构稳定，可直接借用以减少每帧分配。
+	vm.upvalueCells = cells
+}
+
 // SetOpenTop 记录开放返回列表写入后的寄存器开区间上界。
 //
 // top 小于 0 表示清空开放栈顶；非负值由执行器在 CALL C=0 或 VARARG B=0 后设置，供后续

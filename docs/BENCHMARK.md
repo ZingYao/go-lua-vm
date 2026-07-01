@@ -113,23 +113,40 @@ GLUAC_BIN=./bin/gluac \
 
 | 用例 | 官方工具中位数 | 本项目中位数 | 本项目/官方 |
 | --- | ---: | ---: | ---: |
-| `arith_add_loop` | 0.008197s | 0.024225s | 2.96x |
-| `arith_mix_loop` | 0.011950s | 0.035824s | 3.00x |
-| `arith_chain_temp` | 0.013393s | 0.041453s | 3.10x |
-| `table_rw` | 0.007303s | 0.022798s | 3.12x |
-| `function_call` | 0.007267s | 0.019168s | 2.64x |
-| `string_concat` | 0.004960s | 0.012026s | 2.42x |
-| `closure_upvalue` | 0.009052s | 0.023093s | 2.55x |
-| `stdlib_math_string` | 0.020282s | 0.045102s | 2.22x |
-| `recursion` | 0.003853s | 0.012894s | 3.35x |
-| `compile_3000_functions` | 0.005475s | 0.014469s | 2.64x |
+| `arith_add_loop` | 0.007657s | 0.023309s | 3.04x |
+| `arith_mix_loop` | 0.011299s | 0.035249s | 3.12x |
+| `arith_chain_temp` | 0.012972s | 0.040977s | 3.16x |
+| `table_rw` | 0.007155s | 0.022150s | 3.10x |
+| `function_call` | 0.007697s | 0.018901s | 2.46x |
+| `string_concat` | 0.004728s | 0.008614s | 1.82x |
+| `closure_upvalue` | 0.008028s | 0.021180s | 2.64x |
+| `stdlib_math_string` | 0.020259s | 0.045111s | 2.23x |
+| `recursion` | 0.004042s | 0.012342s | 3.05x |
+| `compile_3000_functions` | 0.005533s | 0.014429s | 2.61x |
 
-本轮完整口径下仍高于 3x 的明确路径为 `recursion`、`table_rw` 与 `arith_chain_temp`，
-`arith_mix_loop` 位于 3.00x 边缘，需要继续作为回归观察项。
+本轮完整口径下仍高于 3x 的明确路径为 `arith_chain_temp`、`arith_mix_loop`、`table_rw`、
+`recursion` 与 `arith_add_loop`，但 `recursion` 的项目绝对耗时已经从上一轮约 `0.0129s`
+降到本轮约 `0.0121-0.0126s`。
 其中 `arith_chain_temp` 覆盖 `sum = sum + i * 3 - 7` 这类左结合自二元链，用于区分截图中
 一度混用的 `arith_add_loop` 与混合算术链；该 fixture 已固化到 `scripts/benchmark-official.sh`，后续继续
-作为长期回归项。`function_call` 本轮复测为 2.64x，低于 3x；`arith_add_loop` 与 `compile_3000_functions`
+作为长期回归项。`function_call` 本轮复测为 2.46x，低于 3x；`compile_3000_functions`
 随官方工具中位数波动继续作为回归观察项。
+
+#### 2026-07-01 执行期 upvalue cell 借用复核
+
+本轮只调整 Lua closure 执行期 upvalue cell 绑定：保留公开 `BindUpvalueCells` 的复制语义，
+新增执行器内部使用的 `BindBorrowedUpvalueCells`，直接借用 `LuaClosure.UpvalueCells` 切片头。
+VM 只读取该切片并通过 cell 读写值，不修改切片结构；该模型对齐 Lua 5.3 closure 持有 UpVal
+指针的实现，避免递归调用每帧复制 upvalue cell 切片。该改动不改变 codegen；`recursion` 的
+`fib` 子函数热体仍与官方 Lua 5.3.6 一致：
+`LT; JMP; RETURN; GETUPVAL; SUB; CALL; GETUPVAL; SUB; CALL; ADD; RETURN`。
+
+Go 端 `BenchmarkDoStringRecursion` 复跑 5 次后，从上一轮约 `8.41-8.45 ms/op` 降到约
+`7.65-8.05 ms/op`；alloc/op 从约 `403 KB` / `32095 allocs` 降到约 `151 KB` /
+`526 allocs`。mem profile 中 `VM.BindUpvalueCells` 从约 98% alloc objects 的热点消失。
+完整官方脚本三次复跑中，`recursion` 项目绝对耗时为 `0.012117s` / `0.012578s` /
+`0.012342s`，低于上一轮约 `0.0129s`；倍率仍受官方基线波动影响，为 `3.15x` / `3.07x` /
+`3.05x`，递归仍需继续优化。
 
 #### 2026-07-01 CALL 协程状态复用复核
 
@@ -282,11 +299,11 @@ xychart-beta
 | `BenchmarkDoStringStringConcat` | 约 0.475 ms/op，约 2.23 MB/op，2317 allocs |
 | `BenchmarkDoStringFunctionCall` | 约 0.534 ms/op，约 109 KB/op，372 allocs |
 | `BenchmarkDoStringTableReadWrite` | 约 1.49-1.61 ms/op，约 3.79 MB/op，380 allocs |
-| `BenchmarkDoStringRecursion` | 约 8.44-8.55 ms/op，约 403 KB/op，32094 allocs |
+| `BenchmarkDoStringRecursion` | 约 7.65-8.05 ms/op，约 151 KB/op，526 allocs |
 
 ### 结论
 
-- CLI 冷启动和小脚本差距较小，历史冷启动约 1.25x 到 1.35x；本轮 `compile_3000_functions` 为 2.66x，仍低于当前 3x 目标线。
-- 按当前完整 benchmark 复核口径，`arith_mix_loop`、`arith_chain_temp`、`table_rw` 与 `recursion` 仍高于 3x，需要继续作为短期优化目标；`function_call` 为 2.74x，低于 3x 但仍需回归观察。
+- CLI 冷启动和小脚本差距较小，历史冷启动约 1.25x 到 1.35x；本轮 `compile_3000_functions` 为 2.61x，仍低于当前 3x 目标线。
+- 按当前完整 benchmark 复核口径，`arith_chain_temp`、`arith_mix_loop`、`table_rw`、`recursion` 与 `arith_add_loop` 仍高于 3x，需要继续作为短期优化目标；`function_call` 为 2.46x，低于 3x 但仍需回归观察。
 - 字符串拼接已较 2026-06-29 旧基线明显改善，从约 92x 收窄到约 1.86x。
 - 后续优先优化方向应集中在算术链 `ADD`/`SUB`/`MUL` 与 `FORLOOP` 成本、递归函数调用边界、表读写热路径、VM dispatch code size 对无关路径的影响，以及标准库函数调用边界。
