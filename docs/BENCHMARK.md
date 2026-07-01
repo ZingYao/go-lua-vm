@@ -113,23 +113,37 @@ GLUAC_BIN=./bin/gluac \
 
 | 用例 | 官方工具中位数 | 本项目中位数 | 本项目/官方 |
 | --- | ---: | ---: | ---: |
-| `arith_add_loop` | 0.008125s | 0.024231s | 2.98x |
-| `arith_mix_loop` | 0.012174s | 0.036501s | 3.00x |
-| `arith_chain_temp` | 0.013802s | 0.041891s | 3.04x |
-| `table_rw` | 0.007676s | 0.023035s | 3.00x |
-| `function_call` | 0.007268s | 0.019788s | 2.72x |
-| `string_concat` | 0.005179s | 0.009950s | 1.92x |
-| `closure_upvalue` | 0.008654s | 0.022226s | 2.57x |
-| `stdlib_math_string` | 0.020103s | 0.047565s | 2.37x |
-| `recursion` | 0.004126s | 0.013822s | 3.35x |
-| `compile_3000_functions` | 0.005795s | 0.015426s | 2.66x |
+| `arith_add_loop` | 0.008197s | 0.024225s | 2.96x |
+| `arith_mix_loop` | 0.011950s | 0.035824s | 3.00x |
+| `arith_chain_temp` | 0.013393s | 0.041453s | 3.10x |
+| `table_rw` | 0.007303s | 0.022798s | 3.12x |
+| `function_call` | 0.007267s | 0.019168s | 2.64x |
+| `string_concat` | 0.004960s | 0.012026s | 2.42x |
+| `closure_upvalue` | 0.009052s | 0.023093s | 2.55x |
+| `stdlib_math_string` | 0.020282s | 0.045102s | 2.22x |
+| `recursion` | 0.003853s | 0.012894s | 3.35x |
+| `compile_3000_functions` | 0.005475s | 0.014469s | 2.64x |
 
-本轮完整口径下仍高于 3x 的明确路径为 `arith_chain_temp` 与 `recursion`，`arith_mix_loop` 和
-`table_rw` 位于 3.00x 边缘，需要继续作为回归观察项。
+本轮完整口径下仍高于 3x 的明确路径为 `recursion`、`table_rw` 与 `arith_chain_temp`，
+`arith_mix_loop` 位于 3.00x 边缘，需要继续作为回归观察项。
 其中 `arith_chain_temp` 覆盖 `sum = sum + i * 3 - 7` 这类左结合自二元链，用于区分截图中
 一度混用的 `arith_add_loop` 与混合算术链；该 fixture 已固化到 `scripts/benchmark-official.sh`，后续继续
-作为长期回归项。`function_call` 本轮复测为 2.72x，低于 3x；`arith_add_loop` 与 `compile_3000_functions`
+作为长期回归项。`function_call` 本轮复测为 2.64x，低于 3x；`arith_add_loop` 与 `compile_3000_functions`
 随官方工具中位数波动继续作为回归观察项。
+
+#### 2026-07-01 CALL 协程状态复用复核
+
+本轮只调整普通 Lua `CALL` 后处理：执行循环已经维护 `coroutinesCreated`，因此在 State 从未创建
+coroutine 时，CALL 路径不再重复查询当前运行线程，也不再在 direct-call 判定中重复读取 State 的
+coroutine 数量。已创建 coroutine、yield、continuation 和 hook 路径仍保留原查询与保存逻辑。
+该改动不改变 codegen；`recursion` 的 `fib` 子函数热体仍与官方 Lua 5.3.6 一致：
+`LT; JMP; RETURN; GETUPVAL; SUB; CALL; GETUPVAL; SUB; CALL; ADD; RETURN`，项目只少一个不可达
+尾部 `RETURN`。
+
+Go 端 `BenchmarkDoStringRecursion` 复跑 5 次后，从上一轮常见约 `8.50-8.60 ms/op`
+降到约 `8.28-8.53 ms/op`，alloc/op 维持约 `403 KB` / `32094 allocs`。完整官方脚本两次复跑中，
+`recursion` 项目绝对耗时为 `0.012973s` / `0.012894s`，低于上一轮 `0.013822s`；但官方基线同步
+波动，倍率仍为 `3.25x` / `3.35x`，递归仍需继续优化。
 
 #### 2026-07-01 SUB/MUL 右常量 integer cache 复核
 

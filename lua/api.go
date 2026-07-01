@@ -2599,8 +2599,12 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 				return results, nil
 			}
 			// CALL/TAILCALL/TFORCALL 产生的请求由 API 层递归消费并写回结果。
-			coroutineThread := currentCoroutineThread(state)
-			if err := executeLuaCallRequest(state, vm, proto, pc, callRequest, hooksEnabled); err != nil {
+			var coroutineThread *runtime.Thread
+			if coroutinesCreated {
+				// 只有 State 创建过协程时才需要查询当前运行线程；普通主线程 CALL 避免每次进入 Running。
+				coroutineThread = currentCoroutineThread(state)
+			}
+			if err := executeLuaCallRequest(state, vm, proto, pc, callRequest, hooksEnabled, coroutinesCreated); err != nil {
 				if errors.Is(err, runtime.ErrCoroutineYield) && coroutineThread != nil {
 					// coroutine.yield 中断当前 Lua CALL 时保存当前 VM 现场；已有内层现场会作为链式 continuation 先恢复。
 					saveLuaContinuation(&luaCoroutineContinuation{
@@ -3226,7 +3230,7 @@ func isSameLuaClosure(function Value, current *runtime.LuaClosure) bool {
 // executeLuaCallRequest 消费 VM 执行中产生的调用请求。
 //
 // callRequest 必须来自同一个 vm 最近一次 Step；调用结果会按请求写回 vm 寄存器窗口。
-func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, callPC int, callRequest *runtime.CallRequest, hooksEnabled bool) error {
+func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, callPC int, callRequest *runtime.CallRequest, hooksEnabled bool, coroutinesCreated bool) error {
 	if callRequest.ArgumentCount < 0 {
 		// 开放参数需要真实栈顶，当前执行循环暂不支持。
 		return runtime.ErrUnsupportedInstruction
@@ -3236,7 +3240,7 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 		// 函数寄存器缺失说明 codegen 或 VM 状态异常。
 		return runtime.ErrRegisterOutOfRange
 	}
-	directClosure, directCall := canExecuteLuaCallRequestDirect(state, functionValue, callRequest)
+	directClosure, directCall := canExecuteLuaCallRequestDirect(state, functionValue, callRequest, coroutinesCreated)
 	debugName := ""
 	debugNameWhat := ""
 	debugNameResolved := false
@@ -3544,7 +3548,7 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 // canExecuteLuaCallRequestDirect 判断 CALL 请求是否可使用 Lua closure direct 路径。
 //
 // direct 路径只覆盖固定参数、固定返回、非泛型 for 的普通 Lua closure；复杂开放调用仍走通用路径。
-func canExecuteLuaCallRequestDirect(state *State, functionValue Value, callRequest *runtime.CallRequest) (*runtime.LuaClosure, bool) {
+func canExecuteLuaCallRequestDirect(state *State, functionValue Value, callRequest *runtime.CallRequest, coroutinesCreated bool) (*runtime.LuaClosure, bool) {
 	if state == nil || callRequest == nil || callRequest.GenericFor || callRequest.ReturnCount < 0 || callRequest.ArgumentCount < 0 {
 		// 缺少 State 或调用请求时不能进入 direct CALL。
 		return nil, false
@@ -3553,7 +3557,7 @@ func canExecuteLuaCallRequestDirect(state *State, functionValue Value, callReque
 		// 非 Lua closure 仍走通用调用路径。
 		return nil, false
 	}
-	if ((*runtime.State)(state)).HasCreatedCoroutines() {
+	if coroutinesCreated {
 		// 已创建 coroutine 后，调用现场可能被 continuation 持有，保留完整通用路径。
 		return nil, false
 	}
