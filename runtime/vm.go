@@ -4252,9 +4252,16 @@ func (vm *VM) executeForLoop(instruction bytecode.Instruction) error {
 
 	if vm.registers[baseIndex].Kind == KindInteger && vm.registers[baseIndex+1].Kind == KindInteger && vm.registers[baseIndex+2].Kind == KindInteger {
 		// 三个控制槽都是真实 integer 时直接执行热路径，避免每轮重复折算循环上界。
-		nextValue := vm.registers[baseIndex].Integer + vm.registers[baseIndex+2].Integer
-		if !forIntegerLoopContinues(nextValue, vm.registers[baseIndex+1].Integer, vm.registers[baseIndex+2].Integer) {
-			// 循环越界时不跳转，也不更新外部可见控制变量 R(A+3)。
+		stepValue := vm.registers[baseIndex+2].Integer
+		nextValue := vm.registers[baseIndex].Integer + stepValue
+		if stepValue > 0 {
+			// 正步长是普通计数循环的主路径，直接比较上界，避免每轮进入通用方向 helper。
+			if nextValue > vm.registers[baseIndex+1].Integer {
+				// 循环越过上界时不跳转，也不更新外部可见控制变量 R(A+3)。
+				return nil
+			}
+		} else if !forIntegerLoopContinues(nextValue, vm.registers[baseIndex+1].Integer, stepValue) {
+			// 非正步长保留通用边界判断，覆盖负步长和 0 步长兼容语义。
 			return nil
 		}
 

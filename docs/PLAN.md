@@ -8,7 +8,7 @@
 
 - `go 1.26`
 - `toolchain go1.26.4`
-- 本机 Go SDK 路径参考：`/Users/zing/sdk/go/go1.26.4`
+- 本机 Go SDK 路径不写入公开文档；执行命令前只要求 PATH 上的 `go` 指向 `go1.26.4`
 - 默认模块路径待确认，临时建议为 `github.com/<owner>/go-lua-vm`
 
 执行测试与构建时应优先使用 `go.mod` 的 `toolchain` 机制解析版本，不通过临时设置 `GOROOT`、`GOPATH`、`GOTOOLCHAIN` 或在项目脚本中硬编码绝对路径切换 Go 版本。若本机 PATH 未指向可用 Go，应先修正开发环境配置，再执行项目命令。
@@ -170,7 +170,7 @@ Lua 调 Go 需要支持：
 ### 阶段 0：项目初始化
 
 - 初始化 `go.mod`，写入 Go 1.26 与 toolchain go1.26.4。
-- 确认本机 `/Users/zing/sdk/go/go1.26.4` 可用，但项目命令不硬编码该路径。
+- 确认本机 `go1.26.4` 可用，但项目命令不硬编码 SDK 绝对路径。
 - 建立项目级 `AGENTS.md`，固化 Go 版本、无 CGO、注释和门禁规则。
 - 建立基础 Go 门禁脚本，检查 Go 版本、CGO 禁用、未跟踪 Go 文件与测试。
 - 建立基础目录、README、Makefile、CI、lint/test 命令。

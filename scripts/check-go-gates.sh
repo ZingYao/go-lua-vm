@@ -6,7 +6,7 @@ actual_go_version="$(go version | awk '{print $3}')"
 
 if [[ "${actual_go_version}" != "${expected_go_version}" ]]; then
   echo "go version mismatch: expected ${expected_go_version}, got ${actual_go_version}" >&2
-  echo "ensure PATH points to /Users/zing/sdk/go/go1.26.4/bin before running project commands" >&2
+  echo "ensure PATH resolves go to ${expected_go_version} before running project commands" >&2
   exit 1
 fi
 
