@@ -2635,6 +2635,10 @@ func (environment *Environment) activeThreadHookState() *hookState {
 		// 缺少环境或 State 时没有 running coroutine 可读。
 		return nil
 	}
+	if len(environment.threadHooks) == 0 {
+		// 没有任何协程专属 hook 时无需读取 running thread，主线程与协程都回退默认 hook。
+		return nil
+	}
 	thread, isMain := environment.state.Running()
 	if thread == nil || isMain {
 		// 主线程使用默认 hook 状态。
