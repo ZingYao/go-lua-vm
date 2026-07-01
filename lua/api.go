@@ -347,7 +347,7 @@ const (
 	//
 	// debug hook、协程和 continuation 路径仍逐指令检查，以保持调试和挂起恢复语义；普通路径
 	// 使用固定窗口降低 tight loop 中 atomic/context 查询的固定成本。
-	luaContextCheckInstructionInterval = 64
+	luaContextCheckInstructionInterval = 128
 )
 
 // 与 runtime 对齐的错误对象。
