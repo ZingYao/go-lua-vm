@@ -113,24 +113,38 @@ GLUAC_BIN=./bin/gluac \
 
 | 用例 | 官方工具中位数 | 本项目中位数 | 本项目/官方 |
 | --- | ---: | ---: | ---: |
-| `arith_add_loop` | 0.007657s | 0.023309s | 3.04x |
-| `arith_mix_loop` | 0.011299s | 0.035249s | 3.12x |
-| `arith_chain_temp` | 0.012972s | 0.040977s | 3.16x |
-| `table_rw` | 0.007155s | 0.022150s | 3.10x |
-| `function_call` | 0.007697s | 0.018901s | 2.46x |
-| `string_concat` | 0.004728s | 0.008614s | 1.82x |
-| `closure_upvalue` | 0.008028s | 0.021180s | 2.64x |
-| `stdlib_math_string` | 0.020259s | 0.045111s | 2.23x |
-| `recursion` | 0.004042s | 0.012342s | 3.05x |
-| `compile_3000_functions` | 0.005533s | 0.014429s | 2.61x |
+| `arith_add_loop` | 0.008530s | 0.024616s | 2.89x |
+| `arith_mix_loop` | 0.012071s | 0.036545s | 3.03x |
+| `arith_chain_temp` | 0.013957s | 0.042111s | 3.02x |
+| `table_rw` | 0.007686s | 0.022989s | 2.99x |
+| `function_call` | 0.007404s | 0.019439s | 2.63x |
+| `string_concat` | 0.005394s | 0.009799s | 1.82x |
+| `closure_upvalue` | 0.008782s | 0.022226s | 2.53x |
+| `stdlib_math_string` | 0.020088s | 0.046380s | 2.31x |
+| `recursion` | 0.003987s | 0.012723s | 3.19x |
+| `compile_3000_functions` | 0.005798s | 0.015149s | 2.61x |
 
-本轮完整口径下仍高于 3x 的明确路径为 `arith_chain_temp`、`arith_mix_loop`、`table_rw`、
-`recursion` 与 `arith_add_loop`，但 `recursion` 的项目绝对耗时已经从上一轮约 `0.0129s`
-降到本轮约 `0.0121-0.0126s`。
+本轮完整口径下仍高于 3x 的明确路径为 `recursion`、`arith_mix_loop` 与
+`arith_chain_temp`；`table_rw` 在两次完整复跑中为 3.07x / 2.99x，已经处于 3x 边缘但仍需
+作为回归观察项。`arith_add_loop` 本轮降到 2.76x / 2.89x，低于 3x。
 其中 `arith_chain_temp` 覆盖 `sum = sum + i * 3 - 7` 这类左结合自二元链，用于区分截图中
 一度混用的 `arith_add_loop` 与混合算术链；该 fixture 已固化到 `scripts/benchmark-official.sh`，后续继续
-作为长期回归项。`function_call` 本轮复测为 2.46x，低于 3x；`compile_3000_functions`
+作为长期回归项。`function_call` 本轮复测为 2.59x / 2.63x，低于 3x；`compile_3000_functions`
 随官方工具中位数波动继续作为回归观察项。
+
+#### 2026-07-01 table hash 懒分配复核
+
+本轮只调整 `runtime.Table` 的 hash 区初始化策略：`NewTable` 不再为所有空表立即创建
+`hashValues` 和 `hashKeys`，而是在首次 hash 写入前通过内部 `ensureHashStorage` 延迟创建。
+数组区、raw get、raw next、弱表 sweep 和 delete nil map 均保持 Go 语义安全；测试中直接模拟
+hash 区整数 key 的夹具显式初始化 hash 存储。该改动对齐 C Lua table 按实际数组/hash 需求
+管理存储的方向，不改变字节码或 Lua 可观察语义。
+
+Go 端 micro benchmark 复跑 5 次后，`BenchmarkDoStringTableReadWrite` 的 alloc/op 从约
+`380 allocs` 降到 `372 allocs`，`BenchmarkDoStringArithAddLoop` 从约 `318 allocs` 降到
+`312 allocs`，`BenchmarkDoStringRecursion` 从约 `526 allocs` 降到 `520 allocs`。完整官方脚本
+两次复跑中，`table_rw` 项目绝对耗时为 `0.023583s` / `0.022989s`，倍率为 `3.07x` /
+`2.99x`；该路径已经接近目标线，但仍需继续作为边缘回归项。
 
 #### 2026-07-01 执行期 upvalue cell 借用复核
 
@@ -304,6 +318,6 @@ xychart-beta
 ### 结论
 
 - CLI 冷启动和小脚本差距较小，历史冷启动约 1.25x 到 1.35x；本轮 `compile_3000_functions` 为 2.61x，仍低于当前 3x 目标线。
-- 按当前完整 benchmark 复核口径，`arith_chain_temp`、`arith_mix_loop`、`table_rw`、`recursion` 与 `arith_add_loop` 仍高于 3x，需要继续作为短期优化目标；`function_call` 为 2.46x，低于 3x 但仍需回归观察。
+- 按当前完整 benchmark 复核口径，`recursion`、`arith_chain_temp` 与 `arith_mix_loop` 仍高于 3x，需要继续作为短期优化目标；`table_rw`、`arith_add_loop` 与 `function_call` 低于或接近 3x，仍需回归观察。
 - 字符串拼接已较 2026-06-29 旧基线明显改善，从约 92x 收窄到约 1.86x。
 - 后续优先优化方向应集中在算术链 `ADD`/`SUB`/`MUL` 与 `FORLOOP` 成本、递归函数调用边界、表读写热路径、VM dispatch code size 对无关路径的影响，以及标准库函数调用边界。

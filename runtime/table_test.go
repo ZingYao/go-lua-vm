@@ -472,6 +472,7 @@ func TestTableLenHashBoundary(t *testing.T) {
 	table := NewTable()
 	table.RawSetInteger(1, StringValue("one"))
 	table.RawSetInteger(2, StringValue("two"))
+	table.ensureHashStorage()
 	table.hashValues[tableKey{kind: KindInteger, integerValue: 3}] = StringValue("three")
 
 	if length := table.Len(); length != 3 {
@@ -933,6 +934,7 @@ func TestTableRawNextCacheInvalidatesOnMutation(t *testing.T) {
 func TestTableRawNextSkipsNilEntries(t *testing.T) {
 	table := NewTable()
 	table.RawSetInteger(2, StringValue("two"))
+	table.ensureHashStorage()
 	table.hashValues[tableKey{kind: KindString, stringValue: "deleted"}] = NilValue()
 
 	nextKey, nextValue, ok, err := table.RawNext(NilValue())
@@ -1047,6 +1049,7 @@ func TestTableRawIPairsNextStopsAtHole(t *testing.T) {
 // 当前 table resize 未实现，测试直接写入 hash 区整数 key 来锁定未来 resize 后的读取语义。
 func TestTableRawIPairsNextReadsIntegerHashKey(t *testing.T) {
 	table := NewTable()
+	table.ensureHashStorage()
 	table.hashValues[tableKey{kind: KindInteger, integerValue: 1}] = StringValue("one")
 
 	index, value, ok := table.RawIPairsNext(0)

@@ -104,13 +104,24 @@ type tableEntry struct {
 
 // NewTable 创建一个空 Lua table。
 //
-// 返回的 table 初始化 hash 区，不设置元表，也不预分配数组区。
+// 返回的 table 不设置元表，数组区与 hash 区都按写入需求延迟分配。
 func NewTable() *Table {
-	// 初始化 hash map，数组区按正整数写入需求延迟扩展。
-	return &Table{
-		hashValues: make(map[tableKey]Value),
-		hashKeys:   make(map[tableKey]Value),
+	// 空表延迟分配数组区和 hash 区，纯数组表可避免无用 map 分配。
+	return &Table{}
+}
+
+// ensureHashStorage 确保 hash 区 map 已初始化。
+//
+// hashValues 与 hashKeys 必须一起创建，保证 next 能从内部 tableKey 还原原始 Lua key。
+func (table *Table) ensureHashStorage() {
+	if table.hashValues != nil {
+		// hash 区已经初始化时无需重复分配。
+		return
 	}
+
+	// 首次 hash 写入时再创建 map，避免纯数组 table 和空 table 承担 hash 分配成本。
+	table.hashValues = make(map[tableKey]Value)
+	table.hashKeys = make(map[tableKey]Value)
 }
 
 // RawSet 使用任意 Lua key 写入 Lua 值。
@@ -146,6 +157,7 @@ func (table *Table) RawSet(key Value, value Value) error {
 	}
 
 	// 非 nil 值直接写入 hash 区。
+	table.ensureHashStorage()
 	table.hashValues[hashKey] = value
 	table.hashKeys[hashKey] = key
 	table.noteMutation()
@@ -197,6 +209,7 @@ func (table *Table) RawSetString(key string, value Value) {
 	}
 
 	// 非 nil 值直接写入 hash 区。
+	table.ensureHashStorage()
 	table.hashValues[tableKey{kind: KindString, stringValue: key}] = value
 	table.hashKeys[tableKey{kind: KindString, stringValue: key}] = StringValue(key)
 	table.noteMutation()
@@ -247,6 +260,7 @@ func (table *Table) RawSetInteger(key int64, value Value) {
 	}
 
 	// 非正整数 key 或超大稀疏正整数 key 写入 hash 区。
+	table.ensureHashStorage()
 	table.hashValues[tableKey{kind: KindInteger, integerValue: key}] = value
 	table.hashKeys[tableKey{kind: KindInteger, integerValue: key}] = IntegerValue(key)
 	table.noteMutation()
@@ -288,6 +302,7 @@ func (table *Table) RawSetPositiveIntegerNonNil(key int64, value Value) {
 	}
 
 	// 超大稀疏正整数 key 写入 hash 区。
+	table.ensureHashStorage()
 	table.hashValues[tableKey{kind: KindInteger, integerValue: key}] = value
 	table.hashKeys[tableKey{kind: KindInteger, integerValue: key}] = IntegerValue(key)
 	table.noteMutation()
