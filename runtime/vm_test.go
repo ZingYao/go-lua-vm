@@ -382,6 +382,55 @@ func TestVMGetAndSetUpvalue(t *testing.T) {
 	}
 }
 
+// TestVMUpvalueCellWithoutSnapshot 验证执行期 VM 可只通过共享 cell 访问 upvalue。
+//
+// Lua closure 执行器会在存在 UpvalueCell 时跳过 Upvalues 快照复制；GETUPVAL、SETTABUP 和
+// 捕获外层 upvalue 都必须继续以 cell 作为真实 upvalue 来源。
+func TestVMUpvalueCellWithoutSnapshot(t *testing.T) {
+	table := NewTable()
+	table.RawSetString("name", StringValue("lua"))
+	cell := NewClosedUpvalueCell(ReferenceValue(KindTable, table))
+	vm := NewVMWithConstantsAndUpvalues(2, []bytecode.Constant{bytecode.StringConstant("name"), bytecode.StringConstant("version")}, nil)
+	vm.BindBorrowedUpvalueCells([]*UpvalueCell{cell})
+
+	if err := vm.Step(bytecode.CreateABC(bytecode.OpGetUpval, 0, 0, 0)); err != nil {
+		// 仅有 cell 时 GETUPVAL 仍必须能读取 upvalue。
+		t.Fatalf("get upvalue from cell failed: %v", err)
+	}
+	value, ok := vm.Register(0)
+	if !ok || value.Kind != KindTable || value.Ref != table {
+		// GETUPVAL 结果必须来自共享 cell 保存的 table。
+		t.Fatalf("get upvalue from cell mismatch: value=%#v ok=%v", value, ok)
+	}
+
+	if err := vm.SetRegister(1, IntegerValue(53)); err != nil {
+		// 测试准备阶段写入 SETTABUP value 寄存器必须成功。
+		t.Fatalf("set value register failed: %v", err)
+	}
+	if err := vm.Step(bytecode.CreateABC(bytecode.OpSetTabUp, 0, bytecode.RKAsK(1), 1)); err != nil {
+		// 仅有 cell 时 SETTABUP 必须能通过 upvalue table 写字段。
+		t.Fatalf("set tabup from cell failed: %v", err)
+	}
+	if got := table.RawGetString("version"); !got.RawEqual(IntegerValue(53)) {
+		// SETTABUP 应写入 cell 中 table 的 hash 字段。
+		t.Fatalf("set tabup value mismatch: %#v", got)
+	}
+
+	childProto := bytecode.NewProto("child")
+	childProto.Upvalues = []bytecode.UpvalueDesc{{Name: "env", InStack: false, Index: 0}}
+	vm.protos = []*bytecode.Proto{childProto}
+	if err := vm.Step(bytecode.CreateABx(bytecode.OpClosure, 0, 0)); err != nil {
+		// 捕获外层 upvalue 时必须能复用已有共享 cell。
+		t.Fatalf("closure capture from cell failed: %v", err)
+	}
+	closureValue, ok := vm.Register(0)
+	closure, closureOK := closureValue.Ref.(*LuaClosure)
+	if !ok || closureValue.Kind != KindLuaClosure || !closureOK || len(closure.UpvalueCells) != 1 || closure.UpvalueCells[0] != cell {
+		// 子闭包必须复用同一个 cell，保证多层闭包共享 upvalue。
+		t.Fatalf("closure capture cell mismatch: value=%#v closure=%#v", closureValue, closure)
+	}
+}
+
 // TestVMUpvalueOutOfRange 验证 upvalue 越界时返回明确错误且不覆盖已有值。
 //
 // 损坏 chunk 或闭包原型不匹配可能访问不存在的 upvalue，VM 必须拒绝并保持状态。

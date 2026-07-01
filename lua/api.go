@@ -2016,7 +2016,7 @@ func prepareLuaExecutionStateArgs(state *State, function Value, continuation *lu
 	proto := closure.Proto
 	varargs := luaClosureVarargs(proto, args)
 	registerCount := luaClosureRegisterCount(proto, len(args), len(varargs))
-	vm := ((*runtime.State)(state)).BorrowLuaVMAfterReset(registerCount, proto.Constants, closure.Upvalues, proto.Protos, varargs)
+	vm := ((*runtime.State)(state)).BorrowLuaVMAfterReset(registerCount, proto.Constants, luaClosureExecutionUpvalues(closure), proto.Protos, varargs)
 	vm.BindPrototype(proto)
 	vm.BindBorrowedUpvalueCells(closure.UpvalueCells)
 	vm.BindLuaMetamethodRunner(((*runtime.State)(state)).LuaMetamethodRunner())
@@ -3210,6 +3210,23 @@ func luaClosureVarargs(proto *bytecode.Proto, args []Value) []Value {
 	return append([]Value(nil), args[int(proto.NumParams):]...)
 }
 
+// luaClosureExecutionUpvalues 返回执行期 VM 需要复制的 upvalue 快照。
+//
+// closure 已持有共享 upvalue cell 时，VM 可直接借用 cell 读写真实 upvalue；返回 nil 可避免
+// 每次 Lua 调用重复复制 Upvalues 快照。没有 cell 的手工闭包保留旧快照路径。
+func luaClosureExecutionUpvalues(closure *runtime.LuaClosure) []Value {
+	if closure == nil {
+		// 损坏 closure 会在准备执行阶段返回明确错误，这里保持空快照。
+		return nil
+	}
+	if len(closure.UpvalueCells) > 0 {
+		// 共享 cell 是执行期真实 upvalue 来源，不需要再复制快照。
+		return nil
+	}
+	// 无 cell 的旧闭包或测试闭包继续依赖 Upvalues 快照。
+	return closure.Upvalues
+}
+
 // isSameLuaClosure 判断函数值是否指向当前正在执行的 Lua closure。
 //
 // function 必须来自调用寄存器；current 是当前执行器解析出的 closure。返回 true 时可安全复用当前
@@ -3602,7 +3619,7 @@ func executeLuaCallRequestDirect(state *State, callerVM *runtime.VM, closure *ru
 		}
 	}
 	registerCount := luaClosureRegisterCount(proto, callRequest.ArgumentCount, 0)
-	calleeVM := ((*runtime.State)(state)).BorrowLuaVMAfterReset(registerCount, proto.Constants, closure.Upvalues, proto.Protos, nil)
+	calleeVM := ((*runtime.State)(state)).BorrowLuaVMAfterReset(registerCount, proto.Constants, luaClosureExecutionUpvalues(closure), proto.Protos, nil)
 	calleeVM.BindPrototype(proto)
 	calleeVM.BindBorrowedUpvalueCells(closure.UpvalueCells)
 	calleeVM.BindLuaMetamethodRunner(((*runtime.State)(state)).LuaMetamethodRunner())

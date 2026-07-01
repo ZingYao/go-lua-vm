@@ -1474,7 +1474,7 @@ func (vm *VM) EnsureRegisterCount(count int) {
 // index 使用 Lua VM 的 0-based upvalue 编号；越界时返回 nil 和 false。该方法主要服务
 // 单测与后续 debug.getupvalue 迁移，不暴露给对外 lua 包。
 func (vm *VM) Upvalue(index int) (Value, bool) {
-	if index < 0 || index >= len(vm.upvalues) {
+	if !vm.hasUpvalueIndex(index) {
 		// 越界读取不暴露内部切片，调用方可通过 false 判断无效 upvalue。
 		return NilValue(), false
 	}
@@ -1565,6 +1565,20 @@ func (vm *VM) upvalueValue(index int) Value {
 
 	// 越界按 nil 返回，由调用方负责先做范围校验。
 	return NilValue()
+}
+
+// hasUpvalueIndex 判断指定 upvalue 下标在当前 VM 中是否存在。
+func (vm *VM) hasUpvalueIndex(index int) bool {
+	if index < 0 {
+		// 负下标不是合法 Lua upvalue 索引。
+		return false
+	}
+	if index < len(vm.upvalueCells) && vm.upvalueCells[index] != nil {
+		// 执行期共享 cell 可作为真实 upvalue 来源。
+		return true
+	}
+	// 没有 cell 时退回旧的 upvalue 快照边界。
+	return index < len(vm.upvalues)
 }
 
 // setUpvalueValue 写入指定 upvalue 的当前运行期值。
@@ -1948,7 +1962,7 @@ func (vm *VM) executeGetUpval(instruction bytecode.Instruction) error {
 		// 目标寄存器越界时不能写入，避免破坏寄存器窗口。
 		return ErrRegisterOutOfRange
 	}
-	if upvalueIndex < 0 || upvalueIndex >= len(vm.upvalues) {
+	if !vm.hasUpvalueIndex(upvalueIndex) {
 		// upvalue 越界通常表示损坏 chunk 或闭包原型不匹配。
 		return ErrUpvalueOutOfRange
 	}
@@ -1969,7 +1983,7 @@ func (vm *VM) executeGetTabUp(instruction bytecode.Instruction) error {
 		// 目标寄存器越界时不能写入，避免破坏寄存器窗口。
 		return ErrRegisterOutOfRange
 	}
-	if upvalueIndex < 0 || upvalueIndex >= len(vm.upvalues) {
+	if !vm.hasUpvalueIndex(upvalueIndex) {
 		// upvalue 越界通常表示损坏 chunk 或闭包原型不匹配。
 		return ErrUpvalueOutOfRange
 	}
@@ -2050,7 +2064,7 @@ func (vm *VM) executeSetupVal(instruction bytecode.Instruction) error {
 		// 源寄存器越界时不能读取，upvalue 必须保持原值。
 		return ErrRegisterOutOfRange
 	}
-	if upvalueIndex < 0 || upvalueIndex >= len(vm.upvalues) {
+	if !vm.hasUpvalueIndex(upvalueIndex) {
 		// upvalue 越界时不能写入，避免破坏闭包捕获值。
 		return ErrUpvalueOutOfRange
 	}
@@ -2280,12 +2294,12 @@ func (vm *VM) executeSetTable(instruction bytecode.Instruction) error {
 // 读取 key 与 value；任一读取或写入失败时返回错误，upvalue 本身不被替换。
 func (vm *VM) executeSetTabUp(instruction bytecode.Instruction) error {
 	upvalueIndex := instruction.A()
-	if upvalueIndex < 0 || upvalueIndex >= len(vm.upvalues) {
+	if !vm.hasUpvalueIndex(upvalueIndex) {
 		// upvalue 越界时不能读取 table，也无法执行写入。
 		return ErrUpvalueOutOfRange
 	}
 
-	table, err := tableFromValue(vm.upvalues[upvalueIndex])
+	table, err := tableFromValue(vm.upvalueValue(upvalueIndex))
 	if err != nil {
 		// SETTABUP 需要 upvalue 保存 table，例如 Lua 5.3 的 _ENV。
 		return err
@@ -5446,7 +5460,7 @@ func (vm *VM) captureUpvalue(upvalueDesc bytecode.UpvalueDesc) (Value, error) {
 		}
 		return vm.registers[captureIndex], nil
 	}
-	if captureIndex < 0 || captureIndex >= len(vm.upvalues) {
+	if !vm.hasUpvalueIndex(captureIndex) {
 		// 捕获外层 upvalue 时，索引必须落在当前 upvalue 列表内。
 		return NilValue(), ErrUpvalueOutOfRange
 	}
@@ -5473,7 +5487,7 @@ func (vm *VM) captureUpvalueCell(upvalueDesc bytecode.UpvalueDesc) (*UpvalueCell
 		vm.openUpvalues = append(vm.openUpvalues, openUpvalueCell{register: captureIndex, cell: cell})
 		return cell, nil
 	}
-	if captureIndex < 0 || captureIndex >= len(vm.upvalues) {
+	if !vm.hasUpvalueIndex(captureIndex) {
 		// 捕获外层 upvalue 时，索引必须落在当前 upvalue 列表内。
 		return nil, ErrUpvalueOutOfRange
 	}
