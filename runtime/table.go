@@ -1158,8 +1158,8 @@ func (table *Table) ensureArraySize(size int) {
 // nextTableArrayCapacity 计算数组区下一次预留容量。
 func nextTableArrayCapacity(currentCapacity int, requiredSize int) int {
 	if currentCapacity <= 0 {
-		// 空数组区从 4 个槽位开始，覆盖小 table constructor 和短数组热路径。
-		currentCapacity = 4
+		// 空数组区从 8 个槽位开始，减少连续整数写入热路径的早期扩容与拷贝。
+		currentCapacity = 8
 	}
 	for currentCapacity < requiredSize {
 		// 容量按 2 倍增长，保持连续整数写入的摊还 O(1) 扩容成本。
