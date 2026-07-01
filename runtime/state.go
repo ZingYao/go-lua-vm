@@ -300,6 +300,8 @@ type State struct {
 	luaThreadRunner LuaThreadRunner
 	// luaMetamethodRunner 执行 Lua closure 元方法，由 lua 包注入以避免 runtime 反向依赖。
 	luaMetamethodRunner LuaMetamethodRunner
+	// debugEnvironment 保存 debug 标准库运行环境，由 stdlib/debug 注入以避免每次 VM 调用查 sync.Map。
+	debugEnvironment any
 	// autoGCAllocations 记录自动 GC 运行态下的分配节拍，用于模拟分配压力触发 finalizer。
 	autoGCAllocations int64
 	// hasWeakTables 标记当前 State 曾经登记过弱表；为 true 时自动 GC 才需要周期性 weak sweep。
@@ -481,6 +483,7 @@ func (state *State) Close() {
 	state.finalizableTables = nil
 	state.finalizedTables = nil
 	state.tableFinalizerRunner = nil
+	state.debugEnvironment = nil
 	state.runningThread = nil
 	state.ctx = nil
 	state.closed = true
@@ -514,6 +517,32 @@ func (state *State) MainThread() Value {
 func (state *State) Options() Options {
 	// options 在 State 创建时已经规范化，直接返回副本。
 	return state.options
+}
+
+// SetDebugEnvironment 记录 debug 标准库绑定到当前 State 的运行环境。
+//
+// environment 由 stdlib/debug 包创建，runtime 仅保存不透明引用，避免产生包反向依赖；State 已关闭时忽略写入。
+func (state *State) SetDebugEnvironment(environment any) {
+	if state == nil || state.closed {
+		// nil 或已关闭 State 不再保存 debug 环境。
+		return
+	}
+
+	// 保存不透明 debug 环境，VM 层可通过 debuglib.EnvironmentForState 类型断言后复用。
+	state.debugEnvironment = environment
+}
+
+// DebugEnvironment 返回当前 State 绑定的 debug 标准库运行环境。
+//
+// 返回值是不透明引用；未打开 debug 库、State 为 nil 或已关闭时返回 nil。
+func (state *State) DebugEnvironment() any {
+	if state == nil || state.closed {
+		// nil 或已关闭 State 没有可用 debug 环境。
+		return nil
+	}
+
+	// 返回 stdlib/debug 注入的不透明环境引用。
+	return state.debugEnvironment
 }
 
 // enterGoCallback 标记进入 Go 回调边界。

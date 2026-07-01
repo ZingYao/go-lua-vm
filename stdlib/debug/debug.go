@@ -101,6 +101,7 @@ func Open(state *runtime.State) error {
 	}
 
 	environment := NewEnvironment(state)
+	state.SetDebugEnvironment(environment)
 	debugEnvironments.Store(state, environment)
 	state.SetGlobal("debug", runtime.ReferenceValue(runtime.KindTable, environment.Table()))
 	return nil
@@ -113,6 +114,10 @@ func EnvironmentForState(state *runtime.State) (*Environment, bool) {
 	if state == nil {
 		// nil State 没有可关联的 debug 标准库环境。
 		return nil, false
+	}
+	if environment, ok := state.DebugEnvironment().(*Environment); ok && environment != nil {
+		// Open 已把环境挂到 State 上，VM 热路径优先使用该引用，避免每次 CALL 查询 sync.Map。
+		return environment, true
 	}
 	value, ok := debugEnvironments.Load(state)
 	if !ok {
