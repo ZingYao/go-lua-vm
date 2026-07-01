@@ -95,11 +95,34 @@ BenchmarkGoLuaCallback-10                        509391    268.5 ns/op       492
 
 ### 脚本运行性能
 
-#### 短期性能优化复核
+#### 完整 benchmark 复核
 
-2026-07-01 在 `quanquan/feature/perf-followup` 分支复测短期目标路径。命令口径为当前 `glua` /
-`gluac` 临时构建产物与官方 Lua 5.3.6 工具交替运行 40 次，取 wall-clock 中位数；构建仍使用
-`CGO_ENABLED=0`。
+2026-07-01 在 `quanquan/feature/perf-followup` 分支按完整脚本口径复测。官方工具不是 PATH 上的
+Lua 5.5，而是在临时目录下载 `lua-5.3.6.tar.gz`、校验 SHA256 后构建出的官方 Lua 5.3.6 `lua` /
+`luac`；本项目使用当前 `bin/glua` / `bin/gluac`。每个脚本 warmup 后交替运行 40 次，取 wall-clock
+中位数；CLI 冷启动用例运行 30 次；本项目构建仍使用 `CGO_ENABLED=0`。
+
+| 用例 | 官方工具中位数 | 本项目中位数 | 本项目/官方 |
+| --- | ---: | ---: | ---: |
+| `arith_add_loop` | 0.003588s | 0.007094s | 1.98x |
+| `arith_mix_loop` | 0.004985s | 0.017647s | 3.54x |
+| `table_rw` | 0.004005s | 0.009507s | 2.37x |
+| `function_call` | 0.004590s | 0.009894s | 2.16x |
+| `string_concat` | 0.003884s | 0.005961s | 1.53x |
+| `closure_upvalue` | 0.005354s | 0.016863s | 3.15x |
+| `stdlib_math_string` | 0.006036s | 0.020547s | 3.40x |
+| `recursion` | 0.003664s | 0.011292s | 3.08x |
+| `compile_3000_functions` | 0.007909s | 0.014907s | 1.88x |
+
+本轮完整口径下仍高于 3x 的路径为 `arith_mix_loop`、`closure_upvalue`、`stdlib_math_string` 和
+`recursion`。后续短期性能优化任务重新开启，优先继续按既定顺序从算术 typed fast path、函数调用 /
+upvalue、标准库 fastcall 与递归调用成本处推进；`table_rw`、`function_call`、`string_concat` 和
+`compile_3000_functions` 当前低于 3x，但仍作为回归观察项。
+
+#### 短期性能优化复核历史
+
+下表保留 2026-07-01 较窄短期目标脚本口径的历史复核结果。由于完整脚本口径覆盖的循环规模和标准库
+调用组合不同，当前优化判断以上方完整 benchmark 复核为准。
 
 | 用例 | 官方工具中位数 | 本项目中位数 | 本项目/官方 |
 | --- | ---: | ---: | ---: |
@@ -110,9 +133,6 @@ BenchmarkGoLuaCallback-10                        509391    268.5 ns/op       492
 | `stdlib_math_string` | 0.003337s | 0.005193s | 1.56x |
 | `recursion` | 0.003062s | 0.006723s | 2.20x |
 | `compile_3000_functions` | 0.006180s | 0.013627s | 2.21x |
-
-本轮复核中的主要目标路径均低于 3x；`closure_upvalue` 接近阈值，后续仍应作为函数调用与
-upvalue 专项的观察项。
 
 #### 优化前历史基线
 
@@ -145,20 +165,20 @@ xychart-beta
 
 | 用例 | 官方工具中位数 | 本项目中位数 | 本项目/官方 |
 | --- | ---: | ---: | ---: |
-| `lua_empty_script` | 0.003543s | 0.004696s | 1.33x |
-| `lua_eval_empty` | 0.003343s | 0.004637s | 1.39x |
-| `lua_version` | 0.003422s | 0.004805s | 1.40x |
-| `luac_parse_only` | 0.003341s | 0.004679s | 1.40x |
-| `luac_list` | 0.003419s | 0.004561s | 1.33x |
-| `luac_compile_tiny` | 0.003420s | 0.004471s | 1.31x |
+| `lua_empty_script` | 0.002925s | 0.003839s | 1.31x |
+| `lua_eval_empty` | 0.003037s | 0.004092s | 1.35x |
+| `lua_version` | 0.003219s | 0.004219s | 1.31x |
+| `luac_parse_only` | 0.002860s | 0.003698s | 1.29x |
+| `luac_list` | 0.002942s | 0.003677s | 1.25x |
+| `luac_compile_tiny` | 0.002849s | 0.003629s | 1.27x |
 
 ```mermaid
 xychart-beta
     title "CLI cold start and tiny tasks"
     x-axis ["empty", "eval", "version", "parse", "list", "compile"]
     y-axis "seconds" 0 --> 0.005
-    line "official" [0.003543, 0.003343, 0.003422, 0.003341, 0.003419, 0.003420]
-    line "glua/gluac" [0.004696, 0.004637, 0.004805, 0.004679, 0.004561, 0.004471]
+    line "official" [0.002925, 0.003037, 0.003219, 0.002860, 0.002942, 0.002849]
+    line "glua/gluac" [0.003839, 0.004092, 0.004219, 0.003698, 0.003677, 0.003629]
 ```
 
 ### Go 内部 Benchmark
@@ -167,22 +187,22 @@ xychart-beta
 
 | 用例 | 当前结果 |
 | --- | ---: |
-| `BenchmarkVMDispatch` | 约 3.9 ns/op，0 allocs |
-| `BenchmarkTableReadWrite/raw_set_integer` | 约 6.3-6.5 ns/op，0 allocs |
-| `BenchmarkTableReadWrite/raw_get_integer` | 约 5.2-5.3 ns/op，0 allocs |
-| `BenchmarkGoFunctionCall` | 约 46-48 ns/op，128 B/op，2 allocs |
-| `BenchmarkStringConcat` | 约 35 ns/op，16 B/op，1 alloc |
-| `BenchmarkVMConcatInstruction/binary_string` | 约 25.5 ns/op，8 B/op，1 alloc |
-| `BenchmarkVMConcatInstruction/empty_right` | 约 4.5 ns/op，0 allocs |
-| `BenchmarkVMConcatInstruction/empty_left` | 约 4.7 ns/op，0 allocs |
-| `BenchmarkVMConcatInstruction/four_strings` | 约 40.7-41.0 ns/op，16 B/op，1 alloc |
-| `BenchmarkGoLuaCallback` | 约 249-297 ns/op，约 5 allocs |
-| `BenchmarkDoStringStringConcat` | 约 0.458-0.472 ms/op，约 2.23 MB/op |
-| `BenchmarkDoStringFunctionCall` | 约 0.909-0.910 ms/op，约 108 KB/op |
+| `BenchmarkVMDispatch` | 约 2.89 ns/op，0 allocs |
+| `BenchmarkTableReadWrite/raw_set_integer` | 约 6.05 ns/op，0 allocs |
+| `BenchmarkTableReadWrite/raw_get_integer` | 约 5.23 ns/op，0 allocs |
+| `BenchmarkGoFunctionCall` | 约 46.8 ns/op，128 B/op，2 allocs |
+| `BenchmarkStringConcat` | 约 34.7 ns/op，16 B/op，1 alloc |
+| `BenchmarkVMConcatInstruction/binary_string` | 约 24.7 ns/op，8 B/op，1 alloc |
+| `BenchmarkVMConcatInstruction/empty_right` | 约 4.20 ns/op，0 allocs |
+| `BenchmarkVMConcatInstruction/empty_left` | 约 4.27 ns/op，0 allocs |
+| `BenchmarkVMConcatInstruction/four_strings` | 约 39.9 ns/op，16 B/op，1 alloc |
+| `BenchmarkGoLuaCallback` | 约 255 ns/op，约 584-590 B/op，5 allocs |
+| `BenchmarkDoStringStringConcat` | 约 0.475 ms/op，约 2.23 MB/op，2317 allocs |
+| `BenchmarkDoStringFunctionCall` | 约 0.534 ms/op，约 109 KB/op，372 allocs |
 
 ### 结论
 
-- CLI 冷启动、小脚本和 `gluac` 编译差距较小，约 1.3x 到 1.9x，说明启动和编译器当前不是主要瓶颈。
-- 经过短期性能优化后，本轮复核覆盖的主要目标路径已低于 3x；闭包/upvalue 约 2.99x，仍是最接近阈值的观察项。
+- CLI 冷启动、小脚本和 `gluac` 编译差距较小，约 1.25x 到 1.88x，说明启动和编译器当前不是主要瓶颈。
+- 按完整 benchmark 口径，`arith_mix_loop`、`closure_upvalue`、`stdlib_math_string`、`recursion` 仍高于 3x，需要继续作为短期优化目标。
 - 字符串拼接已较 2026-06-29 旧基线明显改善，从约 92x 收窄到约 1.70x。
 - 后续优先优化方向应集中在稳定 benchmark harness、函数调用/upvalue 余量、VM dispatch code size 对无关路径的影响，以及标准库函数调用边界。
