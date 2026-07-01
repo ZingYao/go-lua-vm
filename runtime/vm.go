@@ -2621,7 +2621,7 @@ func (vm *VM) executeMod(instruction bytecode.Instruction) error {
 		// 目标寄存器越界时不能写入，避免破坏寄存器窗口。
 		return ErrRegisterOutOfRange
 	}
-	if handled, err := vm.tryCachedIntegerModArithmetic(instruction); handled || err != nil {
+	if handled, err := vm.tryCachedIntegerModArithmetic(instruction, targetIndex); handled || err != nil {
 		// MOD 专用缓存命中已完成写回；零除或缓存形态损坏时返回原始错误。
 		return err
 	}
@@ -2663,7 +2663,7 @@ func (vm *VM) executeIDiv(instruction bytecode.Instruction) error {
 		// 目标寄存器越界时不能写入，避免破坏寄存器窗口。
 		return ErrRegisterOutOfRange
 	}
-	if handled, err := vm.tryCachedIntegerIDivArithmetic(instruction); handled || err != nil {
+	if handled, err := vm.tryCachedIntegerIDivArithmetic(instruction, targetIndex); handled || err != nil {
 		// IDIV 专用缓存命中已完成写回；零除或缓存形态损坏时返回原始错误。
 		return err
 	}
@@ -3156,7 +3156,7 @@ func (vm *VM) tryCachedIntegerMulArithmetic(instruction bytecode.Instruction, ta
 //
 // 该函数只处理 MOD 热路径；缓存不存在、类型变化或指令形态变化时返回 handled=false，让调用方
 // 回到完整 Lua 算术语义。相比通用 MOD/IDIV 缓存路径，它避免二次 helper 调用和缓存类型 switch。
-func (vm *VM) tryCachedIntegerModArithmetic(instruction bytecode.Instruction) (bool, error) {
+func (vm *VM) tryCachedIntegerModArithmetic(instruction bytecode.Instruction, targetIndex int) (bool, error) {
 	currentPC := vm.currentPC
 	if currentPC < 0 || currentPC >= len(vm.arithmeticIntRegisterCache) || currentPC >= len(vm.arithmeticIntOperandCache) || vm.arithmeticIntRegisterCache[currentPC] != arithmeticIntRegisterCacheMod {
 		// 当前 PC 没有 MOD integer 缓存，调用方继续走普通 RK 路径。
@@ -3164,18 +3164,20 @@ func (vm *VM) tryCachedIntegerModArithmetic(instruction bytecode.Instruction) (b
 	}
 
 	cacheEntry := vm.arithmeticIntOperandCache[currentPC]
+	registers := vm.registers
 	var leftInteger int64
 	if cacheEntry.leftConstantOperand {
 		// 左操作数为 Proto integer 常量时可直接复用缓存值。
 		leftInteger = cacheEntry.leftConstant
 	} else {
-		if cacheEntry.leftIndex < 0 || cacheEntry.leftIndex >= len(vm.registers) {
+		leftIndex := cacheEntry.leftIndex
+		if uint(leftIndex) >= uint(len(registers)) {
 			// 寄存器窗口变化时清理缓存，并回到通用 RK 路径报出原始错误。
 			vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
 			vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
 			return false, nil
 		}
-		leftValue := vm.registers[cacheEntry.leftIndex]
+		leftValue := registers[leftIndex]
 		if leftValue.Kind != KindInteger {
 			// 左操作数类型变化时缓存失效，后续走完整 Lua 算术和元方法语义。
 			vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
@@ -3190,13 +3192,14 @@ func (vm *VM) tryCachedIntegerModArithmetic(instruction bytecode.Instruction) (b
 		// 右操作数为 Proto integer 常量时可直接复用缓存值。
 		rightInteger = cacheEntry.rightConstant
 	} else {
-		if cacheEntry.rightIndex < 0 || cacheEntry.rightIndex >= len(vm.registers) {
+		rightIndex := cacheEntry.rightIndex
+		if uint(rightIndex) >= uint(len(registers)) {
 			// 寄存器窗口变化时清理缓存，并回到通用 RK 路径报出原始错误。
 			vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
 			vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
 			return false, nil
 		}
-		rightValue := vm.registers[cacheEntry.rightIndex]
+		rightValue := registers[rightIndex]
 		if rightValue.Kind != KindInteger {
 			// 右操作数类型变化时缓存失效，后续走完整 Lua 算术和元方法语义。
 			vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
@@ -3211,7 +3214,7 @@ func (vm *VM) tryCachedIntegerModArithmetic(instruction bytecode.Instruction) (b
 	}
 
 	// MOD 使用 Lua floor modulo 语义，符号与除数保持一致。
-	vm.registers[instruction.A()] = IntegerValue(integerModulo(leftInteger, rightInteger))
+	registers[targetIndex] = IntegerValue(integerModulo(leftInteger, rightInteger))
 	return true, nil
 }
 
@@ -3219,7 +3222,7 @@ func (vm *VM) tryCachedIntegerModArithmetic(instruction bytecode.Instruction) (b
 //
 // 该函数只处理 IDIV 热路径；缓存不存在、类型变化或指令形态变化时返回 handled=false，让调用方
 // 回到完整 Lua 算术语义。相比通用 MOD/IDIV 缓存路径，它避免二次 helper 调用和缓存类型 switch。
-func (vm *VM) tryCachedIntegerIDivArithmetic(instruction bytecode.Instruction) (bool, error) {
+func (vm *VM) tryCachedIntegerIDivArithmetic(instruction bytecode.Instruction, targetIndex int) (bool, error) {
 	currentPC := vm.currentPC
 	if currentPC < 0 || currentPC >= len(vm.arithmeticIntRegisterCache) || currentPC >= len(vm.arithmeticIntOperandCache) || vm.arithmeticIntRegisterCache[currentPC] != arithmeticIntRegisterCacheIDiv {
 		// 当前 PC 没有 IDIV integer 缓存，调用方继续走普通 RK 路径。
@@ -3227,18 +3230,20 @@ func (vm *VM) tryCachedIntegerIDivArithmetic(instruction bytecode.Instruction) (
 	}
 
 	cacheEntry := vm.arithmeticIntOperandCache[currentPC]
+	registers := vm.registers
 	var leftInteger int64
 	if cacheEntry.leftConstantOperand {
 		// 左操作数为 Proto integer 常量时可直接复用缓存值。
 		leftInteger = cacheEntry.leftConstant
 	} else {
-		if cacheEntry.leftIndex < 0 || cacheEntry.leftIndex >= len(vm.registers) {
+		leftIndex := cacheEntry.leftIndex
+		if uint(leftIndex) >= uint(len(registers)) {
 			// 寄存器窗口变化时清理缓存，并回到通用 RK 路径报出原始错误。
 			vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
 			vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
 			return false, nil
 		}
-		leftValue := vm.registers[cacheEntry.leftIndex]
+		leftValue := registers[leftIndex]
 		if leftValue.Kind != KindInteger {
 			// 左操作数类型变化时缓存失效，后续走完整 Lua 算术和元方法语义。
 			vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
@@ -3253,13 +3258,14 @@ func (vm *VM) tryCachedIntegerIDivArithmetic(instruction bytecode.Instruction) (
 		// 右操作数为 Proto integer 常量时可直接复用缓存值。
 		rightInteger = cacheEntry.rightConstant
 	} else {
-		if cacheEntry.rightIndex < 0 || cacheEntry.rightIndex >= len(vm.registers) {
+		rightIndex := cacheEntry.rightIndex
+		if uint(rightIndex) >= uint(len(registers)) {
 			// 寄存器窗口变化时清理缓存，并回到通用 RK 路径报出原始错误。
 			vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
 			vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
 			return false, nil
 		}
-		rightValue := vm.registers[cacheEntry.rightIndex]
+		rightValue := registers[rightIndex]
 		if rightValue.Kind != KindInteger {
 			// 右操作数类型变化时缓存失效，后续走完整 Lua 算术和元方法语义。
 			vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
@@ -3274,7 +3280,7 @@ func (vm *VM) tryCachedIntegerIDivArithmetic(instruction bytecode.Instruction) (
 	}
 
 	// IDIV 使用 Lua floor division 语义，结果向负无穷取整。
-	vm.registers[instruction.A()] = IntegerValue(integerFloorDiv(leftInteger, rightInteger))
+	registers[targetIndex] = IntegerValue(integerFloorDiv(leftInteger, rightInteger))
 	return true, nil
 }
 
