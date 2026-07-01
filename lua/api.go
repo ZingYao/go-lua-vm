@@ -2306,7 +2306,7 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 	debugEnvironment, hasDebugEnvironment := debuglib.EnvironmentForState(runtimeState)
 	hooksEnabled := hasDebugEnvironment && debugEnvironment.HasActiveHook()
 	coroutinesCreated := runtimeState.HasCreatedCoroutines()
-	preciseFrameSync := hasDebugEnvironment || continuation != nil || coroutinesCreated
+	preciseFrameSync := hooksEnabled || continuation != nil || coroutinesCreated
 	refreshHookState := func() {
 		coroutinesCreated = runtimeState.HasCreatedCoroutines()
 		if !hasDebugEnvironment {
@@ -2315,7 +2315,7 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 			return
 		}
 		hooksEnabled = debugEnvironment.HasActiveHook()
-		preciseFrameSync = true
+		preciseFrameSync = hooksEnabled || continuation != nil || coroutinesCreated
 	}
 	if hooksEnabled && continuation == nil {
 		// call/tail call hook 在目标调用帧入栈后触发，使 hook 中 debug.getinfo(2, "f") 指向被调 closure。
@@ -2439,7 +2439,7 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 		}
 		if preciseFrameSync {
 			if err := syncCurrentFrame(pc); err != nil {
-				// debug、hook、coroutine 和 continuation 路径需要逐指令同步调用帧 PC。
+				// active hook、coroutine 和 continuation 路径需要逐指令同步调用帧 PC。
 				return nil, err
 			}
 		}
