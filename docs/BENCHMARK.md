@@ -686,9 +686,34 @@ Go 端 micro 复跑显示，`BenchmarkDoStringFunctionCall` 多数轮约 `0.43-0
 | `recursion` | 0.004152s / 0.004230s / 0.004268s | 0.012533s / 0.012480s / 0.012467s | 3.02x / 2.95x / 2.92x |
 | `compile_3000_functions` | 0.005844s / 0.005787s / 0.005952s | 0.015105s / 0.015083s / 0.015212s | 2.58x / 2.61x / 2.56x |
 
+### 2026-07-01 debug 协程 hook map 懒初始化复核
+
+本轮将 `debug.Environment.threadHooks` 从 `NewEnvironment` 阶段 eager map 分配改为
+`debug.sethook(thread, ...)` 首次设置协程专属 hook 时懒初始化。nil map 的读取、`len` 和
+`delete` 行为与空 map 一致，因此未设置协程 hook 的路径保持 Lua 可见语义不变；设置协程 hook
+时仍会创建 map 并按 running thread 隔离 hook 状态。
+
+Go 端 micro 复跑显示，`BenchmarkDoStringArithChainTemp`、`BenchmarkDoStringTableReadWrite`、
+`BenchmarkDoStringFunctionCall`、`BenchmarkDoStringStringConcat` 和 `BenchmarkDoStringRecursion`
+均减少 1 alloc/op；`BenchmarkDoStringRecursion` 多数轮约 `7.43-7.53 ms/op`，alloc/op 从
+`489` 降到 `488`。重建 `bin/glua` / `bin/gluac` 后，正确 Lua 5.3.6 完整 benchmark 三次复跑如下：
+
+| 用例 | 官方工具中位数 | 本项目中位数 | 本项目/官方 |
+| --- | ---: | ---: | ---: |
+| `arith_add_loop` | 0.008137s / 0.008523s / 0.008452s | 0.021624s / 0.021825s / 0.021956s | 2.66x / 2.56x / 2.60x |
+| `arith_mix_loop` | 0.012034s / 0.012093s / 0.012144s | 0.034238s / 0.034528s / 0.034102s | 2.85x / 2.86x / 2.81x |
+| `arith_chain_temp` | 0.013592s / 0.013796s / 0.013645s | 0.038953s / 0.039322s / 0.039180s | 2.87x / 2.85x / 2.87x |
+| `table_rw` | 0.007518s / 0.007649s / 0.007655s | 0.021325s / 0.021704s / 0.021444s | 2.84x / 2.84x / 2.80x |
+| `function_call` | 0.007394s / 0.007589s / 0.007476s | 0.019021s / 0.019307s / 0.019156s | 2.57x / 2.54x / 2.56x |
+| `string_concat` | 0.005253s / 0.005435s / 0.005356s | 0.009388s / 0.009738s / 0.009759s | 1.79x / 1.79x / 1.82x |
+| `closure_upvalue` | 0.008626s / 0.008604s / 0.008728s | 0.021973s / 0.021817s / 0.021887s | 2.55x / 2.54x / 2.51x |
+| `stdlib_math_string` | 0.019971s / 0.020228s / 0.020213s | 0.045625s / 0.046074s / 0.045826s | 2.28x / 2.28x / 2.27x |
+| `recursion` | 0.004325s / 0.004299s / 0.004153s | 0.012412s / 0.012536s / 0.012500s | 2.87x / 2.92x / 3.01x |
+| `compile_3000_functions` | 0.005748s / 0.005891s / 0.005794s | 0.015216s / 0.015145s / 0.015152s | 2.65x / 2.57x / 2.62x |
+
 ### 结论
 
-- CLI 冷启动和小脚本差距较小，历史冷启动约 1.25x 到 1.35x；本轮 Lua 5.3.6 正确口径下 `compile_3000_functions` 为 2.58x / 2.61x / 2.56x，仍低于当前 3x 目标线。
-- 按当前完整 benchmark 复核口径，算术链路和表读写均低于 3x；`recursion` 第一轮 3.02x、后两轮 2.95x / 2.92x，仍作为 3x 边缘回归观察项；`function_call` 稳定在 2.58x 到 2.61x，`closure_upvalue` 与 `stdlib_math_string` 低于 3x，仍需回归观察。
+- CLI 冷启动和小脚本差距较小，历史冷启动约 1.25x 到 1.35x；本轮 Lua 5.3.6 正确口径下 `compile_3000_functions` 为 2.65x / 2.57x / 2.62x，仍低于当前 3x 目标线。
+- 按当前完整 benchmark 复核口径，算术链路和表读写均低于 3x；`recursion` 两轮低于 3x、一轮 3.01x，仍作为 3x 边缘回归观察项；`function_call` 稳定在 2.54x 到 2.57x，`closure_upvalue` 与 `stdlib_math_string` 低于 3x，仍需回归观察。
 - 字符串拼接已较 2026-06-29 旧基线明显改善，从约 92x 收窄到约 1.86x。
 - 后续优先优化方向应集中在算术链 `ADD`/`SUB`/`MUL` 与 `FORLOOP` 成本、递归函数调用边界、表读写热路径、VM dispatch code size 对无关路径的影响，以及标准库函数调用边界。

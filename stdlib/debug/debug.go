@@ -207,7 +207,6 @@ func NewEnvironment(state *runtime.State) *Environment {
 	return &Environment{
 		state:       state,
 		hook:        runtime.NilValue(),
-		threadHooks: make(map[*runtime.Thread]*hookState),
 		debugInput:  os.Stdin,
 		debugOutput: os.Stderr,
 	}
@@ -625,6 +624,10 @@ func (environment *Environment) SetHook(args ...runtime.Value) ([]runtime.Value,
 
 	if hasThreadArgument {
 		// 协程 hook 独立保存，VM 触发时会按当前 running thread 优先读取。
+		if environment.threadHooks == nil {
+			// 只有真正设置协程专属 hook 时才分配 map，普通无 hook 热路径保持零分配空状态。
+			environment.threadHooks = make(map[*runtime.Thread]*hookState)
+		}
 		environment.threadHooks[thread] = &hookState{
 			hook:  hook,
 			mask:  mask,
