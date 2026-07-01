@@ -2947,6 +2947,30 @@ func (vm *VM) tryCachedIntegerAddArithmetic(instruction bytecode.Instruction, ta
 
 	cacheEntry := operandCache[currentPC]
 	registers := vm.registers
+	if !cacheEntry.leftConstantOperand && !cacheEntry.rightConstantOperand {
+		// 双寄存器 ADD 是算术链热路径，先走无常量分支，避免每轮检查常量操作数形态。
+		leftIndex := cacheEntry.leftIndex
+		rightIndex := cacheEntry.rightIndex
+		if uint(leftIndex) >= uint(len(registers)) || uint(rightIndex) >= uint(len(registers)) {
+			// 寄存器窗口变化时清理缓存，并回到通用 RK 路径报出原始错误。
+			vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
+			vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
+			return false, nil
+		}
+		leftValue := registers[leftIndex]
+		rightValue := registers[rightIndex]
+		if leftValue.Kind != KindInteger || rightValue.Kind != KindInteger {
+			// 任一操作数类型变化时缓存失效，后续走完整 Lua 算术和元方法语义。
+			vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
+			vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
+			return false, nil
+		}
+
+		// ADD 按 64 位补码自然回绕，命中后直接写回目标寄存器。
+		registers[targetIndex] = IntegerValue(leftValue.Integer + rightValue.Integer)
+		return true, nil
+	}
+
 	var leftInteger int64
 	if cacheEntry.leftConstantOperand {
 		// 左操作数为 Proto integer 常量时可直接复用缓存值。
