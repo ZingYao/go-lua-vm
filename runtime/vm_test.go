@@ -942,6 +942,67 @@ func TestVMTryExecuteLeafUpvalueAddSetReturnInCaller(t *testing.T) {
 		// 字符串数字必须回退完整 VM，保留 Lua 算术转换和错误语义。
 		t.Fatalf("string upvalue should fallback: handled=%v err=%v", handled, err)
 	}
+
+	paramProto := &bytecode.Proto{
+		Code: []bytecode.Instruction{
+			bytecode.CreateABC(bytecode.OpGetUpval, 1, 0, 0),
+			bytecode.CreateABC(bytecode.OpAdd, 1, 1, 0),
+			bytecode.CreateABC(bytecode.OpSetupVal, 1, 0, 0),
+			bytecode.CreateABC(bytecode.OpGetUpval, 1, 0, 0),
+			bytecode.CreateABC(bytecode.OpReturn, 1, 2, 0),
+		},
+	}
+	paramCell := NewClosedUpvalueCell(IntegerValue(10))
+	paramClosure := NewLuaClosure(paramProto, []Value{IntegerValue(10)}, []*UpvalueCell{paramCell})
+	if paramClosure.LeafUpvalueAddSetReturn == nil || !paramClosure.LeafUpvalueAddSetReturn.HasRegisterOperand {
+		// `x = x + v; return x` 必须预解析为参数寄存器形态。
+		t.Fatalf("expected upvalue add-set register metadata")
+	}
+	paramVM := NewVM(2)
+	if err := paramVM.SetRegister(0, ReferenceValue(KindLuaClosure, paramClosure)); err != nil {
+		// 调用函数槽写入必须成功。
+		t.Fatalf("set param function register failed: %v", err)
+	}
+	if err := paramVM.SetRegister(1, IntegerValue(5)); err != nil {
+		// 参数槽写入必须成功。
+		t.Fatalf("set param register failed: %v", err)
+	}
+	handled, err = paramVM.TryExecuteLeafUpvalueAddSetReturnInCaller(paramClosure, &CallRequest{
+		FunctionIndex: 0,
+		ArgumentCount: 1,
+		ReturnCount:   1,
+	})
+	if err != nil || !handled {
+		// integer upvalue 加 integer 参数应在 caller 侧完成。
+		t.Fatalf("upvalue param add-set mismatch: handled=%v err=%v", handled, err)
+	}
+	value, ok = paramVM.Register(0)
+	if !ok || !value.RawEqual(IntegerValue(15)) {
+		// 参数形态返回值必须直接写回函数槽。
+		t.Fatalf("upvalue param add-set result mismatch: value=%#v ok=%v", value, ok)
+	}
+	if !paramCell.Value().RawEqual(IntegerValue(15)) || !paramClosure.Upvalues[0].RawEqual(IntegerValue(15)) {
+		// 参数形态也必须同步 cell 和快照。
+		t.Fatalf("upvalue param add-set did not update cell/snapshot: cell=%#v snapshot=%#v", paramCell.Value(), paramClosure.Upvalues[0])
+	}
+
+	if err := paramVM.SetRegister(0, ReferenceValue(KindLuaClosure, paramClosure)); err != nil {
+		// 重新写回函数槽用于字符串参数回退验证。
+		t.Fatalf("reset param function register failed: %v", err)
+	}
+	if err := paramVM.SetRegister(1, StringValue("5")); err != nil {
+		// 字符串参数槽写入必须成功。
+		t.Fatalf("reset param argument failed: %v", err)
+	}
+	handled, err = paramVM.TryExecuteLeafUpvalueAddSetReturnInCaller(paramClosure, &CallRequest{
+		FunctionIndex: 0,
+		ArgumentCount: 1,
+		ReturnCount:   1,
+	})
+	if err != nil || handled {
+		// 字符串数字参数必须回退完整 VM，保留 Lua 算术转换和元方法语义。
+		t.Fatalf("string param should fallback: handled=%v err=%v", handled, err)
+	}
 }
 
 // TestVMNewTable 验证 NEWTABLE 会创建新的 table 引用。

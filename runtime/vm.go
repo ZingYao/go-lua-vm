@@ -229,14 +229,20 @@ type LuaLeafAddOperand struct {
 	Constant bool
 }
 
-// LuaLeafUpvalueAddSetReturn 保存 `upvalue = upvalue + Kint; return upvalue` 叶子函数快路径元数据。
+// LuaLeafUpvalueAddSetReturn 保存 `upvalue = upvalue + X; return upvalue` 叶子函数快路径元数据。
 //
-// UpvalueIndex 指向被读取和写回的 closure upvalue；IntegerConstant 是参与加法的 Lua integer 常量。
+// UpvalueIndex 指向被读取和写回的 closure upvalue；右操作数可为 Lua integer 常量或固定参数寄存器。
 type LuaLeafUpvalueAddSetReturn struct {
 	// UpvalueIndex 保存 GETUPVAL/SETUPVAL 访问的 upvalue 下标。
 	UpvalueIndex int
 	// IntegerConstant 保存 `upvalue + integer` 中的 integer 常量。
 	IntegerConstant int64
+	// RegisterIndex 保存 `upvalue + R` 中的参数寄存器下标。
+	RegisterIndex int
+	// HasIntegerConstant 表示该形态使用 integer 常量作为另一侧操作数。
+	HasIntegerConstant bool
+	// HasRegisterOperand 表示该形态使用调用参数寄存器作为另一侧操作数。
+	HasRegisterOperand bool
 }
 
 // NewLuaClosure 创建带运行期缓存属性的 Lua closure。
@@ -365,11 +371,19 @@ func luaProtoLeafUpvalueAddSetReturn(proto *bytecode.Proto) *LuaLeafUpvalueAddSe
 	}
 	if !leftOperand.Constant && leftOperand.RegisterIndex == upvalueRegister && rightOperand.Constant && rightOperand.ConstantValue.Kind == KindInteger {
 		// `upvalue + Kint` 是闭包计数器热路径的常见输出。
-		return &LuaLeafUpvalueAddSetReturn{UpvalueIndex: upvalueIndex, IntegerConstant: rightOperand.ConstantValue.Integer}
+		return &LuaLeafUpvalueAddSetReturn{UpvalueIndex: upvalueIndex, IntegerConstant: rightOperand.ConstantValue.Integer, HasIntegerConstant: true}
 	}
 	if leftOperand.Constant && leftOperand.ConstantValue.Kind == KindInteger && !rightOperand.Constant && rightOperand.RegisterIndex == upvalueRegister {
 		// `Kint + upvalue` 在原生 integer 上等价，也可复用同一写回路径。
-		return &LuaLeafUpvalueAddSetReturn{UpvalueIndex: upvalueIndex, IntegerConstant: leftOperand.ConstantValue.Integer}
+		return &LuaLeafUpvalueAddSetReturn{UpvalueIndex: upvalueIndex, IntegerConstant: leftOperand.ConstantValue.Integer, HasIntegerConstant: true}
+	}
+	if !leftOperand.Constant && leftOperand.RegisterIndex == upvalueRegister && !rightOperand.Constant && rightOperand.RegisterIndex != upvalueRegister {
+		// `upvalue + R` 是 closure_upvalue benchmark 的 `inc(v)` 热路径。
+		return &LuaLeafUpvalueAddSetReturn{UpvalueIndex: upvalueIndex, RegisterIndex: rightOperand.RegisterIndex, HasRegisterOperand: true}
+	}
+	if !leftOperand.Constant && leftOperand.RegisterIndex != upvalueRegister && !rightOperand.Constant && rightOperand.RegisterIndex == upvalueRegister {
+		// `R + upvalue` 在原生 number/integer 加法下可复用同一写回路径。
+		return &LuaLeafUpvalueAddSetReturn{UpvalueIndex: upvalueIndex, RegisterIndex: leftOperand.RegisterIndex, HasRegisterOperand: true}
 	}
 	return nil
 }
@@ -795,12 +809,13 @@ func (vm *VM) TryExecuteLeafAddReturnInCaller(closure *LuaClosure, request *Call
 
 // TryExecuteLeafUpvalueAddSetReturnInCaller 在 caller VM 中执行 upvalue 自增闭包叶子函数。
 //
-// closure 必须缓存 LeafUpvalueAddSetReturn；request 必须是无参数、单返回 CALL。该快路径仅处理
-// integer upvalue 加 integer 常量，其他类型回退完整 VM 以保留字符串转换、元方法和错误语义。
+// closure 必须缓存 LeafUpvalueAddSetReturn；request 必须是固定参数、单返回 CALL。该快路径仅处理
+// integer/number upvalue 加 integer 常量或参数寄存器，其他类型回退完整 VM 以保留字符串转换、
+// 元方法和错误语义。
 func (vm *VM) TryExecuteLeafUpvalueAddSetReturnInCaller(closure *LuaClosure, request *CallRequest) (bool, error) {
-	// 先校验调用形态，避免误处理带参数或多返回函数。
-	if vm == nil || closure == nil || closure.LeafUpvalueAddSetReturn == nil || request == nil || request.ArgumentCount != 0 || request.ReturnCount != 1 {
-		// 非精确无参单返回形态必须走原 direct CALL。
+	// 先校验调用形态，避免误处理多返回函数。
+	if vm == nil || closure == nil || closure.LeafUpvalueAddSetReturn == nil || request == nil || request.ReturnCount != 1 {
+		// 非精确单返回形态必须走原 direct CALL。
 		return false, nil
 	}
 	if request.FunctionIndex < 0 || request.FunctionIndex >= len(vm.registers) {
@@ -813,11 +828,35 @@ func (vm *VM) TryExecuteLeafUpvalueAddSetReturnInCaller(closure *LuaClosure, req
 		// upvalue 状态异常时回退原 VM 路径生成标准错误。
 		return false, nil
 	}
-	if upvalueValue.Kind != KindInteger {
-		// 非 integer upvalue 需要完整 Lua 算术转换和元方法处理。
+	var operandValue Value
+	if leaf.HasIntegerConstant {
+		// 常量形态要求没有调用参数，避免误吞错误调用布局。
+		if request.ArgumentCount != 0 {
+			// 参数数量不匹配时交给完整 VM 处理多余参数语义。
+			return false, nil
+		}
+		operandValue = IntegerValue(leaf.IntegerConstant)
+	} else if leaf.HasRegisterOperand {
+		// 参数寄存器形态按 CALL 布局读取对应实参。
+		if leaf.RegisterIndex < 0 || leaf.RegisterIndex >= request.ArgumentCount {
+			// 缺参在 callee 内部应为 nil，caller 侧不能读取相邻旧寄存器。
+			return false, nil
+		}
+		registerIndex := request.FunctionIndex + 1 + leaf.RegisterIndex
+		if registerIndex < 0 || registerIndex >= len(vm.registers) {
+			// 参数寄存器越界时回退完整 VM 保留原边界。
+			return false, nil
+		}
+		operandValue = vm.registers[registerIndex]
+	} else {
+		// 未知预解析形态必须回退完整 VM。
 		return false, nil
 	}
-	resultValue := IntegerValue(upvalueValue.Integer + leaf.IntegerConstant)
+	resultValue, ok := leafFastAddValue(upvalueValue, operandValue)
+	if !ok {
+		// 非原生数值需要完整 Lua 算术转换和元方法处理。
+		return false, nil
+	}
 	if !luaClosureSetUpvalueValue(closure, leaf.UpvalueIndex, resultValue) {
 		// 写回失败时回退完整 VM，由原路径暴露 upvalue 状态。
 		return false, nil
