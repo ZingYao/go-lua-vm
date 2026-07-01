@@ -315,6 +315,39 @@ Go 端 micro benchmark 复跑 5 次后，`BenchmarkDoStringRecursion` 从本轮 
 `3.01x` / `2.96x`，`function_call` 为 `2.63x` / `2.60x`；`arith_chain_temp` 仍为 `3.04x`，
 下一轮继续优先优化算术链与 3x 边缘项。
 
+#### 2026-07-01 SUB/MUL 右常量缓存热分支瘦身复核
+
+本轮只调整 VM 中 `SUB` / `MUL` integer inline cache 的右侧 integer 常量命中路径：
+调用方已完成目标寄存器越界检查后，将 `targetIndex` 传入缓存函数，避免热分支再次从指令中解析
+`A`；同时在该热分支局部复用寄存器切片，并用单次 `uint` 边界检查覆盖负索引与越界索引。
+非右常量 `SUB` / `MUL` 缓存路径复用已有通用 integer cache helper，保持缓存失效、类型变化、
+常量操作数、元方法回退和错误语义不变。
+
+该改动不改变 codegen。使用官方 Lua 5.3.6 反汇编复核，`arith_chain_temp` 热循环仍为
+`MUL; ADD; SUB; FORLOOP`；`recursion` 的 `fib` 子函数热体仍为
+`LT; JMP; RETURN; GETUPVAL; SUB; CALL; GETUPVAL; SUB; CALL; ADD; RETURN`。
+项目主函数循环退出处额外的零距离 `JMP` 不在热循环内。
+
+Go 端 micro benchmark 复跑 5 次后，`BenchmarkDoStringArithChainTemp` 从本轮初始约
+`3.73 ms/op` 收窄到约 `3.71-3.72 ms/op`，alloc/op 维持 `320`；`BenchmarkDoStringRecursion`
+约 `7.48-7.55 ms/op`，alloc/op 维持 `489`，未出现明显回归。完整官方脚本两次复跑如下：
+
+| 用例 | 官方工具中位数 | 本项目中位数 | 本项目/官方 |
+| --- | ---: | ---: | ---: |
+| `arith_add_loop` | 0.008265s / 0.008166s | 0.024236s / 0.024148s | 2.93x / 2.96x |
+| `arith_mix_loop` | 0.012158s / 0.012017s | 0.036195s / 0.035877s | 2.98x / 2.99x |
+| `arith_chain_temp` | 0.013786s / 0.013703s | 0.041558s / 0.041449s | 3.01x / 3.02x |
+| `table_rw` | 0.007640s / 0.007529s | 0.022627s / 0.022361s | 2.96x / 2.97x |
+| `function_call` | 0.007507s / 0.007307s | 0.019242s / 0.019210s | 2.56x / 2.63x |
+| `string_concat` | 0.005624s / 0.005412s | 0.009617s / 0.009762s | 1.71x / 1.80x |
+| `closure_upvalue` | 0.008540s / 0.008763s | 0.021849s / 0.022049s | 2.56x / 2.52x |
+| `stdlib_math_string` | 0.020077s / 0.020130s | 0.046085s / 0.046046s | 2.30x / 2.29x |
+| `recursion` | 0.004320s / 0.004311s | 0.012553s / 0.012520s | 2.91x / 2.90x |
+| `compile_3000_functions` | 0.005898s / 0.005925s | 0.015291s / 0.015189s | 2.59x / 2.56x |
+
+当前明确仍需继续优化的路径为 `arith_chain_temp`；`arith_add_loop`、`arith_mix_loop`、`table_rw`
+和 `recursion` 虽低于或贴近 3x，但仍需作为边缘回归观察项。
+
 #### 短期性能优化复核历史
 
 下表保留 2026-07-01 较窄短期目标脚本口径的历史复核结果。由于完整脚本口径覆盖的循环规模和标准库
@@ -401,6 +434,6 @@ xychart-beta
 ### 结论
 
 - CLI 冷启动和小脚本差距较小，历史冷启动约 1.25x 到 1.35x；本轮 `compile_3000_functions` 为 2.63x / 2.61x，仍低于当前 3x 目标线。
-- 按当前完整 benchmark 复核口径，`arith_chain_temp` 仍高于 3x；`arith_add_loop` 与 `recursion` 贴近 3x，需要继续作为短期优化目标；`arith_mix_loop`、`table_rw`、`function_call`、`closure_upvalue` 与 `stdlib_math_string` 低于 3x，仍需回归观察。
+- 按当前完整 benchmark 复核口径，`arith_chain_temp` 仍高于 3x；`arith_add_loop`、`arith_mix_loop`、`table_rw` 与 `recursion` 低于或贴近 3x，需要继续作为边缘回归观察项；`function_call`、`closure_upvalue` 与 `stdlib_math_string` 低于 3x，仍需回归观察。
 - 字符串拼接已较 2026-06-29 旧基线明显改善，从约 92x 收窄到约 1.86x。
 - 后续优先优化方向应集中在算术链 `ADD`/`SUB`/`MUL` 与 `FORLOOP` 成本、递归函数调用边界、表读写热路径、VM dispatch code size 对无关路径的影响，以及标准库函数调用边界。
