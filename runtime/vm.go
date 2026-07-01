@@ -121,6 +121,10 @@ const (
 	arithmeticIntRegisterCacheAddNumber
 	// arithmeticIntRegisterCacheDivNumber 表示当前 PC 最近命中过 DIV 的寄存器原生数值路径。
 	arithmeticIntRegisterCacheDivNumber
+	// arithmeticIntRegisterCacheMod 表示当前 PC 最近命中过 MOD 的双 integer 路径。
+	arithmeticIntRegisterCacheMod
+	// arithmeticIntRegisterCacheIDiv 表示当前 PC 最近命中过 IDIV 的双 integer 路径。
+	arithmeticIntRegisterCacheIDiv
 )
 
 // arithmeticIntOperandCacheEntry 表示一条 integer 算术 inline cache 的操作数形态。
@@ -1678,8 +1682,8 @@ func (vm *VM) Step(instruction bytecode.Instruction) error {
 		// MUL 执行 Lua 5.3 乘法，优先保留 integer 结果。
 		return vm.executeMul(instruction)
 	case bytecode.OpMod:
-		// MOD 执行 Lua 5.3 取模，使用向下取整语义。
-		return vm.executeBinaryArithmetic(instruction, binaryArithmeticMod, metamethodMod)
+		// MOD 执行 Lua 5.3 取模，优先按官方 VM 的双 integer 路径处理。
+		return vm.executeMod(instruction)
 	case bytecode.OpPow:
 		// POW 执行 Lua 5.3 幂运算，结果为 float number。
 		return vm.executeBinaryArithmetic(instruction, binaryArithmeticPow, metamethodPow)
@@ -1687,8 +1691,8 @@ func (vm *VM) Step(instruction bytecode.Instruction) error {
 		// DIV 执行 Lua 5.3 浮点除法，结果为 float number。
 		return vm.executeDiv(instruction)
 	case bytecode.OpIDiv:
-		// IDIV 执行 Lua 5.3 向下取整除法。
-		return vm.executeBinaryArithmetic(instruction, binaryArithmeticIDiv, metamethodIDiv)
+		// IDIV 执行 Lua 5.3 向下取整除法，优先按官方 VM 的双 integer 路径处理。
+		return vm.executeIDiv(instruction)
 	case bytecode.OpBAnd:
 		// BAND 执行 Lua 5.3 按位与，操作数必须可转为 integer。
 		return vm.executeBinaryBitwise(instruction, binaryBitwiseAnd, metamethodBand)
@@ -2489,6 +2493,90 @@ func (vm *VM) executeMul(instruction bytecode.Instruction) error {
 	}, metamethodMul)
 }
 
+// executeMod 执行 Lua 5.3 OP_MOD 指令。
+//
+// instruction 的 A 是目标寄存器，B/C 使用 RK 编码读取操作数。对齐官方 Lua 5.3.6 的
+// lvm.c，双 integer 先直接执行 integer 取模；number、字符串数字和元方法语义回退完整路径。
+func (vm *VM) executeMod(instruction bytecode.Instruction) error {
+	targetIndex := instruction.A()
+	if targetIndex < 0 || targetIndex >= len(vm.registers) {
+		// 目标寄存器越界时不能写入，避免破坏寄存器窗口。
+		return ErrRegisterOutOfRange
+	}
+	if handled, err := vm.tryCachedIntegerDivArithmetic(instruction, arithmeticIntRegisterCacheMod); handled || err != nil {
+		// MOD 专用缓存命中已完成写回；零除或缓存形态损坏时返回原始错误。
+		return err
+	}
+
+	leftOperand := instruction.B()
+	rightOperand := instruction.C()
+	leftValue, err := vm.rkValue(leftOperand)
+	if err != nil {
+		// 左操作数读取失败时不能继续计算，目标寄存器保持原值。
+		return err
+	}
+	rightValue, err := vm.rkValue(rightOperand)
+	if err != nil {
+		// 右操作数读取失败时不能继续计算，目标寄存器保持原值。
+		return err
+	}
+	if leftValue.Kind == KindInteger && rightValue.Kind == KindInteger {
+		if rightValue.Integer == 0 {
+			// integer 取模零除必须返回 Lua 运行期错误，不能触发 Go panic。
+			return fmt.Errorf("'n%%0': %w", ErrDivisionByZero)
+		}
+		// 双 integer 直接写回 integer 余数，并记录当前 PC 的热路径。
+		vm.rememberIntegerRegisterArithmetic(leftOperand, rightOperand, arithmeticIntRegisterCacheMod)
+		vm.registers[targetIndex] = IntegerValue(integerModulo(leftValue.Integer, rightValue.Integer))
+		return nil
+	}
+
+	// 非双 integer 继续使用完整路径，保留 number、字符串数字和 __mod 元方法。
+	return vm.executeBinaryArithmetic(instruction, binaryArithmeticMod, metamethodMod)
+}
+
+// executeIDiv 执行 Lua 5.3 OP_IDIV 指令。
+//
+// instruction 的 A 是目标寄存器，B/C 使用 RK 编码读取操作数。对齐官方 Lua 5.3.6 的
+// lvm.c，双 integer 先直接执行 floor division；number、字符串数字和元方法语义回退完整路径。
+func (vm *VM) executeIDiv(instruction bytecode.Instruction) error {
+	targetIndex := instruction.A()
+	if targetIndex < 0 || targetIndex >= len(vm.registers) {
+		// 目标寄存器越界时不能写入，避免破坏寄存器窗口。
+		return ErrRegisterOutOfRange
+	}
+	if handled, err := vm.tryCachedIntegerDivArithmetic(instruction, arithmeticIntRegisterCacheIDiv); handled || err != nil {
+		// IDIV 专用缓存命中已完成写回；零除或缓存形态损坏时返回原始错误。
+		return err
+	}
+
+	leftOperand := instruction.B()
+	rightOperand := instruction.C()
+	leftValue, err := vm.rkValue(leftOperand)
+	if err != nil {
+		// 左操作数读取失败时不能继续计算，目标寄存器保持原值。
+		return err
+	}
+	rightValue, err := vm.rkValue(rightOperand)
+	if err != nil {
+		// 右操作数读取失败时不能继续计算，目标寄存器保持原值。
+		return err
+	}
+	if leftValue.Kind == KindInteger && rightValue.Kind == KindInteger {
+		if rightValue.Integer == 0 {
+			// integer floor division 零除必须返回 Lua 运行期错误，不能触发 Go panic。
+			return ErrDivisionByZero
+		}
+		// 双 integer 直接写回 integer 商，并记录当前 PC 的热路径。
+		vm.rememberIntegerRegisterArithmetic(leftOperand, rightOperand, arithmeticIntRegisterCacheIDiv)
+		vm.registers[targetIndex] = IntegerValue(integerFloorDiv(leftValue.Integer, rightValue.Integer))
+		return nil
+	}
+
+	// 非双 integer 继续使用完整路径，保留 number、字符串数字和 __idiv 元方法。
+	return vm.executeBinaryArithmetic(instruction, binaryArithmeticIDiv, metamethodIDiv)
+}
+
 // executeDiv 执行 Lua 5.3 OP_DIV 指令。
 //
 // instruction 的 A 是目标寄存器，B/C 使用 RK 编码读取操作数。原生 integer/number 直接按
@@ -2973,6 +3061,57 @@ func (vm *VM) tryCachedIntegerMulArithmetic(instruction bytecode.Instruction) (b
 	// MUL 按 64 位补码自然回绕，命中后直接写回目标寄存器。
 	vm.registers[instruction.A()] = IntegerValue(leftInteger * rightInteger)
 	return true, nil
+}
+
+// tryCachedIntegerDivArithmetic 尝试执行当前 PC 的 MOD/IDIV integer 算术缓存。
+//
+// cacheKind 必须是 arithmeticIntRegisterCacheMod 或 arithmeticIntRegisterCacheIDiv；缓存不存在、
+// 类型变化或指令形态变化时返回 handled=false。除数变为 0 时保持缓存形态并返回 Lua 错误。
+func (vm *VM) tryCachedIntegerDivArithmetic(instruction bytecode.Instruction, cacheKind byte) (bool, error) {
+	currentPC := vm.currentPC
+	if currentPC < 0 || currentPC >= len(vm.arithmeticIntRegisterCache) || currentPC >= len(vm.arithmeticIntOperandCache) || vm.arithmeticIntRegisterCache[currentPC] != cacheKind {
+		// 当前 PC 没有目标 integer 除法类缓存，调用方继续走普通 RK 路径。
+		return false, nil
+	}
+
+	cacheEntry := vm.arithmeticIntOperandCache[currentPC]
+	leftInteger, leftOK, leftErr := vm.cachedIntegerArithmeticEntryValue(cacheEntry.leftIndex, cacheEntry.leftConstant, cacheEntry.leftConstantOperand)
+	rightInteger, rightOK, rightErr := vm.cachedIntegerArithmeticEntryValue(cacheEntry.rightIndex, cacheEntry.rightConstant, cacheEntry.rightConstantOperand)
+	if leftErr != nil || rightErr != nil {
+		// 指令形态或寄存器窗口变化时清理缓存，并回到通用 RK 路径报出原始错误。
+		vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
+		vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
+		return false, nil
+	}
+	if !leftOK || !rightOK {
+		// 类型不再匹配时清理缓存，后续走完整 Lua 算术和元方法语义。
+		vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
+		vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
+		return false, nil
+	}
+	if rightInteger == 0 {
+		// 零除错误必须在写回前暴露，保持目标寄存器原值。
+		if cacheKind == arithmeticIntRegisterCacheMod {
+			return true, fmt.Errorf("'n%%0': %w", ErrDivisionByZero)
+		}
+		return true, ErrDivisionByZero
+	}
+
+	switch cacheKind {
+	case arithmeticIntRegisterCacheMod:
+		// MOD 使用 Lua floor-mod 语义，结果与除数同号。
+		vm.registers[instruction.A()] = IntegerValue(integerModulo(leftInteger, rightInteger))
+		return true, nil
+	case arithmeticIntRegisterCacheIDiv:
+		// IDIV 使用 Lua floor division 语义，结果向负无穷取整。
+		vm.registers[instruction.A()] = IntegerValue(integerFloorDiv(leftInteger, rightInteger))
+		return true, nil
+	default:
+		// 未知缓存类型表示调用方传入错误，清理缓存后回到完整路径。
+		vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
+		vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
+		return false, nil
+	}
 }
 
 // integerArithmeticByCacheKind 执行 ADD/SUB/MUL 的 integer 热路径。
@@ -5308,6 +5447,10 @@ func valueToLuaNumber(value Value) (float64, bool) {
 //
 // right 必须非 0；结果满足 left == floor(left/right)*right + result，并与 right 同号。
 func integerModulo(left int64, right int64) int64 {
+	if right == -1 {
+		// Lua 5.3 官方 luaV_mod 对 -1 特判为 0，避免最小 integer 取模溢出路径。
+		return 0
+	}
 	modulo := left % right
 	if modulo != 0 && (modulo^right) < 0 {
 		// Go % 结果与被除数同号；Lua 需要结果与除数同号，因此跨符号时修正一次。
@@ -5322,6 +5465,10 @@ func integerModulo(left int64, right int64) int64 {
 //
 // right 必须非 0；结果向负无穷方向取整，而不是 Go 默认的向零截断。
 func integerFloorDiv(left int64, right int64) int64 {
+	if right == -1 {
+		// Lua 5.3 官方 luaV_div 对 -1 特判为 0-left，避免最小 integer 除以 -1 溢出。
+		return -left
+	}
 	quotient := left / right
 	remainder := left % right
 	if remainder != 0 && (remainder^right) < 0 {

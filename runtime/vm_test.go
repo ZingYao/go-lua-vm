@@ -1216,6 +1216,7 @@ func TestVMBinaryArithmeticInstructions(t *testing.T) {
 		{name: "sub integer", opCode: bytecode.OpSub, constants: []bytecode.Constant{bytecode.IntegerConstant(7), bytecode.IntegerConstant(5)}, expectedValue: IntegerValue(2)},
 		{name: "mul integer", opCode: bytecode.OpMul, constants: []bytecode.Constant{bytecode.IntegerConstant(7), bytecode.IntegerConstant(5)}, expectedValue: IntegerValue(35)},
 		{name: "mod integer", opCode: bytecode.OpMod, constants: []bytecode.Constant{bytecode.IntegerConstant(-7), bytecode.IntegerConstant(5)}, expectedValue: IntegerValue(3)},
+		{name: "mod min integer by minus one", opCode: bytecode.OpMod, constants: []bytecode.Constant{bytecode.IntegerConstant(math.MinInt64), bytecode.IntegerConstant(-1)}, expectedValue: IntegerValue(0)},
 		{name: "mod positive by positive infinity", opCode: bytecode.OpMod, constants: []bytecode.Constant{bytecode.NumberConstant(1), bytecode.NumberConstant(math.Inf(1))}, expectedValue: NumberValue(1)},
 		{name: "mod positive by negative infinity", opCode: bytecode.OpMod, constants: []bytecode.Constant{bytecode.NumberConstant(1), bytecode.NumberConstant(math.Inf(-1))}, expectedValue: NumberValue(math.Inf(-1))},
 		{name: "mod negative by positive infinity", opCode: bytecode.OpMod, constants: []bytecode.Constant{bytecode.NumberConstant(-1), bytecode.NumberConstant(math.Inf(1))}, expectedValue: NumberValue(math.Inf(1))},
@@ -1224,6 +1225,7 @@ func TestVMBinaryArithmeticInstructions(t *testing.T) {
 		{name: "div number", opCode: bytecode.OpDiv, constants: []bytecode.Constant{bytecode.IntegerConstant(7), bytecode.IntegerConstant(2)}, expectedValue: NumberValue(3.5)},
 		{name: "div zero number", opCode: bytecode.OpDiv, constants: []bytecode.Constant{bytecode.IntegerConstant(1), bytecode.IntegerConstant(0)}, expectedValue: NumberValue(math.Inf(1))},
 		{name: "idiv integer", opCode: bytecode.OpIDiv, constants: []bytecode.Constant{bytecode.IntegerConstant(-7), bytecode.IntegerConstant(2)}, expectedValue: IntegerValue(-4)},
+		{name: "idiv min integer by minus one", opCode: bytecode.OpIDiv, constants: []bytecode.Constant{bytecode.IntegerConstant(math.MinInt64), bytecode.IntegerConstant(-1)}, expectedValue: IntegerValue(math.MinInt64)},
 		{name: "add string number", opCode: bytecode.OpAdd, constants: []bytecode.Constant{bytecode.StringConstant("1.5"), bytecode.StringConstant("2.25")}, expectedValue: NumberValue(3.75)},
 	}
 
@@ -1239,6 +1241,94 @@ func TestVMBinaryArithmeticInstructions(t *testing.T) {
 		if !ok || !value.RawEqual(testCase.expectedValue) {
 			// 目标寄存器必须保存该算术 opcode 的预期结果。
 			t.Fatalf("%s value mismatch: value=%#v ok=%v", testCase.name, value, ok)
+		}
+	}
+}
+
+// TestVMIntegerModIDivCache 验证 MOD/IDIV 的 integer inline cache。
+//
+// 缓存命中必须保持 Lua 5.3 的 floor-mod/floor-division 语义；运行期除数变为 0 时仍返回
+// 原始 Lua 错误并保持目标寄存器不被覆盖。
+func TestVMIntegerModIDivCache(t *testing.T) {
+	tests := []struct {
+		name           string
+		opCode         bytecode.OpCode
+		left           int64
+		right          int64
+		expectedFirst  Value
+		expectedSecond Value
+	}{
+		{
+			name:           "mod cached",
+			opCode:         bytecode.OpMod,
+			left:           -7,
+			right:          5,
+			expectedFirst:  IntegerValue(3),
+			expectedSecond: IntegerValue(1),
+		},
+		{
+			name:           "idiv cached",
+			opCode:         bytecode.OpIDiv,
+			left:           -7,
+			right:          2,
+			expectedFirst:  IntegerValue(-4),
+			expectedSecond: IntegerValue(-5),
+		},
+	}
+
+	for _, testCase := range tests {
+		// 每个 opcode 使用独立 Proto，确保 PC 缓存只观察当前指令。
+		proto := &bytecode.Proto{Code: []bytecode.Instruction{bytecode.CreateABC(testCase.opCode, 0, 1, 2)}}
+		vm := NewVM(3)
+		vm.BindPrototype(proto)
+		if err := vm.SetRegister(1, IntegerValue(testCase.left)); err != nil {
+			// 测试准备阶段必须能写入左操作数。
+			t.Fatalf("%s set left failed: %v", testCase.name, err)
+		}
+		if err := vm.SetRegister(2, IntegerValue(testCase.right)); err != nil {
+			// 测试准备阶段必须能写入右操作数。
+			t.Fatalf("%s set right failed: %v", testCase.name, err)
+		}
+		vm.currentPC = 0
+		if err := vm.Step(proto.Code[0]); err != nil {
+			// 首次执行会建立 integer 缓存，不应失败。
+			t.Fatalf("%s first step failed: %v", testCase.name, err)
+		}
+		if value, ok := vm.Register(0); !ok || !value.RawEqual(testCase.expectedFirst) {
+			// 首次结果必须符合 Lua 5.3 整数语义。
+			t.Fatalf("%s first value=%#v ok=%v", testCase.name, value, ok)
+		}
+
+		if err := vm.SetRegister(1, IntegerValue(testCase.left-2)); err != nil {
+			// 第二轮更新左操作数，用于确认缓存读取的是当前寄存器值。
+			t.Fatalf("%s update left failed: %v", testCase.name, err)
+		}
+		vm.currentPC = 0
+		if err := vm.Step(proto.Code[0]); err != nil {
+			// 第二次同 PC 执行应命中缓存并保持语义。
+			t.Fatalf("%s cached step failed: %v", testCase.name, err)
+		}
+		if value, ok := vm.Register(0); !ok || !value.RawEqual(testCase.expectedSecond) {
+			// 缓存命中不能复用旧值，必须读取当前寄存器。
+			t.Fatalf("%s cached value=%#v ok=%v", testCase.name, value, ok)
+		}
+
+		if err := vm.SetRegister(0, StringValue("keep")); err != nil {
+			// 零除前设置哨兵值，用于确认错误路径不覆盖目标寄存器。
+			t.Fatalf("%s set sentinel failed: %v", testCase.name, err)
+		}
+		if err := vm.SetRegister(2, IntegerValue(0)); err != nil {
+			// 更新右操作数为 0 以覆盖缓存命中错误路径。
+			t.Fatalf("%s set zero divisor failed: %v", testCase.name, err)
+		}
+		vm.currentPC = 0
+		if err := vm.Step(proto.Code[0]); !errors.Is(err, ErrDivisionByZero) {
+			// 缓存命中也必须保留 Lua 的零除错误。
+			t.Fatalf("%s zero divisor error=%v", testCase.name, err)
+		}
+		if value, ok := vm.Register(0); !ok || !value.RawEqual(StringValue("keep")) {
+			// 零除错误路径不能写入部分结果。
+			t.Fatalf("%s zero divisor value=%#v ok=%v", testCase.name, value, ok)
 		}
 	}
 }
