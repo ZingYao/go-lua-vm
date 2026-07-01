@@ -2542,12 +2542,12 @@ func (vm *VM) executeMul(instruction bytecode.Instruction) error {
 		// 目标寄存器越界时不能写入，避免破坏寄存器窗口。
 		return ErrRegisterOutOfRange
 	}
-	if handled, err := vm.tryNumberConstantMul(instruction, targetIndex); handled || err != nil {
-		// 混合算术循环常见 `number register * number constant`，命中后跳过通用 RK 和闭包回调。
-		return err
-	}
 	if handled, err := vm.tryCachedIntegerMulArithmetic(instruction); handled || err != nil {
 		// MUL 专用缓存命中已完成写回；缓存形态损坏时返回原始寄存器错误。
+		return err
+	}
+	if handled, err := vm.tryNumberConstantMul(instruction, targetIndex); handled || err != nil {
+		// 混合算术循环常见 `number register * number constant`，命中后跳过通用 RK 和闭包回调。
 		return err
 	}
 
