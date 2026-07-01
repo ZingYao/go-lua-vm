@@ -2944,18 +2944,20 @@ func (vm *VM) tryCachedIntegerAddArithmetic(instruction bytecode.Instruction, ta
 	}
 
 	cacheEntry := vm.arithmeticIntOperandCache[currentPC]
+	registers := vm.registers
 	var leftInteger int64
 	if cacheEntry.leftConstantOperand {
 		// 左操作数为 Proto integer 常量时可直接复用缓存值。
 		leftInteger = cacheEntry.leftConstant
 	} else {
-		if cacheEntry.leftIndex < 0 || cacheEntry.leftIndex >= len(vm.registers) {
+		leftIndex := cacheEntry.leftIndex
+		if uint(leftIndex) >= uint(len(registers)) {
 			// 寄存器窗口变化时清理缓存，并回到通用 RK 路径报出原始错误。
 			vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
 			vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
 			return false, nil
 		}
-		leftValue := vm.registers[cacheEntry.leftIndex]
+		leftValue := registers[leftIndex]
 		if leftValue.Kind != KindInteger {
 			// 左操作数类型变化时缓存失效，后续走完整 Lua 算术和元方法语义。
 			vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
@@ -2970,13 +2972,14 @@ func (vm *VM) tryCachedIntegerAddArithmetic(instruction bytecode.Instruction, ta
 		// 右操作数为 Proto integer 常量时可直接复用缓存值。
 		rightInteger = cacheEntry.rightConstant
 	} else {
-		if cacheEntry.rightIndex < 0 || cacheEntry.rightIndex >= len(vm.registers) {
+		rightIndex := cacheEntry.rightIndex
+		if uint(rightIndex) >= uint(len(registers)) {
 			// 寄存器窗口变化时清理缓存，并回到通用 RK 路径报出原始错误。
 			vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
 			vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
 			return false, nil
 		}
-		rightValue := vm.registers[cacheEntry.rightIndex]
+		rightValue := registers[rightIndex]
 		if rightValue.Kind != KindInteger {
 			// 右操作数类型变化时缓存失效，后续走完整 Lua 算术和元方法语义。
 			vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
@@ -2987,7 +2990,7 @@ func (vm *VM) tryCachedIntegerAddArithmetic(instruction bytecode.Instruction, ta
 	}
 
 	// ADD 按 64 位补码自然回绕，命中后直接写回目标寄存器。
-	vm.registers[targetIndex] = IntegerValue(leftInteger + rightInteger)
+	registers[targetIndex] = IntegerValue(leftInteger + rightInteger)
 	return true, nil
 }
 
