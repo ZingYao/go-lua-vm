@@ -785,12 +785,12 @@ func (generator *generator) compileSingleLocalSelfBinaryAssignment(statement *pa
 		// concat、短路和比较已有专门语义，当前优化只处理普通二元运算。
 		return false, nil
 	}
-	if chainHandled, err := generator.compileSelfBinaryChainToTarget(targetName.Name, binding, binaryExpression); chainHandled || err != nil {
-		// 左结合自二元链已直接写回目标 local。
+	if chainHandled, err := generator.compileSelfBinaryChainViaAccumulator(targetName.Name, binding, binaryExpression); chainHandled || err != nil {
+		// 左结合自二元链使用临时累加器，保持官方 Lua 的求值和最终写回时机。
 		return chainHandled, err
 	}
-	if chainHandled, err := generator.compileSelfBinaryChainViaAccumulator(targetName.Name, binding, binaryExpression); chainHandled || err != nil {
-		// 含调用的左结合自二元链使用临时累加器，保持官方 Lua 的求值和写回时机。
+	if chainHandled, err := generator.compileSelfBinaryChainToTarget(targetName.Name, binding, binaryExpression); chainHandled || err != nil {
+		// 简单自二元链已直接写回目标 local。
 		return chainHandled, err
 	}
 	leftName, ok := binaryExpression.Left.(*parser.NameExpression)
@@ -850,15 +850,15 @@ func (generator *generator) compileSingleLocalSelfBinaryAssignment(statement *pa
 
 // compileSelfBinaryChainViaAccumulator 编译 `x = ((x op rhs) op rhs)` 的官方兼容累加器形态。
 //
-// 当 RHS 可能调用函数时，不能提前把 x 读入临时值；Lua 5.3 官方 codegen 会先计算
-// RHS，再在二元 opcode 中读取当前 x，并把中间结果放入临时累加器，直到最后一层才写回 x。
+// 当左侧存在子二元链时，不能提前把中间结果写回 x；Lua 5.3 官方 codegen 会把中间结果
+// 放入临时累加器，直到最后一层才写回 x，避免后续运算失败时污染目标 local。
 func (generator *generator) compileSelfBinaryChainViaAccumulator(targetName string, binding localBinding, expression *parser.BinaryExpression) (bool, error) {
 	if !generator.isSelfBinaryChainRoot(targetName, expression) {
 		// 只有左侧最终落到目标 local 的普通二元链可以使用该形态。
 		return false, nil
 	}
-	if !selfBinaryChainContainsCall(expression) {
-		// 不含调用的链路保留既有 table/global 热路径，避免影响 table_rw 字节码形态。
+	if _, leftIsBinary := expression.Left.(*parser.BinaryExpression); !leftIsBinary && !selfBinaryChainContainsCall(expression) {
+		// 简单 `x = x op rhs` 保留 direct-to-target 热路径，避免破坏 table/global 直接寄存器形态。
 		return false, nil
 	}
 	accumulatorRegister := -1

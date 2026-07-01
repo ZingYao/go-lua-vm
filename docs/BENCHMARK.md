@@ -99,25 +99,27 @@ BenchmarkGoLuaCallback-10                        509391    268.5 ns/op       492
 
 2026-07-01 在 `quanquan/feature/perf-followup` 分支按完整脚本口径复测。官方工具不是 PATH 上的
 Lua 5.5，而是在临时目录下载 `lua-5.3.6.tar.gz`、校验 SHA256 后构建出的官方 Lua 5.3.6 `lua` /
-`luac`；本项目使用当前 `bin/glua` / `bin/gluac`。每个脚本 warmup 后交替运行 40 次，取 wall-clock
-中位数；CLI 冷启动用例运行 30 次；本项目构建仍使用 `CGO_ENABLED=0`。
+`luac`；本项目使用当前源码临时构建出的 `glua` / `gluac`。每个脚本 warmup 后交替运行 40 次，取
+wall-clock 中位数；`compile_3000_functions` 运行 30 次；本项目构建仍使用 `CGO_ENABLED=0`。
 
 | 用例 | 官方工具中位数 | 本项目中位数 | 本项目/官方 |
 | --- | ---: | ---: | ---: |
-| `arith_add_loop` | 0.003588s | 0.007094s | 1.98x |
-| `arith_mix_loop` | 0.004985s | 0.017647s | 3.54x |
-| `table_rw` | 0.004005s | 0.009507s | 2.37x |
-| `function_call` | 0.004590s | 0.009894s | 2.16x |
-| `string_concat` | 0.003884s | 0.005961s | 1.53x |
-| `closure_upvalue` | 0.005354s | 0.016863s | 3.15x |
-| `stdlib_math_string` | 0.006036s | 0.020547s | 3.40x |
-| `recursion` | 0.003664s | 0.011292s | 3.08x |
-| `compile_3000_functions` | 0.007909s | 0.014907s | 1.88x |
+| `arith_add_loop` | 0.008338s | 0.029659s | 3.56x |
+| `arith_mix_loop` | 0.006980s | 0.020445s | 2.93x |
+| `arith_chain_temp` | 0.013728s | 0.057742s | 4.21x |
+| `table_rw` | 0.004012s | 0.007046s | 1.76x |
+| `function_call` | 0.003478s | 0.005033s | 1.45x |
+| `string_concat` | 0.005838s | 0.010637s | 1.82x |
+| `closure_upvalue` | 0.016307s | 0.046270s | 2.84x |
+| `stdlib_math_string` | 0.003675s | 0.005850s | 1.59x |
+| `recursion` | 0.003761s | 0.007413s | 1.97x |
+| `compile_3000_functions` | 0.006016s | 0.014862s | 2.47x |
 
-本轮完整口径下仍高于 3x 的路径为 `arith_mix_loop`、`closure_upvalue`、`stdlib_math_string` 和
-`recursion`。后续短期性能优化任务重新开启，优先继续按既定顺序从算术 typed fast path、函数调用 /
-upvalue、标准库 fastcall 与递归调用成本处推进；`table_rw`、`function_call`、`string_concat` 和
-`compile_3000_functions` 当前低于 3x，但仍作为回归观察项。
+本轮完整口径下仍高于 3x 的路径为 `arith_add_loop` 与临时补充的 `arith_chain_temp`。其中
+`arith_chain_temp` 覆盖 `sum = sum + i * 3 - 7` 这类左结合自二元链，用于区分截图中一度混用的
+`arith_add_loop` 与混合算术链；后续需要把该 fixture 固化到稳定 benchmark harness 后再作为长期回归项。
+原旧清单中的 `arith_mix_loop`、`closure_upvalue`、`stdlib_math_string` 和 `recursion` 在本轮复测中已经
+低于 3x，但仍作为回归观察项。
 
 #### 短期性能优化复核历史
 
@@ -202,7 +204,7 @@ xychart-beta
 
 ### 结论
 
-- CLI 冷启动、小脚本和 `gluac` 编译差距较小，约 1.25x 到 1.88x，说明启动和编译器当前不是主要瓶颈。
-- 按完整 benchmark 口径，`arith_mix_loop`、`closure_upvalue`、`stdlib_math_string`、`recursion` 仍高于 3x，需要继续作为短期优化目标。
+- CLI 冷启动和小脚本差距较小，历史冷启动约 1.25x 到 1.35x；本轮 `compile_3000_functions` 为 2.47x，仍低于当前 3x 目标线。
+- 按当前完整 benchmark 复核口径，`arith_add_loop` 与临时补充的 `arith_chain_temp` 仍高于 3x，需要继续作为短期优化目标；旧清单中的 `arith_mix_loop`、`closure_upvalue`、`stdlib_math_string`、`recursion` 本轮已低于 3x，但必须继续回归观察。
 - 字符串拼接已较 2026-06-29 旧基线明显改善，从约 92x 收窄到约 1.70x。
 - 后续优先优化方向应集中在稳定 benchmark harness、函数调用/upvalue 余量、VM dispatch code size 对无关路径的影响，以及标准库函数调用边界。

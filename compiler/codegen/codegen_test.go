@@ -1010,6 +1010,55 @@ return sum
 	}
 }
 
+// TestCompileSelfBinaryChainUsesAccumulator 验证自二元链在最终写回前使用临时累加器。
+//
+// `sum = sum + i * 3 - 7` 对齐官方 Lua 5.3 codegen：第一层 ADD 写入临时寄存器，第二层 SUB
+// 才写回 sum，避免 SUB 失败时提前污染目标 local。
+func TestCompileSelfBinaryChainUsesAccumulator(t *testing.T) {
+	chunk := parseChunkForCodegenTest(t, `
+local sum = 0
+for i = 1, 10 do
+  sum = sum + i * 3 - 7
+end
+return sum
+`)
+
+	proto, err := CompileChunk(chunk, "self-binary-chain-accumulator")
+	if err != nil {
+		// 自二元链样例必须可编译。
+		t.Fatalf("compile self binary chain failed: %v", err)
+	}
+	if proto.MaxStackSize != 6 {
+		// 官方 Lua 5.3 该形态使用一个表达式临时寄存器，总 stack 为 6。
+		t.Fatalf("unexpected max stack=%d code=%v", proto.MaxStackSize, proto.Code)
+	}
+
+	foundAccumulatorAdd := false
+	foundFinalSub := false
+	for _, instruction := range proto.Code {
+		switch instruction.OpCode() {
+		case bytecode.OpAdd:
+			if instruction.A() == 0 {
+				// 中间 ADD 不能直接写回 sum，否则后续 SUB 报错会污染目标 local。
+				t.Fatalf("unexpected ADD writes target before final operator: code=%v", proto.Code)
+			}
+			if instruction.A() == 5 && instruction.B() == 0 && instruction.C() == 5 {
+				// 第一层 ADD 使用 R5 作为临时累加器。
+				foundAccumulatorAdd = true
+			}
+		case bytecode.OpSub:
+			if instruction.A() == 0 && instruction.B() == 5 && bytecode.IsK(instruction.C()) {
+				// 最后一层 SUB 才写回 sum。
+				foundFinalSub = true
+			}
+		}
+	}
+	if !foundAccumulatorAdd || !foundFinalSub {
+		// 两层运算必须分别体现临时累加器和最终写回。
+		t.Fatalf("missing accumulator shape: add=%v sub=%v code=%v", foundAccumulatorAdd, foundFinalSub, proto.Code)
+	}
+}
+
 // TestCompileSelfBinaryCallChainReusesAccumulator 验证自二元调用链复用累加器寄存器。
 //
 // `sum = sum + call() + call()` 需要保持最终写回前不覆盖 sum，同时第一层 `sum + call()`
