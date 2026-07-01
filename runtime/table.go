@@ -41,6 +41,8 @@ const (
 	tableNewIndexMetamethodKey = "__newindex"
 	// tableWeakModeKey 表示 Lua 5.3 弱表元表中的 `__mode` 字段名。
 	tableWeakModeKey = "__mode"
+	// tableArrayDoublingLimit 表示数组区使用 2 倍扩容的上限；超过后改用 1.5 倍减少大表多余扫描。
+	tableArrayDoublingLimit = 1 << 16
 )
 
 // Table 表示 Lua table 的第一阶段实现。
@@ -1162,8 +1164,13 @@ func nextTableArrayCapacity(currentCapacity int, requiredSize int) int {
 		currentCapacity = 8
 	}
 	for currentCapacity < requiredSize {
-		// 容量按 2 倍增长，保持连续整数写入的摊还 O(1) 扩容成本。
-		currentCapacity *= 2
+		if currentCapacity < tableArrayDoublingLimit {
+			// 中小数组区按 2 倍增长，保持连续整数写入的摊还 O(1) 扩容成本。
+			currentCapacity *= 2
+			continue
+		}
+		// 大数组区改用 1.5 倍增长，减少超过实际长度的 Value 槽位和 GC 扫描压力。
+		currentCapacity += currentCapacity / 2
 	}
 	return currentCapacity
 }

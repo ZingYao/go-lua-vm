@@ -477,6 +477,39 @@ Go 端 micro benchmark 复跑 6 次后，`BenchmarkDoStringArithAddLoop` 约 `1.
 当前正确 Lua 5.3.6 口径下，`arith_chain_temp` 仍在 3x 附近或略高于 3x，`table_rw` 两轮略高于
 3x、一轮低于 3x；`arith_mix_loop`、`recursion` 和 `arith_add_loop` 仍作为边缘回归观察项。
 
+#### 2026-07-01 大数组区扩容策略复核
+
+`table_rw` profile 显示，连续数组写入的主要成本来自数组区扩容后的清零、复制与 GC 扫描；
+`GETTABLE` / `SETTABLE` 指令本身不是最大 flat 热点。本轮只调整 table 数组区容量策略：数组区容量
+小于 64K 时仍按 2 倍增长，保持中小表追加的摊还 O(1) 成本；超过 64K 后改为 1.5 倍增长，减少
+大表场景超过实际长度的 `Value` 槽位和 GC 扫描压力。该改动不改变 Lua 可见长度、正整数 key、
+nil 删除、hash 区、元表或 `next` 语义。
+
+该改动不改变 codegen。使用官方 Lua 5.3.6 反汇编复核，`table_rw` 热写循环仍为
+`SETTABLE; FORLOOP`，热读循环仍为 `GETTABLE; ADD; FORLOOP`；项目额外的循环退出零距离 `JMP`
+不在热路径。
+
+Go 端 micro benchmark 复跑 5 次后，`BenchmarkDoStringTableReadWrite` 从本轮 baseline 约
+`1.58-1.68 ms/op` 降到约 `1.50-1.63 ms/op`；`BenchmarkTableReadWrite/raw_set_integer`
+维持约 `5.85-5.90 ns/op`，`raw_get_integer` 维持约 `4.90 ns/op`，alloc/op 未变化。重建
+`bin/glua` / `bin/gluac` 后，完整官方脚本三次复跑如下：
+
+| 用例 | 官方工具中位数 | 本项目中位数 | 本项目/官方 |
+| --- | ---: | ---: | ---: |
+| `arith_add_loop` | 0.008392s / 0.008101s / 0.008230s | 0.023502s / 0.023413s / 0.023573s | 2.80x / 2.89x / 2.86x |
+| `arith_mix_loop` | 0.012118s / 0.012195s / 0.012123s | 0.035714s / 0.035781s / 0.035632s | 2.95x / 2.93x / 2.94x |
+| `arith_chain_temp` | 0.013854s / 0.013742s / 0.013859s | 0.041092s / 0.041304s / 0.041376s | 2.97x / 3.01x / 2.99x |
+| `table_rw` | 0.007756s / 0.007676s / 0.007656s | 0.021869s / 0.022078s / 0.022153s | 2.82x / 2.88x / 2.89x |
+| `function_call` | 0.007372s / 0.007508s / 0.007418s | 0.019178s / 0.019610s / 0.019451s | 2.60x / 2.61x / 2.62x |
+| `string_concat` | 0.005281s / 0.005399s / 0.005318s | 0.009715s / 0.009783s / 0.009812s | 1.84x / 1.81x / 1.84x |
+| `closure_upvalue` | 0.008732s / 0.008794s / 0.008742s | 0.022068s / 0.022135s / 0.022008s | 2.53x / 2.52x / 2.52x |
+| `stdlib_math_string` | 0.020218s / 0.020127s / 0.019959s | 0.046130s / 0.045691s / 0.045774s | 2.28x / 2.27x / 2.29x |
+| `recursion` | 0.004257s / 0.004274s / 0.004171s | 0.012548s / 0.012429s / 0.012398s | 2.95x / 2.91x / 2.97x |
+| `compile_3000_functions` | 0.005884s / 0.005771s / 0.005832s | 0.015201s / 0.015105s / 0.015134s | 2.58x / 2.62x / 2.59x |
+
+当前正确 Lua 5.3.6 口径下，`table_rw` 已回到 3x 以下；`arith_chain_temp` 仍在 3x 附近，
+是下一轮明确优先项。`arith_mix_loop`、`arith_add_loop` 与 `recursion` 继续作为边缘回归观察项。
+
 #### 短期性能优化复核历史
 
 下表保留 2026-07-01 较窄短期目标脚本口径的历史复核结果。由于完整脚本口径覆盖的循环规模和标准库
@@ -562,7 +595,7 @@ xychart-beta
 
 ### 结论
 
-- CLI 冷启动和小脚本差距较小，历史冷启动约 1.25x 到 1.35x；本轮 Lua 5.3.6 正确口径下 `compile_3000_functions` 为 2.61x / 2.59x / 2.60x，仍低于当前 3x 目标线。
-- 按当前完整 benchmark 复核口径，`arith_chain_temp` 仍在 3x 附近或略高于 3x，`table_rw` 仍是 3x 边缘项；`arith_mix_loop`、`arith_add_loop` 与 `recursion` 继续作为边缘回归观察项；`function_call`、`closure_upvalue` 与 `stdlib_math_string` 低于 3x，仍需回归观察。
+- CLI 冷启动和小脚本差距较小，历史冷启动约 1.25x 到 1.35x；本轮 Lua 5.3.6 正确口径下 `compile_3000_functions` 为 2.58x / 2.62x / 2.59x，仍低于当前 3x 目标线。
+- 按当前完整 benchmark 复核口径，`table_rw` 已回到 3x 以下；`arith_chain_temp` 仍在 3x 附近，是下一轮明确优先项；`arith_mix_loop`、`arith_add_loop` 与 `recursion` 继续作为边缘回归观察项；`function_call`、`closure_upvalue` 与 `stdlib_math_string` 低于 3x，仍需回归观察。
 - 字符串拼接已较 2026-06-29 旧基线明显改善，从约 92x 收窄到约 1.86x。
 - 后续优先优化方向应集中在算术链 `ADD`/`SUB`/`MUL` 与 `FORLOOP` 成本、递归函数调用边界、表读写热路径、VM dispatch code size 对无关路径的影响，以及标准库函数调用边界。
