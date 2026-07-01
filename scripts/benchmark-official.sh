@@ -21,10 +21,24 @@ require_tool() {
   fi
 }
 
+require_lua536() {
+  local label="$1"
+  local path="$2"
+  local version
+  version="$("${path}" -v 2>&1 || true)"
+  if [[ "${version}" != *"Lua 5.3.6"* ]]; then
+    echo "${label} must be Lua 5.3.6, got: ${version}" >&2
+    echo "Set LUA_BIN/LUAC_BIN to official Lua 5.3.6 tools." >&2
+    return 1
+  fi
+}
+
 require_tool "official lua" "${lua_bin}"
 require_tool "official luac" "${luac_bin}"
 require_tool "glua" "${glua_bin}"
 require_tool "gluac" "${gluac_bin}"
+require_lua536 "official lua" "${lua_bin}"
+require_lua536 "official luac" "${luac_bin}"
 
 LUA_BIN="${lua_bin}" \
 LUAC_BIN="${luac_bin}" \
