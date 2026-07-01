@@ -59,6 +59,43 @@ func TestByteReturnsRange(t *testing.T) {
 	}
 }
 
+// TestByteFixedFastPath 验证 string.byte 单字节固定返回快路径。
+//
+// 快路径只覆盖返回 0 或 1 个值的调用形态；多字节范围必须回退完整 Byte，避免截断多返回值。
+func TestByteFixedFastPath(t *testing.T) {
+	// 单字节范围应直接写入结果槽。
+	var dst [1]runtime.Value
+	resultCount, handled, err := ByteFixed4(dst[:], runtime.StringValue("abc"), runtime.IntegerValue(2), runtime.IntegerValue(2), runtime.NilValue(), 3)
+	if err != nil {
+		// 合法单字节 byte 快路径不应失败。
+		t.Fatalf("ByteFixed4 failed: %v", err)
+	}
+	if !handled || resultCount != 1 || dst[0].Kind != runtime.KindInteger || dst[0].Integer != int64('b') {
+		// 快路径必须返回第二个字节的整数值。
+		t.Fatalf("ByteFixed4 result mismatch: handled=%v count=%d dst=%#v", handled, resultCount, dst[0])
+	}
+
+	resultCount, handled, err = ByteFixed4(dst[:], runtime.StringValue("abc"), runtime.IntegerValue(4), runtime.IntegerValue(4), runtime.NilValue(), 3)
+	if err != nil {
+		// 越界空区间不应失败。
+		t.Fatalf("ByteFixed4 empty range failed: %v", err)
+	}
+	if !handled || resultCount != 0 {
+		// 空区间按 Lua 5.3 语义返回零个结果。
+		t.Fatalf("ByteFixed4 empty mismatch: handled=%v count=%d", handled, resultCount)
+	}
+
+	resultCount, handled, err = ByteFixed4(dst[:], runtime.StringValue("abc"), runtime.IntegerValue(1), runtime.IntegerValue(2), runtime.NilValue(), 3)
+	if err != nil {
+		// 多字节范围应回退而不是失败。
+		t.Fatalf("ByteFixed4 multi range failed: %v", err)
+	}
+	if handled || resultCount != 0 {
+		// 多返回值范围不能由单槽快路径处理。
+		t.Fatalf("ByteFixed4 multi range should fallback: handled=%v count=%d", handled, resultCount)
+	}
+}
+
 // TestCharBuildsBytesAndRejectsOutOfRange 验证 string.char 构造字节串和越界错误。
 //
 // Lua 5.3 的 string.char 参数必须落在 0..255，不能被 Go byte 截断。
@@ -335,6 +372,33 @@ func TestLenLowerRepReverseAndSub(t *testing.T) {
 	if len(subResults) != 1 || subResults[0].String != "def" {
 		// -3 到默认 -1 应截取最后三个字节。
 		t.Fatalf("Sub result mismatch: %#v", subResults)
+	}
+}
+
+// TestSubFixedFastPath 验证 string.sub 固定单返回快路径。
+//
+// 快路径必须保留负索引、显式终点和空区间返回空字符串的 Lua 5.3 语义。
+func TestSubFixedFastPath(t *testing.T) {
+	// 负索引范围应与 Sub 完整路径返回一致。
+	var dst [1]runtime.Value
+	resultCount, handled, err := SubFixed4(dst[:], runtime.StringValue("abcdef"), runtime.IntegerValue(-3), runtime.IntegerValue(-1), runtime.NilValue(), 3)
+	if err != nil {
+		// 合法 sub 快路径不应失败。
+		t.Fatalf("SubFixed4 failed: %v", err)
+	}
+	if !handled || resultCount != 1 || dst[0].Kind != runtime.KindString || dst[0].String != "def" {
+		// 负索引应截取后三个字节。
+		t.Fatalf("SubFixed4 result mismatch: handled=%v count=%d dst=%#v", handled, resultCount, dst[0])
+	}
+
+	resultCount, handled, err = SubFixed4(dst[:], runtime.StringValue("abc"), runtime.IntegerValue(3), runtime.IntegerValue(1), runtime.NilValue(), 3)
+	if err != nil {
+		// 空区间不应失败。
+		t.Fatalf("SubFixed4 empty failed: %v", err)
+	}
+	if !handled || resultCount != 1 || dst[0].Kind != runtime.KindString || dst[0].String != "" {
+		// Lua string.sub 空区间返回空字符串。
+		t.Fatalf("SubFixed4 empty mismatch: handled=%v count=%d dst=%#v", handled, resultCount, dst[0])
 	}
 }
 

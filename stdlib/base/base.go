@@ -1378,7 +1378,8 @@ func loadedClosureUpvalueCells(upvalues []runtime.Value) []*runtime.UpvalueCell 
 // callProtected 执行 pcall 当前阶段支持的 callable。
 //
 // function 必须是 Go closure 或 Lua closure；Lua closure 当前返回阶段性未接入错误。GoFunction 会
-// 被适配为单返回值列表，GoResultsFunction 保留多返回值。
+// 被适配为单返回值列表，GoResultsFunction 保留多返回值，GoFixedResultsFunction 在命中固定返回
+// 快路径时复用预分配结果槽，未命中则回退完整多返回实现。
 func callProtected(function runtime.Value, args ...runtime.Value) ([]runtime.Value, error) {
 	switch function.Kind {
 	case runtime.KindGoClosure:
@@ -1403,6 +1404,27 @@ func callProtected(function runtime.Value, args ...runtime.Value) ([]runtime.Val
 				return nil, runtime.ErrExpectedCallable
 			}
 			return goFunction(args...)
+		case *runtime.GoFixedResultsFunction:
+			// 固定上限多返回回调用声明上限构造结果槽；未命中时回退完整函数，避免截断变长返回。
+			if goFunction == nil || goFunction.Function == nil {
+				// nil 包装或 nil 函数字段表示不可调用。
+				return nil, runtime.ErrExpectedCallable
+			}
+			results := make([]runtime.Value, goFunction.MaxResults)
+			resultCount, handled, err := goFunction.Function(results, args...)
+			if err != nil {
+				// 固定回调错误交由 pcall 转成 false/errorObject。
+				return nil, err
+			}
+			if handled {
+				// 命中快路径时只返回实际写入的前缀。
+				return results[:resultCount], nil
+			}
+			if goFunction.Fallback == nil {
+				// 没有回退函数时按不可调用错误暴露损坏注册。
+				return nil, runtime.ErrExpectedCallable
+			}
+			return goFunction.Fallback(args...)
 		case *runtime.GoClosureWithUpvalues:
 			// 带 debug upvalue 元数据的 Go closure 仍通过内部 Function 执行。
 			if goFunction == nil || goFunction.Function == nil {
