@@ -723,6 +723,55 @@ func TestSetHookThreadOverloadIsolatesCoroutineHook(t *testing.T) {
 	}
 }
 
+// TestSetHookThreadActiveCountTracksReplacement 验证协程 hook 活跃计数缓存不会因重复设置漂移。
+//
+// HasActiveHook 依赖该缓存跳过无 hook 热路径；重复设置同一协程、设置空 mask/count 和清除 hook
+// 都必须保持计数与真实可触发 hook 状态一致。
+func TestSetHookThreadActiveCountTracksReplacement(t *testing.T) {
+	// 构造独立 State、debug 环境和目标协程。
+	state := runtime.NewState()
+	environment := NewEnvironment(state)
+	thread := state.NewThread(runtime.ReferenceValue(runtime.KindLuaClosure, &runtime.LuaClosure{}))
+	threadValue := runtime.ReferenceValue(runtime.KindThread, thread)
+	hook := runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(func(args ...runtime.Value) ([]runtime.Value, error) {
+		// hook 不在本测试中执行，只验证状态缓存。
+		return nil, nil
+	}))
+
+	if _, err := environment.SetHook(threadValue, hook, runtime.StringValue("c"), runtime.IntegerValue(0)); err != nil {
+		// 首次设置活跃协程 hook 不应失败。
+		t.Fatalf("SetHook active thread hook failed: %v", err)
+	}
+	if environment.activeThreadHookCount != 1 {
+		// 一个可触发协程 hook 应计为 1。
+		t.Fatalf("activeThreadHookCount after set = %d, want 1", environment.activeThreadHookCount)
+	}
+	if _, err := environment.SetHook(threadValue, hook, runtime.StringValue("r"), runtime.IntegerValue(0)); err != nil {
+		// 替换同一协程 hook 不应失败。
+		t.Fatalf("SetHook replacement failed: %v", err)
+	}
+	if environment.activeThreadHookCount != 1 {
+		// 替换同一协程 hook 不能重复增加活跃计数。
+		t.Fatalf("activeThreadHookCount after replace = %d, want 1", environment.activeThreadHookCount)
+	}
+	if _, err := environment.SetHook(threadValue, hook, runtime.StringValue(""), runtime.IntegerValue(0)); err != nil {
+		// 空 mask/count 的 hook 可被 gethook 读回，但不会触发 VM hook。
+		t.Fatalf("SetHook inactive replacement failed: %v", err)
+	}
+	if environment.activeThreadHookCount != 0 {
+		// 空 mask/count 不应继续保留活跃计数。
+		t.Fatalf("activeThreadHookCount after inactive replace = %d, want 0", environment.activeThreadHookCount)
+	}
+	if _, err := environment.SetHook(threadValue, runtime.NilValue()); err != nil {
+		// 清除协程 hook 不应失败。
+		t.Fatalf("SetHook clear failed: %v", err)
+	}
+	if environment.activeThreadHookCount != 0 {
+		// 清除后活跃计数必须保持为 0。
+		t.Fatalf("activeThreadHookCount after clear = %d, want 0", environment.activeThreadHookCount)
+	}
+}
+
 // TestSetHookAcceptsIntegerFloatCount 验证 debug.sethook 的 count 参数接受整数值 float。
 //
 // 官方 db.lua 使用 `2^24 - 1` 作为 count 上界；该表达式可能以 float number 传入。

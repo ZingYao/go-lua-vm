@@ -711,9 +711,38 @@ Go 端 micro 复跑显示，`BenchmarkDoStringArithChainTemp`、`BenchmarkDoStri
 | `recursion` | 0.004325s / 0.004299s / 0.004153s | 0.012412s / 0.012536s / 0.012500s | 2.87x / 2.92x / 3.01x |
 | `compile_3000_functions` | 0.005748s / 0.005891s / 0.005794s | 0.015216s / 0.015145s / 0.015152s | 2.65x / 2.57x / 2.62x |
 
+### 2026-07-02 debug hook 活跃状态缓存复核
+
+本轮在 `debug` 环境中维护默认 hook 是否可能触发和活跃协程专属 hook 数量两个派生状态，使
+`HasActiveHook` 在无默认 hook 且无活跃协程 hook 时直接返回 false，避免 `recursion` 等无 hook
+热路径重复读取默认 hook 三元组和 running thread。`debug.sethook` 是唯一写入口；重复设置同一
+thread、设置空 mask/count 和清除 hook 都会同步维护活跃计数，因此不改变 `debug.sethook`、
+`debug.gethook`、协程专属 hook、call/return/line/count hook 或 hook 重入语义。
+
+字节码复核结果不变：`recursion` 的 `fib` 子函数热体仍与官方 Lua 5.3.6 一致，为
+`LT; JMP; RETURN; GETUPVAL; SUB; CALL; GETUPVAL; SUB; CALL; ADD; RETURN`；`arith_chain_temp`
+热循环仍为 `MUL; ADD; SUB; FORLOOP`。项目主函数循环退出处额外零距离 `JMP` 不在热路径。
+
+Go 端 micro 复跑显示，`BenchmarkDoStringFunctionCall` 多数轮约 `0.427-0.439 ms/op`，
+`BenchmarkDoStringRecursion` 多数轮约 `7.41-7.45 ms/op`，alloc/op 维持 `488`。重建
+`bin/glua` / `bin/gluac` 后，正确 Lua 5.3.6 完整 benchmark 三次复跑如下：
+
+| 用例 | 官方工具中位数 | 本项目中位数 | 本项目/官方 |
+| --- | ---: | ---: | ---: |
+| `arith_add_loop` | 0.008152s / 0.008116s / 0.008080s | 0.021563s / 0.021655s / 0.021620s | 2.65x / 2.67x / 2.68x |
+| `arith_mix_loop` | 0.012032s / 0.012062s / 0.011950s | 0.034203s / 0.034319s / 0.034341s | 2.84x / 2.85x / 2.87x |
+| `arith_chain_temp` | 0.013654s / 0.013607s / 0.013632s | 0.039148s / 0.039123s / 0.039277s | 2.87x / 2.88x / 2.88x |
+| `table_rw` | 0.007587s / 0.007540s / 0.007582s | 0.021469s / 0.021275s / 0.021319s | 2.83x / 2.82x / 2.81x |
+| `function_call` | 0.007375s / 0.007391s / 0.007323s | 0.018761s / 0.018779s / 0.018861s | 2.54x / 2.54x / 2.58x |
+| `string_concat` | 0.005204s / 0.005213s / 0.005247s | 0.009415s / 0.009381s / 0.009348s | 1.81x / 1.80x / 1.78x |
+| `closure_upvalue` | 0.008695s / 0.008624s / 0.008552s | 0.021383s / 0.021418s / 0.021442s | 2.46x / 2.48x / 2.51x |
+| `stdlib_math_string` | 0.019986s / 0.020050s / 0.019962s | 0.045220s / 0.045273s / 0.045261s | 2.26x / 2.26x / 2.27x |
+| `recursion` | 0.004134s / 0.004132s / 0.004152s | 0.012273s / 0.012272s / 0.012258s | 2.97x / 2.97x / 2.95x |
+| `compile_3000_functions` | 0.005774s / 0.005741s / 0.005687s | 0.014900s / 0.014972s / 0.014779s | 2.58x / 2.61x / 2.60x |
+
 ### 结论
 
-- CLI 冷启动和小脚本差距较小，历史冷启动约 1.25x 到 1.35x；本轮 Lua 5.3.6 正确口径下 `compile_3000_functions` 为 2.65x / 2.57x / 2.62x，仍低于当前 3x 目标线。
-- 按当前完整 benchmark 复核口径，算术链路和表读写均低于 3x；`recursion` 两轮低于 3x、一轮 3.01x，仍作为 3x 边缘回归观察项；`function_call` 稳定在 2.54x 到 2.57x，`closure_upvalue` 与 `stdlib_math_string` 低于 3x，仍需回归观察。
+- CLI 冷启动和小脚本差距较小，历史冷启动约 1.25x 到 1.35x；本轮 Lua 5.3.6 正确口径下 `compile_3000_functions` 为 2.58x / 2.61x / 2.60x，仍低于当前 3x 目标线。
+- 按当前完整 benchmark 复核口径，所有主要脚本运行与编译路径三轮均低于 3x；`recursion` 已从上一轮边缘 3.01x 收窄到 2.97x / 2.97x / 2.95x，仍作为边缘回归观察项继续跟踪。
 - 字符串拼接已较 2026-06-29 旧基线明显改善，从约 92x 收窄到约 1.86x。
 - 后续优先优化方向应集中在算术链 `ADD`/`SUB`/`MUL` 与 `FORLOOP` 成本、递归函数调用边界、表读写热路径、VM dispatch code size 对无关路径的影响，以及标准库函数调用边界。

@@ -76,8 +76,12 @@ type Environment struct {
 	hookCount int64
 	// instructionCount 保存当前 count hook 的累计指令数。
 	instructionCount int64
+	// defaultHookActive 缓存默认 hook 是否可能触发，避免 VM 无 hook 热路径重复解析默认三元组。
+	defaultHookActive bool
 	// threadHooks 保存 debug.sethook(thread, ...) 绑定到指定协程的 hook 状态。
 	threadHooks map[*runtime.Thread]*hookState
+	// activeThreadHookCount 记录可能触发的协程专属 hook 数量，避免无协程 hook 热路径读取 running thread。
+	activeThreadHookCount int
 	// hookActive 标记当前是否正在执行 hook，用于避免 hook 重入递归。
 	hookActive bool
 	// debugInput 保存 debug.debug 交互输入，默认绑定宿主 stdin。
@@ -153,11 +157,15 @@ func (environment *Environment) HasActiveHook() bool {
 		// 缺少环境或正在 hook 回调内部时，当前路径不会触发新的 hook。
 		return false
 	}
+	if !environment.defaultHookActive && environment.activeThreadHookCount == 0 {
+		// 没有默认 hook 且没有任何活跃协程 hook 时，VM 热路径无需读取协程状态。
+		return false
+	}
 	if state := environment.activeThreadHookState(); state != nil {
 		// 协程专属 hook 存在时只看该协程状态，避免主线程 hook 干扰协程。
 		return !state.hook.IsNil() && (state.mask != "" || state.count > 0)
 	}
-	return !environment.hook.IsNil() && (environment.hookMask != "" || environment.hookCount > 0)
+	return environment.defaultHookActive
 }
 
 // HookEnabledFor 判断指定 hook 事件当前是否可能触发。
@@ -608,13 +616,14 @@ func (environment *Environment) SetHook(args ...runtime.Value) ([]runtime.Value,
 		// nil hook 表示清除 hook，同时清空 mask 和 count。
 		if hasThreadArgument {
 			// thread 重载只清除目标协程 hook，不影响主线程默认 hook。
-			delete(environment.threadHooks, thread)
+			environment.clearThreadHook(thread)
 			return nil, nil
 		}
 		environment.hook = runtime.NilValue()
 		environment.hookMask = ""
 		environment.hookCount = 0
 		environment.instructionCount = 0
+		environment.defaultHookActive = false
 		return nil, nil
 	}
 	if hook.Kind != runtime.KindGoClosure && hook.Kind != runtime.KindLuaClosure {
@@ -624,22 +633,76 @@ func (environment *Environment) SetHook(args ...runtime.Value) ([]runtime.Value,
 
 	if hasThreadArgument {
 		// 协程 hook 独立保存，VM 触发时会按当前 running thread 优先读取。
-		if environment.threadHooks == nil {
-			// 只有真正设置协程专属 hook 时才分配 map，普通无 hook 热路径保持零分配空状态。
-			environment.threadHooks = make(map[*runtime.Thread]*hookState)
-		}
-		environment.threadHooks[thread] = &hookState{
+		environment.setThreadHook(thread, &hookState{
 			hook:  hook,
 			mask:  mask,
 			count: count,
-		}
+		})
 		return nil, nil
 	}
 	environment.hook = hook
 	environment.hookMask = mask
 	environment.hookCount = count
 	environment.instructionCount = 0
+	environment.defaultHookActive = hookStateCanTrigger(hook, mask, count)
 	return nil, nil
+}
+
+// setThreadHook 写入协程专属 hook，并同步活跃 hook 计数缓存。
+//
+// thread 必须是 debug.sethook 已解析出的目标协程；state 保存本次 hook 三元组。该缓存只影响
+// HasActiveHook 的快速判断，不改变 gethook/sethook 可见状态。
+func (environment *Environment) setThreadHook(thread *runtime.Thread, state *hookState) {
+	if environment.threadHooks == nil {
+		// 只有真正设置协程专属 hook 时才分配 map，普通无 hook 热路径保持零分配空状态。
+		environment.threadHooks = make(map[*runtime.Thread]*hookState)
+	}
+	if previousState := environment.threadHooks[thread]; threadHookCanTrigger(previousState) {
+		// 替换已有活跃 hook 前先扣减旧计数，避免重复设置同一 thread 后计数膨胀。
+		environment.activeThreadHookCount--
+	}
+	environment.threadHooks[thread] = state
+	if threadHookCanTrigger(state) {
+		// 新 hook 可能触发任意事件时计入活跃协程 hook 数量。
+		environment.activeThreadHookCount++
+	}
+}
+
+// clearThreadHook 清除协程专属 hook，并同步活跃 hook 计数缓存。
+//
+// thread 必须是 debug.sethook 的 thread 重载目标；未设置过时保持无副作用。
+func (environment *Environment) clearThreadHook(thread *runtime.Thread) {
+	if environment.threadHooks == nil {
+		// 没有协程 hook 表时无需清理。
+		return
+	}
+	if previousState := environment.threadHooks[thread]; threadHookCanTrigger(previousState) {
+		// 只有旧 hook 可能触发事件时才扣减活跃计数。
+		environment.activeThreadHookCount--
+	}
+	delete(environment.threadHooks, thread)
+}
+
+// hookStateCanTrigger 判断 hook 三元组是否可能触发事件。
+//
+// hook 为 nil、mask 为空且 count 非正时不会产生任何 VM hook 事件。
+func hookStateCanTrigger(hook runtime.Value, mask string, count int64) bool {
+	if hook.IsNil() {
+		// nil hook 表示未设置 hook。
+		return false
+	}
+	return mask != "" || count > 0
+}
+
+// threadHookCanTrigger 判断协程专属 hook 状态是否可能触发事件。
+//
+// nil 状态或空 hook 不触发，供活跃协程 hook 计数维护使用。
+func threadHookCanTrigger(state *hookState) bool {
+	if state == nil {
+		// 没有状态时不触发。
+		return false
+	}
+	return hookStateCanTrigger(state.hook, state.mask, state.count)
 }
 
 // TriggerCallHook 触发当前环境的 call hook。
