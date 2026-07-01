@@ -117,6 +117,8 @@ type GoResultsFunction func(args ...Value) ([]Value, error)
 type GoFixedResultsFunction struct {
 	// MaxResults 表示 Function 最多写入的返回值数量。
 	MaxResults int
+	// Function4Single 将最多四个参数按寄存器原值传入，并返回单返回热点的实际结果数量和值。
+	Function4Single func(arg0 Value, arg1 Value, arg2 Value, arg3 Value, argCount int) (Value, int, bool, error)
 	// Function4 将最多四个参数按寄存器原值传入，避免热点固定结果函数构造参数切片。
 	Function4 func(dst []Value, arg0 Value, arg1 Value, arg2 Value, arg3 Value, argCount int) (int, bool, error)
 	// Function 将返回值写入 dst，并返回实际结果数量和是否命中快路径。

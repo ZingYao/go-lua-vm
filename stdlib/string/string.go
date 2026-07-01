@@ -55,10 +55,11 @@ func Open(state *runtime.State) error {
 	library := runtime.NewTable()
 	// string 库函数以 Go closure 注册，后续 VM CALL 会通过 bridge 调用。
 	library.RawSetString("byte", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFixedResultsFunction{
-		MaxResults: 1,
-		Function4:  ByteFixed4,
-		Function:   ByteFixed,
-		Fallback:   Byte,
+		MaxResults:      1,
+		Function4Single: ByteFixed4Single,
+		Function4:       ByteFixed4,
+		Function:        ByteFixed,
+		Fallback:        Byte,
 	}))
 	library.RawSetString("char", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Char)))
 	library.RawSetString("dump", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Dump)))
@@ -85,10 +86,11 @@ func Open(state *runtime.State) error {
 	library.RawSetString("rep", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Rep)))
 	library.RawSetString("reverse", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: ReverseUnaryValue, AcceptedKinds: runtime.UnaryKindMask(runtime.KindString)}))
 	library.RawSetString("sub", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFixedResultsFunction{
-		MaxResults: 1,
-		Function4:  SubFixed4,
-		Function:   SubFixed,
-		Fallback:   Sub,
+		MaxResults:      1,
+		Function4Single: SubFixed4Single,
+		Function4:       SubFixed4,
+		Function:        SubFixed,
+		Fallback:        Sub,
 	}))
 	library.RawSetString("unpack", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Unpack)))
 	library.RawSetString("upper", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: UpperUnaryValue, AcceptedKinds: runtime.UnaryKindMask(runtime.KindString)}))
@@ -235,6 +237,58 @@ func ByteFixed4(dst []runtime.Value, arg0 runtime.Value, arg1 runtime.Value, arg
 	// 单字节命中时直接写入结果槽，避免构造临时返回切片。
 	dst[0] = runtime.IntegerValue(int64(source[startOffset]))
 	return 1, true, nil
+}
+
+// ByteFixed4Single 实现 `string.byte` 最多三实参的单返回无槽位快路径。
+//
+// argCount 表示实际参数数量。该入口只处理返回 0 或 1 个值的形态，范围返回多个字节时
+// 返回 handled=false，由通用 Byte 保留完整多返回值语义。
+func ByteFixed4Single(arg0 runtime.Value, arg1 runtime.Value, arg2 runtime.Value, _ runtime.Value, argCount int) (runtime.Value, int, bool, error) {
+	// 单返回入口直接复用寄存器实参，不构造结果槽。
+	if argCount < 1 || argCount > 3 {
+		// 参数数量不在窄快路径覆盖范围时回退完整实现。
+		return runtime.NilValue(), 0, false, nil
+	}
+	if arg0.Kind != runtime.KindString {
+		// 第一个参数不是 string 时直接返回 Lua 参数错误。
+		return runtime.NilValue(), 0, true, badArgument("byte", 1, "string expected")
+	}
+
+	startIndex := int64(1)
+	if argCount >= 2 {
+		// i 参数存在时必须可转换为 integer。
+		convertedIndex, ok := arg1.ToInteger()
+		if !ok {
+			// 非整数索引无法参与 Lua 字节区间换算。
+			return runtime.NilValue(), 0, true, badArgument("byte", 2, "integer expected")
+		}
+		startIndex = convertedIndex
+	}
+
+	endIndex := startIndex
+	if argCount >= 3 {
+		// j 参数存在时必须可转换为 integer。
+		convertedIndex, ok := arg2.ToInteger()
+		if !ok {
+			// 非整数索引无法参与 Lua 字节区间换算。
+			return runtime.NilValue(), 0, true, badArgument("byte", 3, "integer expected")
+		}
+		endIndex = convertedIndex
+	}
+
+	source := arg0.String
+	startOffset, endOffset, ok := normalizeRange(len(source), startIndex, endIndex)
+	if !ok {
+		// 空区间在 Lua 5.3 中返回零个结果。
+		return runtime.NilValue(), 0, true, nil
+	}
+	if endOffset-startOffset != 1 {
+		// 多字节范围需要变长返回，不能由单返回快路径处理。
+		return runtime.NilValue(), 0, false, nil
+	}
+
+	// 单字节命中时直接返回整数结果，避免构造临时返回槽。
+	return runtime.IntegerValue(int64(source[startOffset])), 1, true, nil
 }
 
 // Char 实现 Lua 5.3 `string.char` 的字节构造语义。
@@ -1089,6 +1143,48 @@ func SubFixed4(dst []runtime.Value, arg0 runtime.Value, arg1 runtime.Value, arg2
 	// Go 半开区间直接截取底层字节字符串。
 	dst[0] = runtime.StringValue(source[startOffset:endOffset])
 	return 1, true, nil
+}
+
+// SubFixed4Single 实现 `string.sub` 最多三实参的固定单返回无槽位快路径。
+//
+// argCount 表示实际参数数量。该入口直接返回单个字符串结果，与 Lua 5.3 的字节切片、
+// 负索引和空区间返回空字符串语义保持一致。
+func SubFixed4Single(arg0 runtime.Value, arg1 runtime.Value, arg2 runtime.Value, _ runtime.Value, argCount int) (runtime.Value, int, bool, error) {
+	// 单返回入口直接复用寄存器实参，不构造结果槽。
+	if argCount < 2 || argCount > 3 {
+		// 参数数量不在窄快路径覆盖范围时回退完整实现。
+		return runtime.NilValue(), 0, false, nil
+	}
+	if arg0.Kind != runtime.KindString {
+		// 第一个参数不是 string 时直接返回 Lua 参数错误。
+		return runtime.NilValue(), 0, true, badArgument("sub", 1, "string expected")
+	}
+	startIndex, err := integerValueArgument(arg1, 2, "sub")
+	if err != nil {
+		// 第二个参数必须是起始索引。
+		return runtime.NilValue(), 0, true, err
+	}
+
+	endIndex := int64(-1)
+	if argCount >= 3 {
+		// j 参数存在时必须是 integer。
+		convertedIndex, convertedErr := integerValueArgument(arg2, 3, "sub")
+		if convertedErr != nil {
+			// 终点索引类型错误时不返回部分字符串。
+			return runtime.NilValue(), 0, true, convertedErr
+		}
+		endIndex = convertedIndex
+	}
+
+	source := arg0.String
+	startOffset, endOffset, rangeOK := normalizeRange(len(source), startIndex, endIndex)
+	if !rangeOK {
+		// 空区间返回空字符串，而不是 nil。
+		return runtime.StringValue(""), 1, true, nil
+	}
+
+	// Go 半开区间直接截取底层字节字符串。
+	return runtime.StringValue(source[startOffset:endOffset]), 1, true, nil
 }
 
 // Pack 实现 Lua 5.3 `string.pack` 的第一阶段二进制打包语义。

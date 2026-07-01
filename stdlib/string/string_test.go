@@ -96,6 +96,42 @@ func TestByteFixedFastPath(t *testing.T) {
 	}
 }
 
+// TestByteFixedSingleFastPath 验证 string.byte 单返回无槽位快路径。
+//
+// 单返回入口必须与 ByteFixed4 保持相同的返回数量、错误和多返回回退语义。
+func TestByteFixedSingleFastPath(t *testing.T) {
+	// 单字节范围应直接返回字节整数值。
+	result, resultCount, handled, err := ByteFixed4Single(runtime.StringValue("abc"), runtime.IntegerValue(2), runtime.IntegerValue(2), runtime.NilValue(), 3)
+	if err != nil {
+		// 合法单字节 byte 快路径不应失败。
+		t.Fatalf("ByteFixed4Single failed: %v", err)
+	}
+	if !handled || resultCount != 1 || result.Kind != runtime.KindInteger || result.Integer != int64('b') {
+		// 快路径必须返回第二个字节的整数值。
+		t.Fatalf("ByteFixed4Single result mismatch: handled=%v count=%d result=%#v", handled, resultCount, result)
+	}
+
+	result, resultCount, handled, err = ByteFixed4Single(runtime.StringValue("abc"), runtime.IntegerValue(4), runtime.IntegerValue(4), runtime.NilValue(), 3)
+	if err != nil {
+		// 越界空区间不应失败。
+		t.Fatalf("ByteFixed4Single empty range failed: %v", err)
+	}
+	if !handled || resultCount != 0 || !result.IsNil() {
+		// 空区间按 Lua 5.3 语义返回零个结果，固定单返回调用层再补 nil。
+		t.Fatalf("ByteFixed4Single empty mismatch: handled=%v count=%d result=%#v", handled, resultCount, result)
+	}
+
+	_, resultCount, handled, err = ByteFixed4Single(runtime.StringValue("abc"), runtime.IntegerValue(1), runtime.IntegerValue(2), runtime.NilValue(), 3)
+	if err != nil {
+		// 多字节范围应回退而不是失败。
+		t.Fatalf("ByteFixed4Single multi range failed: %v", err)
+	}
+	if handled || resultCount != 0 {
+		// 多返回值范围不能由单返回快路径处理。
+		t.Fatalf("ByteFixed4Single multi range should fallback: handled=%v count=%d", handled, resultCount)
+	}
+}
+
 // TestCharBuildsBytesAndRejectsOutOfRange 验证 string.char 构造字节串和越界错误。
 //
 // Lua 5.3 的 string.char 参数必须落在 0..255，不能被 Go byte 截断。
@@ -399,6 +435,32 @@ func TestSubFixedFastPath(t *testing.T) {
 	if !handled || resultCount != 1 || dst[0].Kind != runtime.KindString || dst[0].String != "" {
 		// Lua string.sub 空区间返回空字符串。
 		t.Fatalf("SubFixed4 empty mismatch: handled=%v count=%d dst=%#v", handled, resultCount, dst[0])
+	}
+}
+
+// TestSubFixedSingleFastPath 验证 string.sub 固定单返回无槽位快路径。
+//
+// 单返回入口必须保留负索引、显式终点和空区间返回空字符串的 Lua 5.3 语义。
+func TestSubFixedSingleFastPath(t *testing.T) {
+	// 负索引范围应与 SubFixed4 完整固定入口返回一致。
+	result, resultCount, handled, err := SubFixed4Single(runtime.StringValue("abcdef"), runtime.IntegerValue(-3), runtime.IntegerValue(-1), runtime.NilValue(), 3)
+	if err != nil {
+		// 合法 sub 快路径不应失败。
+		t.Fatalf("SubFixed4Single failed: %v", err)
+	}
+	if !handled || resultCount != 1 || result.Kind != runtime.KindString || result.String != "def" {
+		// 负索引应截取后三个字节。
+		t.Fatalf("SubFixed4Single result mismatch: handled=%v count=%d result=%#v", handled, resultCount, result)
+	}
+
+	result, resultCount, handled, err = SubFixed4Single(runtime.StringValue("abc"), runtime.IntegerValue(3), runtime.IntegerValue(1), runtime.NilValue(), 3)
+	if err != nil {
+		// 空区间不应失败。
+		t.Fatalf("SubFixed4Single empty failed: %v", err)
+	}
+	if !handled || resultCount != 1 || result.Kind != runtime.KindString || result.String != "" {
+		// Lua string.sub 空区间返回空字符串。
+		t.Fatalf("SubFixed4Single empty mismatch: handled=%v count=%d result=%#v", handled, resultCount, result)
 	}
 }
 

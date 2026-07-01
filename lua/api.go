@@ -3359,6 +3359,26 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 					arg3 = argument
 				}
 			}
+			if callRequest.ReturnCount == 1 && fixedFunction.MaxResults == 1 && fixedFunction.Function4Single != nil {
+				// 固定单返回函数可直接返回结果值，避免准备结果槽再读取首槽。
+				resultValue, resultCount, handled, callErr := fixedFunction.Function4Single(arg0, arg1, arg2, arg3, callRequest.ArgumentCount)
+				if callErr == nil && handled {
+					if resultCount == 0 {
+						// 实际无返回值时，Lua 固定单返回语义需要补 nil。
+						resultValue = runtime.NilValue()
+					}
+					if setErr := vm.SetRegister(callRequest.FunctionIndex, resultValue); setErr != nil {
+						// 写回超过寄存器窗口时返回边界错误。
+						return setErr
+					}
+					vm.SetOpenTop(-1)
+					return nil
+				}
+				if callErr != nil {
+					// 参数错误等慢路径交给下方 debug-frame 回退，保持 traceback 和调用名可见性。
+					err = callErr
+				}
+			}
 			var fixedResults [4]Value
 			resultSlots := fixedResults[:]
 			if fixedFunction.MaxResults > len(resultSlots) {
