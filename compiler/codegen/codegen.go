@@ -803,6 +803,25 @@ func (generator *generator) compileSingleLocalSelfBinaryAssignment(statement *pa
 		// 未支持的二元运算回退通用路径，让通用编译器返回原有错误。
 		return false, nil
 	}
+	if generator.isSafePureBinaryExpression(binaryExpression.Right) {
+		// 右侧纯二元树没有调用、索引或全局访问副作用，可先编入临时槽，再按官方形态读写目标 local。
+		rightRegister := generator.allocateRegister()
+		if err := generator.compileExpressionTo(binaryExpression.Right, rightRegister); err != nil {
+			// 右侧编译失败时释放临时寄存器并返回。
+			generator.releaseRegister(rightRegister)
+			return true, err
+		}
+		if err := generator.withSourceLine(binaryExpression.Position, func() error {
+			// 左操作数直接读取目标 local 旧值，结果也直接写回该 local。
+			generator.emitABC(opCode, binding.register, binding.register, rightRegister)
+			return nil
+		}); err != nil {
+			generator.releaseRegister(rightRegister)
+			return true, err
+		}
+		generator.releaseRegister(rightRegister)
+		return true, nil
+	}
 	rightRegister := generator.allocateRegister()
 	rightHandled, err := generator.compileSelfBinaryRightExpressionTo(binaryExpression.Right, rightRegister)
 	if err != nil {
@@ -1128,6 +1147,10 @@ func (generator *generator) isSafePureBinaryExpression(expression parser.Express
 	if generator.isSafeRKCandidate(expression) {
 		// 单个 local 或字面量没有求值副作用。
 		return true
+	}
+	if prefixExpression, ok := expression.(*parser.PrefixExpression); ok {
+		// 括号表达式只改变优先级，不引入额外求值副作用。
+		return generator.isSafePureBinaryExpression(prefixExpression.Inner)
 	}
 	binaryExpression, ok := expression.(*parser.BinaryExpression)
 	if !ok {

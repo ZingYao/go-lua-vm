@@ -929,6 +929,50 @@ func TestCompileSelfArithmeticAssignmentWritesDirectly(t *testing.T) {
 	}
 }
 
+// TestCompileSelfArithmeticPureBinaryRightAvoidsLeftMove 验证自二元赋值的纯二元右侧不会复制左值。
+//
+// `sum = sum + ((i * 3 - 7) // 2) % 97` 是 arith_mix_loop 热路径。官方 Lua 5.3 会把右侧
+// 纯算术树编入一个临时寄存器，再直接 `ADD sum, sum, temp`，不需要先 MOVE sum 到临时槽。
+func TestCompileSelfArithmeticPureBinaryRightAvoidsLeftMove(t *testing.T) {
+	chunk := parseChunkForCodegenTest(t, `
+local sum = 0
+for i = 1, 10 do
+  sum = sum + ((i * 3 - 7) // 2) % 97
+end
+return sum
+`)
+
+	proto, err := CompileChunk(chunk, "self-arith-pure-binary-right")
+	if err != nil {
+		// 自二元纯算术右侧样例必须可编译。
+		t.Fatalf("compile self arithmetic pure binary right failed: %v", err)
+	}
+	if proto.MaxStackSize != 6 {
+		// 官方 Lua 5.3 该热循环只需要 6 个 slot；7 个 slot 表示仍有左值临时 MOVE。
+		t.Fatalf("unexpected max stack=%d code=%v", proto.MaxStackSize, proto.Code)
+	}
+
+	hasDirectAdd := false
+	for _, instruction := range proto.Code {
+		switch instruction.OpCode() {
+		case bytecode.OpMove:
+			if instruction.A() == 5 && instruction.B() == 0 {
+				// 旧形态会先把 sum 从 R0 复制到 R5，再用 R5 执行 ADD。
+				t.Fatalf("unexpected MOVE of sum before pure binary RHS; code=%v", proto.Code)
+			}
+		case bytecode.OpAdd:
+			if instruction.A() == 0 && instruction.B() == 0 && instruction.C() == 5 {
+				// sum 位于 R0，右侧纯算术结果位于 R5，最终 ADD 应直接写回 R0。
+				hasDirectAdd = true
+			}
+		}
+	}
+	if !hasDirectAdd {
+		// 必须存在直接写回 sum 的 ADD。
+		t.Fatalf("missing direct ADD for pure binary RHS; code=%v", proto.Code)
+	}
+}
+
 // TestCompileSelfBinaryCallChainReusesAccumulator 验证自二元调用链复用累加器寄存器。
 //
 // `sum = sum + call() + call()` 需要保持最终写回前不覆盖 sum，同时第一层 `sum + call()`
