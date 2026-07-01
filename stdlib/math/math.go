@@ -436,23 +436,24 @@ func FloorValue(args ...runtime.Value) (runtime.Value, error) {
 // value 是调用方已经从 Lua 寄存器读取出的第一个参数；返回语义和错误语义与 FloorValue 保持一致。
 func FloorUnaryValue(value runtime.Value) (runtime.Value, error) {
 	// floor 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
-	if !value.IsNumber() {
+	switch value.Kind {
+	case runtime.KindInteger:
+		// integer 已经是整数，直接返回。
+		return value, nil
+	case runtime.KindNumber:
+		// number 入参继续执行 floor 并按可表示范围决定 integer/number 返回类型。
+		floored := math.Floor(value.Number)
+		if math.IsNaN(floored) || math.IsInf(floored, 0) || floored < float64(math.MinInt64) || floored >= -float64(math.MinInt64) {
+			// 非有限或超出 int64 范围时保留 float number。
+			return runtime.NumberValue(floored), nil
+		}
+
+		// 有限且可表达时返回 Lua integer。
+		return runtime.IntegerValue(int64(floored)), nil
+	default:
 		// 非 number 类型不做字符串转数值隐式转换。
 		return runtime.NilValue(), badArgument("floor", 1, fmt.Sprintf("number expected, got %s", runtime.LuaErrorTypeName(value)))
 	}
-	if value.Kind == runtime.KindInteger {
-		// integer 已经是整数，直接返回。
-		return value, nil
-	}
-
-	floored := math.Floor(value.Number)
-	if math.IsNaN(floored) || math.IsInf(floored, 0) || floored < float64(math.MinInt64) || floored >= -float64(math.MinInt64) {
-		// 非有限或超出 int64 范围时保留 float number。
-		return runtime.NumberValue(floored), nil
-	}
-
-	// 有限且可表达时返回 Lua integer。
-	return runtime.IntegerValue(int64(floored)), nil
 }
 
 // FMod 实现 Lua 5.3 `math.fmod`。
@@ -833,14 +834,17 @@ func SqrtValue(args ...runtime.Value) (runtime.Value, error) {
 // value 是调用方已经从 Lua 寄存器读取出的第一个参数；返回语义和错误语义与 SqrtValue 保持一致。
 func SqrtUnaryValue(value runtime.Value) (runtime.Value, error) {
 	// sqrt 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
-	if !value.IsNumber() {
+	switch value.Kind {
+	case runtime.KindInteger:
+		// integer 入参转换为 float64 后计算平方根。
+		return runtime.NumberValue(math.Sqrt(float64(value.Integer))), nil
+	case runtime.KindNumber:
+		// number 入参直接计算平方根。
+		return runtime.NumberValue(math.Sqrt(value.Number)), nil
+	default:
 		// 非 number 类型不做字符串转数值隐式转换。
 		return runtime.NilValue(), badArgument("sqrt", 1, fmt.Sprintf("number expected, got %s", runtime.LuaErrorTypeName(value)))
 	}
-	numberValue, _ := value.ToNumber()
-
-	// 返回平方根结果。
-	return runtime.NumberValue(math.Sqrt(numberValue)), nil
 }
 
 // Tan 实现 Lua 5.3 `math.tan`。
