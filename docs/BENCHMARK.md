@@ -113,22 +113,21 @@ GLUAC_BIN=./bin/gluac \
 
 | 用例 | 官方工具中位数 | 本项目中位数 | 本项目/官方 |
 | --- | ---: | ---: | ---: |
-| `arith_add_loop` | 0.008531s | 0.030540s | 3.58x |
-| `arith_mix_loop` | 0.007172s | 0.021086s | 2.94x |
-| `arith_chain_temp` | 0.013937s | 0.058559s | 4.20x |
-| `table_rw` | 0.004125s | 0.007255s | 1.76x |
-| `function_call` | 0.003669s | 0.005258s | 1.43x |
-| `string_concat` | 0.005871s | 0.010892s | 1.86x |
-| `closure_upvalue` | 0.016460s | 0.046771s | 2.84x |
-| `stdlib_math_string` | 0.004410s | 0.006968s | 1.58x |
-| `recursion` | 0.003829s | 0.007652s | 2.00x |
-| `compile_3000_functions` | 0.006208s | 0.015438s | 2.49x |
+| `arith_add_loop` | 0.007751s | 0.022947s | 2.96x |
+| `arith_mix_loop` | 0.011299s | 0.035342s | 3.13x |
+| `arith_chain_temp` | 0.012969s | 0.041221s | 3.18x |
+| `table_rw` | 0.007230s | 0.022111s | 3.06x |
+| `function_call` | 0.006809s | 0.018669s | 2.74x |
+| `string_concat` | 0.004727s | 0.008495s | 1.80x |
+| `closure_upvalue` | 0.008098s | 0.021140s | 2.61x |
+| `stdlib_math_string` | 0.019405s | 0.046652s | 2.40x |
+| `recursion` | 0.003669s | 0.012962s | 3.53x |
+| `compile_3000_functions` | 0.005326s | 0.014189s | 2.66x |
 
-本轮完整口径下仍高于 3x 的路径为 `arith_add_loop` 与临时补充的 `arith_chain_temp`。其中
-`arith_chain_temp` 覆盖 `sum = sum + i * 3 - 7` 这类左结合自二元链，用于区分截图中一度混用的
-`arith_add_loop` 与混合算术链；后续需要把该 fixture 固化到稳定 benchmark harness 后再作为长期回归项。
-原旧清单中的 `arith_mix_loop`、`closure_upvalue`、`stdlib_math_string` 和 `recursion` 在本轮复测中已经
-低于 3x，但仍作为回归观察项。
+本轮完整口径下仍高于 3x 的路径为 `arith_mix_loop`、临时补充的 `arith_chain_temp`、`table_rw` 与
+`recursion`。其中 `arith_chain_temp` 覆盖 `sum = sum + i * 3 - 7` 这类左结合自二元链，用于区分截图中
+一度混用的 `arith_add_loop` 与混合算术链；该 fixture 已固化到 `scripts/benchmark-official.sh`，后续继续
+作为长期回归项。`arith_add_loop` 本轮复测为 2.96x，已低于 3x，但距离目标线很近，仍必须作为回归观察项。
 
 #### 2026-07-01 MUL integer cache 顺序复核
 
@@ -229,7 +228,7 @@ xychart-beta
 
 ### 结论
 
-- CLI 冷启动和小脚本差距较小，历史冷启动约 1.25x 到 1.35x；本轮 `compile_3000_functions` 为 2.49x，仍低于当前 3x 目标线。
-- 按当前完整 benchmark 复核口径，`arith_add_loop` 与临时补充的 `arith_chain_temp` 仍高于 3x，需要继续作为短期优化目标；旧清单中的 `arith_mix_loop`、`closure_upvalue`、`stdlib_math_string`、`recursion` 本轮已低于 3x，但必须继续回归观察。
-- 字符串拼接已较 2026-06-29 旧基线明显改善，从约 92x 收窄到约 1.70x。
-- 后续优先优化方向应集中在 `arith_add_loop` 的 `ADD R,R` / `FORLOOP` 成本、稳定 benchmark harness、函数调用/upvalue 余量、VM dispatch code size 对无关路径的影响，以及标准库函数调用边界。
+- CLI 冷启动和小脚本差距较小，历史冷启动约 1.25x 到 1.35x；本轮 `compile_3000_functions` 为 2.66x，仍低于当前 3x 目标线。
+- 按当前完整 benchmark 复核口径，`arith_mix_loop`、`arith_chain_temp`、`table_rw` 与 `recursion` 仍高于 3x，需要继续作为短期优化目标；`arith_add_loop` 当前为 2.96x，低于 3x 但余量很小，必须继续回归观察。
+- 字符串拼接已较 2026-06-29 旧基线明显改善，从约 92x 收窄到约 1.80x。
+- 后续优先优化方向应集中在算术链 `ADD`/`SUB`/`MUL` 与 `FORLOOP` 成本、表读写热路径、递归函数调用边界、VM dispatch code size 对无关路径的影响，以及标准库函数调用边界。
