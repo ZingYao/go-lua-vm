@@ -102,6 +102,33 @@ func TestCompileSourceWithSyntaxDisablesExtensions(t *testing.T) {
 	}
 }
 
+// BenchmarkCompileSource3000Functions 度量 gluac 兼容编译入口处理大量顶层函数定义的成本。
+func BenchmarkCompileSource3000Functions(b *testing.B) {
+	// 使用官方 benchmark 同形态源码，覆盖 parser、semantic analyzer 与 codegen 的编译期路径。
+	source := buildCompile3000FunctionsSource()
+	b.ReportAllocs()
+	for benchmarkIndex := 0; benchmarkIndex < b.N; benchmarkIndex++ {
+		// 每轮重新编译完整源码，避免复用 AST 或 Proto 掩盖编译期分配。
+		if _, err := CompileSource(source, "@compile_3000_functions.lua"); err != nil {
+			// 编译失败说明 benchmark fixture 不再是合法 Lua 源码。
+			b.Fatalf("CompileSource failed: %v", err)
+		}
+	}
+}
+
+// buildCompile3000FunctionsSource 构造与官方完整 benchmark 对齐的大量函数定义源码。
+func buildCompile3000FunctionsSource() string {
+	// 预估容量减少 benchmark fixture 构造本身的无关扩容成本。
+	var builder strings.Builder
+	builder.Grow(128 * 3000)
+	for functionIndex := 0; functionIndex < 3000; functionIndex++ {
+		// 每个函数体保持同一结构，便于稳定覆盖 parser/codegen 的重复定义成本。
+		fmt.Fprintf(&builder, "function f%d(x) return x + %d end\n", functionIndex, functionIndex)
+	}
+	builder.WriteString("return f2999(1)\n")
+	return builder.String()
+}
+
 // TestParseArgsRejectsInvalidInput 验证参数错误会在读取文件前暴露。
 func TestParseArgsRejectsInvalidInput(t *testing.T) {
 	// 每个参数组合都应返回明确错误。
