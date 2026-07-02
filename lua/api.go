@@ -2286,7 +2286,6 @@ func executeLuaClosureWithDebugNameTailFromArgs(state *State, function Value, na
 // 该函数承载真实 VM 执行循环，供普通调用和 direct CALL 共享。
 func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function Value, name string, nameWhat string, tailCall bool, continuation *luaCoroutineContinuation, closure *runtime.LuaClosure, proto *bytecode.Proto, vm *runtime.VM, registerCount int, varargs []Value, args []Value) (results []Value, err error) {
 	state.PushActiveVM(vm)
-	defer state.PopActiveVM(vm)
 	runtimeState := ((*runtime.State)(state))
 	frame := luaExecutionFrame(state, function, name, nameWhat, tailCall, continuation, varargs)
 	restoredOuterFrameCount := 0
@@ -2360,6 +2359,7 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 			_, _ = state.PopCallFrame()
 			popContinuationOuterFrames(state, restoredOuterFrameCount)
 		}
+		state.PopActiveVM(vm)
 	}()
 	lastHookLine := int64(-1)
 	previousPC := -1
