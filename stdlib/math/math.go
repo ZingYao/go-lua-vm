@@ -18,6 +18,42 @@ var randomMutex sync.Mutex
 // randomGenerator 是 math.random/math.randomseed 共用的独立随机源，不依赖 Go 顶层 rand 默认源。
 var randomGenerator = mrand.New(mrand.NewSource(1))
 
+// mathNumberUnaryKinds 记录 math 一元数值函数允许走无 frame fast path 的参数类型集合。
+var mathNumberUnaryKinds = runtime.UnaryKindMask(runtime.KindInteger, runtime.KindNumber)
+
+// mathFastUnaryFunctions 保存无状态 math 一元函数的只读 fastcall 描述，避免每个 State 打开标准库时重复分配。
+var mathFastUnaryFunctions = struct {
+	abs   *runtime.GoFastUnaryFunction
+	acos  *runtime.GoFastUnaryFunction
+	asin  *runtime.GoFastUnaryFunction
+	atan  *runtime.GoFastUnaryFunction
+	ceil  *runtime.GoFastUnaryFunction
+	cos   *runtime.GoFastUnaryFunction
+	deg   *runtime.GoFastUnaryFunction
+	exp   *runtime.GoFastUnaryFunction
+	floor *runtime.GoFastUnaryFunction
+	log   *runtime.GoFastUnaryFunction
+	rad   *runtime.GoFastUnaryFunction
+	sin   *runtime.GoFastUnaryFunction
+	sqrt  *runtime.GoFastUnaryFunction
+	tan   *runtime.GoFastUnaryFunction
+}{
+	abs:   &runtime.GoFastUnaryFunction{Function: AbsUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
+	acos:  &runtime.GoFastUnaryFunction{Function: ACosUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
+	asin:  &runtime.GoFastUnaryFunction{Function: ASinUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
+	atan:  &runtime.GoFastUnaryFunction{Function: ATanUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
+	ceil:  &runtime.GoFastUnaryFunction{Function: CeilUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
+	cos:   &runtime.GoFastUnaryFunction{Function: CosUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
+	deg:   &runtime.GoFastUnaryFunction{Function: DegUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
+	exp:   &runtime.GoFastUnaryFunction{Function: ExpUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
+	floor: &runtime.GoFastUnaryFunction{Function: FloorUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
+	log:   &runtime.GoFastUnaryFunction{Function: LogUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
+	rad:   &runtime.GoFastUnaryFunction{Function: RadUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
+	sin:   &runtime.GoFastUnaryFunction{Function: SinUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
+	sqrt:  &runtime.GoFastUnaryFunction{Function: SqrtUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
+	tan:   &runtime.GoFastUnaryFunction{Function: TanUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
+}
+
 // Open 将 Lua 5.3 math 标准库注册到 State 全局环境。
 //
 // state 必须非 nil 且未关闭；成功后全局 `math` 字段指向库表，并注册 abs、acos、asin、
@@ -36,32 +72,31 @@ func Open(state *runtime.State) error {
 	}
 
 	library := runtime.NewTable()
-	numberUnaryKinds := runtime.UnaryKindMask(runtime.KindInteger, runtime.KindNumber)
 	// math 库函数以 Go closure 注册，后续 VM CALL 会通过 bridge 调用。
-	library.RawSetString("abs", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: AbsUnaryValue, AcceptedKinds: numberUnaryKinds}))
-	library.RawSetString("acos", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: ACosUnaryValue, AcceptedKinds: numberUnaryKinds}))
-	library.RawSetString("asin", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: ASinUnaryValue, AcceptedKinds: numberUnaryKinds}))
-	library.RawSetString("atan", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: ATanUnaryValue, AcceptedKinds: numberUnaryKinds}))
-	library.RawSetString("ceil", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: CeilUnaryValue, AcceptedKinds: numberUnaryKinds}))
-	library.RawSetString("cos", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: CosUnaryValue, AcceptedKinds: numberUnaryKinds}))
-	library.RawSetString("deg", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: DegUnaryValue, AcceptedKinds: numberUnaryKinds}))
-	library.RawSetString("exp", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: ExpUnaryValue, AcceptedKinds: numberUnaryKinds}))
-	library.RawSetString("floor", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: FloorUnaryValue, AcceptedKinds: numberUnaryKinds}))
+	library.RawSetString("abs", runtime.ReferenceValue(runtime.KindGoClosure, mathFastUnaryFunctions.abs))
+	library.RawSetString("acos", runtime.ReferenceValue(runtime.KindGoClosure, mathFastUnaryFunctions.acos))
+	library.RawSetString("asin", runtime.ReferenceValue(runtime.KindGoClosure, mathFastUnaryFunctions.asin))
+	library.RawSetString("atan", runtime.ReferenceValue(runtime.KindGoClosure, mathFastUnaryFunctions.atan))
+	library.RawSetString("ceil", runtime.ReferenceValue(runtime.KindGoClosure, mathFastUnaryFunctions.ceil))
+	library.RawSetString("cos", runtime.ReferenceValue(runtime.KindGoClosure, mathFastUnaryFunctions.cos))
+	library.RawSetString("deg", runtime.ReferenceValue(runtime.KindGoClosure, mathFastUnaryFunctions.deg))
+	library.RawSetString("exp", runtime.ReferenceValue(runtime.KindGoClosure, mathFastUnaryFunctions.exp))
+	library.RawSetString("floor", runtime.ReferenceValue(runtime.KindGoClosure, mathFastUnaryFunctions.floor))
 	library.RawSetString("fmod", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(FMod)))
 	library.RawSetString("huge", runtime.NumberValue(math.Inf(1)))
-	library.RawSetString("log", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: LogUnaryValue, AcceptedKinds: numberUnaryKinds}))
+	library.RawSetString("log", runtime.ReferenceValue(runtime.KindGoClosure, mathFastUnaryFunctions.log))
 	library.RawSetString("max", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Max)))
 	library.RawSetString("maxinteger", runtime.IntegerValue(math.MaxInt64))
 	library.RawSetString("min", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Min)))
 	library.RawSetString("mininteger", runtime.IntegerValue(math.MinInt64))
 	library.RawSetString("modf", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(ModF)))
 	library.RawSetString("pi", runtime.NumberValue(math.Pi))
-	library.RawSetString("rad", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: RadUnaryValue, AcceptedKinds: numberUnaryKinds}))
+	library.RawSetString("rad", runtime.ReferenceValue(runtime.KindGoClosure, mathFastUnaryFunctions.rad))
 	library.RawSetString("random", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Random)))
 	library.RawSetString("randomseed", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(RandomSeed)))
-	library.RawSetString("sin", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: SinUnaryValue, AcceptedKinds: numberUnaryKinds}))
-	library.RawSetString("sqrt", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: SqrtUnaryValue, AcceptedKinds: numberUnaryKinds}))
-	library.RawSetString("tan", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: TanUnaryValue, AcceptedKinds: numberUnaryKinds}))
+	library.RawSetString("sin", runtime.ReferenceValue(runtime.KindGoClosure, mathFastUnaryFunctions.sin))
+	library.RawSetString("sqrt", runtime.ReferenceValue(runtime.KindGoClosure, mathFastUnaryFunctions.sqrt))
+	library.RawSetString("tan", runtime.ReferenceValue(runtime.KindGoClosure, mathFastUnaryFunctions.tan))
 	library.RawSetString("tointeger", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(ToInteger)))
 	library.RawSetString("type", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Type)))
 	library.RawSetString("ult", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(ULT)))
