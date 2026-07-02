@@ -1130,9 +1130,30 @@ Go micro 复核中，`BenchmarkPreparedRecursion` 从 `5 allocs/op` 降到 `3 al
 略高于 3x；后续仍需作为边缘观察项。`closure_upvalue` 第二轮 `3.20x` 同样来自本项目绝对时间慢轮，
 需要后续用 Go micro/profile 分辨是否只是计时波动。
 
+为分辨 `closure_upvalue` 慢轮是否可复现，`00e86e5` 新增官方规模 Go micro：
+`BenchmarkDoStringClosureUpvalueOfficial` 与 `BenchmarkPreparedClosureUpvalueOfficial`。源码与官方完整
+benchmark 同形态：外层定义 `x`，局部函数 `inc(v)` 执行 `x = x + v` 并返回 `x`，随后循环
+`200000` 次调用 `inc(1)`。该 benchmark-only 改动不修改 parser、codegen、VM 或标准库语义。
+
+字节码复核中，官方 Lua 5.3.6 与本项目主循环热体均为
+`FORPREP; MOVE; LOADK; CALL; MOVE; FORLOOP`；`inc` 子函数热体均为
+`GETUPVAL; ADD; SETUPVAL; GETUPVAL; RETURN`。项目额外循环退出零距离 `JMP` 和少尾部默认 `RETURN`
+是既有 codegen 形态差异，不在热路径。
+
+Go micro 三轮结果如下：
+
+| 用例 | 耗时 | 分配 |
+| --- | ---: | ---: |
+| `BenchmarkDoStringClosureUpvalueOfficial` | 17.78ms / 16.61ms / 16.83ms | 约 62.2KB/op，266 allocs/op |
+| `BenchmarkPreparedClosureUpvalueOfficial` | 16.13ms / 16.16ms / 16.14ms | 约 500B/op，5 allocs/op |
+
+本地官方规模 Go micro 未复现 `closure_upvalue` 的稳定退化，更支持默认完整 benchmark 第二轮 `3.20x`
+是官方/子进程计时波动的判断。prepared 口径显示该路径 wall-clock 主要来自运行期闭包 upvalue 调用边界；
+编译、OpenLibs 和 State 初始化主要贡献少量分配。
+
 ### 结论
 
 - CLI 冷启动和小脚本差距较小，历史冷启动约 1.25x 到 1.35x；最新 Lua 5.3.6 正确口径下 `compile_3000_functions` 为 2.36x / 2.30x / 2.35x，仍低于当前 3x 目标线。
-- 按最新完整 benchmark 复核口径，`compile_3000_functions`、`stdlib_math_string` 和 `function_call` 稳定低于 3x；`table_rw` 贴近但低于 3x，prepared 口径确认其 B/op 主要来自运行期 table 数组区扩容；`recursion` 经 `b24f6c0` 后从三轮稳定略高于 3x 改为两轮低于 3x、一轮慢轮高于 3x，仍需作为边缘观察项；`arith_chain_temp` 仍是执行 CPU 侧的边缘观察项。
+- 按最新完整 benchmark 复核口径，`compile_3000_functions`、`stdlib_math_string` 和 `function_call` 稳定低于 3x；`table_rw` 贴近但低于 3x，prepared 口径确认其 B/op 主要来自运行期 table 数组区扩容；`closure_upvalue` 的单轮 3.20x 慢轮已由官方规模 Go micro 初步判断为计时波动；`recursion` 经 `b24f6c0` 后从三轮稳定略高于 3x 改为两轮低于 3x、一轮慢轮高于 3x，仍需作为边缘观察项；`arith_chain_temp` 仍是执行 CPU 侧的边缘观察项。
 - 字符串拼接已较 2026-06-29 旧基线明显改善，从约 92x 收窄到约 1.86x。
 - 后续优先优化方向应集中在算术链 `ADD`/`SUB`/`MUL` 与 `FORLOOP` 成本、递归函数调用边界、表读写热路径、VM dispatch code size 对无关路径的影响；但若 profile 只落在已证伪的调用边界或算术缓存细枝，应优先继续定位或文档化，而不是堆局部字段/分支微调。
