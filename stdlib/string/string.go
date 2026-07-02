@@ -37,6 +37,50 @@ const (
 	packMaxOptionSize = 16
 )
 
+// stringKindUnaryMask 记录 string 一元函数允许走无 frame fast path 的参数类型集合。
+var stringKindUnaryMask = runtime.UnaryKindMask(runtime.KindString)
+
+// stringFastUnaryFunctions 保存无状态 string 一元函数的只读 fastcall 描述，避免每个 State 打开标准库时重复分配。
+var stringFastUnaryFunctions = struct {
+	len     *runtime.GoFastUnaryFunction
+	lower   *runtime.GoFastUnaryFunction
+	reverse *runtime.GoFastUnaryFunction
+	upper   *runtime.GoFastUnaryFunction
+}{
+	len:     &runtime.GoFastUnaryFunction{Function: LenUnaryValue, AcceptedKinds: stringKindUnaryMask},
+	lower:   &runtime.GoFastUnaryFunction{Function: LowerUnaryValue, AcceptedKinds: stringKindUnaryMask},
+	reverse: &runtime.GoFastUnaryFunction{Function: ReverseUnaryValue, AcceptedKinds: stringKindUnaryMask},
+	upper:   &runtime.GoFastUnaryFunction{Function: UpperUnaryValue, AcceptedKinds: stringKindUnaryMask},
+}
+
+// stringFixedResultsFunctions 保存无状态 string 固定返回上限函数的只读描述，供库表注册复用。
+var stringFixedResultsFunctions = struct {
+	byteFunction *runtime.GoFixedResultsFunction
+	findFunction *runtime.GoFixedResultsFunction
+	subFunction  *runtime.GoFixedResultsFunction
+}{
+	byteFunction: &runtime.GoFixedResultsFunction{
+		MaxResults:      1,
+		Function4Single: ByteFixed4Single,
+		Function4:       ByteFixed4,
+		Function:        ByteFixed,
+		Fallback:        Byte,
+	},
+	findFunction: &runtime.GoFixedResultsFunction{
+		MaxResults: 2,
+		Function4:  FindFixed4,
+		Function:   FindFixed,
+		Fallback:   Find,
+	},
+	subFunction: &runtime.GoFixedResultsFunction{
+		MaxResults:      1,
+		Function4Single: SubFixed4Single,
+		Function4:       SubFixed4,
+		Function:        SubFixed,
+		Fallback:        Sub,
+	},
+}
+
 // Open 将 Lua 5.3 string 标准库注册到 State 全局环境。
 //
 // state 必须非 nil 且未关闭；成功后全局 `string` 字段指向库表，并注册本阶段已支持的
@@ -54,21 +98,10 @@ func Open(state *runtime.State) error {
 
 	library := runtime.NewTable()
 	// string 库函数以 Go closure 注册，后续 VM CALL 会通过 bridge 调用。
-	library.RawSetString("byte", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFixedResultsFunction{
-		MaxResults:      1,
-		Function4Single: ByteFixed4Single,
-		Function4:       ByteFixed4,
-		Function:        ByteFixed,
-		Fallback:        Byte,
-	}))
+	library.RawSetString("byte", runtime.ReferenceValue(runtime.KindGoClosure, stringFixedResultsFunctions.byteFunction))
 	library.RawSetString("char", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Char)))
 	library.RawSetString("dump", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Dump)))
-	library.RawSetString("find", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFixedResultsFunction{
-		MaxResults: 2,
-		Function4:  FindFixed4,
-		Function:   FindFixed,
-		Fallback:   Find,
-	}))
+	library.RawSetString("find", runtime.ReferenceValue(runtime.KindGoClosure, stringFixedResultsFunctions.findFunction))
 	library.RawSetString("format", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(func(args ...runtime.Value) ([]runtime.Value, error) {
 		// format 的 %s 需要当前 State 才能执行 Lua closure `__tostring` 元方法。
 		return formatWithState(state, args...)
@@ -78,22 +111,16 @@ func Open(state *runtime.State) error {
 		// gsub 的 Lua closure 替换函数需要当前 State 提供 Lua closure runner。
 		return gsubWithState(state, args...)
 	})))
-	library.RawSetString("len", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: LenUnaryValue, AcceptedKinds: runtime.UnaryKindMask(runtime.KindString)}))
-	library.RawSetString("lower", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: LowerUnaryValue, AcceptedKinds: runtime.UnaryKindMask(runtime.KindString)}))
+	library.RawSetString("len", runtime.ReferenceValue(runtime.KindGoClosure, stringFastUnaryFunctions.len))
+	library.RawSetString("lower", runtime.ReferenceValue(runtime.KindGoClosure, stringFastUnaryFunctions.lower))
 	library.RawSetString("match", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Match)))
 	library.RawSetString("pack", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Pack)))
 	library.RawSetString("packsize", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(PackSize)))
 	library.RawSetString("rep", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Rep)))
-	library.RawSetString("reverse", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: ReverseUnaryValue, AcceptedKinds: runtime.UnaryKindMask(runtime.KindString)}))
-	library.RawSetString("sub", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFixedResultsFunction{
-		MaxResults:      1,
-		Function4Single: SubFixed4Single,
-		Function4:       SubFixed4,
-		Function:        SubFixed,
-		Fallback:        Sub,
-	}))
+	library.RawSetString("reverse", runtime.ReferenceValue(runtime.KindGoClosure, stringFastUnaryFunctions.reverse))
+	library.RawSetString("sub", runtime.ReferenceValue(runtime.KindGoClosure, stringFixedResultsFunctions.subFunction))
 	library.RawSetString("unpack", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Unpack)))
-	library.RawSetString("upper", runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{Function: UpperUnaryValue, AcceptedKinds: runtime.UnaryKindMask(runtime.KindString)}))
+	library.RawSetString("upper", runtime.ReferenceValue(runtime.KindGoClosure, stringFastUnaryFunctions.upper))
 	state.SetGlobal("string", runtime.ReferenceValue(runtime.KindTable, library))
 	runtime.SetStringIndexTable(library)
 	return nil
