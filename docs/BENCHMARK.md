@@ -803,9 +803,34 @@ benchmark 三次复跑如下：
 3x。因此下一轮仍以 `recursion` 为明确优先项；`arith_chain_temp`、`table_rw`、`arith_mix_loop`
 和 `arith_add_loop` 继续作为边缘回归观察项。
 
+#### 2026-07-02 完整 benchmark 稳定性复跑
+
+本轮未修改 VM 代码，只在 `df7e71f` 当前提交上重新构建 `bin/glua` / `bin/gluac`，并使用
+`scripts/benchmark-official.sh` 通过版本门禁的官方 Lua 5.3.6 `lua` / `luac` 做一次完整复核。
+字节码复核结论不变：`recursion` 的 `fib` 子函数热体仍与官方 Lua 5.3.6 一致，为
+`LT; JMP; RETURN; GETUPVAL; SUB; CALL; GETUPVAL; SUB; CALL; ADD; RETURN`；`arith_chain_temp`
+热循环仍为 `MUL; ADD; SUB; FORLOOP`。项目主函数循环退出处额外零距离 `JMP` 不在热路径。
+
+| 用例 | 官方工具中位数 | 本项目中位数 | 本项目/官方 |
+| --- | ---: | ---: | ---: |
+| `arith_add_loop` | 0.007547s | 0.020595s | 2.73x |
+| `arith_mix_loop` | 0.011092s | 0.033469s | 3.02x |
+| `arith_chain_temp` | 0.012800s | 0.038063s | 2.97x |
+| `table_rw` | 0.007073s | 0.020873s | 2.95x |
+| `function_call` | 0.006760s | 0.018263s | 2.70x |
+| `string_concat` | 0.004685s | 0.008654s | 1.85x |
+| `closure_upvalue` | 0.007947s | 0.020455s | 2.57x |
+| `stdlib_math_string` | 0.019221s | 0.044313s | 2.31x |
+| `recursion` | 0.003879s | 0.011716s | 3.02x |
+| `compile_3000_functions` | 0.005353s | 0.014338s | 2.68x |
+
+本次稳定性复跑显示，`recursion` 仍略高于 3x，`arith_mix_loop` 也在同轮越过 3x；
+`arith_chain_temp`、`table_rw`、`arith_add_loop` 继续贴近 3x。下一轮不应只盯递归调用边界，
+还需要同步观察混合算术链路中 `MUL; ADD; SUB; IDIV; MOD; ADD; FORLOOP` 热循环的稳定性。
+
 ### 结论
 
 - CLI 冷启动和小脚本差距较小，历史冷启动约 1.25x 到 1.35x；本轮 Lua 5.3.6 正确口径下 `compile_3000_functions` 为 2.58x / 2.61x / 2.60x，仍低于当前 3x 目标线。
-- 按最新完整 benchmark 复核口径，`recursion` 为 3.11x / 3.10x / 3.14x，仍是明确高于 3x 的路径；`arith_chain_temp`、`table_rw`、`arith_mix_loop` 和 `arith_add_loop` 继续作为边缘回归观察项。
+- 按最新完整 benchmark 复核口径，`recursion` 与 `arith_mix_loop` 均出现略高于 3x 的轮次；`arith_chain_temp`、`table_rw` 和 `arith_add_loop` 继续作为边缘回归观察项。
 - 字符串拼接已较 2026-06-29 旧基线明显改善，从约 92x 收窄到约 1.86x。
 - 后续优先优化方向应集中在算术链 `ADD`/`SUB`/`MUL` 与 `FORLOOP` 成本、递归函数调用边界、表读写热路径、VM dispatch code size 对无关路径的影响，以及标准库函数调用边界。
