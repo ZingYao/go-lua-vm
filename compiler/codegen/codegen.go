@@ -164,7 +164,6 @@ func newGenerator(source string) *generator {
 		proto:     bytecode.NewProto(source),
 		constants: make(map[string]int),
 		locals:    make(map[string]localBinding),
-		upvalues:  make(map[string]int),
 	}
 }
 
@@ -261,6 +260,17 @@ func (generator *generator) currentScope() *parser.ScopeInfo {
 		return nil
 	}
 	return generator.scopeStack[len(generator.scopeStack)-1]
+}
+
+// setUpvalue 记录名称到当前 Proto upvalue 下标的映射。
+//
+// 大多数函数没有 upvalue；首次真实捕获或登记 `_ENV` 时才分配去重表。
+func (generator *generator) setUpvalue(name string, index int) {
+	if generator.upvalues == nil {
+		// 只有需要写入时才创建 map；nil map 读取已等价于空 map。
+		generator.upvalues = make(map[string]int)
+	}
+	generator.upvalues[name] = index
 }
 
 // withSourceLine 在指定源码行上下文中执行 codegen 动作。
@@ -4264,7 +4274,7 @@ func (generator *generator) resolveUpvalue(name string, position lexer.Position)
 		// 命中父函数 local 时，登记 InStack upvalue。
 		index := len(generator.proto.Upvalues)
 		generator.proto.Upvalues = append(generator.proto.Upvalues, bytecode.UpvalueDesc{Name: name, InStack: true, Index: uint8(binding.register)})
-		generator.upvalues[name] = index
+		generator.setUpvalue(name, index)
 		binding.captured = true
 		generator.parent.locals[name] = binding
 		return index, true, nil
@@ -4284,7 +4294,7 @@ func (generator *generator) resolveUpvalue(name string, position lexer.Position)
 	}
 	index := len(generator.proto.Upvalues)
 	generator.proto.Upvalues = append(generator.proto.Upvalues, bytecode.UpvalueDesc{Name: name, InStack: false, Index: uint8(parentIndex)})
-	generator.upvalues[name] = index
+	generator.setUpvalue(name, index)
 
 	// 返回间接捕获的 upvalue 下标。
 	return index, true, nil
@@ -4315,13 +4325,13 @@ func (generator *generator) envUpvalueIndex() int {
 	if generator.parent == nil {
 		// 顶层 `_ENV` 由 lua.LoadString 绑定到 State globals，不来自源码局部寄存器。
 		generator.proto.Upvalues = append(generator.proto.Upvalues, bytecode.UpvalueDesc{Name: envUpvalueName, InStack: true, Index: 0})
-		generator.upvalues[envUpvalueName] = index
+		generator.setUpvalue(envUpvalueName, index)
 		return index
 	}
 	if binding, exists := generator.parent.locals[envUpvalueName]; exists {
 		// 父函数显式 local _ENV 时，嵌套函数必须捕获该寄存器作为自身环境。
 		generator.proto.Upvalues = append(generator.proto.Upvalues, bytecode.UpvalueDesc{Name: envUpvalueName, InStack: true, Index: uint8(binding.register)})
-		generator.upvalues[envUpvalueName] = index
+		generator.setUpvalue(envUpvalueName, index)
 		binding.captured = true
 		generator.parent.locals[envUpvalueName] = binding
 		return index
@@ -4329,7 +4339,7 @@ func (generator *generator) envUpvalueIndex() int {
 	parentIndex := generator.parent.envUpvalueIndex()
 	// 嵌套函数捕获父函数的 `_ENV` upvalue，运行时 CLOSURE 会从父 closure.Upvalues 读取。
 	generator.proto.Upvalues = append(generator.proto.Upvalues, bytecode.UpvalueDesc{Name: envUpvalueName, InStack: false, Index: uint8(parentIndex)})
-	generator.upvalues[envUpvalueName] = index
+	generator.setUpvalue(envUpvalueName, index)
 
 	// 返回当前函数中的 `_ENV` upvalue 下标。
 	return index
