@@ -1027,6 +1027,22 @@ DoString micro 未显示稳定退化，且不在本轮 `string.format("%d")` 触
 `arith_chain_temp` 稳定约 `33.5-34.3 ms/op`、`recursion` 稳定约 `6.94 ms/op`，下一轮若继续生产
 优化，应优先围绕这两条路径重新定位，而不是回到已经证伪的标准库、table 扩容或通用调用边界调参。
 
+随后对 `arith_chain_temp` 与 `recursion` 重新跑 3s/5 轮 Go micro 和 CPU/alloc profile。
+`BenchmarkDoStringArithChainTempOfficial` 5 轮稳定在 `33.38-33.82 ms/op`、约 `58.9 KB/op`、
+`220 allocs/op`；CPU 仍集中在 `executePreparedLuaClosureWithDebugNameTailFromArgs`、`VM.Step`、
+`tryCachedIntegerAddArithmetic`、`tryCachedIntegerMulArithmetic`、`tryCachedIntegerSubArithmetic`
+和 `executeForLoop`。alloc profile 主要来自每轮 DoString 的标准库注册、解析、语义分析和 codegen，
+不是热循环逐步分配。`BenchmarkDoStringRecursion` 5 轮稳定在 `6.97-7.00 ms/op`、
+约 `89.6 KB/op`、`363 allocs/op`；CPU 仍集中在 `executeLuaCallRequest`、VM reset/borrow、
+`prepareLuaExecutionStateArgs`、debug name 推断、调用帧维护、`writeLuaCallResults`、
+`CheckCallDepth/NormalizeOptions` 和 `PopActiveVM` 等路径。
+
+这次重新定位没有发现新的低风险生产切口。`arith_chain_temp` 命中的算术 cache、FORLOOP、pc 更新和
+dispatch 方向已被多轮优化或证伪覆盖；`recursion` 命中的调用边界与 debug、hook、coroutine、yield、
+traceback 和错误路径强相关，也覆盖 direct Lua CALL 扩大、结果写回绕过、VM 小栈/fast slot、
+CheckCallDepth/NormalizeOptions 与 PopCallFrame 清理策略等已证伪方向。后续若继续冲击 3x，应优先寻找
+新的可证明语义等价入口，或用更细的 benchmark 分离官方基线波动，而不是重复这些局部调参。
+
 ### 结论
 
 - CLI 冷启动和小脚本差距较小，历史冷启动约 1.25x 到 1.35x；最新 Lua 5.3.6 正确口径下 `compile_3000_functions` 为 2.36x / 2.30x / 2.35x，仍低于当前 3x 目标线。
