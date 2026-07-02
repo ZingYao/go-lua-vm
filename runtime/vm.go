@@ -255,13 +255,21 @@ type LuaLeafUpvalueAddSetReturn struct {
 // 会缓存 direct CALL 安全性和极小叶子函数形态，避免热循环中每次 CALL 重复扫描 Proto 指令。
 func NewLuaClosure(proto *bytecode.Proto, upvalues []Value, upvalueCells []*UpvalueCell) *LuaClosure {
 	// 创建 closure 时一次性计算不可变 Proto 的 direct CALL 属性。
+	directCallSafe := luaProtoDirectCallSafe(proto)
+	var leafAddReturn *LuaLeafAddReturn
+	var leafUpvalueAddSetReturn *LuaLeafUpvalueAddSetReturn
+	if directCallSafe {
+		// 叶子快路径形态不包含 CALL/TAILCALL/TFORCALL/CLOSURE；非 direct-safe Proto 必然无法命中。
+		leafAddReturn = luaProtoLeafAddReturn(proto)
+		leafUpvalueAddSetReturn = luaProtoLeafUpvalueAddSetReturn(proto)
+	}
 	return &LuaClosure{
 		Proto:                   proto,
 		Upvalues:                upvalues,
 		UpvalueCells:            upvalueCells,
-		DirectCallSafe:          luaProtoDirectCallSafe(proto),
-		LeafAddReturn:           luaProtoLeafAddReturn(proto),
-		LeafUpvalueAddSetReturn: luaProtoLeafUpvalueAddSetReturn(proto),
+		DirectCallSafe:          directCallSafe,
+		LeafAddReturn:           leafAddReturn,
+		LeafUpvalueAddSetReturn: leafUpvalueAddSetReturn,
 	}
 }
 
