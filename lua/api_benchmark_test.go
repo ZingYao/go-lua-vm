@@ -52,6 +52,18 @@ return sum
 	}
 }
 
+// BenchmarkPreparedArithAddLoopOfficial 度量预编译后重复执行官方规模整数累加 numeric for 热循环。
+func BenchmarkPreparedArithAddLoopOfficial(b *testing.B) {
+	source := `
+local sum = 0
+for i = 1, 1000000 do
+  sum = sum + i
+end
+return sum
+	`
+	benchmarkPreparedClosure(b, source)
+}
+
 // BenchmarkDoStringArithMixLoopOfficial 度量官方完整 benchmark 同规模的混合整数算术热循环。
 func BenchmarkDoStringArithMixLoopOfficial(b *testing.B) {
 	source := `
@@ -76,6 +88,19 @@ return sum
 		}
 		state.Close()
 	}
+}
+
+// BenchmarkPreparedArithMixLoopOfficial 度量预编译后重复执行官方规模混合整数算术热循环。
+func BenchmarkPreparedArithMixLoopOfficial(b *testing.B) {
+	source := `
+local sum = 0
+for i = 1, 400000 do
+  sum = sum + i * 3 - 7
+  sum = sum // 2 + i % 5
+end
+return sum
+	`
+	benchmarkPreparedClosure(b, source)
 }
 
 // BenchmarkDoStringArithChainTemp 度量完整 Lua VM 路径下的左结合自二元链热循环。
