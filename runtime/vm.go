@@ -3193,6 +3193,32 @@ func (vm *VM) tryCachedIntegerModArithmetic(instruction bytecode.Instruction, ta
 
 	cacheEntry := vm.arithmeticIntOperandCache[currentPC]
 	registers := vm.registers
+	if cacheEntry.rightConstantOperand && !cacheEntry.leftConstantOperand {
+		// 左寄存器右常量是混合算术循环常见形态，命中时只需校验左寄存器类型。
+		leftIndex := cacheEntry.leftIndex
+		if uint(leftIndex) >= uint(len(registers)) {
+			// 寄存器窗口变化时清理缓存，并回到通用 RK 路径报出原始错误。
+			vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
+			vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
+			return false, nil
+		}
+		if registers[leftIndex].Kind != KindInteger {
+			// 左操作数类型变化时缓存失效，后续走完整 Lua 算术和元方法语义。
+			vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
+			vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
+			return false, nil
+		}
+		rightInteger := cacheEntry.rightConstant
+		if rightInteger == 0 {
+			// MOD 零除错误必须保持 Lua 运行期错误文本，并避免覆盖目标寄存器。
+			return true, fmt.Errorf("'n%%0': %w", ErrDivisionByZero)
+		}
+
+		// MOD 使用 Lua floor modulo 语义，右侧 integer 常量直接复用缓存值。
+		registers[targetIndex] = IntegerValue(integerModulo(registers[leftIndex].Integer, rightInteger))
+		return true, nil
+	}
+
 	var leftInteger int64
 	if cacheEntry.leftConstantOperand {
 		// 左操作数为 Proto integer 常量时可直接复用缓存值。
@@ -3259,6 +3285,32 @@ func (vm *VM) tryCachedIntegerIDivArithmetic(instruction bytecode.Instruction, t
 
 	cacheEntry := vm.arithmeticIntOperandCache[currentPC]
 	registers := vm.registers
+	if cacheEntry.rightConstantOperand && !cacheEntry.leftConstantOperand {
+		// 左寄存器右常量是混合算术循环常见形态，命中时只需校验左寄存器类型。
+		leftIndex := cacheEntry.leftIndex
+		if uint(leftIndex) >= uint(len(registers)) {
+			// 寄存器窗口变化时清理缓存，并回到通用 RK 路径报出原始错误。
+			vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
+			vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
+			return false, nil
+		}
+		if registers[leftIndex].Kind != KindInteger {
+			// 左操作数类型变化时缓存失效，后续走完整 Lua 算术和元方法语义。
+			vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
+			vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
+			return false, nil
+		}
+		rightInteger := cacheEntry.rightConstant
+		if rightInteger == 0 {
+			// 零除错误必须在写回前暴露，保持目标寄存器原值。
+			return true, ErrDivisionByZero
+		}
+
+		// IDIV 使用 Lua floor division 语义，右侧 integer 常量直接复用缓存值。
+		registers[targetIndex] = IntegerValue(integerFloorDiv(registers[leftIndex].Integer, rightInteger))
+		return true, nil
+	}
+
 	var leftInteger int64
 	if cacheEntry.leftConstantOperand {
 		// 左操作数为 Proto integer 常量时可直接复用缓存值。
