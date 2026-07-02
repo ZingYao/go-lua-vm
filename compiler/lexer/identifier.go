@@ -16,8 +16,7 @@ func (lexer *Lexer) ScanIdentifier() (string, Position, bool) {
 		return "", startPosition, false
 	}
 
-	// 首字符合法后，读取完整标识符。
-	var identifierRunes []rune
+	// 首字符合法后，读取完整标识符；标识符限定 ASCII，可在消费后直接切原始源码文本。
 	for {
 		nextRune, ok := lexer.source.Peek()
 		if !ok {
@@ -29,11 +28,10 @@ func (lexer *Lexer) ScanIdentifier() (string, Position, bool) {
 			break
 		}
 		lexer.source.Next()
-		identifierRunes = append(identifierRunes, nextRune)
 	}
 
 	// 返回标识符文本和起始位置。
-	return string(identifierRunes), startPosition, true
+	return lexer.source.input[startPosition.Offset:lexer.source.Position().Offset], startPosition, true
 }
 
 // isIdentifierStart 判断 rune 是否可以作为 Lua 标识符首字符。
