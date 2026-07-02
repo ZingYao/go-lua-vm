@@ -5,6 +5,7 @@ package codegen
 
 import (
 	"fmt"
+	"strconv"
 
 	"github.com/zing/go-lua-vm/bytecode"
 	"github.com/zing/go-lua-vm/compiler/lexer"
@@ -4681,18 +4682,22 @@ func stableConstantKey(constant bytecode.Constant) string {
 		return "nil"
 	case bytecode.ConstantBoolean:
 		// boolean key 包含 true/false。
-		return fmt.Sprintf("bool:%v", constant.Bool)
+		if constant.Bool {
+			// true/false 只有两个稳定值，直接返回常量字符串避免格式化分配。
+			return "bool:true"
+		}
+		return "bool:false"
 	case bytecode.ConstantInteger:
 		// integer key 保留十进制整数值。
-		return fmt.Sprintf("int:%d", constant.Integer)
+		return "int:" + strconv.FormatInt(constant.Integer, 10)
 	case bytecode.ConstantNumber:
 		// number key 使用 %g 保持稳定且区分浮点类型前缀。
-		return fmt.Sprintf("num:%g", constant.Number)
+		return "num:" + strconv.FormatFloat(constant.Number, 'g', 6, 64)
 	case bytecode.ConstantString:
 		// string key 使用 %q 保留转义边界。
-		return fmt.Sprintf("str:%q", constant.String)
+		return "str:" + strconv.Quote(constant.String)
 	default:
-		return fmt.Sprintf("unknown:%d", constant.Kind)
+		return "unknown:" + strconv.Itoa(int(constant.Kind))
 	}
 }
 
