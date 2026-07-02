@@ -165,7 +165,6 @@ func newGenerator(source string) *generator {
 		constants: make(map[string]int),
 		locals:    make(map[string]localBinding),
 		upvalues:  make(map[string]int),
-		scopes:    make(map[int]*parser.ScopeInfo),
 	}
 }
 
@@ -216,7 +215,10 @@ func (generator *generator) pushScope(block *parser.Block) {
 		generator.scopeStack = append(generator.scopeStack, nil)
 		return
 	}
-	generator.scopes[block.Scope.ID] = block.Scope
+	if generator.scopes != nil {
+		// 已经遇到 goto 后才需要维护作用域父链索引。
+		generator.scopes[block.Scope.ID] = block.Scope
+	}
 	generator.scopeStack = append(generator.scopeStack, block.Scope)
 }
 
@@ -229,6 +231,25 @@ func (generator *generator) popScope() {
 		return
 	}
 	generator.scopeStack = generator.scopeStack[:len(generator.scopeStack)-1]
+}
+
+// ensureScopeIndex 按需创建 goto 作用域父链索引。
+//
+// 普通函数没有 goto 解析需求；首次遇到 goto 时才把当前作用域栈回填到索引中，
+// 后续进入的新 block 会由 pushScope 增量维护。
+func (generator *generator) ensureScopeIndex() {
+	if generator.scopes != nil {
+		// 已初始化时无需重复回填，避免热路径做多余 map 写入。
+		return
+	}
+	generator.scopes = make(map[int]*parser.ScopeInfo)
+	for _, scope := range generator.scopeStack {
+		if scope == nil {
+			// 缺失作用域信息的栈帧不能参与父链解析。
+			continue
+		}
+		generator.scopes[scope.ID] = scope
+	}
 }
 
 // currentScope 返回当前正在生成的 block 作用域。
@@ -358,6 +379,7 @@ func (generator *generator) compileLabelStatement(statement *parser.LabelStateme
 //
 // goto 先生成 JMP 占位；目标 label 可能位于后文，统一在函数编译结束时回填。
 func (generator *generator) compileGotoStatement(statement *parser.GotoStatement) error {
+	generator.ensureScopeIndex()
 	jumpPC := generator.emitJump(0)
 	generator.pendingGotos = append(generator.pendingGotos, pendingGoto{
 		label:              statement.Label,
