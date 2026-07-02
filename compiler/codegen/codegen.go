@@ -163,7 +163,6 @@ func newGenerator(source string) *generator {
 	return &generator{
 		proto:     bytecode.NewProto(source),
 		constants: make(map[string]int),
-		locals:    make(map[string]localBinding),
 	}
 }
 
@@ -4179,6 +4178,10 @@ func (generator *generator) defineLocal(name string, register int, position lexe
 	localVar := bytecode.LocalVar{Name: name, Register: register, StartPC: len(generator.proto.Code), EndPC: len(generator.proto.Code)}
 	index := len(generator.proto.LocalVars)
 	generator.proto.LocalVars = append(generator.proto.LocalVars, localVar)
+	if generator.locals == nil {
+		// 首次声明局部变量时才创建绑定表；nil map 的读取、遍历和 len 与空 map 等价。
+		generator.locals = make(map[string]localBinding)
+	}
 	generator.locals[name] = localBinding{register: register, localVarIndex: index, scopeID: currentScopeID}
 }
 
@@ -4201,10 +4204,14 @@ func (generator *generator) currentScopeID() int {
 // 返回快照必须传给 endScope；该机制只恢复 codegen 解析名称所需的 locals 与寄存器水位，
 // 不回退已经生成的指令、常量或调试局部变量表。
 func (generator *generator) beginScope() scopeSnapshot {
-	locals := make(map[string]localBinding, len(generator.locals))
-	for name, binding := range generator.locals {
-		// 浅拷贝局部绑定，退出作用域时恢复外层同名变量。
-		locals[name] = binding
+	var locals map[string]localBinding
+	if len(generator.locals) > 0 {
+		// 只有外层确实存在局部绑定时才复制快照；空作用域用 nil map 表示即可。
+		locals = make(map[string]localBinding, len(generator.locals))
+		for name, binding := range generator.locals {
+			// 浅拷贝局部绑定，退出作用域时恢复外层同名变量。
+			locals[name] = binding
+		}
 	}
 	return scopeSnapshot{
 		locals:        locals,
