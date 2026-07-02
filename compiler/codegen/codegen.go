@@ -165,7 +165,6 @@ func newGenerator(source string) *generator {
 		constants: make(map[string]int),
 		locals:    make(map[string]localBinding),
 		upvalues:  make(map[string]int),
-		labelPCs:  make(map[string][]labelInfo),
 		scopes:    make(map[int]*parser.ScopeInfo),
 	}
 }
@@ -341,6 +340,10 @@ func (generator *generator) compileStatement(statement parser.Statement) error {
 //
 // label 自身没有运行时效果；记录当前 PC 作为后续 goto 的目标位置。
 func (generator *generator) compileLabelStatement(statement *parser.LabelStatement) error {
+	if generator.labelPCs == nil {
+		// 大多数函数没有 label/goto；只有遇到 label 时才分配目标索引。
+		generator.labelPCs = make(map[string][]labelInfo)
+	}
 	generator.labelPCs[statement.Name] = append(generator.labelPCs[statement.Name], labelInfo{
 		pc:           len(generator.proto.Code),
 		nextRegister: generator.nextRegister,
