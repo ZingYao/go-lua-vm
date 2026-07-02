@@ -661,6 +661,19 @@ func formatWithState(state *runtime.State, args ...runtime.Value) ([]runtime.Val
 		// 第一个参数不是 string 时直接返回 Lua 参数错误。
 		return nil, err
 	}
+	if formatText == "%d" {
+		// 标准库混合热路径频繁调用 string.format("%d", i)，精确 %d 可跳过格式解析和 fmt.Sprintf。
+		if len(args) <= 1 {
+			// 缺少对应实参时保持通用路径的 Lua error 文本。
+			return nil, runtime.RaiseError(runtime.StringValue("no value"))
+		}
+		integerValue, ok := formatIntegerValue(args[1])
+		if !ok {
+			// 非整数仍使用 string.format 的第二参数错误语义。
+			return nil, badArgument("format", 2, "integer expected")
+		}
+		return []runtime.Value{runtime.StringValue(strconv.FormatInt(integerValue, 10))}, nil
+	}
 
 	var builder strings.Builder
 	argumentIndex := 1

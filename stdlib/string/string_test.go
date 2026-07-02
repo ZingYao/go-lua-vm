@@ -585,6 +585,17 @@ func TestFormatQuoteUsesLuaEscapes(t *testing.T) {
 // 官方 strings.lua 依赖 `%c/%x/%X/%o/%u`，其中 `%c` 必须输出单字节字符串，十六进制和
 // 无符号格式必须按 64 位补码视图处理。
 func TestFormatSupportsIntegerAndCharVerbs(t *testing.T) {
+	// 精确 %d 热路径必须保留字符串整数转换，并像通用路径一样忽略多余实参。
+	decimalResults, err := Format(runtime.StringValue("%d"), runtime.StringValue(" 42 "), runtime.IntegerValue(99))
+	if err != nil {
+		// 合法字符串整数不应失败。
+		t.Fatalf("Format decimal fast path failed: %v", err)
+	}
+	if len(decimalResults) != 1 || decimalResults[0].String != "42" {
+		// 精确 %d 输出必须与通用整数格式一致。
+		t.Fatalf("Format decimal fast path result = %#v", decimalResults)
+	}
+
 	// %c 输出原始字节，不能按 UTF-8 rune 扩展。
 	charResults, err := Format(runtime.StringValue("\x00%c\x00%c%x\x00"), runtime.IntegerValue(0xe4), runtime.IntegerValue('b'), runtime.IntegerValue(140))
 	if err != nil {
