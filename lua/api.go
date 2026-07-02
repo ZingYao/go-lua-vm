@@ -2016,7 +2016,8 @@ func prepareLuaExecutionStateArgs(state *State, function Value, continuation *lu
 	proto := closure.Proto
 	varargs := luaClosureVarargs(proto, args)
 	registerCount := luaClosureRegisterCount(proto, len(args), len(varargs))
-	vm := ((*runtime.State)(state)).BorrowLuaVMAfterReset(registerCount, proto.Constants, luaClosureExecutionUpvalues(closure), proto.Protos, varargs)
+	fixedArgumentCount := luaClosureFixedArgumentCount(proto, len(args))
+	vm := ((*runtime.State)(state)).BorrowLuaVMAfterResetSkippingClearPrefix(registerCount, proto.Constants, luaClosureExecutionUpvalues(closure), proto.Protos, varargs, fixedArgumentCount)
 	vm.BindPrototype(proto)
 	vm.BindBorrowedUpvalueCells(closure.UpvalueCells)
 	vm.BindLuaMetamethodRunner(((*runtime.State)(state)).LuaMetamethodRunner())
@@ -2258,7 +2259,7 @@ func executeLuaClosureWithDebugNameTailFromArgs(state *State, function Value, na
 		return nil, prepareErr
 	}
 	if continuation == nil {
-		// 首次执行需要把 resume 参数写入固定形参寄存器。
+		// 首次执行需要把 resume 参数写入固定形参寄存器；这些槽在 VM reset 阶段已跳过清零。
 		fixedArgumentCount := luaClosureFixedArgumentCount(proto, len(args))
 		for argumentIndex := 0; argumentIndex < fixedArgumentCount; argumentIndex++ {
 			// 固定参数从 R0 开始写入；多余参数已经进入 varargs，写入也不会影响固定参数读取。
@@ -3627,11 +3628,11 @@ func executeLuaCallRequestDirect(state *State, callerVM *runtime.VM, closure *ru
 		}
 	}
 	registerCount := luaClosureRegisterCount(proto, callRequest.ArgumentCount, 0)
-	calleeVM := ((*runtime.State)(state)).BorrowLuaVMAfterReset(registerCount, proto.Constants, luaClosureExecutionUpvalues(closure), proto.Protos, nil)
+	fixedArgumentCount := luaClosureFixedArgumentCount(proto, callRequest.ArgumentCount)
+	calleeVM := ((*runtime.State)(state)).BorrowLuaVMAfterResetSkippingClearPrefix(registerCount, proto.Constants, luaClosureExecutionUpvalues(closure), proto.Protos, nil, fixedArgumentCount)
 	calleeVM.BindPrototype(proto)
 	calleeVM.BindBorrowedUpvalueCells(closure.UpvalueCells)
 	calleeVM.BindLuaMetamethodRunner(((*runtime.State)(state)).LuaMetamethodRunner())
-	fixedArgumentCount := luaClosureFixedArgumentCount(proto, callRequest.ArgumentCount)
 	if !callerVM.CopyRegistersTo(callRequest.FunctionIndex+1, calleeVM, 0, fixedArgumentCount) {
 		// caller 或 callee 固定参数窗口异常时返回寄存器错误。
 		((*runtime.State)(state)).ReturnLuaVMToPool(calleeVM)

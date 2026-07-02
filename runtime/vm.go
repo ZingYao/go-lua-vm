@@ -624,12 +624,28 @@ func NewVMWithBorrowedPrototypeData(registerCount int, constants []bytecode.Cons
 // 私有切片，避免调用方后续修改影响当前 closure 执行。registerCount 变化时只在必要时
 // 扩容寄存器窗口，避免重复申请；缩容只调整视图长度。返回 false 表示入参非法。
 func (vm *VM) ResetForBorrowedPrototypeData(registerCount int, constants []bytecode.Constant, upvalues []Value, protos []*bytecode.Proto, varargs []Value) bool {
+	return vm.ResetForBorrowedPrototypeDataSkippingClearPrefix(registerCount, constants, upvalues, protos, varargs, 0)
+}
+
+// ResetForBorrowedPrototypeDataSkippingClearPrefix 用于 VM 池复用场景，并跳过即将被调用方覆盖的前缀寄存器清零。
+//
+// skipClearPrefix 只能覆盖调用入口会立刻写入的固定参数槽；其余寄存器仍清为 nil，保持 Lua 5.3
+// 缺省参数、临时寄存器、局部变量生命周期和调试可见语义。返回 false 表示入参非法。
+func (vm *VM) ResetForBorrowedPrototypeDataSkippingClearPrefix(registerCount int, constants []bytecode.Constant, upvalues []Value, protos []*bytecode.Proto, varargs []Value, skipClearPrefix int) bool {
 	if vm == nil {
 		// nil VM 无法复用，直接返回失败。
 		return false
 	}
 	if registerCount < 0 {
 		// 寄存器数量不能为负，保持调用方错误语义。
+		return false
+	}
+	if skipClearPrefix < 0 {
+		// 负数前缀无意义，保持防御式失败，避免调用方掩盖寄存器边界错误。
+		return false
+	}
+	if skipClearPrefix > registerCount {
+		// 跳过范围不能超过当前寄存器窗口，防止旧值越过本轮函数可见边界。
 		return false
 	}
 
@@ -643,7 +659,7 @@ func (vm *VM) ResetForBorrowedPrototypeData(registerCount int, constants []bytec
 	}
 	// 缩容只收窄切片视图，底层容量保留用于后续大窗口复用。
 	vm.registers = vm.registers[:registerCount]
-	for registerIndex := range vm.registers {
+	for registerIndex := skipClearPrefix; registerIndex < len(vm.registers); registerIndex++ {
 		// 每次复用前清空寄存器，避免上一帧残留值被意外读取。
 		vm.registers[registerIndex] = NilValue()
 	}

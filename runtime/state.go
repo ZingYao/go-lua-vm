@@ -376,6 +376,14 @@ func NewStateWithOptions(options Options) *State {
 // 缓存条目按寄存器窗口长度命中；无可用缓存时按借用 Proto 数据创建新 VM。返回值始终可直接
 // 复用于当前函数调用，调用方无需再执行二次构造。
 func (state *State) BorrowLuaVMAfterReset(registerCount int, constants []bytecode.Constant, upvalues []Value, protos []*bytecode.Proto, varargs []Value) *VM {
+	return state.BorrowLuaVMAfterResetSkippingClearPrefix(registerCount, constants, upvalues, protos, varargs, 0)
+}
+
+// BorrowLuaVMAfterResetSkippingClearPrefix 返回一个可复用的 Lua closure VM，并跳过即将覆盖的参数前缀清零。
+//
+// skipClearPrefix 必须只覆盖调用入口马上写入的固定参数槽；无可用缓存时仍按普通借用 Proto
+// 构造新 VM，新建 VM 本身已是 nil 初始化，不需要额外清零。
+func (state *State) BorrowLuaVMAfterResetSkippingClearPrefix(registerCount int, constants []bytecode.Constant, upvalues []Value, protos []*bytecode.Proto, varargs []Value, skipClearPrefix int) *VM {
 	if state == nil || state.closed {
 		// state 未初始化或关闭时不复用缓存，直接按纯构造语义返回新 VM。
 		return NewVMWithBorrowedPrototypeData(registerCount, constants, upvalues, protos, varargs)
@@ -384,7 +392,7 @@ func (state *State) BorrowLuaVMAfterReset(registerCount int, constants []bytecod
 	if fastVM := state.pooledLuaVMFast; fastVM != nil && len(fastVM.registers) == registerCount {
 		// 最近归还的同窗口 VM 优先复用，避开热路径 map 查询。
 		state.pooledLuaVMFast = nil
-		if fastVM.ResetForBorrowedPrototypeData(registerCount, constants, upvalues, protos, varargs) {
+		if fastVM.ResetForBorrowedPrototypeDataSkippingClearPrefix(registerCount, constants, upvalues, protos, varargs, skipClearPrefix) {
 			return fastVM
 		}
 	}
@@ -397,7 +405,7 @@ func (state *State) BorrowLuaVMAfterReset(registerCount int, constants []bytecod
 				// 污染条目直接丢弃并兜底创建新 VM，避免 nil deref。
 				return NewVMWithBorrowedPrototypeData(registerCount, constants, upvalues, protos, varargs)
 			}
-			if vm.ResetForBorrowedPrototypeData(registerCount, constants, upvalues, protos, varargs) {
+			if vm.ResetForBorrowedPrototypeDataSkippingClearPrefix(registerCount, constants, upvalues, protos, varargs, skipClearPrefix) {
 				return vm
 			}
 		}
