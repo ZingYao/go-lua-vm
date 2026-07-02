@@ -163,8 +163,8 @@ func (analyzer *semanticAnalyzer) analyzeChunk(chunk *Chunk) error {
 //
 // Lua label 和 goto 只在单个函数内互相可见。
 func newFunctionNamespace() *functionNamespace {
-	// 初始化 label 与 scope 索引，避免声明和校验时反复判空。
-	return &functionNamespace{labels: make(map[string][]labelRecord), scopes: make(map[int]*ScopeInfo)}
+	// scope 索引仍供 goto 父链校验使用；label 表仅在遇到 label 时按需创建。
+	return &functionNamespace{scopes: make(map[int]*ScopeInfo)}
 }
 
 // analyzeBlock 标注 block 作用域并递归处理嵌套结构。
@@ -309,6 +309,10 @@ func (analyzer *semanticAnalyzer) addLocalNames(scope *ScopeInfo, names []string
 func (analyzer *semanticAnalyzer) addLabel(block *Block, scope *ScopeInfo, statementIndex int, statement *LabelStatement, namespace *functionNamespace) {
 	labelInfo := LabelInfo{Name: statement.Name, StatementIndex: statementIndex, Position: statement.Position}
 	scope.Labels = append(scope.Labels, labelInfo)
+	if namespace.labels == nil {
+		// 普通函数没有 label；首次登记 label 时才创建名称索引。
+		namespace.labels = make(map[string][]labelRecord)
+	}
 	for _, existingLabel := range namespace.labels[statement.Name] {
 		if existingLabel.block == block {
 			// 同一 block 内重复 label 会导致 goto 目标不唯一，必须报错。
