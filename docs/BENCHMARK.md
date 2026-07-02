@@ -1000,6 +1000,13 @@ DoString micro 未显示稳定退化，且不在本轮 `string.format("%d")` 触
 `ensureArraySize` 占 alloc_space 约 `99.78%`，后续仍不应重复数组扩容阈值调参。完整 benchmark 的
 单轮 >3x 结果应先用这些 official-sized Go micro 分辨真实退化、官方基线波动和子进程计时噪声。
 
+继续复查 `stdlib_math_string` 时，`math.sqrt` 与 `math.floor` 已经注册为
+`runtime.GoFastUnaryFunction`，在无 hook、单参数、单返回且参数类型命中时会跳过 Go 调用帧；带 hook、
+参数错误或返回数不匹配时仍保留调试帧、bad argument 名称重写和通用调用语义。因此继续压缩
+`sqrt/floor` 调用边界会进入 debug hook 与错误栈语义敏感区，暂不作为短期低风险生产改动。单独复跑
+`BenchmarkDoStringStdlibMathString` 5 轮为 `37.11 / 33.69 / 33.57 / 33.86 / 34.75 ms/op`、
+约 `23.52 MB/op`、`240,147-240,148 allocs/op`，仍保持 exact `%d` 快路径后的改善口径。
+
 ### 结论
 
 - CLI 冷启动和小脚本差距较小，历史冷启动约 1.25x 到 1.35x；最新 Lua 5.3.6 正确口径下 `compile_3000_functions` 为 2.22x / 2.32x / 2.29x，仍低于当前 3x 目标线。
