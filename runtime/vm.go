@@ -175,6 +175,10 @@ type LuaClosure struct {
 	Upvalues []Value
 	// UpvalueCells 保存运行期共享 upvalue 槽；存在时优先于 Upvalues 执行读写。
 	UpvalueCells []*UpvalueCell
+	// inlineUpvalue 保存单 upvalue 闭包的内嵌快照，避免 OP_CLOSURE 热路径额外分配切片底层数组。
+	inlineUpvalue [1]Value
+	// inlineUpvalueCell 保存单 upvalue 闭包的内嵌共享 cell，避免 OP_CLOSURE 热路径额外分配切片底层数组。
+	inlineUpvalueCell [1]*UpvalueCell
 	// DirectCallSafe 表示该 closure 的 Proto 可走 Lua 叶子函数 direct CALL 快路径。
 	DirectCallSafe bool
 	// LeafAddReturn 保存 ADD;RETURN 叶子函数的预解析形态，nil 表示不能走 caller-side 加法快路径。
@@ -271,6 +275,21 @@ func NewLuaClosure(proto *bytecode.Proto, upvalues []Value, upvalueCells []*Upva
 		LeafAddReturn:           leafAddReturn,
 		LeafUpvalueAddSetReturn: leafUpvalueAddSetReturn,
 	}
+}
+
+// bindSingleCapturedUpvalue 绑定 OP_CLOSURE 捕获到的单个 upvalue。
+//
+// 该方法只供 VM 创建闭包时使用；value 是创建时的调试快照，cell 是运行期共享槽。单 upvalue
+// 直接存入 closure 内嵌数组，避免为常见局部函数创建两段独立切片底层数组。
+func (closure *LuaClosure) bindSingleCapturedUpvalue(value Value, cell *UpvalueCell) {
+	// nil closure 无法绑定捕获值，保持调用方幂等。
+	if closure == nil {
+		return
+	}
+	closure.inlineUpvalue[0] = value
+	closure.inlineUpvalueCell[0] = cell
+	closure.Upvalues = closure.inlineUpvalue[:1]
+	closure.UpvalueCells = closure.inlineUpvalueCell[:1]
 }
 
 // luaProtoDirectCallSafe 判断 Proto 是否适合 Lua closure direct CALL 热路径。
@@ -4498,6 +4517,18 @@ func (vm *VM) executeClosure(instruction bytecode.Instruction) error {
 	}
 
 	proto := vm.protos[protoIndex]
+	if len(proto.Upvalues) == 1 {
+		// 单 upvalue 局部函数是递归和闭包 micro 的常见形态，直接写入 closure 内嵌槽避免切片底层数组分配。
+		capturedCell, err := vm.captureUpvalueCell(proto.Upvalues[0])
+		if err != nil {
+			return err
+		}
+		closure := NewLuaClosure(proto, nil, nil)
+		closure.bindSingleCapturedUpvalue(capturedCell.Value(), capturedCell)
+		vm.registers[targetIndex] = ReferenceValue(KindLuaClosure, closure)
+		return nil
+	}
+
 	upvalues := make([]Value, 0, len(proto.Upvalues))
 	upvalueCells := make([]*UpvalueCell, 0, len(proto.Upvalues))
 	for _, upvalueDesc := range proto.Upvalues {
