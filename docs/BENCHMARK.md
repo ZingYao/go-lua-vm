@@ -1189,9 +1189,30 @@ Go micro 复核结果如下：
 `arith_mix_loop` 2.75x、`arith_chain_temp` 2.83x、`table_rw` 2.74x、`function_call` 2.51x、
 `stdlib_math_string` 1.92x、`compile_3000_functions` 2.45x。
 
+继续按默认完整口径复跑三轮，结果如下：
+
+| 用例 | 官方工具中位数 | 本项目中位数 | 本项目/官方 |
+| --- | ---: | ---: | ---: |
+| `arith_add_loop` | 0.008170s / 0.008063s / 0.008158s | 0.021829s / 0.021675s / 0.021762s | 2.67x / 2.69x / 2.67x |
+| `arith_mix_loop` | 0.012153s / 0.012039s / 0.012170s | 0.033961s / 0.033860s / 0.034016s | 2.79x / 2.81x / 2.80x |
+| `arith_chain_temp` | 0.013853s / 0.013778s / 0.013778s | 0.039649s / 0.039697s / 0.039635s | 2.86x / 2.88x / 2.88x |
+| `table_rw` | 0.007675s / 0.007694s / 0.007677s | 0.022055s / 0.022045s / 0.021731s | 2.87x / 2.87x / 2.83x |
+| `function_call` | 0.007565s / 0.007358s / 0.007504s | 0.019316s / 0.019239s / 0.019267s | 2.55x / 2.61x / 2.57x |
+| `string_concat` | 0.005425s / 0.005377s / 0.005311s | 0.009976s / 0.009653s / 0.009582s | 1.84x / 1.80x / 1.80x |
+| `closure_upvalue` | 0.008557s / 0.008732s / 0.008697s | 0.021807s / 0.021781s / 0.021830s | 2.55x / 2.49x / 2.51x |
+| `stdlib_math_string` | 0.020067s / 0.019987s / 0.020026s | 0.038392s / 0.038346s / 0.038230s | 1.91x / 1.92x / 1.91x |
+| `recursion` | 0.004237s / 0.004266s / 0.004203s | 0.012156s / 0.012283s / 0.012220s | 2.87x / 2.88x / 2.91x |
+| `compile_3000_functions` | 0.005946s / 0.005899s / 0.005837s | 0.013103s / 0.013164s / 0.013148s | 2.20x / 2.23x / 2.25x |
+
+默认三轮确认 `recursion` 从上一轮 `2.86x / 3.26x / 2.92x` 稳定回到
+`2.87x / 2.88x / 2.91x`，`arith_chain_temp` 也稳定在 `2.86x-2.88x`，主要路径均低于 3x。
+后续若继续推进短期性能，应优先寻找新的可证明语义等价切口，避免仅为挤压已低于 3x 的边缘项
+重复尝试已证伪的 dispatch、算术 cache 或调用边界大改。
+
 ### 结论
 
-- CLI 冷启动和小脚本差距较小，历史冷启动约 1.25x 到 1.35x；最新 Lua 5.3.6 正确口径下 `compile_3000_functions` 为 2.36x / 2.30x / 2.35x，仍低于当前 3x 目标线。
-- 按最新完整 benchmark 复核口径，`compile_3000_functions`、`stdlib_math_string` 和 `function_call` 稳定低于 3x；`table_rw` 贴近但低于 3x，prepared 口径确认其 B/op 主要来自运行期 table 数组区扩容；`closure_upvalue` 的单轮 3.20x 慢轮已由官方规模 Go micro 初步判断为计时波动；`recursion` 经 upvalue cell 闭合值内嵌后，prepared 口径从 3 allocs/op 降到 2 allocs/op，抽样完整 benchmark 回到 2.77x，但默认完整三轮仍需后续复核稳定性；`arith_chain_temp` 仍是执行 CPU 侧的边缘观察项。
+- CLI 冷启动和小脚本差距较小，历史冷启动约 1.25x 到 1.35x；最新 Lua 5.3.6 正确口径下 `compile_3000_functions` 为 2.20x / 2.23x / 2.25x，仍低于当前 3x 目标线。
+- 按最新默认完整 benchmark 三轮复核口径，主要路径均低于 3x：`arith_chain_temp` 为 2.86x / 2.88x / 2.88x，`recursion` 为 2.87x / 2.88x / 2.91x，`table_rw` 为 2.87x / 2.87x / 2.83x；`closure_upvalue` 的单轮 3.20x 慢轮已由官方规模 Go micro 和默认复跑判断为计时波动。
+- `recursion` 经 upvalue cell 闭合值内嵌后，prepared 口径从 3 allocs/op 降到 2 allocs/op；默认完整三轮也从上一轮两轮低于 3x、一轮 3.26x，改善为三轮稳定低于 3x。
 - 字符串拼接已较 2026-06-29 旧基线明显改善，从约 92x 收窄到约 1.86x。
 - 后续优先优化方向应集中在算术链 `ADD`/`SUB`/`MUL` 与 `FORLOOP` 成本、递归函数调用边界、表读写热路径、VM dispatch code size 对无关路径的影响；但若 profile 只落在已证伪的调用边界或算术缓存细枝，应优先继续定位或文档化，而不是堆局部字段/分支微调。
