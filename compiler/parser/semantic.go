@@ -371,10 +371,18 @@ func (analyzer *semanticAnalyzer) addLabel(block *Block, scope *ScopeInfo, state
 //
 // position 当前使用语法结构起始位置，后续 token span 细化后可保存逐个名称位置。
 func (analyzer *semanticAnalyzer) declarationsFromNames(names []string, position lexer.Position) []localDeclaration {
-	declarations := make([]localDeclaration, 0, len(names))
-	for _, name := range names {
+	if len(names) == 0 {
+		// 空名称列表没有预声明局部变量，返回 nil 避免无意义切片分配。
+		return nil
+	}
+	if len(names) == 1 {
+		// 单名称是函数形参和普通泛型 for 的常见路径，直接构造一元素切片。
+		return []localDeclaration{{name: names[0], position: position}}
+	}
+	declarations := make([]localDeclaration, len(names))
+	for index, name := range names {
 		// 每个名称都作为当前 block 起始局部变量。
-		declarations = append(declarations, localDeclaration{name: name, position: position})
+		declarations[index] = localDeclaration{name: name, position: position}
 	}
 
 	// 返回完整预声明列表。
