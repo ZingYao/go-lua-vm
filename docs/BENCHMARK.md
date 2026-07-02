@@ -1007,9 +1007,29 @@ DoString micro 未显示稳定退化，且不在本轮 `string.format("%d")` 触
 `BenchmarkDoStringStdlibMathString` 5 轮为 `37.11 / 33.69 / 33.57 / 33.86 / 34.75 ms/op`、
 约 `23.52 MB/op`、`240,147-240,148 allocs/op`，仍保持 exact `%d` 快路径后的改善口径。
 
+重建 `bin/glua` / `bin/gluac` 后，使用正确 Lua 5.3.6 默认完整 benchmark 复跑三轮如下：
+
+| 用例 | 官方工具中位数 | 本项目中位数 | 本项目/官方 |
+| --- | ---: | ---: | ---: |
+| `arith_add_loop` | 0.007442s / 0.007282s / 0.007265s | 0.020302s / 0.020129s / 0.020160s | 2.73x / 2.76x / 2.78x |
+| `arith_mix_loop` | 0.011153s / 0.010910s / 0.010985s | 0.032215s / 0.031887s / 0.032010s | 2.89x / 2.92x / 2.91x |
+| `arith_chain_temp` | 0.012458s / 0.012459s / 0.012375s | 0.037666s / 0.037644s / 0.037714s | 3.02x / 3.02x / 3.05x |
+| `table_rw` | 0.006867s / 0.006846s / 0.006857s | 0.020290s / 0.020268s / 0.020419s | 2.95x / 2.96x / 2.98x |
+| `function_call` | 0.006586s / 0.006547s / 0.006579s | 0.017454s / 0.017570s / 0.017667s | 2.65x / 2.68x / 2.69x |
+| `string_concat` | 0.004469s / 0.004502s / 0.004601s | 0.008087s / 0.008093s / 0.008689s | 1.81x / 1.80x / 1.89x |
+| `closure_upvalue` | 0.007888s / 0.007795s / 0.008038s | 0.020104s / 0.020050s / 0.019889s | 2.55x / 2.57x / 2.47x |
+| `stdlib_math_string` | 0.018925s / 0.018947s / 0.018939s | 0.035892s / 0.035943s / 0.036183s | 1.90x / 1.90x / 1.91x |
+| `recursion` | 0.003505s / 0.003467s / 0.003509s | 0.010972s / 0.010896s / 0.010760s | 3.13x / 3.14x / 3.07x |
+| `compile_3000_functions` | 0.004975s / 0.005124s / 0.004997s | 0.011731s / 0.011793s / 0.011761s | 2.36x / 2.30x / 2.35x |
+
+本轮完整口径确认 `stdlib_math_string` 和 `compile_3000_functions` 均稳定低于 3x，`table_rw` 仍贴近但低于
+3x；`arith_chain_temp` 与 `recursion` 三轮略高于 3x。由于对应 official-sized Go micro 中
+`arith_chain_temp` 稳定约 `33.5-34.3 ms/op`、`recursion` 稳定约 `6.94 ms/op`，下一轮若继续生产
+优化，应优先围绕这两条路径重新定位，而不是回到已经证伪的标准库、table 扩容或通用调用边界调参。
+
 ### 结论
 
-- CLI 冷启动和小脚本差距较小，历史冷启动约 1.25x 到 1.35x；最新 Lua 5.3.6 正确口径下 `compile_3000_functions` 为 2.22x / 2.32x / 2.29x，仍低于当前 3x 目标线。
-- 按最新完整 benchmark 复核口径，`compile_3000_functions` 稳定低于 3x；`stdlib_math_string` 经 exact `%d` 快路径后已明显改善；运行期主要路径仍存在单轮 3x 边缘波动，`recursion`、`arith_chain_temp`、`table_rw`、`arith_mix_loop` 和 `arith_add_loop` 继续作为边缘回归观察项。
+- CLI 冷启动和小脚本差距较小，历史冷启动约 1.25x 到 1.35x；最新 Lua 5.3.6 正确口径下 `compile_3000_functions` 为 2.36x / 2.30x / 2.35x，仍低于当前 3x 目标线。
+- 按最新完整 benchmark 复核口径，`compile_3000_functions` 和 `stdlib_math_string` 稳定低于 3x；`table_rw` 贴近但低于 3x；`recursion` 与 `arith_chain_temp` 三轮略高于 3x，下一轮应作为优先定位对象。
 - 字符串拼接已较 2026-06-29 旧基线明显改善，从约 92x 收窄到约 1.86x。
 - 后续优先优化方向应集中在算术链 `ADD`/`SUB`/`MUL` 与 `FORLOOP` 成本、递归函数调用边界、表读写热路径、VM dispatch code size 对无关路径的影响；但若 profile 只落在已证伪的调用边界或算术缓存细枝，应优先继续定位或文档化，而不是堆局部字段/分支微调。
