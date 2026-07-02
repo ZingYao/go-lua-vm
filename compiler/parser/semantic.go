@@ -106,6 +106,8 @@ type functionNamespace struct {
 	gotos []gotoRecord
 	// scopes 按 ID 保存当前函数内的 block 作用域，用于判断 label 可见性。
 	scopes map[int]*ScopeInfo
+	// scopeStack 保存当前递归分析路径上的作用域，用于首次 goto 时回填父链索引。
+	scopeStack []*ScopeInfo
 }
 
 // labelRecord 保存 label 及其所在 block。
@@ -163,8 +165,48 @@ func (analyzer *semanticAnalyzer) analyzeChunk(chunk *Chunk) error {
 //
 // Lua label 和 goto 只在单个函数内互相可见。
 func newFunctionNamespace() *functionNamespace {
-	// scope 索引仍供 goto 父链校验使用；label 表仅在遇到 label 时按需创建。
-	return &functionNamespace{scopes: make(map[int]*ScopeInfo)}
+	// label 和 scope 索引都按需创建；无 goto/label 的普通函数不需要这些表。
+	return &functionNamespace{}
+}
+
+// pushScope 记录当前语义分析路径上的作用域。
+//
+// 作用域父链索引只有 goto 校验需要；若已经出现 goto，则进入新 block 时同步写入索引。
+func (namespace *functionNamespace) pushScope(scope *ScopeInfo) {
+	namespace.scopeStack = append(namespace.scopeStack, scope)
+	if namespace.scopes != nil {
+		// 已经启用 goto 父链索引时，后续作用域需要增量补入。
+		namespace.scopes[scope.ID] = scope
+	}
+}
+
+// popScope 弹出当前语义分析路径上的作用域。
+//
+// 作用域对象仍保留在已建立的索引中，供函数体分析结束后的 goto 统一校验使用。
+func (namespace *functionNamespace) popScope() {
+	if len(namespace.scopeStack) == 0 {
+		// 空栈表示调用方递归不平衡，防御性忽略。
+		return
+	}
+	namespace.scopeStack = namespace.scopeStack[:len(namespace.scopeStack)-1]
+}
+
+// ensureScopeIndex 按需创建 goto 父链索引。
+//
+// 首次遇到 goto 时回填当前作用域栈；之后进入的新 block 由 pushScope 继续维护。
+func (namespace *functionNamespace) ensureScopeIndex() {
+	if namespace.scopes != nil {
+		// 已初始化时无需重复回填。
+		return
+	}
+	namespace.scopes = make(map[int]*ScopeInfo)
+	for _, scope := range namespace.scopeStack {
+		if scope == nil {
+			// nil scope 不能参与父链解析。
+			continue
+		}
+		namespace.scopes[scope.ID] = scope
+	}
 }
 
 // analyzeBlock 标注 block 作用域并递归处理嵌套结构。
@@ -182,8 +224,9 @@ func (analyzer *semanticAnalyzer) analyzeBlock(block *Block, parent *ScopeInfo, 
 	analyzer.nextScopeID++
 	block.Scope = scope
 	if namespace != nil {
-		// 当前函数命名空间记录所有 block 作用域，供 goto 查找可见 label。
-		namespace.scopes[scope.ID] = scope
+		// 当前递归路径用于首次 goto 时回填作用域父链索引。
+		namespace.pushScope(scope)
+		defer namespace.popScope()
 	}
 	for _, declaration := range predeclared {
 		if len(scope.Locals) >= maxFunctionLocals {
@@ -250,6 +293,7 @@ func (analyzer *semanticAnalyzer) analyzeStatement(block *Block, scope *ScopeInf
 		// goto 先记录，待当前函数所有 label 收集完后统一校验。
 		gotoInfo := GotoInfo{Name: typedStatement.Label, StatementIndex: statementIndex, Position: typedStatement.Position}
 		scope.Gotos = append(scope.Gotos, gotoInfo)
+		namespace.ensureScopeIndex()
 		namespace.gotos = append(namespace.gotos, gotoRecord{block: block, scope: scope, gotoInfo: gotoInfo})
 	default:
 		if analyzer.analyzeExtensionStatement(block, scope, depth, statementIndex, statement, namespace) {
