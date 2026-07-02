@@ -53,6 +53,31 @@ func TestCompileChunkDeduplicatesConstantsAndRegisters(t *testing.T) {
 	}
 }
 
+// TestCompileChunkKeepsDistinctFloatConstants 验证浮点常量按 Lua 5.3 原值去重。
+//
+// Lua 5.3 的 addk 对 number 使用 TValue 原值作为 key；相近但不相等的浮点数不能被格式化文本误合并。
+func TestCompileChunkKeepsDistinctFloatConstants(t *testing.T) {
+	chunk := parseChunkForCodegenTest(t, "local a = 1.0000001 local b = 1.0000002 return a, b")
+
+	proto, err := CompileChunk(chunk, "test")
+	if err != nil {
+		// 合法浮点字面量不应编译失败。
+		t.Fatalf("compile chunk failed: %v", err)
+	}
+	if len(proto.Constants) != 2 {
+		// 两个浮点原值不同，必须保留两个常量表槽位。
+		t.Fatalf("unexpected constants=%+v", proto.Constants)
+	}
+	if proto.Constants[0].Kind != bytecode.ConstantNumber || proto.Constants[1].Kind != bytecode.ConstantNumber {
+		// 两个字面量都含小数部分，应按 Lua number 常量保存。
+		t.Fatalf("unexpected constant kinds=%+v", proto.Constants)
+	}
+	if proto.Constants[0].Number == proto.Constants[1].Number {
+		// 测试夹具必须覆盖两个不同的浮点值。
+		t.Fatalf("fixture constants should be distinct: %+v", proto.Constants)
+	}
+}
+
 // TestCompileChunkReleasesFixedCallArguments 验证固定单返回 CALL 后回收参数槽。
 //
 // Lua 5.3 官方 codegen 会在 `x = x + f(i) + g(i)` 中让第二个调用复用前一个调用的参数槽；

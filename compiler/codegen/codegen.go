@@ -5,7 +5,6 @@ package codegen
 
 import (
 	"fmt"
-	"strconv"
 
 	"github.com/zing/go-lua-vm/bytecode"
 	"github.com/zing/go-lua-vm/compiler/lexer"
@@ -58,8 +57,8 @@ type generator struct {
 	nextRegister int
 	// maxRegister 保存生成过程中到达过的最大寄存器数量。
 	maxRegister int
-	// constants 保存常量去重索引，key 由 stableConstantKey 生成。
-	constants map[string]int
+	// constants 保存常量去重索引，按常量类型拆分以对齐 Lua 5.3 addk 的原值 key 语义。
+	constants constantIndexes
 	// locals 保存当前函数已声明局部变量到寄存器的映射。
 	locals map[string]localBinding
 	// upvalues 保存当前函数已捕获 upvalue 到 upvalue 索引的映射。
@@ -94,6 +93,27 @@ type localBinding struct {
 	scopeID int
 	// captured 表示该局部变量已被子函数捕获为 open upvalue。
 	captured bool
+}
+
+// constantIndexes 保存当前 Proto 的常量去重索引。
+//
+// Lua 5.3 addk 使用常量原值作为索引 key，并额外区分 integer 与 float；这里按类型拆分 map，
+// 避免为每个常量构造格式化字符串，同时避免使用完整 Constant 结构体作为大 map key。
+type constantIndexes struct {
+	// hasNil 表示 nil 常量是否已经进入常量表。
+	hasNil bool
+	// nilIndex 保存 nil 常量表下标。
+	nilIndex int
+	// hasBool 表示 false/true 常量是否已经进入常量表。
+	hasBool [2]bool
+	// boolIndex 保存 false/true 常量表下标。
+	boolIndex [2]int
+	// integers 保存 integer 原值到常量表下标的映射。
+	integers map[int64]int
+	// numbers 保存 float number 原值到常量表下标的映射。
+	numbers map[float64]int
+	// strings 保存 string 字节序列到常量表下标的映射。
+	strings map[string]int
 }
 
 // pendingGoto 描述 codegen 阶段尚未确定目标 PC 的 goto 跳转。
@@ -162,8 +182,7 @@ type scopeSnapshot struct {
 func newGenerator(source string) *generator {
 	// 初始化最小状态，寄存器从 0 开始按 Lua VM 约定分配。
 	return &generator{
-		proto:     bytecode.NewProto(source),
-		constants: make(map[string]int),
+		proto: bytecode.NewProto(source),
 	}
 }
 
@@ -4560,16 +4579,91 @@ func (generator *generator) patchLoopContinues(loopIndex int, targetPC int) {
 //
 // 返回值是常量表索引，可直接用于 LOADK 的 Bx 字段。
 func (generator *generator) addConstant(constant bytecode.Constant) int {
-	key := stableConstantKey(constant)
-	if index, ok := generator.constants[key]; ok {
-		// 常量已存在时复用索引，保持常量池去重。
+	if index, ok := generator.constantIndex(constant); ok {
+		// 常量已存在时复用索引，保持常量池按原值去重。
 		return index
 	}
 	index := generator.proto.AddConstant(constant)
-	generator.constants[key] = index
+	generator.recordConstantIndex(constant, index)
 
 	// 返回新增常量索引。
 	return index
+}
+
+// constantIndex 查询常量表中已有的原值下标。
+//
+// 返回 ok=false 表示该常量尚未登记；integer 与 number 分属不同索引，兼容 Lua 5.3 常量类型边界。
+func (generator *generator) constantIndex(constant bytecode.Constant) (int, bool) {
+	switch constant.Kind {
+	case bytecode.ConstantNil:
+		// nil 不能作为 C Lua table key；Go 侧用专用字段表达同一唯一常量。
+		return generator.constants.nilIndex, generator.constants.hasNil
+	case bytecode.ConstantBoolean:
+		// bool 只有 false/true 两种取值，使用固定数组避免 map 分配。
+		boolSlot := 0
+		if constant.Bool {
+			// true 存放在第二个槽位，false 保持零槽位。
+			boolSlot = 1
+		}
+		return generator.constants.boolIndex[boolSlot], generator.constants.hasBool[boolSlot]
+	case bytecode.ConstantInteger:
+		// integer 使用 int64 原值索引，避免和 float 同值碰撞。
+		index, ok := generator.constants.integers[constant.Integer]
+		return index, ok
+	case bytecode.ConstantNumber:
+		// float number 使用 float64 原值索引，保留 Lua 5.3 number 常量边界。
+		index, ok := generator.constants.numbers[constant.Number]
+		return index, ok
+	case bytecode.ConstantString:
+		// string 按字节序列原值索引，不需要额外 quote 转义。
+		index, ok := generator.constants.strings[constant.String]
+		return index, ok
+	default:
+		// 未知常量类型不参与复用，避免未来扩展误合并。
+		return 0, false
+	}
+}
+
+// recordConstantIndex 登记新常量的常量表下标。
+//
+// 调用方必须保证该常量刚刚追加到 Proto.Constants；重复登记会覆盖同值索引并破坏首次出现顺序。
+func (generator *generator) recordConstantIndex(constant bytecode.Constant, index int) {
+	switch constant.Kind {
+	case bytecode.ConstantNil:
+		// nil 常量全局唯一。
+		generator.constants.hasNil = true
+		generator.constants.nilIndex = index
+	case bytecode.ConstantBoolean:
+		// bool 常量按 false/true 固定槽位登记。
+		boolSlot := 0
+		if constant.Bool {
+			// true 存放在第二个槽位，false 保持零槽位。
+			boolSlot = 1
+		}
+		generator.constants.hasBool[boolSlot] = true
+		generator.constants.boolIndex[boolSlot] = index
+	case bytecode.ConstantInteger:
+		if generator.constants.integers == nil {
+			// integer 常量首次出现时才创建索引表。
+			generator.constants.integers = make(map[int64]int)
+		}
+		generator.constants.integers[constant.Integer] = index
+	case bytecode.ConstantNumber:
+		if generator.constants.numbers == nil {
+			// float number 常量首次出现时才创建索引表。
+			generator.constants.numbers = make(map[float64]int)
+		}
+		generator.constants.numbers[constant.Number] = index
+	case bytecode.ConstantString:
+		if generator.constants.strings == nil {
+			// string 常量首次出现时才创建索引表。
+			generator.constants.strings = make(map[string]int)
+		}
+		generator.constants.strings[constant.String] = index
+	default:
+		// 未知常量类型已追加到 Proto，但不建立复用索引。
+		return
+	}
 }
 
 // addNumberConstant 按 lexer 数字分类添加常量。
@@ -4670,35 +4764,6 @@ func (generator *generator) addInstruction(instruction bytecode.Instruction) int
 	pc := generator.proto.AddInstruction(instruction)
 	generator.proto.LineInfo = append(generator.proto.LineInfo, generator.currentLine)
 	return pc
-}
-
-// stableConstantKey 返回常量去重 key。
-//
-// key 包含类型前缀，避免 integer(1)、number(1) 和 string("1") 互相碰撞。
-func stableConstantKey(constant bytecode.Constant) string {
-	switch constant.Kind {
-	case bytecode.ConstantNil:
-		// nil 常量全局唯一。
-		return "nil"
-	case bytecode.ConstantBoolean:
-		// boolean key 包含 true/false。
-		if constant.Bool {
-			// true/false 只有两个稳定值，直接返回常量字符串避免格式化分配。
-			return "bool:true"
-		}
-		return "bool:false"
-	case bytecode.ConstantInteger:
-		// integer key 保留十进制整数值。
-		return "int:" + strconv.FormatInt(constant.Integer, 10)
-	case bytecode.ConstantNumber:
-		// number key 使用 %g 保持稳定且区分浮点类型前缀。
-		return "num:" + strconv.FormatFloat(constant.Number, 'g', 6, 64)
-	case bytecode.ConstantString:
-		// string key 使用 %q 保留转义边界。
-		return "str:" + strconv.Quote(constant.String)
-	default:
-		return "unknown:" + strconv.Itoa(int(constant.Kind))
-	}
 }
 
 // binaryOpCode 返回普通二元操作符对应的 Lua opcode。
