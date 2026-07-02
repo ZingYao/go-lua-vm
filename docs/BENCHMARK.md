@@ -1166,9 +1166,32 @@ Go micro 三轮结果如下：
 会触及共享 cell、`debug.getupvalue` / `debug.setupvalue` / `upvaluejoin`、yield/continuation 和
 寄存器生命周期语义，暂不作为短期低风险生产切口。
 
+后续复核发现其中 `Close` 的闭合值本身可以用更小范围处理：`UpvalueCell` 继续作为唯一共享 cell，
+但把闭合后的稳定值内嵌到 cell 结构体中，`Close` 时只把 `target` 改指向该内嵌槽。这样不改变
+cell identity、开放 upvalue 列表、closure 持有的 cell 指针或 debug/upvaluejoin 可见共享关系，
+同时避免 `Close` 为闭合值单独分配。新增 `TestUpvalueCellCloseKeepsStableValue` 覆盖闭合后原寄存器
+复用不污染 upvalue、闭合 cell 后续写入不回写旧寄存器。
+
+Go micro 复核结果如下：
+
+| 用例 | 改动后结果 | 变化 |
+| --- | ---: | ---: |
+| `BenchmarkPreparedRecursion` | 7.78ms / 7.15ms / 7.26ms，约 240-247B/op，2 allocs/op | 从 3 allocs/op 降到 2 allocs/op |
+| `BenchmarkPreparedClosureUpvalueOfficial` | 16.56ms / 16.68ms / 16.65ms，约 488B/op，4 allocs/op | 从 5 allocs/op 降到 4 allocs/op |
+| `BenchmarkDoStringRecursion` | 8.31ms / 7.30ms / 7.27ms，约 89.2KB/op，359 allocs/op | 端到端 allocs/op 暂未变化 |
+| `BenchmarkDoStringClosureUpvalueOfficial` | 19.24ms / 17.02ms / 16.59ms，约 62.3KB/op，266 allocs/op | 端到端 allocs/op 暂未变化 |
+
+仅 memprofile 复核 `BenchmarkPreparedRecursion` 三轮为 `7.78ms`、`7.15ms`、`7.26ms`，稳定
+`2 allocs/op`；`runtime.(*UpvalueCell).Close` 已从 alloc profile 热点中消失，剩余对象主要为
+开放 upvalue cell 与 VM/proto 绑定相关结构。抽样完整 benchmark（`BENCH_ITERATIONS=20`、
+`BENCH_COMPILE_ITERATIONS=15`、`BENCH_WARMUP_ITERATIONS=3`）中，`recursion` 为 `2.77x`，
+`closure_upvalue` 为 `2.50x`，其余主要运行期路径也均低于 3x：`arith_add_loop` 2.70x、
+`arith_mix_loop` 2.75x、`arith_chain_temp` 2.83x、`table_rw` 2.74x、`function_call` 2.51x、
+`stdlib_math_string` 1.92x、`compile_3000_functions` 2.45x。
+
 ### 结论
 
 - CLI 冷启动和小脚本差距较小，历史冷启动约 1.25x 到 1.35x；最新 Lua 5.3.6 正确口径下 `compile_3000_functions` 为 2.36x / 2.30x / 2.35x，仍低于当前 3x 目标线。
-- 按最新完整 benchmark 复核口径，`compile_3000_functions`、`stdlib_math_string` 和 `function_call` 稳定低于 3x；`table_rw` 贴近但低于 3x，prepared 口径确认其 B/op 主要来自运行期 table 数组区扩容；`closure_upvalue` 的单轮 3.20x 慢轮已由官方规模 Go micro 初步判断为计时波动；`recursion` 经 `b24f6c0` 后从三轮稳定略高于 3x 改为两轮低于 3x、一轮慢轮高于 3x，仍需作为边缘观察项；prepared recursion 的剩余 `3 allocs/op` 已确认来自局部递归闭包创建、开放 upvalue cell 和闭合值语义，不是简单临时分配；`arith_chain_temp` 仍是执行 CPU 侧的边缘观察项。
+- 按最新完整 benchmark 复核口径，`compile_3000_functions`、`stdlib_math_string` 和 `function_call` 稳定低于 3x；`table_rw` 贴近但低于 3x，prepared 口径确认其 B/op 主要来自运行期 table 数组区扩容；`closure_upvalue` 的单轮 3.20x 慢轮已由官方规模 Go micro 初步判断为计时波动；`recursion` 经 upvalue cell 闭合值内嵌后，prepared 口径从 3 allocs/op 降到 2 allocs/op，抽样完整 benchmark 回到 2.77x，但默认完整三轮仍需后续复核稳定性；`arith_chain_temp` 仍是执行 CPU 侧的边缘观察项。
 - 字符串拼接已较 2026-06-29 旧基线明显改善，从约 92x 收窄到约 1.86x。
 - 后续优先优化方向应集中在算术链 `ADD`/`SUB`/`MUL` 与 `FORLOOP` 成本、递归函数调用边界、表读写热路径、VM dispatch code size 对无关路径的影响；但若 profile 只落在已证伪的调用边界或算术缓存细枝，应优先继续定位或文档化，而不是堆局部字段/分支微调。

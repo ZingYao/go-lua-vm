@@ -431,6 +431,33 @@ func TestVMUpvalueCellWithoutSnapshot(t *testing.T) {
 	}
 }
 
+// TestUpvalueCellCloseKeepsStableValue 验证开放 upvalue 闭合后不再受原寄存器复用影响。
+//
+// Lua 局部变量离开作用域后，捕获它的 closure 必须继续看到闭合时的值；后续寄存器复用不能污染
+// 已闭合 upvalue。该测试覆盖 UpvalueCell 内嵌闭合槽的关键语义边界。
+func TestUpvalueCellCloseKeepsStableValue(t *testing.T) {
+	// 模拟活动寄存器被闭包捕获。
+	register := IntegerValue(53)
+	cell := NewOpenUpvalueCell(&register)
+	cell.Close()
+
+	// 复用原寄存器槽不能影响已闭合 upvalue。
+	register = IntegerValue(99)
+	if value := cell.Value(); !value.RawEqual(IntegerValue(53)) {
+		// 闭合值必须停留在 Close 时刻的寄存器值。
+		t.Fatalf("closed upvalue value mismatch: %#v", value)
+	}
+	cell.Set(StringValue("closed"))
+	if value := cell.Value(); !value.RawEqual(StringValue("closed")) {
+		// 闭合后的 SETUPVAL 仍应写入同一个共享 cell。
+		t.Fatalf("closed upvalue set mismatch: %#v", value)
+	}
+	if !register.RawEqual(IntegerValue(99)) {
+		// 写入闭合 upvalue 不能回写已经离开作用域的旧寄存器。
+		t.Fatalf("closed upvalue should not mutate old register: %#v", register)
+	}
+}
+
 // TestVMUpvalueOutOfRange 验证 upvalue 越界时返回明确错误且不覆盖已有值。
 //
 // 损坏 chunk 或闭包原型不匹配可能访问不存在的 upvalue，VM 必须拒绝并保持状态。

@@ -496,6 +496,8 @@ func luaLeafAddOperandFromProto(proto *bytecode.Proto, operand int) (LuaLeafAddO
 type UpvalueCell struct {
 	// target 指向当前 upvalue 的实际存储位置。
 	target *Value
+	// closed 保存 upvalue 生命周期结束后的稳定值，避免 Close 时为闭合值单独分配。
+	closed Value
 }
 
 // openUpvalueCell 记录当前 VM 中仍指向活动寄存器的 upvalue。
@@ -510,9 +512,10 @@ type openUpvalueCell struct {
 
 // NewClosedUpvalueCell 创建保存独立堆值的 upvalue cell。
 func NewClosedUpvalueCell(value Value) *UpvalueCell {
-	// 为 value 创建独立变量，保证返回 cell 的 target 地址稳定。
-	copiedValue := value
-	return &UpvalueCell{target: &copiedValue}
+	// 闭合 cell 把值存入自身字段，保证 target 地址跟随 cell 生命周期稳定。
+	cell := &UpvalueCell{closed: value}
+	cell.target = &cell.closed
+	return cell
 }
 
 // NewOpenUpvalueCell 创建指向活动寄存器的 upvalue cell。
@@ -557,9 +560,9 @@ func (cell *UpvalueCell) Close() {
 		return
 	}
 
-	// 复制当前值到独立变量，并让 cell 指向该稳定地址。
-	closedValue := *cell.target
-	cell.target = &closedValue
+	// 复制当前值到 cell 内嵌闭合槽，并让 cell 指向该稳定地址。
+	cell.closed = *cell.target
+	cell.target = &cell.closed
 }
 
 // CallRequest 表示 VM 单步执行阶段产生的调用请求。
