@@ -223,6 +223,22 @@ return sum
 	}
 }
 
+// BenchmarkPreparedTableReadWriteOfficial 度量预编译后重复执行官方规模连续整数 table 写读热路径。
+func BenchmarkPreparedTableReadWriteOfficial(b *testing.B) {
+	source := `
+local t = {}
+for i = 1, 200000 do
+  t[i] = i
+end
+local sum = 0
+for i = 1, 200000 do
+  sum = sum + t[i]
+end
+return sum
+	`
+	benchmarkPreparedClosure(b, source)
+}
+
 // BenchmarkDoStringStringConcat 度量完整 Lua VM 路径下的循环字符串拼接。
 func BenchmarkDoStringStringConcat(b *testing.B) {
 	source := `
