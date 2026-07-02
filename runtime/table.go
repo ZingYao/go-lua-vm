@@ -213,7 +213,6 @@ func (table *Table) RawSetString(key string, value Value) {
 	// 非 nil 值直接写入 hash 区。
 	table.ensureHashStorage()
 	table.hashValues[tableKey{kind: KindString, stringValue: key}] = value
-	table.hashKeys[tableKey{kind: KindString, stringValue: key}] = StringValue(key)
 	table.noteMutation()
 }
 
