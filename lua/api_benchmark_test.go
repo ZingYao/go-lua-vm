@@ -128,6 +128,18 @@ return sum
 	}
 }
 
+// BenchmarkPreparedArithChainTempOfficial 度量预编译后重复执行官方规模左结合自二元链热循环。
+func BenchmarkPreparedArithChainTempOfficial(b *testing.B) {
+	source := `
+local sum = 0
+for i = 1, 1000000 do
+  sum = sum + i * 3 - 7
+end
+return sum
+	`
+	benchmarkPreparedClosure(b, source)
+}
+
 // BenchmarkDoStringTableReadWrite 度量完整 Lua VM 路径下的连续整数 table 写入和读取。
 func BenchmarkDoStringTableReadWrite(b *testing.B) {
 	source := `
@@ -290,5 +302,43 @@ return sum
 			b.Fatalf("DoString failed: %v", err)
 		}
 		state.Close()
+	}
+}
+
+// BenchmarkPreparedRecursion 度量预编译后重复执行递归 Lua closure 的运行期调用边界。
+func BenchmarkPreparedRecursion(b *testing.B) {
+	source := `
+local function fib(n)
+  if n < 2 then return n end
+  return fib(n - 1) + fib(n - 2)
+end
+local sum = 0
+for i = 1, 16 do
+  sum = sum + fib(15)
+end
+return sum
+`
+	benchmarkPreparedClosure(b, source)
+}
+
+// benchmarkPreparedClosure 编译一次 Lua chunk 后反复执行同一个顶层 closure。
+func benchmarkPreparedClosure(b *testing.B, source string) {
+	state := NewState()
+	defer state.Close()
+	if err := LoadString(state, source, "=(benchmark)"); err != nil {
+		b.Fatalf("LoadString failed: %v", err)
+	}
+	closure := state.ValueAt(-1)
+	if closure.Kind != KindLuaClosure {
+		b.Fatalf("LoadString top value is not Lua closure: %#v", closure)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for benchmarkIndex := 0; benchmarkIndex < b.N; benchmarkIndex++ {
+		// 每轮只执行已编译 closure，剥离源码编译、OpenLibs 和 State 初始化成本。
+		if _, err := Call(state, closure); err != nil {
+			b.Fatalf("Call failed: %v", err)
+		}
 	}
 }
