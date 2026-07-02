@@ -976,6 +976,30 @@ DoString micro 未显示稳定退化，且不在本轮 `string.format("%d")` 触
 因此当前不应重复尝试扩大 direct Lua CALL、绕过 `writeLuaCallResults`、调整
 `CheckCallDepth/NormalizeOptions`、`PopCallFrame` 清理策略或 VM 小栈/fast slot 等方向。
 
+#### 2026-07-02 official-sized Go micro 矩阵复核
+
+`bb944b5` 新增 `BenchmarkDoStringArithAddLoopOfficial` 与 `BenchmarkDoStringArithMixLoopOfficial`，
+把 `arith_add_loop` 和 `arith_mix_loop` 的 Go micro 补齐到完整 benchmark 同规模。`arith_add_loop`
+官方 Lua 5.3.6 与本项目热循环均为 `ADD; FORLOOP`，5 slots / 3 constants 对齐；`arith_mix_loop`
+两侧热循环均为 `MUL; ADD; SUB; IDIV; MOD; ADD; FORLOOP`，7 slots / 7 constants 对齐。项目额外
+零距离 `JMP` 仍只位于循环退出后，不在热路径；项目少官方尾部默认 `RETURN` 是既有 codegen 形态差异。
+
+在同一轮 Go micro 矩阵中，official-sized 运行期边缘项结果如下：
+
+| Go micro | 循环规模 | 结果 |
+| --- | ---: | --- |
+| `BenchmarkDoStringArithAddLoopOfficial` | 1,000,000 | `17.24 / 16.74 / 16.41 ms/op`，约 `58 KB/op`，`213 allocs/op` |
+| `BenchmarkDoStringArithMixLoopOfficial` | 400,000 | `28.16 / 29.52 / 28.17 ms/op`，约 `60 KB/op`，`234 allocs/op` |
+| `BenchmarkDoStringArithChainTempOfficial` | 1,000,000 | `34.33 / 33.46 / 33.51 ms/op`，约 `58.9 KB/op`，`220 allocs/op` |
+| `BenchmarkDoStringTableReadWriteOfficial` | 200,000 写 + 200,000 读 | `13.45 / 14.31 / 15.66 ms/op`，约 `32.0 MB/op`，`262 allocs/op` |
+| `BenchmarkDoStringStdlibMathString` | 80,000 | `33.57 / 31.38 / 31.38 ms/op`，约 `23.52 MB/op`，`240,147 allocs/op` |
+| `BenchmarkDoStringRecursion` | 完整 benchmark 同形态 | `6.94 / 6.94 / 6.94 ms/op`，约 `89.6 KB/op`，`363 allocs/op` |
+
+该矩阵未显示算术链、标准库 `%d` 快路径或递归调用边界存在新的稳定退化。`table_rw` 本轮未复现
+`9e7d84f` 中 `28.93 ms/op` 的慢轮，但仍保持约 `32 MB/op` 的数组区扩容分配；结合 profile 中
+`ensureArraySize` 占 alloc_space 约 `99.78%`，后续仍不应重复数组扩容阈值调参。完整 benchmark 的
+单轮 >3x 结果应先用这些 official-sized Go micro 分辨真实退化、官方基线波动和子进程计时噪声。
+
 ### 结论
 
 - CLI 冷启动和小脚本差距较小，历史冷启动约 1.25x 到 1.35x；最新 Lua 5.3.6 正确口径下 `compile_3000_functions` 为 2.22x / 2.32x / 2.29x，仍低于当前 3x 目标线。
