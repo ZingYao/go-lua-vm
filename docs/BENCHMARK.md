@@ -1151,9 +1151,24 @@ Go micro 三轮结果如下：
 是官方/子进程计时波动的判断。prepared 口径显示该路径 wall-clock 主要来自运行期闭包 upvalue 调用边界；
 编译、OpenLibs 和 State 初始化主要贡献少量分配。
 
+继续复核 `BenchmarkPreparedRecursion` 的剩余运行期分配，5s 五轮结果为 `7.18ms`、`7.19ms`、
+`7.16ms`、`7.12ms`、`7.19ms`，仍为 `3 allocs/op`；仅内存 profile 的三轮复跑为
+`7.13ms`、`7.12ms`、`7.28ms`，稳定 `248B/op`、`3 allocs/op`。alloc_objects 中主要落在：
+
+- `runtime.NewOpenUpvalueCell`：执行顶层 chunk 创建局部递归函数 `fib` 时，函数名局部需要被子闭包捕获。
+- `runtime.(*UpvalueCell).Close`：顶层 chunk 返回前必须把开放 upvalue 从寄存器指针闭合到稳定存储。
+- `runtime.mallocgc`：对应 `LuaClosure` 自身和 runtime 采样噪声。
+
+源码复核中，`NewOpenUpvalueCell` 返回共享 cell，既要被 VM 的 `openUpvalues` 列表跟踪，也要被
+`fib` closure 持有；`Close` 会复制当前寄存器值并让 cell 指向闭合后的稳定地址，避免顶层寄存器
+复用污染递归函数持有的 upvalue。这些都是 Lua 局部递归闭包的生命周期语义，不是编译、OpenLibs
+或 State 初始化残留。继续减少这 3 个分配需要重新设计开放 upvalue cell/闭合值的内嵌所有权，
+会触及共享 cell、`debug.getupvalue` / `debug.setupvalue` / `upvaluejoin`、yield/continuation 和
+寄存器生命周期语义，暂不作为短期低风险生产切口。
+
 ### 结论
 
 - CLI 冷启动和小脚本差距较小，历史冷启动约 1.25x 到 1.35x；最新 Lua 5.3.6 正确口径下 `compile_3000_functions` 为 2.36x / 2.30x / 2.35x，仍低于当前 3x 目标线。
-- 按最新完整 benchmark 复核口径，`compile_3000_functions`、`stdlib_math_string` 和 `function_call` 稳定低于 3x；`table_rw` 贴近但低于 3x，prepared 口径确认其 B/op 主要来自运行期 table 数组区扩容；`closure_upvalue` 的单轮 3.20x 慢轮已由官方规模 Go micro 初步判断为计时波动；`recursion` 经 `b24f6c0` 后从三轮稳定略高于 3x 改为两轮低于 3x、一轮慢轮高于 3x，仍需作为边缘观察项；`arith_chain_temp` 仍是执行 CPU 侧的边缘观察项。
+- 按最新完整 benchmark 复核口径，`compile_3000_functions`、`stdlib_math_string` 和 `function_call` 稳定低于 3x；`table_rw` 贴近但低于 3x，prepared 口径确认其 B/op 主要来自运行期 table 数组区扩容；`closure_upvalue` 的单轮 3.20x 慢轮已由官方规模 Go micro 初步判断为计时波动；`recursion` 经 `b24f6c0` 后从三轮稳定略高于 3x 改为两轮低于 3x、一轮慢轮高于 3x，仍需作为边缘观察项；prepared recursion 的剩余 `3 allocs/op` 已确认来自局部递归闭包创建、开放 upvalue cell 和闭合值语义，不是简单临时分配；`arith_chain_temp` 仍是执行 CPU 侧的边缘观察项。
 - 字符串拼接已较 2026-06-29 旧基线明显改善，从约 92x 收窄到约 1.86x。
 - 后续优先优化方向应集中在算术链 `ADD`/`SUB`/`MUL` 与 `FORLOOP` 成本、递归函数调用边界、表读写热路径、VM dispatch code size 对无关路径的影响；但若 profile 只落在已证伪的调用边界或算术缓存细枝，应优先继续定位或文档化，而不是堆局部字段/分支微调。
