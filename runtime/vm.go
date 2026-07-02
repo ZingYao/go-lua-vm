@@ -3312,57 +3312,6 @@ func (vm *VM) tryCachedIntegerIDivArithmetic(instruction bytecode.Instruction, t
 	return true, nil
 }
 
-// tryCachedIntegerDivArithmetic 尝试执行当前 PC 的 MOD/IDIV integer 算术缓存。
-//
-// cacheKind 必须是 arithmeticIntRegisterCacheMod 或 arithmeticIntRegisterCacheIDiv；缓存不存在、
-// 类型变化或指令形态变化时返回 handled=false。除数变为 0 时保持缓存形态并返回 Lua 错误。
-func (vm *VM) tryCachedIntegerDivArithmetic(instruction bytecode.Instruction, cacheKind byte) (bool, error) {
-	currentPC := vm.currentPC
-	if currentPC < 0 || currentPC >= len(vm.arithmeticIntRegisterCache) || currentPC >= len(vm.arithmeticIntOperandCache) || vm.arithmeticIntRegisterCache[currentPC] != cacheKind {
-		// 当前 PC 没有目标 integer 除法类缓存，调用方继续走普通 RK 路径。
-		return false, nil
-	}
-
-	cacheEntry := vm.arithmeticIntOperandCache[currentPC]
-	leftInteger, leftOK, leftErr := vm.cachedIntegerArithmeticEntryValue(cacheEntry.leftIndex, cacheEntry.leftConstant, cacheEntry.leftConstantOperand)
-	rightInteger, rightOK, rightErr := vm.cachedIntegerArithmeticEntryValue(cacheEntry.rightIndex, cacheEntry.rightConstant, cacheEntry.rightConstantOperand)
-	if leftErr != nil || rightErr != nil {
-		// 指令形态或寄存器窗口变化时清理缓存，并回到通用 RK 路径报出原始错误。
-		vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
-		vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
-		return false, nil
-	}
-	if !leftOK || !rightOK {
-		// 类型不再匹配时清理缓存，后续走完整 Lua 算术和元方法语义。
-		vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
-		vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
-		return false, nil
-	}
-	if rightInteger == 0 {
-		// 零除错误必须在写回前暴露，保持目标寄存器原值。
-		if cacheKind == arithmeticIntRegisterCacheMod {
-			return true, fmt.Errorf("'n%%0': %w", ErrDivisionByZero)
-		}
-		return true, ErrDivisionByZero
-	}
-
-	switch cacheKind {
-	case arithmeticIntRegisterCacheMod:
-		// MOD 使用 Lua floor-mod 语义，结果与除数同号。
-		vm.registers[instruction.A()] = IntegerValue(integerModulo(leftInteger, rightInteger))
-		return true, nil
-	case arithmeticIntRegisterCacheIDiv:
-		// IDIV 使用 Lua floor division 语义，结果向负无穷取整。
-		vm.registers[instruction.A()] = IntegerValue(integerFloorDiv(leftInteger, rightInteger))
-		return true, nil
-	default:
-		// 未知缓存类型表示调用方传入错误，清理缓存后回到完整路径。
-		vm.arithmeticIntRegisterCache[currentPC] = arithmeticIntRegisterCacheNone
-		vm.arithmeticIntOperandCache[currentPC] = arithmeticIntOperandCacheEntry{}
-		return false, nil
-	}
-}
-
 // integerArithmeticByCacheKind 执行 ADD/SUB/MUL 的 integer 热路径。
 //
 // cacheKind 必须来自当前算术指令；未知类型返回 0 仅作为损坏缓存的防御兜底，正常路径不会触发。
