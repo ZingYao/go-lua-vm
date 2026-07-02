@@ -902,9 +902,52 @@ Go 端 `BenchmarkCompileSource3000Functions` 显示，新增基准初始约 `95,
 `arith_mix_loop` 和 `arith_add_loop` 继续作为边缘回归观察项。近期新增证伪方向包括：子函数按参数数
 预留 `LocalVars` 容量，该方向不改变语义但对 `BenchmarkCompileSource3000Functions` 无分配收益。
 
+#### 2026-07-02 typed 常量去重索引复核
+
+`ab982a0` 将 codegen 常量去重索引从格式化字符串 key 拆成 typed 原值索引：`nil` 和 boolean
+使用字段和固定数组保存，integer、number 和 string 分别使用原值 map。该改动删除 `stableConstantKey`
+以及 `%g`、`%q` 和十进制字符串格式化路径，避免每次常量查询构造临时字符串。
+
+迁移依据来自 Lua 5.3.6 `lcode.c` 的 `addk`：C Lua 对 string、number、boolean 使用常量自身作为
+scanner table key，对 integer 使用独立 key 避免和 float 同值碰撞，并在复用前校验 `ttype` 与
+`luaV_rawequalobj`。本项目 typed 索引同样保留常量类型边界，integer 和 number 不共享索引。新增
+`TestCompileChunkKeepsDistinctFloatConstants` 覆盖旧 `%g` 6 位有效数字可能误合并的边界；官方
+Lua 5.3.6 与本项目对 `local a = 1.0000001 local b = 1.0000002 return a, b` 均保留 2 个 number
+常量并分别用 `LOADK` 加载。项目仍少官方尾部默认 `RETURN`，这是既有 codegen 形态差异，不是本轮新增。
+
+Go 端 `BenchmarkCompileSource3000Functions` 复核显示，`22850d8` 后约 `8.61-8.80 ms/op`、
+`7.58 MB/op`、`90,145 allocs/op`；`ab982a0` 后 3s 复核三轮为 `8.72 / 8.55 / 8.53 ms/op`、
+约 `7.44 MB/op`、`81,145-81,146 allocs/op`。对象分配再降约 `9,000 allocs/op`，内存分配下降约
+`140 KB/op`，wall-clock 未见稳定退化。中间试验过直接使用 `map[bytecode.Constant]int`，虽然也能把
+alloc/op 降到约 `81,144`，但 B/op 升到约 `8.35 MB/op` 且耗时不稳，已回退；后续不应重复该形态。
+
+DoString micro 复核未见运行期稳定退化：`arith_chain_temp` 约 `3.47 / 3.60 / 3.47 ms/op`、
+`220 allocs/op`；`table_rw` 约 `1.49 / 1.54 / 1.54 ms/op`、`258 allocs/op`；`function_call`
+约 `0.409-0.432 ms/op`、`251 allocs/op`；`recursion` 约 `7.21-7.35 ms/op`、`363 allocs/op`。
+
+重建 `bin/glua` / `bin/gluac` 后，正确 Lua 5.3.6 完整 benchmark 三次复跑如下：
+
+| 用例 | 官方工具中位数 | 本项目中位数 | 本项目/官方 |
+| --- | ---: | ---: | ---: |
+| `arith_add_loop` | 0.008535s / 0.008065s / 0.008119s | 0.021936s / 0.021715s / 0.021677s | 2.57x / 2.69x / 2.67x |
+| `arith_mix_loop` | 0.012314s / 0.012431s / 0.011768s | 0.035171s / 0.033830s / 0.036409s | 2.86x / 2.72x / 3.09x |
+| `arith_chain_temp` | 0.013858s / 0.013817s / 0.019659s | 0.040022s / 0.039707s / 0.047838s | 2.89x / 2.87x / 2.43x |
+| `table_rw` | 0.007626s / 0.007532s / 0.008119s | 0.023727s / 0.022264s / 0.023544s | 3.11x / 2.96x / 2.90x |
+| `function_call` | 0.008045s / 0.007499s / 0.008049s | 0.019912s / 0.018794s / 0.019893s | 2.48x / 2.51x / 2.47x |
+| `string_concat` | 0.005347s / 0.005027s / 0.005409s | 0.009323s / 0.009022s / 0.009813s | 1.74x / 1.79x / 1.81x |
+| `closure_upvalue` | 0.012213s / 0.008380s / 0.008748s | 0.026562s / 0.021344s / 0.021265s | 2.17x / 2.55x / 2.43x |
+| `stdlib_math_string` | 0.020843s / 0.019956s / 0.019935s | 0.065061s / 0.045142s / 0.045194s | 3.12x / 2.26x / 2.27x |
+| `recursion` | 0.008905s / 0.003848s / 0.003901s | 0.014709s / 0.011715s / 0.011831s | 1.65x / 3.04x / 3.03x |
+| `compile_3000_functions` | 0.006996s / 0.005381s / 0.005512s | 0.015521s / 0.012495s / 0.012623s | 2.22x / 2.32x / 2.29x |
+
+`compile_3000_functions` 稳定保持在 3x 以下，并较上一节继续降低本项目绝对时间。运行期边缘项仍受
+官方基线与本项目绝对耗时波动影响，单轮出现 `table_rw`、`stdlib_math_string`、`recursion` 或
+`arith_mix_loop` 高于 3x；DoString micro 未显示稳定退化。下一轮仍需继续观察 `table_rw`、
+`stdlib_math_string`、`recursion`、`arith_mix_loop`、`arith_chain_temp` 和 `arith_add_loop`。
+
 ### 结论
 
-- CLI 冷启动和小脚本差距较小，历史冷启动约 1.25x 到 1.35x；最新 Lua 5.3.6 正确口径下 `compile_3000_functions` 为 2.40x / 2.23x / 2.33x，仍低于当前 3x 目标线。
-- 按最新完整 benchmark 复核口径，主要路径三轮均低于 3x；`recursion`、`arith_chain_temp`、`table_rw`、`arith_mix_loop` 和 `arith_add_loop` 继续作为边缘回归观察项。
+- CLI 冷启动和小脚本差距较小，历史冷启动约 1.25x 到 1.35x；最新 Lua 5.3.6 正确口径下 `compile_3000_functions` 为 2.22x / 2.32x / 2.29x，仍低于当前 3x 目标线。
+- 按最新完整 benchmark 复核口径，`compile_3000_functions` 稳定低于 3x；运行期主要路径仍存在单轮 3x 边缘波动，`recursion`、`arith_chain_temp`、`table_rw`、`arith_mix_loop`、`arith_add_loop` 和 `stdlib_math_string` 继续作为边缘回归观察项。
 - 字符串拼接已较 2026-06-29 旧基线明显改善，从约 92x 收窄到约 1.86x。
 - 后续优先优化方向应集中在算术链 `ADD`/`SUB`/`MUL` 与 `FORLOOP` 成本、递归函数调用边界、表读写热路径、VM dispatch code size 对无关路径的影响，以及标准库函数调用边界。
