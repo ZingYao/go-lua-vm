@@ -106,6 +106,31 @@ return #s
 	}
 }
 
+// BenchmarkDoStringStdlibMathString 度量标准库 math/string 混合调用热路径。
+func BenchmarkDoStringStdlibMathString(b *testing.B) {
+	source := `
+local sum = 0
+for i = 1, 80000 do
+  sum = sum + math.floor(math.sqrt(i)) + #string.format('%d', i)
+end
+return sum
+`
+	b.ReportAllocs()
+	for benchmarkIndex := 0; benchmarkIndex < b.N; benchmarkIndex++ {
+		// 每轮创建独立 State，覆盖标准库注册、源码编译、加载和执行的端到端路径。
+		state := NewState()
+		if err := OpenLibs(state); err != nil {
+			state.Close()
+			b.Fatalf("OpenLibs failed: %v", err)
+		}
+		if err := DoString(state, source); err != nil {
+			state.Close()
+			b.Fatalf("DoString failed: %v", err)
+		}
+		state.Close()
+	}
+}
+
 // BenchmarkDoStringFunctionCall 度量完整 Lua VM 路径下的 Lua 函数调用循环。
 func BenchmarkDoStringFunctionCall(b *testing.B) {
 	source := `
