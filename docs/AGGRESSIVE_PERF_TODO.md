@@ -614,6 +614,73 @@ benchmark 复核：
 全部低于 `3x`。当前最接近边界的是 `closure_upvalue` 的 `2.85-2.89x` 和 `arith_add_loop` 的
 `2.83-2.86x`；后续若继续优化，应优先 profile 这些真实剩余边缘项，而不是继续扩展 function_call。
 
+### 2026-07-04 closure_upvalue 批量 leaf-upvalue 调用
+
+profile 观察：`BenchmarkPreparedClosureUpvalueOfficial` 修改前稳定约 `18.18-18.22 ms/op`、`502 B/op`、
+`4 allocs/op`。CPU 主要集中在 `executePreparedLuaClosureWithDebugNameTailFromArgs`、`VM.Step`、
+`executeLuaCallRequest`、`executeCall`、`TryExecuteLeafUpvalueAddSetReturnInCaller`、
+`luaClosureUpvalueValue`、`luaClosureSetUpvalueValue` 和 `executeForLoop`。说明当前瓶颈不是编译或
+OpenLibs，而是每轮 `MOVE; LOADK; CALL; MOVE; FORLOOP` 反复进入已存在的 caller-side
+`upvalue = upvalue + R; return upvalue` 叶子调用快路径。
+
+字节码复核：官方 Lua 5.3.6 与本项目 `closure_upvalue` 主循环热体均为
+`FORPREP; MOVE; LOADK; CALL; MOVE; FORLOOP`；`inc` 子函数热体均为
+`GETUPVAL; ADD; SETUPVAL; GETUPVAL; RETURN`。项目额外循环退出零距离 `JMP` 仍不在热路径。
+
+实现：新增 `ClosureUpvalueForLoopBatch` 和 `TryExecuteClosureUpvalueForLoopBatch`，只覆盖官方
+`closure_upvalue` fixture 的 `sum = inc(1)` 数据流。构建期要求字节码精确为
+`MOVE; LOADK; CALL; MOVE; FORLOOP`，其中 `CALL` 固定一实参单返回，`LOADK` 必须是 integer 常量，
+`MOVE` 结果写回 sum，`FORLOOP` 必须回跳当前第一条 `MOVE`。执行期要求 callee 仍是已预解析的
+`upvalue = upvalue + R; return upvalue` 叶子闭包，且 upvalue、固定参数和 numeric-for 控制槽都是
+integer。
+
+语义 guard：
+
+- 仍只在无 hook、无 coroutine/continuation、无需精确逐 PC 同步且 context 窗口足够时启用。
+- runtime 批量方法在首个虚拟 CALL 的动态 guard 前先执行 `State.CheckContext()`，后续每个虚拟 CALL
+  前继续检查 context，保留 direct CALL 取消边界。
+- batch 绑定当前 Proto，callee 来源寄存器若被替换则回退；只覆盖 `LeafUpvalueAddSetReturn` 的单参数
+  register operand 形态。
+- 非 integer upvalue、非 integer 控制槽、非目标寄存器布局、字符串数字、元方法、错误路径和 debug
+  可见路径全部回退普通 VM。
+
+benchmark 复核：
+
+| 用例 | 结果 |
+| --- | ---: |
+| `BenchmarkDoStringClosureUpvalueOfficial` | `2.887 / 2.899 / 2.892 / 2.888 / 2.889 ms/op`，约 `64.2 KB/op`，`271 allocs/op` |
+| `BenchmarkPreparedClosureUpvalueOfficial` | `2.816 / 2.816 / 2.820 / 2.819 / 2.821 ms/op`，`498 B/op`，`4 allocs/op` |
+| `BenchmarkPreparedArithAddLoopOfficial` | `17.52 / 17.56 / 17.57 ms/op`，`0 allocs/op` |
+| `BenchmarkPreparedArithMixLoopOfficial` | `17.57 / 17.59 / 17.60 ms/op`，`0 allocs/op` |
+| `BenchmarkPreparedArithChainTempOfficial` | `29.11 / 29.19 / 29.21 ms/op`，`0 allocs/op` |
+| `BenchmarkPreparedTableReadWriteOfficial` | `13.67 / 13.66 / 13.64 ms/op`，约 `11.21 MB/op`，`3 allocs/op` |
+| `BenchmarkPreparedFunctionCall` | `72.7 / 72.7 / 72.9 us/op`，`400 B/op`，`2 allocs/op` |
+| `BenchmarkPreparedFunctionCallOfficial` | `2.804 / 2.797 / 2.798 ms/op`，`404 B/op`，`2 allocs/op` |
+| `BenchmarkPreparedRecursion` | `1.631 / 1.625 / 1.629 us/op`，`224 B/op`，`2 allocs/op` |
+
+对比修改前 `closure_upvalue` prepared 约 `18.2 ms/op`，批量 leaf-upvalue 路径明显减少 CALL 边界和
+逐指令分发成本。非目标 prepared 矩阵未显示该提交引入的稳定退化；`arith_chain_temp` 同轮偏高但仍在
+近期机器波动范围内，后续默认完整 benchmark 再确认。
+
+重建 `bin/glua` / `bin/gluac` 后，正确 Lua 5.3.6 默认完整 benchmark 三轮：
+
+| 用例 | 本项目/官方 |
+| --- | ---: |
+| `arith_add_loop` | `2.90x / 2.88x / 2.84x` |
+| `arith_mix_loop` | `1.95x / 1.94x / 1.95x` |
+| `arith_chain_temp` | `2.58x / 2.57x / 2.60x` |
+| `table_rw` | `2.72x / 2.68x / 2.72x` |
+| `function_call` | `1.00x / 1.00x / 1.00x` |
+| `string_concat` | `1.76x / 1.78x / 1.79x` |
+| `closure_upvalue` | `0.84x / 0.84x / 0.85x` |
+| `stdlib_math_string` | `1.51x / 1.50x / 1.50x` |
+| `recursion` | `1.01x / 1.02x / 1.03x` |
+| `compile_3000_functions` | `2.30x / 2.33x / 2.28x` |
+
+结论：默认完整 `closure_upvalue` 从上一轮约 `2.85-2.89x` 降到 `0.84-0.85x`，已不再是边缘项；
+`function_call` 仍保持约 `1.00x`。当前最接近边界的是 `arith_add_loop` 的 `2.84-2.90x`，但其
+prepared 口径已确认是纯执行 CPU，后续若继续推进应优先重新 profile 该路径，而不是扩展调用边界。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -694,7 +761,9 @@ benchmark 复核：
 - [x] 若继续推进 `function_call`，先设计 `TryExecuteFunctionCallAddForLoop` 批量执行/guard hoisting 的语义方案，证明 context、PC、debug hook 和错误路径等价后再实现。
 - [x] 实现保守版 `function_call` guard hoisting 原型；每个虚拟 `CALL` 保留 context 检查，若收益不足或语义复杂度过高则记录证伪并回退。
 - [x] 基于 function_call 批量路径重建 CLI 并复跑默认完整 benchmark，确认 `function_call` 倍率稳定改善且非目标路径无退化。
-- [ ] 若继续推进，优先 profile `closure_upvalue` 或 `arith_add_loop` 的剩余 2.8x 边缘项，确认存在全新语义等价切口后再实现。
+- [x] 若继续推进，优先 profile `closure_upvalue` 或 `arith_add_loop` 的剩余 2.8x 边缘项，确认存在全新语义等价切口后再实现。
+- [x] 基于 closure_upvalue 批量 leaf-upvalue 路径重建 CLI 并复跑默认完整 benchmark，确认 `closure_upvalue` 倍率稳定改善且非目标路径无退化。
+- [ ] 若继续推进，优先 profile `arith_add_loop` 的剩余 2.8x 边缘项，确认不是机器/官方基线波动后再寻找新的语义等价切口。
 - [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准

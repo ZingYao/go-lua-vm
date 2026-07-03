@@ -2809,6 +2809,126 @@ func TestVMTryExecuteFunctionCallAssignForLoopFallback(t *testing.T) {
 	}
 }
 
+// TestVMTryExecuteClosureUpvalueForLoopBatch 验证官方 closure_upvalue 循环 batch。
+func TestVMTryExecuteClosureUpvalueForLoopBatch(t *testing.T) {
+	proto := testClosureUpvalueForLoopProto()
+	vm := NewVMWithConstants(8, nil)
+	vm.BindPrototype(proto)
+	if !vm.PrepareClosureUpvalueForLoopSuperInstructions() {
+		// 官方 closure_upvalue 字节码形态应能预构建 superinstruction。
+		t.Fatalf("expected closure_upvalue superinstruction")
+	}
+	cell := NewClosedUpvalueCell(IntegerValue(0))
+	closure := NewLuaClosure(testLeafUpvalueAddSetReturnParamProto(), []Value{IntegerValue(0)}, []*UpvalueCell{cell})
+	if closure.LeafUpvalueAddSetReturn == nil || !closure.LeafUpvalueAddSetReturn.HasRegisterOperand {
+		// 被调闭包必须命中 upvalue 加参数后写回的叶子形态。
+		t.Fatalf("expected upvalue add-set register metadata")
+	}
+	for _, entry := range []struct {
+		register int
+		value    Value
+	}{
+		{register: 0, value: ReferenceValue(KindLuaClosure, closure)},
+		{register: 1, value: IntegerValue(0)},
+		{register: 2, value: IntegerValue(1)},
+		{register: 3, value: IntegerValue(3)},
+		{register: 4, value: IntegerValue(1)},
+		{register: 5, value: IntegerValue(1)},
+	} {
+		if err := vm.SetRegister(entry.register, entry.value); err != nil {
+			// 测试夹具寄存器必须能成功初始化。
+			t.Fatalf("set register %d failed: %v", entry.register, err)
+		}
+	}
+
+	batch, ok := vm.PrepareClosureUpvalueForLoopBatch(0)
+	if !ok {
+		// batch 准备应复用已验证的静态形态和 callee metadata。
+		t.Fatalf("expected prepared closure_upvalue batch")
+	}
+	nextPC, iterations, handled, err := vm.TryExecuteClosureUpvalueForLoopBatch(batch, 8, NewState())
+	if err != nil || !handled || iterations != 3 || nextPC != 5 {
+		// 三轮后达到 limit 并退出循环。
+		t.Fatalf("closure_upvalue batch mismatch: handled=%v iterations=%d nextPC=%d err=%v", handled, iterations, nextPC, err)
+	}
+	if value, _ := vm.Register(1); !value.RawEqual(IntegerValue(3)) {
+		// sum 保存最后一次 inc(1) 返回值。
+		t.Fatalf("sum mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(6); !value.RawEqual(IntegerValue(3)) {
+		// CALL 函数槽在单返回后保存最后一轮 inc 的结果。
+		t.Fatalf("call result mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(7); !value.RawEqual(IntegerValue(1)) {
+		// 实参槽保留最后一轮 LOADK 后的常量 1。
+		t.Fatalf("argument mismatch: %#v", value)
+	}
+	if !cell.Value().RawEqual(IntegerValue(3)) || !closure.Upvalues[0].RawEqual(IntegerValue(3)) {
+		// upvalue cell 和 closure 快照都必须同步到最后结果。
+		t.Fatalf("upvalue mismatch: cell=%#v snapshot=%#v", cell.Value(), closure.Upvalues[0])
+	}
+	if value, _ := vm.Register(2); !value.RawEqual(IntegerValue(3)) {
+		// 循环退出时 FORLOOP 不写入越界后的内部 index。
+		t.Fatalf("for index mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(5); !value.RawEqual(IntegerValue(3)) {
+		// 循环退出时外部可见循环变量保持最后一次有效值。
+		t.Fatalf("visible index mismatch: %#v", value)
+	}
+}
+
+// TestVMTryExecuteClosureUpvalueForLoopFallback 验证 closure_upvalue batch 动态 guard 失败无副作用。
+func TestVMTryExecuteClosureUpvalueForLoopFallback(t *testing.T) {
+	proto := testClosureUpvalueForLoopProto()
+	vm := NewVMWithConstants(8, nil)
+	vm.BindPrototype(proto)
+	if !vm.PrepareClosureUpvalueForLoopSuperInstructions() {
+		// 官方 closure_upvalue 字节码形态应能预构建 superinstruction。
+		t.Fatalf("expected closure_upvalue superinstruction")
+	}
+	cell := NewClosedUpvalueCell(StringValue("not integer"))
+	closure := NewLuaClosure(testLeafUpvalueAddSetReturnParamProto(), []Value{StringValue("not integer")}, []*UpvalueCell{cell})
+	if err := vm.SetRegister(0, ReferenceValue(KindLuaClosure, closure)); err != nil {
+		// 被调函数局部必须能写入寄存器。
+		t.Fatalf("set function failed: %v", err)
+	}
+	if err := vm.SetRegister(1, IntegerValue(99)); err != nil {
+		// sum 初值必须能写入寄存器。
+		t.Fatalf("set sum failed: %v", err)
+	}
+	if err := vm.SetRegister(2, IntegerValue(1)); err != nil {
+		// FORLOOP 内部 index 必须能写入寄存器。
+		t.Fatalf("set for index failed: %v", err)
+	}
+	if err := vm.SetRegister(3, IntegerValue(3)); err != nil {
+		// FORLOOP limit 必须能写入寄存器。
+		t.Fatalf("set for limit failed: %v", err)
+	}
+	if err := vm.SetRegister(4, IntegerValue(1)); err != nil {
+		// FORLOOP step 必须能写入寄存器。
+		t.Fatalf("set for step failed: %v", err)
+	}
+
+	batch, ok := vm.PrepareClosureUpvalueForLoopBatch(0)
+	if !ok {
+		// upvalue 类型不是 batch 静态 guard；应延迟到执行期回退。
+		t.Fatalf("expected prepared closure_upvalue batch")
+	}
+	nextPC, iterations, handled, err := vm.TryExecuteClosureUpvalueForLoopBatch(batch, 8, NewState())
+	if err != nil || handled || iterations != 0 || nextPC != 0 {
+		// 动态 guard 失败不应被 fast path 消费。
+		t.Fatalf("fallback mismatch: handled=%v iterations=%d nextPC=%d err=%v", handled, iterations, nextPC, err)
+	}
+	if value, _ := vm.Register(1); !value.RawEqual(IntegerValue(99)) {
+		// guard 失败不能修改 sum。
+		t.Fatalf("sum should be unchanged: %#v", value)
+	}
+	if value, _ := vm.Register(6); !value.IsNil() {
+		// guard 失败不能执行第一条 MOVE。
+		t.Fatalf("temporary slot should stay nil: %#v", value)
+	}
+}
+
 // TestVMTryExecuteFormatLenAddForLoop 验证 `#string.format("%d", i)` 长度消费 fast path。
 //
 // 该路径必须在不构造格式化字符串的情况下，产生与 CALL、LEN、ADD、FORLOOP 后一致的寄存器和 PC 状态。
@@ -2936,6 +3056,35 @@ func testFunctionCallAssignForLoopProto() *bytecode.Proto {
 			bytecode.CreateABC(bytecode.OpCall, 6, 3, 2),
 			bytecode.CreateABC(bytecode.OpMove, 1, 6, 0),
 			bytecode.CreateAsBx(bytecode.OpForLoop, 2, -6),
+		},
+	}
+}
+
+// testClosureUpvalueForLoopProto 构造官方 closure_upvalue benchmark 的 `sum = inc(1)` 循环体 Proto。
+func testClosureUpvalueForLoopProto() *bytecode.Proto {
+	return &bytecode.Proto{
+		Constants: []bytecode.Constant{
+			bytecode.IntegerConstant(1),
+		},
+		Code: []bytecode.Instruction{
+			bytecode.CreateABC(bytecode.OpMove, 6, 0, 0),
+			bytecode.CreateABx(bytecode.OpLoadK, 7, 0),
+			bytecode.CreateABC(bytecode.OpCall, 6, 2, 2),
+			bytecode.CreateABC(bytecode.OpMove, 1, 6, 0),
+			bytecode.CreateAsBx(bytecode.OpForLoop, 2, -5),
+		},
+	}
+}
+
+// testLeafUpvalueAddSetReturnParamProto 构造 `x = x + v; return x` 叶子闭包 Proto。
+func testLeafUpvalueAddSetReturnParamProto() *bytecode.Proto {
+	return &bytecode.Proto{
+		Code: []bytecode.Instruction{
+			bytecode.CreateABC(bytecode.OpGetUpval, 1, 0, 0),
+			bytecode.CreateABC(bytecode.OpAdd, 1, 1, 0),
+			bytecode.CreateABC(bytecode.OpSetupVal, 1, 0, 0),
+			bytecode.CreateABC(bytecode.OpGetUpval, 1, 0, 0),
+			bytecode.CreateABC(bytecode.OpReturn, 1, 2, 0),
 		},
 	}
 }

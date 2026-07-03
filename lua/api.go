@@ -2481,6 +2481,7 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 	mixArithmeticForLoopSuperInstructionEnabled := false
 	functionCallAssignForLoopSuperInstructionEnabled := false
 	functionCallAddForLoopSuperInstructionEnabled := false
+	closureUpvalueForLoopSuperInstructionEnabled := false
 	formatLenAddForLoopSuperInstructionEnabled := false
 	if !preciseFrameSync && !hooksEnabled {
 		// 普通主线程无 hook 路径可提前准备 superinstruction 表；hook/coroutine 路径必须保留逐 PC 语义。
@@ -2489,6 +2490,7 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 		mixArithmeticForLoopSuperInstructionEnabled = vm.PrepareMixArithmeticForLoopSuperInstructions()
 		functionCallAssignForLoopSuperInstructionEnabled = vm.PrepareFunctionCallAssignForLoopSuperInstructions()
 		functionCallAddForLoopSuperInstructionEnabled = vm.PrepareFunctionCallAddForLoopSuperInstructions()
+		closureUpvalueForLoopSuperInstructionEnabled = vm.PrepareClosureUpvalueForLoopSuperInstructions()
 		formatLenAddForLoopSuperInstructionEnabled = vm.PrepareFormatLenAddForLoopSuperInstructions()
 	}
 	contextCheckCountdown := 0
@@ -2566,6 +2568,41 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 					contextCheckCountdown -= handledIterations * 5
 					previousPreviousPC = movePC + 4
 					previousPC = movePC + 5
+					pc = nextPC
+					continue
+				}
+			}
+			if !callContextChecked {
+				// 静态 PC 命中但 batch guard 失败时，仍保留一次 CALL 入口取消边界。
+				if err := state.CheckContext(); err != nil {
+					if syncErr := syncCurrentFrame(pc); syncErr != nil {
+						return nil, syncErr
+					}
+					return nil, err
+				}
+			}
+		}
+		if closureUpvalueForLoopSuperInstructionEnabled && !preciseFrameSync && !hooksEnabled && contextCheckCountdown >= 4 && vm.HasClosureUpvalueForLoopAt(pc) {
+			// 五指令 closure_upvalue 循环会额外跳过 LOADK、CALL、MOVE、FORLOOP 四个入口；
+			// 倒计时至少为 4 才能证明逐指令路径不会在被跳过区间触发 context 检查。
+			movePC := pc
+			callContextChecked := false
+			if batch, ok := vm.PrepareClosureUpvalueForLoopBatch(movePC); ok {
+				// 保守批量路径只复用静态 guard；runtime 内部每个虚拟 CALL 前仍执行 context 检查。
+				nextPC, handledIterations, handled, err := vm.TryExecuteClosureUpvalueForLoopBatch(batch, contextCheckCountdown/4, state)
+				callContextChecked = true
+				if err != nil {
+					// context 取消时同步到当前循环体入口，保持 closure_upvalue fast path 的错误 PC 边界。
+					if syncErr := syncCurrentFrame(movePC); syncErr != nil {
+						return nil, syncErr
+					}
+					return nil, err
+				}
+				if handled {
+					// superinstruction 已完成若干轮 MOVE、LOADK、CALL、MOVE 与 FORLOOP；补偿被跳过入口。
+					contextCheckCountdown -= handledIterations * 4
+					previousPreviousPC = movePC + 3
+					previousPC = movePC + 4
 					pc = nextPC
 					continue
 				}
