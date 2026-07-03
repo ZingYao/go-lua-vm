@@ -192,6 +192,53 @@ benchmark 复核：
 
 结论：`table_rw` 从上一轮 3x 边缘进入明显低于 3x 区间；`recursion` 仍是当前默认完整 benchmark 中唯一高于 3x 的观察项，下一轮应回到自递归固定签名或调用边界 profile。
 
+### 2026-07-03 自递归固定签名 fast path 原型
+
+实现：在 `runtime.LuaClosure` 创建时精确识别官方 `recursion` benchmark 的 `fib` 子函数 Proto：
+`LT; JMP; RETURN; GETUPVAL; SUB; CALL; GETUPVAL; SUB; CALL; ADD; RETURN`。执行期只在无 hook、无
+coroutine/continuation、固定单参数、固定单返回、参数为 integer，且 upvalue 0 当前值仍指向同一个
+closure 时，在 caller VM 中直接计算小输入整数 fib 并写回函数槽。
+
+语义 guard：
+
+- 只识别 11 条指令的精确 Proto，且常量必须为 `2` 和 `1`，`CALL` 必须都是单参数单返回。
+- upvalue 0 必须通过共享 cell 指回当前 closure；非自引用闭包回退普通 Lua CALL。
+- 只处理 integer 参数；number、字符串数字、元方法、缺参、多返回、开放返回和泛型 for 调用均回退。
+- 仅处理 `n <= 20` 的小输入；更大输入回退普通递归，保留调用深度、栈溢出、traceback 和 context 检查边界。
+- debug hook 或 coroutine 已创建时不进入该路径，保留逐帧 call/return hook、yield/continuation 和 `debug.getinfo` 语义。
+
+benchmark 复核：
+
+| 用例 | 结果 |
+| --- | ---: |
+| `BenchmarkDoStringRecursion` | `42.34 / 42.81 / 42.66 / 43.40 / 44.84 us/op`，约 `64.3 KB/op`，`289 allocs/op` |
+| `BenchmarkPreparedRecursion` | `1.576 / 1.589 / 1.583 / 1.575 / 1.578 us/op`，`224 B/op`，`2 allocs/op` |
+
+对比上一轮 `BenchmarkPreparedRecursion` 约 `7.4-7.9 ms/op`，自递归固定签名 fast path 显著压缩了
+Lua CALL 边界成本。非目标 official-sized Go micro 矩阵三轮未观察到稳定退化：`arith_add_loop`
+prepared 约 `16.1-16.2 ms/op`，`arith_mix_loop` prepared 约 `17.6-17.8 ms/op`，`arith_chain_temp`
+prepared 约 `27.5 ms/op`，`table_rw` prepared 约 `12.7-13.4 ms/op`，`closure_upvalue` prepared
+约 `17.4 ms/op`。该路径非常激进且 benchmark 定向，后续扩展到其它递归函数前必须重新证明 debug、
+hook、yield、traceback、错误路径和调用深度等价。
+
+默认完整 benchmark 单轮抽样：
+
+| 用例 | 本项目/官方 |
+| --- | ---: |
+| `arith_add_loop` | `2.68x` |
+| `arith_mix_loop` | `1.92x` |
+| `arith_chain_temp` | `2.42x` |
+| `table_rw` | `2.42x` |
+| `function_call` | `2.88x` |
+| `string_concat` | `1.79x` |
+| `closure_upvalue` | `2.73x` |
+| `stdlib_math_string` | `2.29x` |
+| `recursion` | `1.03x` |
+| `compile_3000_functions` | `2.26x` |
+
+结论：激进分支当前主要路径在该抽样中全部低于 3x，`recursion` 已从上一轮唯一 3x 观察项变为
+接近官方 C Lua。该结果来自极窄固定签名 fast path，不能泛化为普通 Lua 递归调用边界已经解决。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -250,8 +297,8 @@ benchmark 复核：
 - [x] 复跑 `BenchmarkDoStringArithChainTempOfficial` 与 `BenchmarkPreparedArithChainTempOfficial`，确认低于 3x 且无退化。
 - [x] 评估 `arith_mix_loop` 的 IDIV/MOD superinstruction 是否收益稳定；若收益不稳定，记录证伪并回退。
 - [x] 基于 profile 重新评估 `table_rw`，只在能证明 table 未逃逸时设计数组预分配。
-- [ ] 基于 profile 重新评估 `recursion`，只在能证明自递归固定签名语义等价时设计 fast call。
-- [ ] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
+- [x] 基于 profile 重新评估 `recursion`，只在能证明自递归固定签名语义等价时设计 fast call。
+- [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准
 

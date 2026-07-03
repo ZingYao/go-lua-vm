@@ -729,6 +729,115 @@ func TestNewLuaClosureCachesDirectCallSafe(t *testing.T) {
 		// upvalue 自增并返回同一 upvalue 的闭包叶子函数应缓存专用元数据。
 		t.Fatalf("upvalue add-set metadata mismatch: %+v", upvalueAddSetClosure.LeafUpvalueAddSetReturn)
 	}
+
+	fibClosure := NewLuaClosure(testSelfRecursiveIntegerFibProto(), nil, nil)
+	if fibClosure.DirectCallSafe {
+		// 自递归 fib 含 CALL，不能被误判为叶子 direct CALL。
+		t.Fatalf("self-recursive fib should not be direct-call safe")
+	}
+	if !fibClosure.SelfRecursiveIntegerFib {
+		// 精确 fib 形态应在 closure 创建时缓存，供 caller-side 固定签名路径使用。
+		t.Fatalf("self-recursive fib should cache fixed-signature metadata")
+	}
+}
+
+// TestVMTryExecuteSelfRecursiveIntegerFibInCaller 验证固定签名自递归 fib caller-side 快路径。
+//
+// 该路径只处理官方 recursion benchmark 的 integer 小输入；非自引用、非 integer 或大输入必须
+// 回退普通 VM，以保留 debug、traceback、调用深度和算术转换语义。
+func TestVMTryExecuteSelfRecursiveIntegerFibInCaller(t *testing.T) {
+	proto := testSelfRecursiveIntegerFibProto()
+	selfCell := NewClosedUpvalueCell(NilValue())
+	closure := NewLuaClosure(proto, nil, []*UpvalueCell{selfCell})
+	selfCell.Set(ReferenceValue(KindLuaClosure, closure))
+	vm := NewVM(2)
+	if err := vm.SetRegister(0, ReferenceValue(KindLuaClosure, closure)); err != nil {
+		// 测试准备阶段必须能写入函数槽。
+		t.Fatalf("set function register failed: %v", err)
+	}
+	if err := vm.SetRegister(1, IntegerValue(15)); err != nil {
+		// 测试准备阶段必须能写入唯一实参。
+		t.Fatalf("set argument register failed: %v", err)
+	}
+	request := &CallRequest{FunctionIndex: 0, ArgumentCount: 1, ReturnCount: 1}
+	handled, err := vm.TryExecuteSelfRecursiveIntegerFibInCaller(closure, request)
+	if err != nil {
+		// 合法小整数 fib 不应失败。
+		t.Fatalf("self-recursive fib fast path failed: %v", err)
+	}
+	if !handled {
+		// 目标形态必须由 fast path 完成。
+		t.Fatalf("self-recursive fib should be handled")
+	}
+	value, ok := vm.Register(0)
+	if !ok || !value.RawEqual(IntegerValue(610)) {
+		// fib(15) 的结果必须与普通递归一致。
+		t.Fatalf("self-recursive fib result mismatch: value=%#v ok=%v", value, ok)
+	}
+
+	if err := vm.SetRegister(0, ReferenceValue(KindLuaClosure, closure)); err != nil {
+		// 回退场景也需要恢复函数槽。
+		t.Fatalf("reset function register failed: %v", err)
+	}
+	if err := vm.SetRegister(1, StringValue("15")); err != nil {
+		// 字符串数字在普通 VM 中涉及比较和算术转换，fast path 必须回退。
+		t.Fatalf("set string argument failed: %v", err)
+	}
+	handled, err = vm.TryExecuteSelfRecursiveIntegerFibInCaller(closure, request)
+	if err != nil || handled {
+		// 非 integer 参数不能被 caller-side 路径吞掉。
+		t.Fatalf("string argument should fallback: handled=%v err=%v", handled, err)
+	}
+
+	if err := vm.SetRegister(1, IntegerValue(selfRecursiveIntegerFibFastMaxArgument+1)); err != nil {
+		// 大输入用于验证调用深度和栈溢出边界回退。
+		t.Fatalf("set large argument failed: %v", err)
+	}
+	handled, err = vm.TryExecuteSelfRecursiveIntegerFibInCaller(closure, request)
+	if err != nil || handled {
+		// 超出小输入范围时必须保留普通递归调用栈。
+		t.Fatalf("large argument should fallback: handled=%v err=%v", handled, err)
+	}
+
+	nonSelfCell := NewClosedUpvalueCell(NilValue())
+	nonSelfClosure := NewLuaClosure(proto, nil, []*UpvalueCell{nonSelfCell})
+	nonSelfCell.Set(ReferenceValue(KindLuaClosure, closure))
+	if err := vm.SetRegister(1, IntegerValue(5)); err != nil {
+		// 自引用 guard 测试仍需要合法 integer 参数。
+		t.Fatalf("set non-self argument failed: %v", err)
+	}
+	handled, err = vm.TryExecuteSelfRecursiveIntegerFibInCaller(nonSelfClosure, request)
+	if err != nil || handled {
+		// upvalue 0 没有指回当前 closure 时不能当作自递归。
+		t.Fatalf("non-self closure should fallback: handled=%v err=%v", handled, err)
+	}
+}
+
+// testSelfRecursiveIntegerFibProto 构造官方 recursion benchmark 中 fib 子函数的精确 Proto。
+func testSelfRecursiveIntegerFibProto() *bytecode.Proto {
+	// 指令形态对应：if n < 2 then return n end; return fib(n-1)+fib(n-2)。
+	return &bytecode.Proto{
+		NumParams:    1,
+		MaxStackSize: 4,
+		Constants: []bytecode.Constant{
+			bytecode.IntegerConstant(2),
+			bytecode.IntegerConstant(1),
+		},
+		Upvalues: []bytecode.UpvalueDesc{{Name: "fib", InStack: true, Index: 0}},
+		Code: []bytecode.Instruction{
+			bytecode.CreateABC(bytecode.OpLt, 0, 0, bytecode.RKAsK(0)),
+			bytecode.CreateAsBx(bytecode.OpJmp, 0, 1),
+			bytecode.CreateABC(bytecode.OpReturn, 0, 2, 0),
+			bytecode.CreateABC(bytecode.OpGetUpval, 1, 0, 0),
+			bytecode.CreateABC(bytecode.OpSub, 2, 0, bytecode.RKAsK(1)),
+			bytecode.CreateABC(bytecode.OpCall, 1, 2, 2),
+			bytecode.CreateABC(bytecode.OpGetUpval, 2, 0, 0),
+			bytecode.CreateABC(bytecode.OpSub, 3, 0, bytecode.RKAsK(0)),
+			bytecode.CreateABC(bytecode.OpCall, 2, 2, 2),
+			bytecode.CreateABC(bytecode.OpAdd, 1, 1, 2),
+			bytecode.CreateABC(bytecode.OpReturn, 1, 2, 0),
+		},
+	}
 }
 
 // TestVMTryExecuteLeafAddReturn 验证 `ADD; RETURN` 叶子函数快路径。

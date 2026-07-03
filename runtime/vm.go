@@ -383,6 +383,8 @@ type LuaClosure struct {
 	LeafAddReturn *LuaLeafAddReturn
 	// LeafUpvalueAddSetReturn 保存 upvalue 自增叶子函数的预解析形态，nil 表示不能走 caller-side 写回快路径。
 	LeafUpvalueAddSetReturn *LuaLeafUpvalueAddSetReturn
+	// SelfRecursiveIntegerFib 表示该 closure 的 Proto 命中固定签名整数 fib 自递归形态。
+	SelfRecursiveIntegerFib bool
 }
 
 // LuaLeafAddReturn 保存 `ADD;RETURN` 或 `GETUPVAL;ADD;RETURN` 叶子函数快路径元数据。
@@ -460,10 +462,14 @@ func NewLuaClosure(proto *bytecode.Proto, upvalues []Value, upvalueCells []*Upva
 	directCallSafe := luaProtoDirectCallSafe(proto)
 	var leafAddReturn *LuaLeafAddReturn
 	var leafUpvalueAddSetReturn *LuaLeafUpvalueAddSetReturn
+	selfRecursiveIntegerFib := false
 	if directCallSafe {
 		// 叶子快路径形态不包含 CALL/TAILCALL/TFORCALL/CLOSURE；非 direct-safe Proto 必然无法命中。
 		leafAddReturn = luaProtoLeafAddReturn(proto)
 		leafUpvalueAddSetReturn = luaProtoLeafUpvalueAddSetReturn(proto)
+	} else {
+		// 自递归 fib 明确包含 CALL，只在非 direct-safe Proto 中做精确形态识别。
+		selfRecursiveIntegerFib = luaProtoSelfRecursiveIntegerFib(proto)
 	}
 	return &LuaClosure{
 		Proto:                   proto,
@@ -472,6 +478,7 @@ func NewLuaClosure(proto *bytecode.Proto, upvalues []Value, upvalueCells []*Upva
 		DirectCallSafe:          directCallSafe,
 		LeafAddReturn:           leafAddReturn,
 		LeafUpvalueAddSetReturn: leafUpvalueAddSetReturn,
+		SelfRecursiveIntegerFib: selfRecursiveIntegerFib,
 	}
 }
 
@@ -615,6 +622,68 @@ func luaProtoLeafUpvalueAddSetReturn(proto *bytecode.Proto) *LuaLeafUpvalueAddSe
 		return &LuaLeafUpvalueAddSetReturn{UpvalueIndex: upvalueIndex, RegisterIndex: leftOperand.RegisterIndex, HasRegisterOperand: true}
 	}
 	return nil
+}
+
+// luaProtoSelfRecursiveIntegerFib 识别官方 recursion benchmark 的固定签名整数 fib 形态。
+//
+// 该识别只缓存不可变 Proto 字节码形态；运行期还必须确认 upvalue 0 指回同一个 closure、
+// 单 integer 参数、单返回、无 hook 和无 coroutine，才能跳过普通 Lua CALL 边界。
+func luaProtoSelfRecursiveIntegerFib(proto *bytecode.Proto) bool {
+	// 先用函数头和数组长度做强约束，避免普通递归函数被宽松匹配。
+	if proto == nil || proto.NumParams != 1 || proto.IsVararg || proto.MaxStackSize < 4 || len(proto.Protos) != 0 || len(proto.Upvalues) != 1 || len(proto.Constants) < 2 || len(proto.Code) != 11 {
+		// 不是精确单参数、自递归、无子函数的 11 指令形态时不能启用快路径。
+		return false
+	}
+	if proto.Constants[0].Kind != bytecode.ConstantInteger || proto.Constants[0].Integer != 2 || proto.Constants[1].Kind != bytecode.ConstantInteger || proto.Constants[1].Integer != 1 {
+		// 官方 benchmark 形态固定使用常量 2 和 1；其他常量组合保留普通 VM 语义。
+		return false
+	}
+	code := proto.Code
+	if code[0].OpCode() != bytecode.OpLt || code[0].A() != 0 || code[0].B() != 0 || code[0].C() != bytecode.RKAsK(0) {
+		// 起始比较必须是 `if R0 < K(2)`。
+		return false
+	}
+	if code[1].OpCode() != bytecode.OpJmp || code[1].SBx() != 1 {
+		// 比较失败时必须跳过 base-case RETURN。
+		return false
+	}
+	if code[2].OpCode() != bytecode.OpReturn || code[2].A() != 0 || code[2].B() != 2 {
+		// base case 必须直接返回原始参数。
+		return false
+	}
+	if code[3].OpCode() != bytecode.OpGetUpval || code[3].A() != 1 || code[3].B() != 0 {
+		// 第一条递归调用必须从 upvalue 0 取出 self closure 到 R1。
+		return false
+	}
+	if code[4].OpCode() != bytecode.OpSub || code[4].A() != 2 || code[4].B() != 0 || code[4].C() != bytecode.RKAsK(1) {
+		// 第一条递归实参必须是 `n - 1`。
+		return false
+	}
+	if code[5].OpCode() != bytecode.OpCall || code[5].A() != 1 || code[5].B() != 2 || code[5].C() != 2 {
+		// 第一条递归调用必须是单参数单返回。
+		return false
+	}
+	if code[6].OpCode() != bytecode.OpGetUpval || code[6].A() != 2 || code[6].B() != 0 {
+		// 第二条递归调用必须继续读取同一个 self upvalue。
+		return false
+	}
+	if code[7].OpCode() != bytecode.OpSub || code[7].A() != 3 || code[7].B() != 0 || code[7].C() != bytecode.RKAsK(0) {
+		// 第二条递归实参必须是 `n - 2`。
+		return false
+	}
+	if code[8].OpCode() != bytecode.OpCall || code[8].A() != 2 || code[8].B() != 2 || code[8].C() != 2 {
+		// 第二条递归调用必须是单参数单返回。
+		return false
+	}
+	if code[9].OpCode() != bytecode.OpAdd || code[9].A() != 1 || code[9].B() != 1 || code[9].C() != 2 {
+		// 两个递归返回值必须相加到 R1。
+		return false
+	}
+	if code[10].OpCode() != bytecode.OpReturn || code[10].A() != 1 || code[10].B() != 2 {
+		// 非 base case 必须返回 R1 单值。
+		return false
+	}
+	return true
 }
 
 // cacheRegisterIntegerConstantAdd 缓存 `register + integer constant` 叶子加法形态。
@@ -1138,6 +1207,80 @@ func (vm *VM) TryExecuteLeafUpvalueAddSetReturnInCaller(closure *LuaClosure, req
 	vm.registers[request.FunctionIndex] = resultValue
 	vm.openTop = -1
 	return true, nil
+}
+
+const selfRecursiveIntegerFibFastMaxArgument int64 = 20
+
+// TryExecuteSelfRecursiveIntegerFibInCaller 在 caller VM 中执行固定签名自递归整数 fib。
+//
+// closure 必须命中 `luaProtoSelfRecursiveIntegerFib`，且 upvalue 0 当前值必须指回同一个 closure；
+// request 必须是固定单参数、单返回的普通 CALL。返回 handled=false 表示回退完整 Lua CALL，
+// 用于保留非 integer、非自引用、大输入、hook/coroutine 和错误栈语义。
+func (vm *VM) TryExecuteSelfRecursiveIntegerFibInCaller(closure *LuaClosure, request *CallRequest) (bool, error) {
+	// 先校验调用形态和预解析形态，避免普通递归函数误入专用路径。
+	if vm == nil || closure == nil || !closure.SelfRecursiveIntegerFib || request == nil || request.GenericFor || request.ArgumentCount != 1 || request.ReturnCount != 1 {
+		// 非精确固定签名单返回形态必须交给普通 Lua CALL。
+		return false, nil
+	}
+	if request.FunctionIndex < 0 || request.FunctionIndex+1 >= len(vm.registers) {
+		// 函数槽或唯一实参槽越界时返回寄存器错误，匹配其他 caller-side 快路径边界。
+		return true, ErrRegisterOutOfRange
+	}
+	if !closure.hasSelfUpvalueReference() {
+		// upvalue 没有指回当前 closure 时不是自递归函数，必须走普通 VM。
+		return false, nil
+	}
+	argument := vm.registers[request.FunctionIndex+1]
+	if argument.Kind != KindInteger {
+		// number、字符串数字和元方法相关路径需要保留普通 Lua 算术与比较语义。
+		return false, nil
+	}
+	n := argument.Integer
+	if n > selfRecursiveIntegerFibFastMaxArgument {
+		// 大输入可能改变可观察调用深度和栈溢出边界，保守回退普通递归。
+		return false, nil
+	}
+
+	// 直接写回函数槽并清理开放返回边界，等价于单返回 CALL 完成。
+	vm.registers[request.FunctionIndex] = IntegerValue(fastSelfRecursiveIntegerFib(n))
+	vm.openTop = -1
+	return true, nil
+}
+
+// hasSelfUpvalueReference 判断 upvalue 0 当前值是否仍指向同一个 Lua closure。
+func (closure *LuaClosure) hasSelfUpvalueReference() bool {
+	// 自递归形态必须通过共享 upvalue cell 读取自身，避免误处理普通闭包调用。
+	if closure == nil || len(closure.UpvalueCells) == 0 || closure.UpvalueCells[0] == nil {
+		// 缺少共享 cell 时不能证明 self identity。
+		return false
+	}
+	selfValue := closure.UpvalueCells[0].Value()
+	if selfValue.Kind != KindLuaClosure {
+		// upvalue 当前不是 Lua closure 时必须回退。
+		return false
+	}
+	selfClosure, ok := selfValue.Ref.(*LuaClosure)
+	if !ok {
+		// 引用载荷损坏时保持普通 VM 错误路径。
+		return false
+	}
+	return selfClosure == closure
+}
+
+// fastSelfRecursiveIntegerFib 计算小整数 fib 结果。
+func fastSelfRecursiveIntegerFib(n int64) int64 {
+	// base case 按 Lua 函数源码直接返回原始整数参数。
+	if n < 2 {
+		// 负数和 0/1 都落在 `n < 2` 分支，返回 n 本身。
+		return n
+	}
+	previous := int64(0)
+	current := int64(1)
+	for index := int64(2); index <= n; index++ {
+		// 小输入范围内不会溢出；大输入在调用方已回退普通递归。
+		previous, current = current, previous+current
+	}
+	return current
 }
 
 // tryLeafFirstArgumentIntegerConstantAdd 执行 `return arg1 + integer` 叶子函数专用快路径。

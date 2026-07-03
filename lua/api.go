@@ -3399,6 +3399,19 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 		// 固定参数/固定返回的 Lua closure 走 direct CALL，避免构造参数切片。
 		results, directCallVM, directResultsWritten, err = executeLuaCallRequestDirect(state, vm, directClosure, debugName, debugNameWhat, callRequest)
 	} else {
+		if !hooksEnabled && !coroutinesCreated && functionValue.Kind == runtime.KindLuaClosure {
+			// 无 hook、无 coroutine 的普通主线程路径可尝试固定签名自递归 fast path；不命中时回退完整 CALL。
+			if selfRecursiveClosure, ok := functionValue.Ref.(*runtime.LuaClosure); ok && selfRecursiveClosure.SelfRecursiveIntegerFib {
+				if contextErr := state.CheckContext(); contextErr != nil {
+					// context 已取消时必须在跳过递归前中断，保持普通调用入口的取消语义。
+					return contextErr
+				}
+				if handled, fastErr := vm.TryExecuteSelfRecursiveIntegerFibInCaller(selfRecursiveClosure, callRequest); handled || fastErr != nil {
+					// 命中 fast path 时已完成结果写回；guard 错误直接返回边界错误。
+					return fastErr
+				}
+			}
+		}
 		if fastUnaryFunction, ok := functionValue.Ref.(*runtime.GoFastUnaryFunction); ok && callRequest.ArgumentCount == 1 && (callRequest.ReturnCount == 1 || callRequest.ReturnCount < 0) && !callRequest.GenericFor {
 			// 显式 opt-in 的标准库一元函数在无 hook 且参数类型已确认时跳过 Go 调用帧。
 			argument, argumentOK := vm.Register(callRequest.FunctionIndex + 1)

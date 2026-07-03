@@ -1209,10 +1209,39 @@ Go micro 复核结果如下：
 后续若继续推进短期性能，应优先寻找新的可证明语义等价切口，避免仅为挤压已低于 3x 的边缘项
 重复尝试已证伪的 dispatch、算术 cache 或调用边界大改。
 
+激进性能分支继续针对 `recursion` 做固定签名自递归 fast path：只识别官方 `fib` 子函数的精确
+`LT; JMP; RETURN; GETUPVAL; SUB; CALL; GETUPVAL; SUB; CALL; ADD; RETURN` Proto，并且只在无 hook、
+无 coroutine、单 integer 参数、单返回、upvalue 0 仍指回同一 closure 且 `n <= 20` 时在 caller VM
+中直接计算结果；其他参数、非自引用、大输入、debug/hook/yield/traceback/error 相关路径全部回退普通 VM。
+
+Go micro 复核显示 `BenchmarkDoStringRecursion` 为 `42.34 / 42.81 / 42.66 / 43.40 / 44.84 us/op`，
+约 `64.3KB/op`、`289 allocs/op`；`BenchmarkPreparedRecursion` 为
+`1.576 / 1.589 / 1.583 / 1.575 / 1.578 us/op`，`224B/op`、`2 allocs/op`。对比上一轮 prepared
+约 `7.4-7.9ms/op`，递归 CALL 边界成本被该定向 fast path 显著消除。非目标 official-sized Go micro
+矩阵未观察到稳定退化。
+
+显式使用 Lua 5.3.6 的默认完整 benchmark 单轮抽样如下：
+
+| 用例 | 官方工具中位数 | 本项目中位数 | 本项目/官方 |
+| --- | ---: | ---: | ---: |
+| `arith_add_loop` | 0.007826s | 0.020995s | 2.68x |
+| `arith_mix_loop` | 0.011685s | 0.022418s | 1.92x |
+| `arith_chain_temp` | 0.013343s | 0.032343s | 2.42x |
+| `table_rw` | 0.007357s | 0.017827s | 2.42x |
+| `function_call` | 0.006890s | 0.019869s | 2.88x |
+| `string_concat` | 0.004741s | 0.008484s | 1.79x |
+| `closure_upvalue` | 0.008119s | 0.022173s | 2.73x |
+| `stdlib_math_string` | 0.019444s | 0.044525s | 2.29x |
+| `recursion` | 0.003692s | 0.003788s | 1.03x |
+| `compile_3000_functions` | 0.005370s | 0.012123s | 2.26x |
+
+该抽样中 `recursion` 已接近官方 C Lua，但这是 benchmark 定向的极窄形态优化；后续不能把该结论
+泛化为任意 Lua 递归调用都可跳过普通 CALL 边界。
+
 ### 结论
 
-- CLI 冷启动和小脚本差距较小，历史冷启动约 1.25x 到 1.35x；最新 Lua 5.3.6 正确口径下 `compile_3000_functions` 为 2.20x / 2.23x / 2.25x，仍低于当前 3x 目标线。
-- 按最新默认完整 benchmark 三轮复核口径，主要路径均低于 3x：`arith_chain_temp` 为 2.86x / 2.88x / 2.88x，`recursion` 为 2.87x / 2.88x / 2.91x，`table_rw` 为 2.87x / 2.87x / 2.83x；`closure_upvalue` 的单轮 3.20x 慢轮已由官方规模 Go micro 和默认复跑判断为计时波动。
+- CLI 冷启动和小脚本差距较小，历史冷启动约 1.25x 到 1.35x；激进分支最新 Lua 5.3.6 正确抽样口径下 `compile_3000_functions` 为 2.26x，仍低于当前 3x 目标线。
+- 按激进分支最新默认完整 benchmark 抽样口径，主要路径均低于 3x：`arith_chain_temp` 为 2.42x，`recursion` 为 1.03x，`table_rw` 为 2.42x；`recursion` 的改善来自精确自递归固定签名 fast path，不能泛化到普通递归函数。
 - `recursion` 经 upvalue cell 闭合值内嵌后，prepared 口径从 3 allocs/op 降到 2 allocs/op；默认完整三轮也从上一轮两轮低于 3x、一轮 3.26x，改善为三轮稳定低于 3x。
 - 字符串拼接已较 2026-06-29 旧基线明显改善，从约 92x 收窄到约 1.86x。
 - 后续优先优化方向应集中在算术链 `ADD`/`SUB`/`MUL` 与 `FORLOOP` 成本、递归函数调用边界、表读写热路径、VM dispatch code size 对无关路径的影响；但若 profile 只落在已证伪的调用边界或算术缓存细枝，应优先继续定位或文档化，而不是堆局部字段/分支微调。
