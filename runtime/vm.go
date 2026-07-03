@@ -106,6 +106,10 @@ type VM struct {
 	tableWriteForLoopSuperInstructionProto *bytecode.Proto
 	// tableWriteForLoopSuperInstructions 按 PC 保存连续 table 数组写入循环 superinstruction 预匹配结果。
 	tableWriteForLoopSuperInstructions []tableWriteForLoopSuperInstruction
+	// tableReadAddForLoopSuperInstructionProto 记录连续 table 读取求和循环 superinstruction 表对应的 Proto。
+	tableReadAddForLoopSuperInstructionProto *bytecode.Proto
+	// tableReadAddForLoopSuperInstructions 按 PC 保存连续 table 读取求和循环 superinstruction 预匹配结果。
+	tableReadAddForLoopSuperInstructions []tableReadAddForLoopSuperInstruction
 	// tableArrayPreallocHintProto 记录 table 数组预分配 hint 表对应的 Proto。
 	tableArrayPreallocHintProto *bytecode.Proto
 	// tableArrayPreallocHints 按 NEWTABLE 所在 PC 保存可证明安全的数组区预留容量。
@@ -292,6 +296,45 @@ type TableWriteForLoopBatch struct {
 	// maxRegisterIndex 保存参与寄存器最大下标，用一次边界检查替代逐寄存器重复检查。
 	maxRegisterIndex int
 	// valid 表示 batch 是否由 PrepareTableWriteForLoopBatch 成功构造。
+	valid bool
+}
+
+// tableReadAddForLoopSuperInstruction 保存 `GETTABLE; ADD; FORLOOP` 的预匹配形态。
+//
+// 该形态只覆盖 `sum = sum + t[i]` 或 `sum = t[i] + sum` 的连续 numeric-for 读取求和。
+// 执行期仍检查 table identity、元表、寄存器类型、table 值类型和 numeric-for 控制槽。
+type tableReadAddForLoopSuperInstruction struct {
+	// TableRegister 保存被读取 table 所在寄存器。
+	TableRegister int
+	// GetTarget 保存 GETTABLE 写入的临时寄存器。
+	GetTarget int
+	// SumRegister 保存 ADD 累加寄存器，也是 ADD 的目标寄存器。
+	SumRegister int
+	// ForBase 保存 FORLOOP 的 base 寄存器。
+	ForBase int
+	// ForSBx 保存 FORLOOP 的有符号跳转偏移。
+	ForSBx int
+	// ExitPC 保存循环退出时的下一条 PC。
+	ExitPC int
+	// LoopPC 保存循环继续时的跳转 PC。
+	LoopPC int
+	// Valid 表示当前 PC 是否匹配连续 table 读取求和形态。
+	Valid bool
+}
+
+// TableReadAddForLoopBatch 保存已验证的连续 table 读取求和 batch 执行上下文。
+//
+// 字段保持未导出，调用方只能通过 PrepareTableReadAddForLoopBatch 获取已验证上下文。
+type TableReadAddForLoopBatch struct {
+	// proto 记录 batch 绑定的 Proto，用于防止 VM 复用后误用旧上下文。
+	proto *bytecode.Proto
+	// pc 保存循环体 GETTABLE 的 PC。
+	pc int
+	// superInstruction 保存已匹配的 GETTABLE;ADD;FORLOOP 寄存器数据流。
+	superInstruction tableReadAddForLoopSuperInstruction
+	// maxRegisterIndex 保存参与寄存器最大下标，用一次边界检查替代逐寄存器重复检查。
+	maxRegisterIndex int
+	// valid 表示 batch 是否由 PrepareTableReadAddForLoopBatch 成功构造。
 	valid bool
 }
 
@@ -1934,6 +1977,8 @@ func (vm *VM) BindPrototype(proto *bytecode.Proto) {
 		vm.formatLenAddForLoopSuperInstructions = nil
 		vm.tableWriteForLoopSuperInstructionProto = nil
 		vm.tableWriteForLoopSuperInstructions = nil
+		vm.tableReadAddForLoopSuperInstructionProto = nil
+		vm.tableReadAddForLoopSuperInstructions = nil
 		vm.tableArrayPreallocHintProto = nil
 		vm.tableArrayPreallocHints = nil
 		vm.arithmeticIntRegisterCacheProto = nil
@@ -1987,6 +2032,11 @@ func (vm *VM) BindPrototype(proto *bytecode.Proto) {
 		// VM 池切换到其他 Proto 时丢弃 table 写入循环表，避免不同 Proto 的 PC 误命中。
 		vm.tableWriteForLoopSuperInstructionProto = nil
 		vm.tableWriteForLoopSuperInstructions = nil
+	}
+	if vm.tableReadAddForLoopSuperInstructionProto != nil && vm.tableReadAddForLoopSuperInstructionProto != proto {
+		// VM 池切换到其他 Proto 时丢弃 table 读取求和循环表，避免不同 Proto 的 PC 误命中。
+		vm.tableReadAddForLoopSuperInstructionProto = nil
+		vm.tableReadAddForLoopSuperInstructions = nil
 	}
 	if vm.tableArrayPreallocHintProto != nil && vm.tableArrayPreallocHintProto != proto {
 		// VM 池切换到其他 Proto 时丢弃 table 预分配 hint，避免相同 PC 误用其他函数的数据流结论。
@@ -2474,6 +2524,239 @@ func (vm *VM) TryExecuteTableWriteForLoopBatch(batch TableWriteForLoopBatch, max
 		return 0, 0, false
 	}
 	vm.currentPC = batch.pc + 1
+	vm.skipNext = false
+	vm.closeFrom = -1
+	vm.hasCallRequest = false
+	vm.returned = false
+	return nextPC, iterations, true
+}
+
+// ensureTableReadAddForLoopSuperInstructions 返回当前 Proto 的连续 table 读取求和循环预匹配表。
+//
+// 该表按 PC 与 Proto.Code 对齐，只记录完整 `GETTABLE;ADD;FORLOOP` 循环体；运行期 table 元表、值类型、
+// hook 和 context guard 仍由调用方与 batch 执行方法检查。
+func (vm *VM) ensureTableReadAddForLoopSuperInstructions() []tableReadAddForLoopSuperInstruction {
+	// 按当前 Proto 懒构建 table 读取求和循环预匹配表，并在 Proto 未变化时复用。
+	if vm == nil || vm.proto == nil {
+		// 缺少 VM 或 Proto 时没有可用 superinstruction 表。
+		return nil
+	}
+	if len(vm.proto.Code) < 3 {
+		// 少于三条指令不可能包含 `GETTABLE; ADD; FORLOOP`。
+		vm.tableReadAddForLoopSuperInstructionProto = vm.proto
+		vm.tableReadAddForLoopSuperInstructions = nil
+		return nil
+	}
+	if vm.tableReadAddForLoopSuperInstructionProto == vm.proto {
+		// 当前 Proto 已完成扫描；nil 表示无匹配形态，非 nil 表示可按 PC 读取。
+		return vm.tableReadAddForLoopSuperInstructions
+	}
+
+	vm.tableReadAddForLoopSuperInstructionProto = vm.proto
+	vm.tableReadAddForLoopSuperInstructions = buildTableReadAddForLoopSuperInstructions(vm.proto)
+	return vm.tableReadAddForLoopSuperInstructions
+}
+
+// buildTableReadAddForLoopSuperInstructions 构建 `GETTABLE; ADD; FORLOOP` 预匹配表。
+//
+// 返回表按 PC 对齐；没有匹配形态时返回 nil，表示该 Proto 不需要承担额外表分配。
+func buildTableReadAddForLoopSuperInstructions(proto *bytecode.Proto) []tableReadAddForLoopSuperInstruction {
+	// 空 Proto 或短函数没有可构建的 table 读取求和循环。
+	if proto == nil || len(proto.Code) < 3 {
+		return nil
+	}
+
+	var superInstructions []tableReadAddForLoopSuperInstruction
+	for pc := 0; pc+2 < len(proto.Code); pc++ {
+		// 只识别相邻的 GETTABLE;ADD;FORLOOP，其他形态保持零值表示无效。
+		getTableInstruction := proto.Code[pc]
+		addInstruction := proto.Code[pc+1]
+		forLoopInstruction := proto.Code[pc+2]
+		if getTableInstruction.OpCode() != bytecode.OpGetTable || addInstruction.OpCode() != bytecode.OpAdd || forLoopInstruction.OpCode() != bytecode.OpForLoop {
+			// 当前 PC 不匹配目标邻接模式，继续扫描后续指令。
+			continue
+		}
+		exitPC := pc + 3
+		loopPC := exitPC + forLoopInstruction.SBx()
+		if loopPC != pc {
+			// 只覆盖完整循环体为 GETTABLE;ADD 的连续读取求和形态。
+			continue
+		}
+		forBase := forLoopInstruction.A()
+		tableRegister := getTableInstruction.B()
+		getTarget := getTableInstruction.A()
+		if bytecode.IsK(getTableInstruction.C()) || bytecode.IsK(addInstruction.B()) || bytecode.IsK(addInstruction.C()) {
+			// 当前 batch 只覆盖 key、sum 和 GETTABLE 结果都来自寄存器的官方形态。
+			continue
+		}
+		keyRegister := bytecode.IndexK(getTableInstruction.C())
+		if keyRegister != forBase+3 {
+			// 读取 key 必须是 numeric-for 外部可见循环变量。
+			continue
+		}
+		sumRegister := addInstruction.A()
+		leftRegister := bytecode.IndexK(addInstruction.B())
+		rightRegister := bytecode.IndexK(addInstruction.C())
+		leftIsSum := leftRegister == sumRegister
+		rightIsSum := rightRegister == sumRegister
+		leftIsGet := leftRegister == getTarget
+		rightIsGet := rightRegister == getTarget
+		if !((leftIsSum && rightIsGet) || (rightIsSum && leftIsGet)) {
+			// 只覆盖 `sum = sum + t[i]` 或 `sum = t[i] + sum` 数据流。
+			continue
+		}
+		if registerInRange(tableRegister, forBase, forBase+3) || registerInRange(sumRegister, forBase, forBase+3) || registerInRange(getTarget, forBase, forBase+3) {
+			// table、sum 和临时结果寄存器都不能覆盖 numeric-for 控制槽。
+			continue
+		}
+		if tableRegister == sumRegister || tableRegister == getTarget || sumRegister == getTarget {
+			// 复杂别名会改变逐指令可见性，保守回退普通 VM。
+			continue
+		}
+
+		if superInstructions == nil {
+			// 只有真实存在匹配形态时才分配 PC 对齐表，避免普通函数执行增加分配。
+			superInstructions = make([]tableReadAddForLoopSuperInstruction, len(proto.Code))
+		}
+		superInstructions[pc] = tableReadAddForLoopSuperInstruction{
+			TableRegister: tableRegister,
+			GetTarget:     getTarget,
+			SumRegister:   sumRegister,
+			ForBase:       forBase,
+			ForSBx:        forLoopInstruction.SBx(),
+			ExitPC:        exitPC,
+			LoopPC:        loopPC,
+			Valid:         true,
+		}
+	}
+	return superInstructions
+}
+
+// PrepareTableReadAddForLoopSuperInstructions 预构建当前 Proto 的连续 table 读取求和循环表。
+func (vm *VM) PrepareTableReadAddForLoopSuperInstructions() bool {
+	// 预构建失败不影响普通 VM；后续 batch 准备会因为表不匹配而回退。
+	return len(vm.ensureTableReadAddForLoopSuperInstructions()) > 0
+}
+
+// HasTableReadAddForLoopAt 判断当前 PC 是否存在连续 table 读取求和循环 superinstruction。
+func (vm *VM) HasTableReadAddForLoopAt(pc int) bool {
+	// 该 helper 只读取已准备好的表，供 API 层决定是否尝试 batch。
+	if vm == nil || vm.tableReadAddForLoopSuperInstructionProto != vm.proto {
+		// 表尚未准备或 Proto 已变化时不能命中。
+		return false
+	}
+	superInstructions := vm.tableReadAddForLoopSuperInstructions
+	if uint(pc) >= uint(len(superInstructions)) {
+		// PC 越界时不能命中。
+		return false
+	}
+	return superInstructions[pc].Valid
+}
+
+// PrepareTableReadAddForLoopBatch 为连续 table 读取求和循环体准备可复用 batch 上下文。
+func (vm *VM) PrepareTableReadAddForLoopBatch(pc int) (TableReadAddForLoopBatch, bool) {
+	// 先按 PC 读取已准备好的预匹配表；非目标 PC 必须快速失败且不能产生副作用。
+	if vm == nil || vm.tableReadAddForLoopSuperInstructionProto != vm.proto {
+		return TableReadAddForLoopBatch{}, false
+	}
+	superInstructions := vm.tableReadAddForLoopSuperInstructions
+	if uint(pc) >= uint(len(superInstructions)) {
+		return TableReadAddForLoopBatch{}, false
+	}
+	superInstruction := superInstructions[pc]
+	if !superInstruction.Valid {
+		return TableReadAddForLoopBatch{}, false
+	}
+	maxRegisterIndex := superInstruction.ForBase + 3
+	for _, registerIndex := range [...]int{
+		superInstruction.TableRegister,
+		superInstruction.GetTarget,
+		superInstruction.SumRegister,
+	} {
+		// batch 准备阶段只计算一次最大寄存器下标，执行阶段用单次边界判断。
+		if registerIndex > maxRegisterIndex {
+			maxRegisterIndex = registerIndex
+		}
+	}
+	return TableReadAddForLoopBatch{
+		proto:            vm.proto,
+		pc:               pc,
+		superInstruction: superInstruction,
+		maxRegisterIndex: maxRegisterIndex,
+		valid:            true,
+	}, true
+}
+
+// TryExecuteTableReadAddForLoopBatch 批量执行已准备的连续 table 读取求和循环体。
+//
+// batch 必须来自 PrepareTableReadAddForLoopBatch；maxIterations 由调用方按 context 检查窗口换算。
+// 返回 handled=false 表示当前动态寄存器状态不满足 guard，调用方必须回退普通 VM。
+func (vm *VM) TryExecuteTableReadAddForLoopBatch(batch TableReadAddForLoopBatch, maxIterations int) (nextPC int, iterations int, handled bool) {
+	// batch 与当前 VM/Proto 不匹配时必须回退，避免 VM 池复用后误写寄存器。
+	if vm == nil || !batch.valid || batch.proto != vm.proto || maxIterations <= 0 {
+		return 0, 0, false
+	}
+	registers := vm.registers
+	if uint(batch.maxRegisterIndex) >= uint(len(registers)) {
+		return 0, 0, false
+	}
+	superInstruction := batch.superInstruction
+	tableValue := registers[superInstruction.TableRegister]
+	if tableValue.Kind != KindTable {
+		// 非 table 值必须回退普通 GETTABLE，保留错误名和 __index 语义边界。
+		return 0, 0, false
+	}
+	table, ok := tableValue.Ref.(*Table)
+	if !ok || table == nil || table.metatable != nil {
+		// table 损坏或带元表时必须回退普通 GETTABLE，以保留元方法链和错误语义。
+		return 0, 0, false
+	}
+	sumValue := registers[superInstruction.SumRegister]
+	indexValue := registers[superInstruction.ForBase]
+	limitValue := registers[superInstruction.ForBase+1]
+	stepValue := registers[superInstruction.ForBase+2]
+	visibleIndexValue := registers[superInstruction.ForBase+3]
+	if sumValue.Kind != KindInteger || indexValue.Kind != KindInteger || limitValue.Kind != KindInteger || stepValue.Kind != KindInteger || visibleIndexValue.Kind != KindInteger {
+		// 只覆盖 integer ADD 和 integer numeric-for；其他类型保留完整 GETTABLE/ADD/FORLOOP 语义。
+		return 0, 0, false
+	}
+	sum := sumValue.Integer
+	index := indexValue.Integer
+	limit := limitValue.Integer
+	step := stepValue.Integer
+	visibleIndex := visibleIndexValue.Integer
+	nextPC = batch.pc
+	for iterations < maxIterations {
+		tableEntryValue := table.RawGetInteger(visibleIndex)
+		if tableEntryValue.Kind != KindInteger {
+			// 当前轮次需要普通 GETTABLE 写回和 ADD 错误/转换语义；若已有提交轮次，则让调用方从当前 GETTABLE 重放。
+			return nextPC, iterations, iterations > 0
+		}
+		registers[superInstruction.GetTarget] = tableEntryValue
+		sum += tableEntryValue.Integer
+		registers[superInstruction.SumRegister] = IntegerValue(sum)
+		iterations++
+
+		nextIndex := index + step
+		nextPC = superInstruction.ExitPC
+		if forIntegerLoopContinues(nextIndex, limit, step) {
+			// 循环继续时更新内部 index 和外部可见循环变量，并跳回 GETTABLE。
+			index = nextIndex
+			visibleIndex = nextIndex
+			registers[superInstruction.ForBase] = IntegerValue(index)
+			registers[superInstruction.ForBase+3] = IntegerValue(visibleIndex)
+			nextPC = superInstruction.LoopPC
+			vm.pcOffset = superInstruction.ForSBx
+		} else {
+			// 循环结束时不写入越界后的 index，保持普通 FORLOOP 语义。
+			vm.pcOffset = 0
+			break
+		}
+	}
+	if iterations == 0 {
+		return 0, 0, false
+	}
+	vm.currentPC = batch.pc + 2
 	vm.skipNext = false
 	vm.closeFrom = -1
 	vm.hasCallRequest = false

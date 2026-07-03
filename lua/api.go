@@ -2484,6 +2484,7 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 	closureUpvalueForLoopSuperInstructionEnabled := false
 	formatLenAddForLoopSuperInstructionEnabled := false
 	tableWriteForLoopSuperInstructionEnabled := false
+	tableReadAddForLoopSuperInstructionEnabled := false
 	if !preciseFrameSync && !hooksEnabled {
 		// 普通主线程无 hook 路径可提前准备 superinstruction 表；hook/coroutine 路径必须保留逐 PC 语义。
 		addForLoopSuperInstructionEnabled = vm.PrepareAddForLoopSuperInstructions()
@@ -2494,6 +2495,7 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 		closureUpvalueForLoopSuperInstructionEnabled = vm.PrepareClosureUpvalueForLoopSuperInstructions()
 		formatLenAddForLoopSuperInstructionEnabled = vm.PrepareFormatLenAddForLoopSuperInstructions()
 		tableWriteForLoopSuperInstructionEnabled = vm.PrepareTableWriteForLoopSuperInstructions()
+		tableReadAddForLoopSuperInstructionEnabled = vm.PrepareTableReadAddForLoopSuperInstructions()
 	}
 	contextCheckCountdown := 0
 	for pc >= 0 && pc < len(proto.Code) {
@@ -2541,6 +2543,23 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 					contextCheckCountdown -= handledIterations*2 - 1
 					previousPreviousPC = setTablePC
 					previousPC = setTablePC + 1
+					pc = nextPC
+					continue
+				}
+			}
+		}
+		if tableReadAddForLoopSuperInstructionEnabled && !preciseFrameSync && !hooksEnabled && contextCheckCountdown >= 2 && vm.HasTableReadAddForLoopAt(pc) {
+			// 三指令 table 连续读取求和循环会额外跳过 ADD、FORLOOP，批量 N 轮会额外跳过 3*N-1 个入口。
+			getTablePC := pc
+			if batch, ok := vm.PrepareTableReadAddForLoopBatch(getTablePC); ok {
+				// 当前 GETTABLE 入口的 context 已在本轮循环顶部消费；N 轮 batch 按窗口上限保守提交。
+				maxIterations := (contextCheckCountdown + 1) / 3
+				nextPC, handledIterations, handled := vm.TryExecuteTableReadAddForLoopBatch(batch, maxIterations)
+				if handled {
+					// superinstruction 已完成若干轮 GETTABLE、ADD 与 FORLOOP；补偿被跳过的入口。
+					contextCheckCountdown -= handledIterations*3 - 1
+					previousPreviousPC = getTablePC + 1
+					previousPC = getTablePC + 2
 					pc = nextPC
 					continue
 				}

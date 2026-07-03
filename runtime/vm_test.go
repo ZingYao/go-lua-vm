@@ -2253,6 +2253,132 @@ func TestVMTryExecuteTableWriteForLoopFallback(t *testing.T) {
 	}
 }
 
+// TestVMTryExecuteTableReadAddForLoopBatch 验证 `GETTABLE; ADD; FORLOOP` batch 可连续读取求和。
+func TestVMTryExecuteTableReadAddForLoopBatch(t *testing.T) {
+	proto := testTableReadAddForLoopProto()
+	vm := NewVMWithPrototypeData(7, nil, nil, nil, nil)
+	vm.BindPrototype(proto)
+	if !vm.PrepareTableReadAddForLoopSuperInstructions() {
+		// 官方 table_rw 读取循环形态应能预构建 superinstruction。
+		t.Fatalf("expected table read-add for-loop superinstruction")
+	}
+	table := NewTable()
+	for index := int64(1); index <= 3; index++ {
+		// 准备密集数组区，模拟 table_rw 写入段完成后的 table 状态。
+		table.RawSetPositiveIntegerNonNil(index, IntegerValue(index))
+	}
+	initialRegisters := map[int]Value{
+		0: ReferenceValue(KindTable, table),
+		1: IntegerValue(0),
+		2: IntegerValue(1),
+		3: IntegerValue(3),
+		4: IntegerValue(1),
+		5: IntegerValue(1),
+	}
+	for registerIndex, value := range initialRegisters {
+		// 初始化 table、sum 与 FORLOOP 控制寄存器，模拟 FORPREP 后进入读取循环体的状态。
+		if err := vm.SetRegister(registerIndex, value); err != nil {
+			t.Fatalf("set register %d failed: %v", registerIndex, err)
+		}
+	}
+
+	batch, ok := vm.PrepareTableReadAddForLoopBatch(0)
+	if !ok {
+		// 精确 `sum = sum + t[i]` 读取循环应能准备 batch。
+		t.Fatalf("expected prepared table read-add batch")
+	}
+	nextPC, iterations, handled := vm.TryExecuteTableReadAddForLoopBatch(batch, 2)
+	if !handled || iterations != 2 || nextPC != 0 {
+		// 最多提交两轮时循环仍应跳回 GETTABLE。
+		t.Fatalf("partial batch mismatch: handled=%v iterations=%d nextPC=%d", handled, iterations, nextPC)
+	}
+	if value, ok := vm.Register(1); !ok || !value.RawEqual(IntegerValue(3)) {
+		// sum 必须等于 t[1]+t[2]。
+		t.Fatalf("partial sum mismatch: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(6); !ok || !value.RawEqual(IntegerValue(2)) {
+		// GETTABLE 临时寄存器保留第二轮读取结果。
+		t.Fatalf("partial get target mismatch: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(2); !ok || !value.RawEqual(IntegerValue(3)) {
+		// FORLOOP 继续时内部 index 必须推进到第三轮。
+		t.Fatalf("partial index mismatch: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(5); !ok || !value.RawEqual(IntegerValue(3)) {
+		// 外部可见循环变量必须同步到第三轮。
+		t.Fatalf("partial visible index mismatch: value=%#v ok=%v", value, ok)
+	}
+
+	nextPC, iterations, handled = vm.TryExecuteTableReadAddForLoopBatch(batch, 10)
+	if !handled || iterations != 1 || nextPC != 3 {
+		// 剩余一轮后达到 limit 并退出循环。
+		t.Fatalf("final batch mismatch: handled=%v iterations=%d nextPC=%d", handled, iterations, nextPC)
+	}
+	if value, ok := vm.Register(1); !ok || !value.RawEqual(IntegerValue(6)) {
+		// 三轮累加结果必须等于 1+2+3。
+		t.Fatalf("final sum mismatch: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(2); !ok || !value.RawEqual(IntegerValue(3)) {
+		// 循环退出时普通 FORLOOP 不写回越界后的内部 index。
+		t.Fatalf("final index mismatch: value=%#v ok=%v", value, ok)
+	}
+	if vm.currentPC != 2 || vm.pcOffset != 0 {
+		// batch 后 VM 状态应等价于刚执行完 FORLOOP。
+		t.Fatalf("final pc state mismatch: currentPC=%d pcOffset=%d", vm.currentPC, vm.pcOffset)
+	}
+}
+
+// TestVMTryExecuteTableReadAddForLoopPartialFallback 验证读取 batch 中途 guard 失败时回到当前 GETTABLE。
+func TestVMTryExecuteTableReadAddForLoopPartialFallback(t *testing.T) {
+	proto := testTableReadAddForLoopProto()
+	vm := NewVMWithPrototypeData(7, nil, nil, nil, nil)
+	vm.BindPrototype(proto)
+	if !vm.PrepareTableReadAddForLoopSuperInstructions() {
+		// 静态字节码形态应能命中；table 值类型属于执行期 guard。
+		t.Fatalf("expected table read-add for-loop superinstruction")
+	}
+	table := NewTable()
+	table.RawSetPositiveIntegerNonNil(1, IntegerValue(1))
+	table.RawSetPositiveIntegerNonNil(2, StringValue("not integer"))
+	initialRegisters := map[int]Value{
+		0: ReferenceValue(KindTable, table),
+		1: IntegerValue(0),
+		2: IntegerValue(1),
+		3: IntegerValue(3),
+		4: IntegerValue(1),
+		5: IntegerValue(1),
+	}
+	for registerIndex, value := range initialRegisters {
+		// 初始化 table、sum 与 FORLOOP 控制寄存器，便于验证部分提交后回到当前轮次。
+		if err := vm.SetRegister(registerIndex, value); err != nil {
+			t.Fatalf("set register %d failed: %v", registerIndex, err)
+		}
+	}
+
+	batch, ok := vm.PrepareTableReadAddForLoopBatch(0)
+	if !ok {
+		// table 值类型不是静态 guard，batch 准备应成功并在执行期回退。
+		t.Fatalf("expected prepared table read-add batch")
+	}
+	nextPC, iterations, handled := vm.TryExecuteTableReadAddForLoopBatch(batch, 8)
+	if !handled || iterations != 1 || nextPC != 0 {
+		// 第一轮可提交，第二轮遇到非 integer 后应回到 GETTABLE 让普通 VM 重放。
+		t.Fatalf("partial fallback mismatch: handled=%v iterations=%d nextPC=%d", handled, iterations, nextPC)
+	}
+	if value, ok := vm.Register(1); !ok || !value.RawEqual(IntegerValue(1)) {
+		// sum 只包含第一轮已成功提交的 t[1]。
+		t.Fatalf("sum mismatch: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(2); !ok || !value.RawEqual(IntegerValue(2)) {
+		// FORLOOP 控制槽已推进到需要普通 VM 重放的第二轮。
+		t.Fatalf("index mismatch: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(6); !ok || !value.RawEqual(IntegerValue(1)) {
+		// GETTABLE 临时寄存器仍保留上一轮结果，当前失败轮尚未写入。
+		t.Fatalf("get target mismatch: value=%#v ok=%v", value, ok)
+	}
+}
+
 // TestVMTryExecuteAddForLoopBatch 验证 `ADD; FORLOOP` batch 可连续提交多轮。
 func TestVMTryExecuteAddForLoopBatch(t *testing.T) {
 	// 构造官方 arith_add_loop 的 `sum = sum + i; FORLOOP` 形态。
@@ -3231,6 +3357,17 @@ func testTableWriteForLoopProto() *bytecode.Proto {
 		Code: []bytecode.Instruction{
 			bytecode.CreateABC(bytecode.OpSetTable, 0, 4, 4),
 			bytecode.CreateAsBx(bytecode.OpForLoop, 1, -2),
+		},
+	}
+}
+
+// testTableReadAddForLoopProto 构造官方 table_rw 读取段的 `sum = sum + t[i]` 循环体 Proto。
+func testTableReadAddForLoopProto() *bytecode.Proto {
+	return &bytecode.Proto{
+		Code: []bytecode.Instruction{
+			bytecode.CreateABC(bytecode.OpGetTable, 6, 0, 5),
+			bytecode.CreateABC(bytecode.OpAdd, 1, 1, 6),
+			bytecode.CreateAsBx(bytecode.OpForLoop, 2, -3),
 		},
 	}
 }
