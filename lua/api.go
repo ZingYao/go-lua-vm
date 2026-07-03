@@ -2682,8 +2682,21 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 			// 普通无 hook、无 coroutine 的热路径可尝试两条指令合并；contextCheckCountdown > 0
 			// 表示被合并的 FORLOOP 也不会越过本轮 context 检查边界。
 			addPC := pc
+			if batch, ok := vm.PrepareAddForLoopBatch(addPC); ok {
+				// 当前 ADD 入口的 context 已在本轮循环顶部消费；N 轮 batch 额外跳过 2*N-1 个指令入口。
+				maxIterations := (contextCheckCountdown + 1) / 2
+				nextPC, handledIterations, handled := vm.TryExecuteAddForLoopBatch(batch, maxIterations)
+				if handled {
+					// superinstruction 已完成若干轮 ADD 与 FORLOOP；补偿被跳过的 ADD/FORLOOP 入口。
+					contextCheckCountdown -= handledIterations*2 - 1
+					previousPreviousPC = addPC
+					previousPC = addPC + 1
+					pc = nextPC
+					continue
+				}
+			}
 			if nextPC, handled := vm.TryExecuteAddForLoop(addPC); handled {
-				// superinstruction 已完成 ADD 与后续 FORLOOP；补偿被跳过 FORLOOP 入口的一次 context 倒计时。
+				// superinstruction 已完成单轮 ADD 与后续 FORLOOP；补偿被跳过 FORLOOP 入口的一次 context 倒计时。
 				contextCheckCountdown--
 				previousPreviousPC = addPC
 				previousPC = addPC + 1

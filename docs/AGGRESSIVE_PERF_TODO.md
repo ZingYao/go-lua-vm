@@ -681,6 +681,61 @@ benchmark 复核：
 `function_call` 仍保持约 `1.00x`。当前最接近边界的是 `arith_add_loop` 的 `2.84-2.90x`，但其
 prepared 口径已确认是纯执行 CPU，后续若继续推进应优先重新 profile 该路径，而不是扩展调用边界。
 
+### 2026-07-04 arith_add_loop 批量 `ADD;FORLOOP`
+
+profile 观察：`BenchmarkPreparedArithAddLoopOfficial` 在 closure_upvalue 优化后约 `17.60 ms/op`，
+CPU profile 中 `runtime.(*VM).TryExecuteAddForLoop` 占 `58.57% flat / 67.49% cum`，
+`executePreparedLuaClosureWithDebugNameTailFromArgs` 占 `28.05% flat / 96.23% cum`。说明该路径已经从
+普通 `VM.Step` 分发转移到现有单轮 `ADD;FORLOOP` superinstruction 本身，继续优化应减少每轮重复 guard
+和 API/runtime 往返，而不是修改单个 opcode 字段读取。
+
+实现：新增 `AddForLoopBatch` 和 `TryExecuteAddForLoopBatch`，只覆盖官方 `arith_add_loop` 的
+`sum = sum + i` / `sum = i + sum` 数据流。构建期继续复用现有 `ADD;FORLOOP` 预匹配表；batch 准备期要求
+sum 目标寄存器不与 numeric-for 控制槽别名，且 ADD 的两个操作数必须分别是 sum 目标寄存器和外部可见
+循环变量。执行期要求 sum、可见循环变量和 numeric-for 控制槽全部是 integer。
+
+语义 guard：
+
+- 仍只在无 hook、无 coroutine/continuation、无需精确逐 PC 同步且 context 窗口足够时启用。
+- API 层在进入 batch 前已经消费当前 ADD 入口的 context 检查；批量提交 `N` 轮会额外跳过 `2*N-1`
+  个虚拟指令入口，因此最多提交 `(contextCheckCountdown+1)/2` 轮，并按 `2*N-1` 扣减倒计时。
+- 非 `sum = sum + i` 数据流、sum 与 FORLOOP 控制槽别名、非 integer 类型、寄存器越界、hook/debug/coroutine
+  路径全部回退旧单轮 `TryExecuteAddForLoop` 或普通 VM。
+- 循环退出时不写入越界后的 FORLOOP 内部 index 和外部可见变量，保持普通 `FORLOOP` 语义。
+
+benchmark 复核：
+
+| 用例 | 结果 |
+| --- | ---: |
+| `BenchmarkDoStringArithAddLoopOfficial` | `5.057 / 5.052 / 5.042 / 5.057 / 5.057 ms/op`，约 `59.9 KB/op`，`218 allocs/op` |
+| `BenchmarkPreparedArithAddLoopOfficial` | `4.996 / 5.230 / 5.092 / 5.095 / 5.018 ms/op`，`3 B/op`，`0 allocs/op` |
+| `BenchmarkPreparedArithMixLoopOfficial` | `17.33 / 17.30 / 17.31 ms/op`，`0 allocs/op` |
+| `BenchmarkPreparedArithChainTempOfficial` | `28.79 / 28.31 / 28.30 ms/op`，`0 allocs/op` |
+| `BenchmarkPreparedTableReadWriteOfficial` | `13.72 / 13.70 / 13.69 ms/op`，约 `11.21 MB/op`，`3 allocs/op` |
+| `BenchmarkPreparedFunctionCall` | `71.4 / 71.5 / 71.6 us/op`，`400 B/op`，`2 allocs/op` |
+| `BenchmarkPreparedFunctionCallOfficial` | `2.788 / 2.778 / 2.790 ms/op`，`403-404 B/op`，`2 allocs/op` |
+| `BenchmarkPreparedClosureUpvalueOfficial` | `2.839 / 2.850 / 2.832 ms/op`，`499 B/op`，`4 allocs/op` |
+| `BenchmarkPreparedRecursion` | `1.626 / 1.624 / 1.629 us/op`，`224 B/op`，`2 allocs/op` |
+
+重建 `bin/glua` / `bin/gluac` 后，正确 Lua 5.3.6 默认完整 benchmark 三轮：
+
+| 用例 | 本项目/官方 |
+| --- | ---: |
+| `arith_add_loop` | `1.21x / 1.18x / 1.20x` |
+| `arith_mix_loop` | `1.94x / 1.93x / 1.93x` |
+| `arith_chain_temp` | `2.61x / 2.60x / 2.57x` |
+| `table_rw` | `2.71x / 2.71x / 2.74x` |
+| `function_call` | `1.01x / 1.01x / 1.00x` |
+| `string_concat` | `1.81x / 1.80x / 1.80x` |
+| `closure_upvalue` | `0.85x / 0.85x / 0.85x` |
+| `stdlib_math_string` | `1.52x / 1.51x / 1.50x` |
+| `recursion` | `1.09x / 1.06x / 1.02x` |
+| `compile_3000_functions` | `2.29x / 2.30x / 2.27x` |
+
+结论：`arith_add_loop` 从上一轮约 `2.84-2.90x` 降到 `1.18-1.21x`，已不再是边缘项。当前默认完整
+benchmark 中最接近边界的是 `table_rw` 的 `2.71-2.74x`，其次是 `arith_chain_temp` 的 `2.57-2.61x`。
+后续若继续推进，应优先重新 profile 这两个剩余项，并确认是否存在新的语义等价切口。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -763,7 +818,8 @@ prepared 口径已确认是纯执行 CPU，后续若继续推进应优先重新 
 - [x] 基于 function_call 批量路径重建 CLI 并复跑默认完整 benchmark，确认 `function_call` 倍率稳定改善且非目标路径无退化。
 - [x] 若继续推进，优先 profile `closure_upvalue` 或 `arith_add_loop` 的剩余 2.8x 边缘项，确认存在全新语义等价切口后再实现。
 - [x] 基于 closure_upvalue 批量 leaf-upvalue 路径重建 CLI 并复跑默认完整 benchmark，确认 `closure_upvalue` 倍率稳定改善且非目标路径无退化。
-- [ ] 若继续推进，优先 profile `arith_add_loop` 的剩余 2.8x 边缘项，确认不是机器/官方基线波动后再寻找新的语义等价切口。
+- [x] 若继续推进，优先 profile `arith_add_loop` 的剩余 2.8x 边缘项，确认不是机器/官方基线波动后再寻找新的语义等价切口。
+- [ ] 若继续推进，优先 profile `table_rw` 或 `arith_chain_temp` 的剩余 2.6-2.7x 项，确认存在全新语义等价切口后再实现。
 - [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准

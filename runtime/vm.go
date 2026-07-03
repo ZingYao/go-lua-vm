@@ -279,6 +279,23 @@ type addForLoopSuperInstruction struct {
 	Valid bool
 }
 
+// AddForLoopBatch 保存已验证的 `ADD; FORLOOP` batch 执行上下文。
+//
+// 该结构只覆盖 `sum = sum + i` 或 `sum = i + sum` 这类目标寄存器加可见 numeric-for 变量的窄形态；
+// 字段保持未导出，调用方只能通过 PrepareAddForLoopBatch 获取已验证上下文。
+type AddForLoopBatch struct {
+	// proto 记录 batch 绑定的 Proto，用于防止 VM 复用后误用旧上下文。
+	proto *bytecode.Proto
+	// pc 保存循环体 ADD 的 PC。
+	pc int
+	// superInstruction 保存已匹配的 ADD;FORLOOP 寄存器数据流。
+	superInstruction addForLoopSuperInstruction
+	// maxRegisterIndex 保存参与寄存器最大下标，用一次边界检查替代逐寄存器重复检查。
+	maxRegisterIndex int
+	// valid 表示 batch 是否由 PrepareAddForLoopBatch 成功构造。
+	valid bool
+}
+
 // mulAddSubForLoopSuperInstruction 保存 `MUL; ADD; SUB; FORLOOP` 的预匹配形态。
 //
 // 该形态覆盖 `sum = sum + i * K1 - K2` 一类左结合整数算术链。所有操作数仍在运行期按
@@ -2295,12 +2312,120 @@ func (vm *VM) PrepareAddForLoopSuperInstructions() bool {
 	return len(vm.ensureAddForLoopSuperInstructions()) > 0
 }
 
+// PrepareAddForLoopBatch 为 `ADD; FORLOOP` 循环体准备可复用 batch 上下文。
+func (vm *VM) PrepareAddForLoopBatch(pc int) (AddForLoopBatch, bool) {
+	// 先按 PC 读取已准备好的预匹配表；非目标 PC 必须快速失败且不能产生副作用。
+	if vm == nil || vm.addForLoopSuperInstructionProto != vm.proto {
+		return AddForLoopBatch{}, false
+	}
+	superInstructions := vm.addForLoopSuperInstructions
+	if uint(pc) >= uint(len(superInstructions)) {
+		return AddForLoopBatch{}, false
+	}
+	superInstruction := superInstructions[pc]
+	if !superInstruction.Valid {
+		return AddForLoopBatch{}, false
+	}
+	if registerInRange(superInstruction.AddTarget, superInstruction.ForBase, superInstruction.ForBase+3) {
+		// batch 只处理 sum 独立于 numeric-for 控制槽的官方形态；别名形态保留单步 VM 语义。
+		return AddForLoopBatch{}, false
+	}
+	leftIsTarget := !superInstruction.LeftOperand.Constant && superInstruction.LeftOperand.Index == superInstruction.AddTarget
+	rightIsTarget := !superInstruction.RightOperand.Constant && superInstruction.RightOperand.Index == superInstruction.AddTarget
+	leftIsVisible := !superInstruction.LeftOperand.Constant && superInstruction.LeftOperand.Index == superInstruction.ForBase+3
+	rightIsVisible := !superInstruction.RightOperand.Constant && superInstruction.RightOperand.Index == superInstruction.ForBase+3
+	if !((leftIsTarget && rightIsVisible) || (rightIsTarget && leftIsVisible)) {
+		// 当前 batch 只覆盖 `sum = sum + i` 或 `sum = i + sum`；其他操作数形态回退单轮路径。
+		return AddForLoopBatch{}, false
+	}
+	maxRegisterIndex := superInstruction.ForBase + 3
+	if superInstruction.AddTarget > maxRegisterIndex {
+		// 目标寄存器可能高于 numeric-for 控制槽，需要纳入边界检查。
+		maxRegisterIndex = superInstruction.AddTarget
+	}
+	return AddForLoopBatch{
+		proto:            vm.proto,
+		pc:               pc,
+		superInstruction: superInstruction,
+		maxRegisterIndex: maxRegisterIndex,
+		valid:            true,
+	}, true
+}
+
+// TryExecuteAddForLoopBatch 批量执行已准备的 `ADD; FORLOOP` 循环体。
+//
+// batch 必须来自 PrepareAddForLoopBatch；maxIterations 由调用方按 context 检查窗口换算。返回
+// handled=false 表示当前动态寄存器状态不再满足 integer guard，调用方必须回退普通 VM。
+func (vm *VM) TryExecuteAddForLoopBatch(batch AddForLoopBatch, maxIterations int) (nextPC int, iterations int, handled bool) {
+	// batch 与当前 VM/Proto 不匹配时必须回退，避免 VM 池复用后误写寄存器。
+	if vm == nil || !batch.valid || batch.proto != vm.proto || maxIterations <= 0 {
+		return 0, 0, false
+	}
+	registers := vm.registers
+	if uint(batch.maxRegisterIndex) >= uint(len(registers)) {
+		return 0, 0, false
+	}
+	superInstruction := batch.superInstruction
+	sumValue := registers[superInstruction.AddTarget]
+	indexValue := registers[superInstruction.ForBase]
+	limitValue := registers[superInstruction.ForBase+1]
+	stepValue := registers[superInstruction.ForBase+2]
+	visibleIndexValue := registers[superInstruction.ForBase+3]
+	if sumValue.Kind != KindInteger || indexValue.Kind != KindInteger || limitValue.Kind != KindInteger || stepValue.Kind != KindInteger || visibleIndexValue.Kind != KindInteger {
+		// 只覆盖 integer ADD 和 integer numeric-for；其他类型保留完整算术与 FORLOOP 语义。
+		return 0, 0, false
+	}
+	sum := sumValue.Integer
+	index := indexValue.Integer
+	limit := limitValue.Integer
+	step := stepValue.Integer
+	visibleIndex := visibleIndexValue.Integer
+	nextPC = batch.pc
+	for iterations < maxIterations {
+		sum += visibleIndex
+		registers[superInstruction.AddTarget] = IntegerValue(sum)
+		iterations++
+
+		nextIndex := index + step
+		nextPC = superInstruction.ExitPC
+		if forIntegerLoopContinues(nextIndex, limit, step) {
+			// 循环继续时更新内部 index 和外部可见循环变量，并跳回 ADD。
+			index = nextIndex
+			visibleIndex = nextIndex
+			registers[superInstruction.ForBase] = IntegerValue(index)
+			registers[superInstruction.ForBase+3] = IntegerValue(visibleIndex)
+			nextPC = superInstruction.LoopPC
+			vm.pcOffset = superInstruction.ForSBx
+		} else {
+			// 循环结束时不写入越界后的 index，保持普通 FORLOOP 语义。
+			vm.pcOffset = 0
+			break
+		}
+	}
+	if iterations == 0 {
+		return 0, 0, false
+	}
+	vm.currentPC = batch.pc + 1
+	vm.skipNext = false
+	vm.closeFrom = -1
+	vm.hasCallRequest = false
+	vm.returned = false
+	return nextPC, iterations, true
+}
+
 // TryExecuteAddForLoop 尝试执行 `ADD; FORLOOP` superinstruction。
 //
 // pc 必须指向当前 Proto.Code 中的 ADD 指令；返回 handled=false 表示 guard 不满足，调用方必须回退
 // 普通 VM。该 fast path 只覆盖 integer ADD 和 integer numeric-for，不触发元方法、不处理 hook、
 // 不处理 yield；调用方必须先确认当前执行环境允许跳过逐 PC 后处理。
 func (vm *VM) TryExecuteAddForLoop(pc int) (int, bool) {
+	// 单轮路径先尝试更窄的 batch 准备，覆盖官方 arith_add_loop；失败再保留旧通用单轮 guard。
+	if batch, ok := vm.PrepareAddForLoopBatch(pc); ok {
+		if nextPC, _, handled := vm.TryExecuteAddForLoopBatch(batch, 1); handled {
+			return nextPC, true
+		}
+	}
+
 	// 先按 PC 读取已准备好的预匹配表；非目标 PC 必须快速失败，避免普通指令承担额外识别成本。
 	if vm == nil || vm.addForLoopSuperInstructionProto != vm.proto {
 		// 调用方尚未为当前 Proto 准备表，回退普通 VM。

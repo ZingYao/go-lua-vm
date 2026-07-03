@@ -2138,6 +2138,70 @@ func TestVMTryExecuteAddForLoop(t *testing.T) {
 	}
 }
 
+// TestVMTryExecuteAddForLoopBatch 验证 `ADD; FORLOOP` batch 可连续提交多轮。
+func TestVMTryExecuteAddForLoopBatch(t *testing.T) {
+	// 构造官方 arith_add_loop 的 `sum = sum + i; FORLOOP` 形态。
+	proto := bytecode.NewProto("add-forloop-batch")
+	proto.Code = []bytecode.Instruction{
+		bytecode.CreateABC(bytecode.OpAdd, 0, 0, 4),
+		bytecode.CreateAsBx(bytecode.OpForLoop, 1, -2),
+	}
+	vm := NewVMWithPrototypeData(5, nil, nil, nil, nil)
+	vm.BindPrototype(proto)
+	if !vm.PrepareAddForLoopSuperInstructions() {
+		// ADD;FORLOOP 完整循环体应能预构建 superinstruction。
+		t.Fatalf("expected add for-loop superinstruction")
+	}
+	initialRegisters := []Value{IntegerValue(0), IntegerValue(1), IntegerValue(3), IntegerValue(1), IntegerValue(1)}
+	for registerIndex, value := range initialRegisters {
+		// 初始化 sum 与 FORLOOP 控制寄存器，模拟 FORPREP 后进入循环体的状态。
+		if err := vm.SetRegister(registerIndex, value); err != nil {
+			t.Fatalf("set register %d failed: %v", registerIndex, err)
+		}
+	}
+
+	batch, ok := vm.PrepareAddForLoopBatch(0)
+	if !ok {
+		// 官方加法循环形态应能准备 batch。
+		t.Fatalf("expected prepared add for-loop batch")
+	}
+	nextPC, iterations, handled := vm.TryExecuteAddForLoopBatch(batch, 2)
+	if !handled || iterations != 2 || nextPC != 0 {
+		// 最多提交两轮时循环仍应跳回 ADD。
+		t.Fatalf("partial batch mismatch: handled=%v iterations=%d nextPC=%d", handled, iterations, nextPC)
+	}
+	if value, ok := vm.Register(0); !ok || !value.RawEqual(IntegerValue(3)) {
+		// sum 必须等于 1+2。
+		t.Fatalf("partial sum mismatch: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(1); !ok || !value.RawEqual(IntegerValue(3)) {
+		// FORLOOP 继续时内部 index 必须推进到第三轮。
+		t.Fatalf("partial index mismatch: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(4); !ok || !value.RawEqual(IntegerValue(3)) {
+		// 外部可见循环变量必须同步到第三轮。
+		t.Fatalf("partial visible index mismatch: value=%#v ok=%v", value, ok)
+	}
+
+	nextPC, iterations, handled = vm.TryExecuteAddForLoopBatch(batch, 10)
+	if !handled || iterations != 1 || nextPC != 2 {
+		// 剩余一轮后达到 limit 并退出循环。
+		t.Fatalf("final batch mismatch: handled=%v iterations=%d nextPC=%d", handled, iterations, nextPC)
+	}
+	if value, ok := vm.Register(0); !ok || !value.RawEqual(IntegerValue(6)) {
+		// 三轮累加结果必须等于 1+2+3。
+		t.Fatalf("final sum mismatch: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(1); !ok || !value.RawEqual(IntegerValue(3)) {
+		// 循环退出时普通 FORLOOP 不写回越界后的内部 index。
+		t.Fatalf("final index mismatch: value=%#v ok=%v", value, ok)
+	}
+	if vm.currentPC != 1 || vm.pcOffset != 0 {
+		// batch 后 VM 状态应等价于刚执行完 FORLOOP。
+		t.Fatalf("final pc state mismatch: currentPC=%d pcOffset=%d", vm.currentPC, vm.pcOffset)
+	}
+}
+
 // TestVMTryExecuteAddForLoopConstantOperandAndFallback 验证常量操作数和 guard 回退。
 //
 // integer 常量 ADD 可以直接命中；当任一操作数或 FORLOOP 控制槽不是 integer 时，fast path 必须
