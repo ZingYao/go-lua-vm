@@ -1622,6 +1622,43 @@ benchmark 复核：
 `parseReturnStatementUntil`、`newGenerator` 和 `NewProto`；下一步若继续编译期，应该转入 AST 紧凑表示、
 semantic scope 生命周期或 Proto/generator 所有权这类大结构方案，不再追加局部容量预估。
 
+### 2026-07-04 表达式 AST 页式 arena
+
+实现：`compiler/parser.Parser` 为 `NameExpression`、`LiteralExpression` 和 `BinaryExpression` 增加页式
+arena 分配。parser 仍返回原来的 `*NameExpression`、`*LiteralExpression`、`*BinaryExpression` 指针类型，
+semantic analyzer 与 codegen 的类型断言、AST 结构和错误位置语义不变。每页固定容纳 256 个节点，当前页满后
+分配新页；已返回的表达式指针会保持对应页存活。
+
+本轮先试过普通增长 slice arena，虽然 `BenchmarkCompileSource3000Functions` 从 `30081 allocs/op`
+降到 `21122 allocs/op`，但 B/op 从约 `5.32 MB/op` 涨到约 `7.18 MB/op`。原因是 slice 扩容时旧
+backing array 被已返回 AST 指针保留，扩容复制导致内存放大。最终实现改为固定页式 arena，避免扩容复制。
+
+语义边界：
+
+- AST 对外类型、字段、指针 identity 语义不变；只改变 parser 内部节点所有权。
+- 页满后不会迁移已返回节点，避免旧指针指向被复制前的数组后产生双份可见状态。
+- 仅覆盖 profile 证明高频的名称、字面量和二元表达式；statement、scope、函数体和 table constructor
+  暂不纳入，避免一次性扩大所有权变更面。
+
+验证：
+
+| 项目 | 结果 |
+| --- | ---: |
+| `gopls check compiler/parser/parser.go compiler/parser/ast.go compiler/parser/parser_test.go compiler/codegen/*.go` | 无诊断 |
+| `CGO_ENABLED=0 go test ./compiler/parser ./compiler/codegen ./internal/luac -count=1` | 通过 |
+
+benchmark 复核：
+
+| 用例 | 结果 |
+| --- | ---: |
+| `BenchmarkCompileSource3000Functions` | `6.195 / 6.192 / 6.210 / 6.191 / 6.194 ms/op`，约 `5.31 MB/op`，`21114 allocs/op` |
+| 同用例 memprofile 单轮 | `6.299 ms/op`，约 `5.31 MB/op`，`21111 allocs/op` |
+
+对比数字扫描源码切片后的 `30077-30081 allocs/op`，页式表达式 arena 稳定减少约 `8960 allocs/op`，
+B/op 略低于上一轮，wall-clock 小幅改善。alloc_objects 中 `parsePrimaryExpression` 已不再是顶层热点，
+剩余主要集中在 `parseReturnStatementUntil`、`parseFunctionStatement`、`parseFunctionBody`、
+semantic `analyzeBlock/analyzeFunctionBody`、`codegen.newGenerator` 和 `bytecode.NewProto`。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -1731,7 +1768,8 @@ semantic scope 生命周期或 Proto/generator 所有权这类大结构方案，
 - [x] 若继续推进编译期，基于直接子 Proto 容量预留后 profile 重新观察剩余 parser AST、semantic scope、`newGenerator/NewProto` 与最终 Proto 本体；没有新结构性切口时记录证伪。
 - [x] 若继续推进编译期，基于直接函数 block 容量预估后 profile 重新观察剩余 parser AST、semantic scope、`newGenerator/NewProto` 与最终 Proto 本体；若只剩 AST/semantic/Proto 本体成本则记录证伪，不再追加容量预估。
 - [x] 若继续推进编译期，先独立评估 lexer 数字扫描或 AST/semantic 大结构方案；没有收益证据前不再追加 codegen/Proto 容量预估。
-- [ ] 若继续推进编译期，先设计 AST 紧凑表示、semantic scope 生命周期或 Proto/generator 所有权方案；没有明确语义等价和收益证据前，不再堆局部字段/容量微调。
+- [x] 若继续推进编译期，先设计 AST 紧凑表示、semantic scope 生命周期或 Proto/generator 所有权方案；没有明确语义等价和收益证据前，不再堆局部字段/容量微调。
+- [ ] 若继续推进编译期，基于表达式 AST 页式 arena 后重新 profile；优先评估 ReturnStatement/FunctionStatement 或 semantic ScopeInfo 页式所有权，未证明 B/op 不退化前不实现。
 - [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准

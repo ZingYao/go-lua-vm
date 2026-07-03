@@ -12,6 +12,8 @@ import (
 const (
 	// maxSyntaxCLevels 对齐 Lua 5.3 LUAI_MAXCCALLS，用于限制 parser 递归语法层级。
 	maxSyntaxCLevels = 200
+	// parserExpressionArenaPageSize 表示 parser 表达式节点 arena 的单页容量。
+	parserExpressionArenaPageSize = 256
 )
 
 // Parser 表示 Lua 5.3 递归下降语法分析器。
@@ -28,6 +30,12 @@ type Parser struct {
 	syntax extensions.SyntaxSet
 	// syntaxDepth 保存当前 parser 递归层级，用于模拟 Lua 5.3 的 C 调用深度限制。
 	syntaxDepth int
+	// nameExpressionPage 保存当前页内紧凑分配的名称表达式节点。
+	nameExpressionPage []NameExpression
+	// literalExpressionPage 保存当前页内紧凑分配的字面量表达式节点。
+	literalExpressionPage []LiteralExpression
+	// binaryExpressionPage 保存当前页内紧凑分配的二元表达式节点。
+	binaryExpressionPage []BinaryExpression
 }
 
 // New 创建新的 Parser。
@@ -46,6 +54,43 @@ func NewWithSyntax(input string, syntax extensions.SyntaxSet) *Parser {
 	// 初始化 lexer 并读取首个 token，后续 parse 方法只消费 current。
 	tokenLexer := lexer.New(input)
 	return &Parser{input: input, lexer: tokenLexer, current: tokenLexer.NextToken(), syntax: syntax & extensions.Compiled()}
+}
+
+// newNameExpression 创建名称表达式节点。
+//
+// name 必须来自当前 parser 的 token 文本，position 是该 token 起始位置；返回值保持
+// `*NameExpression` 类型，以便现有 AST、semantic 和 codegen 类型断言继续生效。
+func (parser *Parser) newNameExpression(name string, position lexer.Position) *NameExpression {
+	// 当前页满时分配新页，避免 append 扩容复制后旧数组因 AST 指针保留而造成内存放大。
+	if len(parser.nameExpressionPage) == cap(parser.nameExpressionPage) {
+		parser.nameExpressionPage = make([]NameExpression, 0, parserExpressionArenaPageSize)
+	}
+	parser.nameExpressionPage = append(parser.nameExpressionPage, NameExpression{Name: name, Position: position})
+	return &parser.nameExpressionPage[len(parser.nameExpressionPage)-1]
+}
+
+// newLiteralExpression 创建字面量表达式节点。
+//
+// literal 是完整字面量节点内容；调用方负责按 token 类型填充 Value、Number 和 Position。
+func (parser *Parser) newLiteralExpression(literal LiteralExpression) *LiteralExpression {
+	// 当前页满时分配新页，避免已返回字面量指针被扩容后的旧数组长期保留。
+	if len(parser.literalExpressionPage) == cap(parser.literalExpressionPage) {
+		parser.literalExpressionPage = make([]LiteralExpression, 0, parserExpressionArenaPageSize)
+	}
+	parser.literalExpressionPage = append(parser.literalExpressionPage, literal)
+	return &parser.literalExpressionPage[len(parser.literalExpressionPage)-1]
+}
+
+// newBinaryExpression 创建二元表达式节点。
+//
+// operator 是 Lua 二元操作符文本；left/right 必须是已经按优先级归约好的左右表达式。
+func (parser *Parser) newBinaryExpression(operator string, left Expression, right Expression, position lexer.Position) *BinaryExpression {
+	// 当前页满时分配新页，保持二元表达式指针稳定且避免 slice 扩容复制。
+	if len(parser.binaryExpressionPage) == cap(parser.binaryExpressionPage) {
+		parser.binaryExpressionPage = make([]BinaryExpression, 0, parserExpressionArenaPageSize)
+	}
+	parser.binaryExpressionPage = append(parser.binaryExpressionPage, BinaryExpression{Operator: operator, Left: left, Right: right, Position: position})
+	return &parser.binaryExpressionPage[len(parser.binaryExpressionPage)-1]
 }
 
 // ParseChunk 解析完整 Lua chunk。
@@ -437,7 +482,7 @@ func (parser *Parser) parseFunctionName() (Expression, string, bool, error) {
 		// 简单函数名直接返回名称字符串，避免构造随后会被拆回字符串的 NameExpression。
 		return nil, name, false, nil
 	}
-	var targetExpression Expression = &NameExpression{Name: name, Position: nameToken.Position}
+	var targetExpression Expression = parser.newNameExpression(name, nameToken.Position)
 	for parser.current.Kind == lexer.TokenOperator && parser.current.Text == "." {
 		// 点号字段定义会继续构造字段左值链。
 		parser.advance()
@@ -955,7 +1000,7 @@ func (parser *Parser) parseNameExpressionList() ([]Expression, error) {
 	expressions := make([]Expression, 0, len(names))
 	for _, name := range names {
 		// 当前没有逐个保存名称位置，先使用列表起始位置；后续 token span 会细化。
-		expressions = append(expressions, &NameExpression{Name: name, Position: startPosition})
+		expressions = append(expressions, parser.newNameExpression(name, startPosition))
 	}
 
 	// 返回名称表达式列表。
@@ -1028,7 +1073,7 @@ func (parser *Parser) parseSubExpression(minimumPriority int) (Expression, error
 			// 二元操作符右侧必须存在合法表达式。
 			return nil, err
 		}
-		leftExpression = &BinaryExpression{Operator: operatorToken.Text, Left: leftExpression, Right: rightExpression, Position: operatorToken.Position}
+		leftExpression = parser.newBinaryExpression(operatorToken.Text, leftExpression, rightExpression, operatorToken.Position)
 	}
 
 	// 返回按优先级归约后的表达式。
@@ -1170,15 +1215,15 @@ func (parser *Parser) parsePrimaryExpression() (Expression, error) {
 	case lexer.TokenIdentifier:
 		// 标识符表达式表示读取变量。
 		parser.advance()
-		return &NameExpression{Name: token.Text, Position: token.Position}, nil
+		return parser.newNameExpression(token.Text, token.Position), nil
 	case lexer.TokenNumber:
 		// 数字字面量表达式保留 lexer 数字解析结果。
 		parser.advance()
-		return &LiteralExpression{Kind: token.Kind, Value: token.Text, Number: token.Number, Position: token.Position}, nil
+		return parser.newLiteralExpression(LiteralExpression{Kind: token.Kind, Value: token.Text, Number: token.Number, Position: token.Position}), nil
 	case lexer.TokenString:
 		// 字符串字面量表达式使用解码后的 Literal。
 		parser.advance()
-		return &LiteralExpression{Kind: token.Kind, Value: token.Literal, Position: token.Position}, nil
+		return parser.newLiteralExpression(LiteralExpression{Kind: token.Kind, Value: token.Literal, Position: token.Position}), nil
 	case lexer.TokenOperator:
 		// 操作符开头当前支持 vararg、table constructor 和括号 prefix expression。
 		if token.Text == "..." {
@@ -1195,7 +1240,7 @@ func (parser *Parser) parsePrimaryExpression() (Expression, error) {
 		// nil/true/false 是 Lua 基础字面量关键字。
 		if token.Text == "nil" || token.Text == "true" || token.Text == "false" {
 			parser.advance()
-			return &LiteralExpression{Kind: token.Kind, Value: token.Text, Position: token.Position}, nil
+			return parser.newLiteralExpression(LiteralExpression{Kind: token.Kind, Value: token.Text, Position: token.Position}), nil
 		}
 		if token.Text == "function" {
 			// function 关键字在表达式位置表示匿名函数。
@@ -1235,7 +1280,7 @@ func (parser *Parser) parseCallArguments() ([]Expression, error) {
 		// 字符串字面量可直接作为函数调用的唯一参数。
 		token := parser.current
 		parser.advance()
-		return []Expression{&LiteralExpression{Kind: token.Kind, Value: token.Literal, Position: token.Position}}, nil
+		return []Expression{parser.newLiteralExpression(LiteralExpression{Kind: token.Kind, Value: token.Literal, Position: token.Position})}, nil
 	}
 	if parser.current.Kind == lexer.TokenOperator && parser.current.Text == "{" {
 		// table constructor 可直接作为函数调用的唯一参数。
