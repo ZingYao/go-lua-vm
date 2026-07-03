@@ -1332,6 +1332,38 @@ alloc profile 显示剩余对象和空间主要分散在：
 先证明字节码、LocalVars/Upvalues、debug local 生命周期、错误语义和官方反汇编保持等价。本轮只记录 profile
 证伪结果，不修改生产代码。
 
+### 2026-07-04 编译期结构切口设计
+
+目标：在不继续堆 parser/codegen 局部字段的前提下，判断 `compile_3000_functions` 剩余约
+`45129 allocs/op` 是否还有可验证的结构性空间。当前 profile 中 `newGenerator/NewProto`、
+真实表达式 AST、semantic scope、`Proto.AddConstant` 和 `Proto.AddInstruction` 都是稳定来源，但多数对象
+同时也是最终 Proto、AST 或 debug 元数据本体，不能直接删除。
+
+候选方案按风险排序：
+
+| 方案 | 判断 |
+| --- | --- |
+| `Proto` 的 codegen-only 短 `Code/LineInfo` 内嵌槽 | 优先级最高。当前每个简单子函数通常只有 `ADD; RETURN` 两条指令，codegen 已用容量 2 预留，但仍需要为 `Code` 与 `LineInfo` 各分配短底层数组。可在 `bytecode.Proto` 内部增加短槽，并通过 bytecode 包方法让 codegen opt-in；`NewProto` 默认 nil 切片语义不变，chunk loader 和外部手写 Proto 不受影响。 |
+| `newGenerator/NewProto` 编译上下文 arena | 暂不实现。最终 Proto 树需要稳定 `*Proto` 身份，generator 还保存 parent、upvalue、scope snapshot 和错误上下文；把 generator/Proto 放入统一 arena 会触及指针稳定性、递归 child 生命周期和失败回滚，收益不明确。 |
+| 真实表达式 AST 紧凑 union | 暂不实现。`Expression` 当前是公开接口加具体节点，parser、semantic、codegen 和测试都依赖节点类型；改成 union 或 arena 会是 AST v2 级别重构，必须单独设计迁移层和完整语义 golden。 |
+| 常量/指令存储整体重排 | 暂不实现。首个 integer 常量 inline 和指令小容量预留已经覆盖当前热形态；继续泛化 number/string 或常量表 inline 需要证明不会改变常量顺序、RK 编码、binary chunk 和反汇编输出。 |
+
+推荐下一步最小原型：`Proto` 短 `Code/LineInfo` 内嵌槽。
+
+设计边界：
+
+- `bytecode.NewProto` 继续只初始化 `Source`，保持 `Code/LineInfo/Constants/LocalVars/Upvalues` nil，避免改变 chunk loader、测试和外部嵌入方对空 Proto 的观察。
+- 新增 bytecode 包内方法，例如 `PrepareInlineCodeLineInfo(capacity int)`，仅 codegen 调用；capacity 只支持当前证据充分的 2，超出时回退普通 slice 分配。
+- `Proto.AddInstruction` 仍只 append 到 `Code`，调用方继续负责同步 `LineInfo`；反汇编、binary dump、debug hook 和 traceback 仍读取公开切片。
+- `StripDebug`、binary chunk 编解码、`luac -l -l` 和官方 golden 必须证明没有因为内嵌数组导致切片别名或输出顺序变化。
+- 如果 benchmark 只减少 allocs/op 但 B/op 明显升高，或引入任何 CLI/官方测试差异，应回滚该原型。
+
+验收标准：
+
+- 新增 bytecode/codegen 定向测试，覆盖默认 `NewProto` nil 切片语义、codegen opt-in 后短槽容量、第三条指令 append 后仍保持 `Code/LineInfo` 顺序，以及 `StripDebug` 不与原 Proto 共享切片。
+- benchmark 至少包含 `BenchmarkCompileSource3000Functions` 5 轮；目标是相对当前 `45129 allocs/op` 有稳定下降，且 B/op 不高于当前 `5.64 MB/op` 的噪声范围。
+- 由于触碰 `bytecode.Proto`，提交前必须重建 `bin/glua` / `bin/gluac`，显式确认官方 Lua/Luac 5.3.6，并跑 `compare-cli-golden.sh`、`compare-official-executables.sh`、`run-official-tests.sh`。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -1433,7 +1465,8 @@ alloc profile 显示剩余对象和空间主要分散在：
 - [x] 若继续推进编译期，优先 profile 函数体 block 内嵌槽后的真实表达式 AST、semantic `ScopeInfo` 与 Proto/generator 实体成本。
 - [x] 若继续推进编译期，优先 profile block 作用域内嵌槽后的 `newGenerator/NewProto`、真实表达式 AST 与常量记录成本。
 - [x] 若继续推进编译期，优先 profile codegen 作用域栈内嵌槽后的 `newGenerator/NewProto`、真实表达式 AST 与常量记录成本。
-- [ ] 若继续推进编译期，优先设计 `newGenerator/NewProto` 实体所有权、真实表达式 AST 布局或常量/指令存储的更大结构切口；未证明字节码、debug local 和错误语义等价前，不再堆局部字段或分支微调。
+- [x] 若继续推进编译期，优先设计 `newGenerator/NewProto` 实体所有权、真实表达式 AST 布局或常量/指令存储的更大结构切口；未证明字节码、debug local 和错误语义等价前，不再堆局部字段或分支微调。
+- [ ] 若继续推进编译期，优先实现 `Proto` 短 `Code/LineInfo` 内嵌槽原型；保持 `NewProto` 默认 nil 切片语义，只允许 codegen opt-in，并用官方 CLI/golden 门禁验证 bytecode/debug 输出不变。
 - [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准
