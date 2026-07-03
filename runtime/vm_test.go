@@ -2703,6 +2703,112 @@ func TestVMTryExecutePreparedFunctionCallAddForLoopFallback(t *testing.T) {
 	}
 }
 
+// TestVMTryExecuteFunctionCallAssignForLoopBatch 验证官方 function_call 赋值循环 batch。
+func TestVMTryExecuteFunctionCallAssignForLoopBatch(t *testing.T) {
+	proto := testFunctionCallAssignForLoopProto()
+	vm := NewVMWithConstants(9, nil)
+	vm.BindPrototype(proto)
+	if !vm.PrepareFunctionCallAssignForLoopSuperInstructions() {
+		// 官方 function_call 赋值字节码形态应能预构建 superinstruction。
+		t.Fatalf("expected function_call assign superinstruction")
+	}
+	closure := NewLuaClosure(testLeafAddReturnProto(), nil, nil)
+	for _, entry := range []struct {
+		register int
+		value    Value
+	}{
+		{register: 0, value: ReferenceValue(KindLuaClosure, closure)},
+		{register: 1, value: IntegerValue(10)},
+		{register: 2, value: IntegerValue(1)},
+		{register: 3, value: IntegerValue(3)},
+		{register: 4, value: IntegerValue(1)},
+		{register: 5, value: IntegerValue(1)},
+	} {
+		if err := vm.SetRegister(entry.register, entry.value); err != nil {
+			// 测试夹具寄存器必须能成功初始化。
+			t.Fatalf("set register %d failed: %v", entry.register, err)
+		}
+	}
+
+	batch, ok := vm.PrepareFunctionCallAssignForLoopBatch(0)
+	if !ok {
+		// batch 准备应复用已验证的静态形态和 callee metadata。
+		t.Fatalf("expected prepared assign batch")
+	}
+	nextPC, iterations, handled, err := vm.TryExecuteFunctionCallAssignForLoopBatch(batch, 8, NewState())
+	if err != nil || !handled || iterations != 3 || nextPC != 6 {
+		// 三轮后达到 limit 并退出循环。
+		t.Fatalf("assign batch mismatch: handled=%v iterations=%d nextPC=%d err=%v", handled, iterations, nextPC, err)
+	}
+	if value, _ := vm.Register(1); !value.RawEqual(IntegerValue(16)) {
+		// sum = add(add(add(10, 1), 2), 3)。
+		t.Fatalf("sum mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(6); !value.RawEqual(IntegerValue(16)) {
+		// CALL 函数槽在单返回后保存最后一轮 add 的结果。
+		t.Fatalf("call result mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(7); !value.RawEqual(IntegerValue(13)) {
+		// 第一实参槽保留最后一轮 MOVE 后的旧 sum。
+		t.Fatalf("first argument mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(8); !value.RawEqual(IntegerValue(3)) {
+		// 第二实参槽保留最后一轮 MOVE 后的循环变量值。
+		t.Fatalf("second argument mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(2); !value.RawEqual(IntegerValue(3)) {
+		// 循环退出时 FORLOOP 不写入越界后的内部 index。
+		t.Fatalf("for index mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(5); !value.RawEqual(IntegerValue(3)) {
+		// 循环退出时外部可见循环变量保持最后一次有效值。
+		t.Fatalf("visible index mismatch: %#v", value)
+	}
+}
+
+// TestVMTryExecuteFunctionCallAssignForLoopFallback 验证官方 function_call batch 动态 guard 失败无副作用。
+func TestVMTryExecuteFunctionCallAssignForLoopFallback(t *testing.T) {
+	proto := testFunctionCallAssignForLoopProto()
+	vm := NewVMWithConstants(9, nil)
+	vm.BindPrototype(proto)
+	if !vm.PrepareFunctionCallAssignForLoopSuperInstructions() {
+		// 官方 function_call 赋值字节码形态应能预构建 superinstruction。
+		t.Fatalf("expected function_call assign superinstruction")
+	}
+	closure := NewLuaClosure(testLeafAddReturnProto(), nil, nil)
+	if err := vm.SetRegister(0, ReferenceValue(KindLuaClosure, closure)); err != nil {
+		// 被调函数局部必须能写入寄存器。
+		t.Fatalf("set function failed: %v", err)
+	}
+	if err := vm.SetRegister(1, StringValue("not integer sum")); err != nil {
+		// 非 integer sum 用于验证动态 guard 失败。
+		t.Fatalf("set sum failed: %v", err)
+	}
+	if err := vm.SetRegister(5, IntegerValue(1)); err != nil {
+		// 外部循环变量必须能写入寄存器。
+		t.Fatalf("set visible index failed: %v", err)
+	}
+
+	batch, ok := vm.PrepareFunctionCallAssignForLoopBatch(0)
+	if !ok {
+		// sum 类型不是 batch 静态 guard；应延迟到执行期回退。
+		t.Fatalf("expected prepared assign batch")
+	}
+	nextPC, iterations, handled, err := vm.TryExecuteFunctionCallAssignForLoopBatch(batch, 8, NewState())
+	if err != nil || handled || iterations != 0 || nextPC != 0 {
+		// 动态 guard 失败不应被 fast path 消费。
+		t.Fatalf("fallback mismatch: handled=%v iterations=%d nextPC=%d err=%v", handled, iterations, nextPC, err)
+	}
+	if value, _ := vm.Register(1); !value.RawEqual(StringValue("not integer sum")) {
+		// guard 失败不能修改 sum。
+		t.Fatalf("sum should be unchanged: %#v", value)
+	}
+	if value, _ := vm.Register(6); !value.IsNil() {
+		// guard 失败不能执行第一条 MOVE。
+		t.Fatalf("temporary slot should stay nil: %#v", value)
+	}
+}
+
 // TestVMTryExecuteFormatLenAddForLoop 验证 `#string.format("%d", i)` 长度消费 fast path。
 //
 // 该路径必须在不构造格式化字符串的情况下，产生与 CALL、LEN、ADD、FORLOOP 后一致的寄存器和 PC 状态。
@@ -2815,6 +2921,20 @@ func testFunctionCallAddForLoopProto() *bytecode.Proto {
 			bytecode.CreateABx(bytecode.OpLoadK, 8, 0),
 			bytecode.CreateABC(bytecode.OpCall, 6, 3, 2),
 			bytecode.CreateABC(bytecode.OpAdd, 1, 1, 6),
+			bytecode.CreateAsBx(bytecode.OpForLoop, 2, -6),
+		},
+	}
+}
+
+// testFunctionCallAssignForLoopProto 构造官方完整 benchmark 的 `sum = add(sum, i)` 循环体 Proto。
+func testFunctionCallAssignForLoopProto() *bytecode.Proto {
+	return &bytecode.Proto{
+		Code: []bytecode.Instruction{
+			bytecode.CreateABC(bytecode.OpMove, 6, 0, 0),
+			bytecode.CreateABC(bytecode.OpMove, 7, 1, 0),
+			bytecode.CreateABC(bytecode.OpMove, 8, 5, 0),
+			bytecode.CreateABC(bytecode.OpCall, 6, 3, 2),
+			bytecode.CreateABC(bytecode.OpMove, 1, 6, 0),
 			bytecode.CreateAsBx(bytecode.OpForLoop, 2, -6),
 		},
 	}

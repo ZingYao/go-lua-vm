@@ -90,6 +90,10 @@ type VM struct {
 	functionCallAddForLoopSuperInstructionProto *bytecode.Proto
 	// functionCallAddForLoopSuperInstructions 按 PC 保存函数调用加法循环 superinstruction 预匹配结果。
 	functionCallAddForLoopSuperInstructions []functionCallAddForLoopSuperInstruction
+	// functionCallAssignForLoopSuperInstructionProto 记录函数调用赋值循环 superinstruction 表对应的 Proto。
+	functionCallAssignForLoopSuperInstructionProto *bytecode.Proto
+	// functionCallAssignForLoopSuperInstructions 按 PC 保存函数调用赋值循环 superinstruction 预匹配结果。
+	functionCallAssignForLoopSuperInstructions []functionCallAssignForLoopSuperInstruction
 	// formatLenAddForLoopSuperInstructionProto 记录 string.format 长度消费循环 superinstruction 表对应的 Proto。
 	formatLenAddForLoopSuperInstructionProto *bytecode.Proto
 	// formatLenAddForLoopSuperInstructions 按 PC 保存 string.format 长度消费循环 superinstruction 预匹配结果。
@@ -420,6 +424,54 @@ type FunctionCallAddForLoopBatch struct {
 	// maxRegisterIndex 保存参与寄存器最大下标，用一次边界检查替代逐寄存器重复检查。
 	maxRegisterIndex int
 	// valid 表示 batch 是否由 PrepareFunctionCallAddForLoopBatch 成功构造。
+	valid bool
+}
+
+// functionCallAssignForLoopSuperInstruction 保存 `MOVE; MOVE; MOVE; CALL; MOVE; FORLOOP` 的预匹配形态。
+//
+// 该形态覆盖官方完整 benchmark 的 `sum = add(sum, i)` 循环体。构建期只记录寄存器数据流；执行期仍
+// 检查 callee closure、sum、循环变量和 numeric-for 控制槽类型，guard 不满足时必须回退普通 VM。
+type functionCallAssignForLoopSuperInstruction struct {
+	// FunctionSlot 保存 CALL 的函数槽，也是第一条 MOVE 的目标和 CALL 结果槽。
+	FunctionSlot int
+	// FunctionSource 保存被调用 closure 所在寄存器。
+	FunctionSource int
+	// SumRegister 保存 sum 寄存器，也是第一实参来源与 CALL 后 MOVE 的目标。
+	SumRegister int
+	// FirstArgumentSlot 保存第二条 MOVE 的目标实参槽。
+	FirstArgumentSlot int
+	// SecondArgumentSlot 保存第三条 MOVE 的目标实参槽。
+	SecondArgumentSlot int
+	// SecondArgumentSource 保存第二实参来源寄存器，通常是 numeric-for 外部循环变量。
+	SecondArgumentSource int
+	// ForBase 保存 FORLOOP 的 base 寄存器。
+	ForBase int
+	// ForSBx 保存 FORLOOP 的有符号跳转偏移。
+	ForSBx int
+	// ExitPC 保存循环退出时的下一条 PC。
+	ExitPC int
+	// LoopPC 保存循环继续时的跳转 PC。
+	LoopPC int
+	// Valid 表示当前 PC 是否匹配完整函数调用赋值循环形态。
+	Valid bool
+}
+
+// FunctionCallAssignForLoopBatch 保存已验证的函数调用赋值循环 batch 执行上下文。
+//
+// 字段保持未导出，调用方只能通过 PrepareFunctionCallAssignForLoopBatch 获取已验证上下文。每个虚拟
+// CALL 前的 context 检查由 TryExecuteFunctionCallAssignForLoopBatch 负责。
+type FunctionCallAssignForLoopBatch struct {
+	// proto 记录 batch 绑定的 Proto，用于防止 VM 复用后误用旧上下文。
+	proto *bytecode.Proto
+	// pc 保存循环体第一条 MOVE 的 PC。
+	pc int
+	// superInstruction 保存已匹配的循环体寄存器数据流。
+	superInstruction functionCallAssignForLoopSuperInstruction
+	// functionValue 保存已验证的 callee closure 值，执行期用于确认函数寄存器未被替换。
+	functionValue Value
+	// maxRegisterIndex 保存参与寄存器最大下标，用一次边界检查替代逐寄存器重复检查。
+	maxRegisterIndex int
+	// valid 表示 batch 是否由 PrepareFunctionCallAssignForLoopBatch 成功构造。
 	valid bool
 }
 
@@ -1764,6 +1816,8 @@ func (vm *VM) BindPrototype(proto *bytecode.Proto) {
 		vm.mixArithmeticForLoopSuperInstructions = nil
 		vm.functionCallAddForLoopSuperInstructionProto = nil
 		vm.functionCallAddForLoopSuperInstructions = nil
+		vm.functionCallAssignForLoopSuperInstructionProto = nil
+		vm.functionCallAssignForLoopSuperInstructions = nil
 		vm.formatLenAddForLoopSuperInstructionProto = nil
 		vm.formatLenAddForLoopSuperInstructions = nil
 		vm.tableArrayPreallocHintProto = nil
@@ -1799,6 +1853,11 @@ func (vm *VM) BindPrototype(proto *bytecode.Proto) {
 		// VM 池切换到其他 Proto 时丢弃函数调用循环 superinstruction 表，避免不同 Proto 的 PC 误命中。
 		vm.functionCallAddForLoopSuperInstructionProto = nil
 		vm.functionCallAddForLoopSuperInstructions = nil
+	}
+	if vm.functionCallAssignForLoopSuperInstructionProto != nil && vm.functionCallAssignForLoopSuperInstructionProto != proto {
+		// VM 池切换到其他 Proto 时丢弃函数调用赋值循环 superinstruction 表，避免不同 Proto 的 PC 误命中。
+		vm.functionCallAssignForLoopSuperInstructionProto = nil
+		vm.functionCallAssignForLoopSuperInstructions = nil
 	}
 	if vm.formatLenAddForLoopSuperInstructionProto != nil && vm.formatLenAddForLoopSuperInstructionProto != proto {
 		// VM 池切换到其他 Proto 时丢弃 string.format 长度消费表，避免不同 Proto 的 PC 误命中。
@@ -2962,6 +3021,265 @@ func (vm *VM) TryExecuteFunctionCallAddForLoop(pc int) (int, bool) {
 		return 0, false
 	}
 	return vm.TryExecutePreparedFunctionCallAddForLoop(batch)
+}
+
+// ensureFunctionCallAssignForLoopSuperInstructions 返回当前 Proto 的函数调用赋值循环预匹配表。
+//
+// 该表按 PC 与 Proto.Code 对齐，只记录完整 `MOVE;MOVE;MOVE;CALL;MOVE;FORLOOP` 循环体；运行期
+// closure identity、参数类型、hook 和 context guard 仍由调用方与 batch 执行方法检查。
+func (vm *VM) ensureFunctionCallAssignForLoopSuperInstructions() []functionCallAssignForLoopSuperInstruction {
+	// 按当前 Proto 懒构建官方 function_call 赋值循环 superinstruction 表，并在 Proto 未变化时复用。
+	if vm == nil || vm.proto == nil {
+		// 缺少 VM 或 Proto 时没有可用 superinstruction 表。
+		return nil
+	}
+	if len(vm.proto.Code) < 6 {
+		// 少于六条指令不可能包含完整 function_call 赋值循环体。
+		vm.functionCallAssignForLoopSuperInstructionProto = vm.proto
+		vm.functionCallAssignForLoopSuperInstructions = nil
+		return nil
+	}
+	if vm.functionCallAssignForLoopSuperInstructionProto == vm.proto {
+		// 当前 Proto 已完成扫描；nil 表示无匹配形态，非 nil 表示可按 PC 读取。
+		return vm.functionCallAssignForLoopSuperInstructions
+	}
+
+	vm.functionCallAssignForLoopSuperInstructionProto = vm.proto
+	vm.functionCallAssignForLoopSuperInstructions = buildFunctionCallAssignForLoopSuperInstructions(vm.proto)
+	return vm.functionCallAssignForLoopSuperInstructions
+}
+
+// buildFunctionCallAssignForLoopSuperInstructions 构建 `MOVE;MOVE;MOVE;CALL;MOVE;FORLOOP` 预匹配表。
+//
+// 返回表按 PC 对齐；没有匹配形态时返回 nil，表示该 Proto 不需要承担额外表分配。
+func buildFunctionCallAssignForLoopSuperInstructions(proto *bytecode.Proto) []functionCallAssignForLoopSuperInstruction {
+	// 空 Proto 或短函数没有可构建的函数调用赋值循环 superinstruction。
+	if proto == nil || len(proto.Code) < 6 {
+		return nil
+	}
+
+	var superInstructions []functionCallAssignForLoopSuperInstruction
+	for pc := 0; pc+5 < len(proto.Code); pc++ {
+		// 只识别完整相邻 `MOVE;MOVE;MOVE;CALL;MOVE;FORLOOP`，其他形态保持零值表示无效。
+		moveFunctionInstruction := proto.Code[pc]
+		moveFirstArgumentInstruction := proto.Code[pc+1]
+		moveSecondArgumentInstruction := proto.Code[pc+2]
+		callInstruction := proto.Code[pc+3]
+		moveResultInstruction := proto.Code[pc+4]
+		forLoopInstruction := proto.Code[pc+5]
+		if moveFunctionInstruction.OpCode() != bytecode.OpMove || moveFirstArgumentInstruction.OpCode() != bytecode.OpMove || moveSecondArgumentInstruction.OpCode() != bytecode.OpMove || callInstruction.OpCode() != bytecode.OpCall || moveResultInstruction.OpCode() != bytecode.OpMove || forLoopInstruction.OpCode() != bytecode.OpForLoop {
+			// 当前 PC 不匹配目标六指令模式，继续扫描后续指令。
+			continue
+		}
+		functionSlot := callInstruction.A()
+		if moveFunctionInstruction.A() != functionSlot || moveFirstArgumentInstruction.A() != functionSlot+1 || moveSecondArgumentInstruction.A() != functionSlot+2 || callInstruction.B() != 3 || callInstruction.C() != 2 || moveResultInstruction.B() != functionSlot {
+			// 只覆盖固定两实参、单返回 CALL，且两个实参必须由紧邻 MOVE 准备，结果必须 MOVE 到 sum。
+			continue
+		}
+		exitPC := pc + 6
+		loopPC := exitPC + forLoopInstruction.SBx()
+		if loopPC != pc {
+			// 只覆盖完整循环体；回跳到其他 PC 的形态必须交给普通 VM。
+			continue
+		}
+		sumRegister := moveFirstArgumentInstruction.B()
+		if moveResultInstruction.A() != sumRegister {
+			// 官方 function_call 形态必须把 CALL 结果写回第一实参来源的 sum 寄存器。
+			continue
+		}
+		forBase := forLoopInstruction.A()
+		secondArgumentSource := moveSecondArgumentInstruction.B()
+		if secondArgumentSource != forBase+3 {
+			// 当前窄路径只处理 numeric-for 外部可见循环变量作为第二实参。
+			continue
+		}
+		functionSource := moveFunctionInstruction.B()
+		if registerInRange(functionSource, forBase, forBase+3) || functionSource == functionSlot || functionSource == functionSlot+1 || functionSource == functionSlot+2 || functionSource == sumRegister {
+			// 被调用 closure 来源必须在循环体内保持稳定，不能被 CALL、MOVE 或 FORLOOP 覆盖。
+			continue
+		}
+		if registerInRange(sumRegister, forBase, forBase+3) || sumRegister == functionSlot || sumRegister == functionSlot+1 || sumRegister == functionSlot+2 {
+			// sum 不能覆盖 CALL 临时槽或 numeric-for 控制槽，否则需要逐指令别名语义。
+			continue
+		}
+		if superInstructions == nil {
+			// 只有真实存在匹配形态时才分配 PC 对齐表，避免普通函数执行增加分配。
+			superInstructions = make([]functionCallAssignForLoopSuperInstruction, len(proto.Code))
+		}
+		superInstructions[pc] = functionCallAssignForLoopSuperInstruction{
+			FunctionSlot:         functionSlot,
+			FunctionSource:       functionSource,
+			SumRegister:          sumRegister,
+			FirstArgumentSlot:    functionSlot + 1,
+			SecondArgumentSlot:   functionSlot + 2,
+			SecondArgumentSource: secondArgumentSource,
+			ForBase:              forBase,
+			ForSBx:               forLoopInstruction.SBx(),
+			ExitPC:               exitPC,
+			LoopPC:               loopPC,
+			Valid:                true,
+		}
+	}
+	return superInstructions
+}
+
+// PrepareFunctionCallAssignForLoopSuperInstructions 预构建当前 Proto 的函数调用赋值循环表。
+func (vm *VM) PrepareFunctionCallAssignForLoopSuperInstructions() bool {
+	// 预构建失败不影响普通 VM；后续 batch 准备会因为表不匹配而回退。
+	return len(vm.ensureFunctionCallAssignForLoopSuperInstructions()) > 0
+}
+
+// HasFunctionCallAssignForLoopAt 判断当前 PC 是否存在函数调用赋值循环 superinstruction。
+func (vm *VM) HasFunctionCallAssignForLoopAt(pc int) bool {
+	// 该 helper 只读取已准备好的表，供 API 层决定是否尝试 batch。
+	if vm == nil || vm.functionCallAssignForLoopSuperInstructionProto != vm.proto {
+		// 表尚未准备或 Proto 已变化时不能命中。
+		return false
+	}
+	superInstructions := vm.functionCallAssignForLoopSuperInstructions
+	if uint(pc) >= uint(len(superInstructions)) {
+		// PC 越界时不能命中。
+		return false
+	}
+	return superInstructions[pc].Valid
+}
+
+// PrepareFunctionCallAssignForLoopBatch 为官方 function_call 循环体准备可复用 batch 上下文。
+func (vm *VM) PrepareFunctionCallAssignForLoopBatch(pc int) (FunctionCallAssignForLoopBatch, bool) {
+	// 先按 PC 读取已准备好的预匹配表；非目标 PC 必须快速失败且不能产生副作用。
+	if vm == nil || vm.functionCallAssignForLoopSuperInstructionProto != vm.proto {
+		return FunctionCallAssignForLoopBatch{}, false
+	}
+	superInstructions := vm.functionCallAssignForLoopSuperInstructions
+	if uint(pc) >= uint(len(superInstructions)) {
+		return FunctionCallAssignForLoopBatch{}, false
+	}
+	superInstruction := superInstructions[pc]
+	if !superInstruction.Valid {
+		return FunctionCallAssignForLoopBatch{}, false
+	}
+	registers := vm.registers
+	maxRegisterIndex := 0
+	for _, registerIndex := range [...]int{
+		superInstruction.FunctionSlot,
+		superInstruction.FunctionSource,
+		superInstruction.SumRegister,
+		superInstruction.FirstArgumentSlot,
+		superInstruction.SecondArgumentSlot,
+		superInstruction.SecondArgumentSource,
+		superInstruction.ForBase + 3,
+	} {
+		// batch 准备阶段只计算一次最大寄存器下标，执行阶段用单次边界判断。
+		if registerIndex > maxRegisterIndex {
+			maxRegisterIndex = registerIndex
+		}
+	}
+	if uint(maxRegisterIndex) >= uint(len(registers)) {
+		return FunctionCallAssignForLoopBatch{}, false
+	}
+	functionValue := registers[superInstruction.FunctionSource]
+	if functionValue.Kind != KindLuaClosure {
+		// 被调值不是 Lua closure 时必须回退普通 CALL，保留 __call 和错误语义。
+		return FunctionCallAssignForLoopBatch{}, false
+	}
+	closure, ok := functionValue.Ref.(*LuaClosure)
+	if !ok || closure == nil || closure.LeafAddReturn == nil || !closure.LeafAddReturn.HasRegisterRegisterAdd {
+		// 只覆盖已预解析的 `return a+b` 叶子 closure。
+		return FunctionCallAssignForLoopBatch{}, false
+	}
+	leaf := closure.LeafAddReturn
+	if !((leaf.LeftRegisterIndex == 0 && leaf.RightRegisterIndex == 1) || (leaf.LeftRegisterIndex == 1 && leaf.RightRegisterIndex == 0)) {
+		// 叶子函数必须只读取两个固定实参，其他寄存器布局回退普通 direct CALL。
+		return FunctionCallAssignForLoopBatch{}, false
+	}
+	return FunctionCallAssignForLoopBatch{
+		proto:            vm.proto,
+		pc:               pc,
+		superInstruction: superInstruction,
+		functionValue:    functionValue,
+		maxRegisterIndex: maxRegisterIndex,
+		valid:            true,
+	}, true
+}
+
+// TryExecuteFunctionCallAssignForLoopBatch 批量执行已准备的官方 function_call 循环体。
+//
+// batch 必须来自 PrepareFunctionCallAssignForLoopBatch；maxIterations 由调用方按 context 检查窗口换算。
+// 本方法每个虚拟 CALL 前都会调用 state.CheckContext，保留 direct CALL 取消边界。
+func (vm *VM) TryExecuteFunctionCallAssignForLoopBatch(batch FunctionCallAssignForLoopBatch, maxIterations int, state *State) (nextPC int, iterations int, handled bool, err error) {
+	// batch 与当前 VM/Proto 不匹配时必须回退，避免 VM 池复用后误写寄存器。
+	if vm == nil || !batch.valid || batch.proto != vm.proto || maxIterations <= 0 || state == nil {
+		return 0, 0, false, nil
+	}
+	if err := state.CheckContext(); err != nil {
+		// 首个虚拟 CALL 入口的取消检查必须发生在动态 guard 和任何寄存器写入之前。
+		return 0, 0, false, err
+	}
+	registers := vm.registers
+	if uint(batch.maxRegisterIndex) >= uint(len(registers)) {
+		return 0, 0, false, nil
+	}
+	superInstruction := batch.superInstruction
+	if !registers[superInstruction.FunctionSource].RawEqual(batch.functionValue) {
+		// 被调函数寄存器被替换时必须回退普通 CALL，保留 __call 和错误语义。
+		return 0, 0, false, nil
+	}
+	sumValue := registers[superInstruction.SumRegister]
+	indexValue := registers[superInstruction.ForBase]
+	limitValue := registers[superInstruction.ForBase+1]
+	stepValue := registers[superInstruction.ForBase+2]
+	visibleIndexValue := registers[superInstruction.SecondArgumentSource]
+	if sumValue.Kind != KindInteger || indexValue.Kind != KindInteger || limitValue.Kind != KindInteger || stepValue.Kind != KindInteger || visibleIndexValue.Kind != KindInteger {
+		return 0, 0, false, nil
+	}
+	sum := sumValue.Integer
+	index := indexValue.Integer
+	limit := limitValue.Integer
+	step := stepValue.Integer
+	visibleIndex := visibleIndexValue.Integer
+	nextPC = batch.pc
+	for iterations < maxIterations {
+		if iterations > 0 {
+			// 首轮已在动态 guard 前检查；后续每个虚拟 CALL 前继续保留 direct CALL 取消边界。
+			if err := state.CheckContext(); err != nil {
+				return nextPC, iterations, true, err
+			}
+		}
+
+		callResult := sum + visibleIndex
+		registers[superInstruction.FunctionSlot] = batch.functionValue
+		registers[superInstruction.FirstArgumentSlot] = IntegerValue(sum)
+		registers[superInstruction.SecondArgumentSlot] = IntegerValue(visibleIndex)
+		registers[superInstruction.FunctionSlot] = IntegerValue(callResult)
+		registers[superInstruction.SumRegister] = IntegerValue(callResult)
+		sum = callResult
+		iterations++
+
+		nextIndex := index + step
+		nextPC = superInstruction.ExitPC
+		if forIntegerLoopContinues(nextIndex, limit, step) {
+			// 循环继续时更新内部 index 和外部可见循环变量，并跳回循环体开头。
+			index = nextIndex
+			visibleIndex = nextIndex
+			registers[superInstruction.ForBase] = IntegerValue(index)
+			registers[superInstruction.ForBase+3] = IntegerValue(visibleIndex)
+			nextPC = superInstruction.LoopPC
+			vm.pcOffset = superInstruction.ForSBx
+		} else {
+			// 循环结束时不写入越界后的 index，保持普通 FORLOOP 语义。
+			vm.pcOffset = 0
+			break
+		}
+	}
+	if iterations == 0 {
+		return 0, 0, false, nil
+	}
+	vm.currentPC = batch.pc + 5
+	vm.skipNext = false
+	vm.closeFrom = -1
+	vm.hasCallRequest = false
+	vm.returned = false
+	return nextPC, iterations, true, nil
 }
 
 // ensureFormatLenAddForLoopSuperInstructions 返回当前 Proto 的 string.format 长度消费预匹配表。

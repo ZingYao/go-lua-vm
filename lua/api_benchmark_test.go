@@ -332,6 +332,49 @@ return sum
 	benchmarkPreparedClosure(b, source)
 }
 
+// BenchmarkDoStringFunctionCallOfficial 度量官方完整 benchmark 同规模的 Lua 函数调用循环。
+func BenchmarkDoStringFunctionCallOfficial(b *testing.B) {
+	source := `
+local function add(a, b)
+  return a + b
+end
+local sum = 0
+for i = 1, 200000 do
+  sum = add(sum, i)
+end
+return sum
+`
+	b.ReportAllocs()
+	for benchmarkIndex := 0; benchmarkIndex < b.N; benchmarkIndex++ {
+		// 每轮创建独立 State，覆盖源码编译、加载和执行的端到端路径，并对齐官方脚本循环规模。
+		state := NewState()
+		if err := OpenLibs(state); err != nil {
+			state.Close()
+			b.Fatalf("OpenLibs failed: %v", err)
+		}
+		if err := DoString(state, source); err != nil {
+			state.Close()
+			b.Fatalf("DoString failed: %v", err)
+		}
+		state.Close()
+	}
+}
+
+// BenchmarkPreparedFunctionCallOfficial 度量预编译后重复执行官方规模 Lua 函数调用循环。
+func BenchmarkPreparedFunctionCallOfficial(b *testing.B) {
+	source := `
+local function add(a, b)
+  return a + b
+end
+local sum = 0
+for i = 1, 200000 do
+  sum = add(sum, i)
+end
+return sum
+`
+	benchmarkPreparedClosure(b, source)
+}
+
 // BenchmarkDoStringClosureUpvalueOfficial 度量官方完整 benchmark 同规模的闭包 upvalue 写读调用热路径。
 func BenchmarkDoStringClosureUpvalueOfficial(b *testing.B) {
 	source := `

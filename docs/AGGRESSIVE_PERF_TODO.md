@@ -264,8 +264,8 @@ error path 和 `debug.getinfo` 语义不变；本轮不改生产代码。
 
 ### 2026-07-03 `MOVE; MOVE; LOADK; CALL; ADD; FORLOOP` superinstruction 原型
 
-实现：在 `runtime.VM` 中新增完整 `function_call` 循环体匹配和 `TryExecuteFunctionCallAddForLoop`，
-只覆盖官方 benchmark 的 `sum = sum + add(i, 1)` 形态。构建期要求字节码精确为
+实现：在 `runtime.VM` 中新增 `function_call` Go micro 循环体匹配和 `TryExecuteFunctionCallAddForLoop`，
+只覆盖早期 Go micro 的 `sum = sum + add(i, 1)` 形态。构建期要求字节码精确为
 `MOVE; MOVE; LOADK; CALL; ADD; FORLOOP`，其中 `CALL` 固定两实参单返回，`ADD` 必须写回同一个
 `sum` 寄存器，`FORLOOP` 必须回跳当前第一条 `MOVE`。
 
@@ -292,6 +292,8 @@ benchmark 复核：
 对比上一轮 function_call prepared 约 `411-412 us/op`、DoString 约 `461-475 us/op`，循环级 CALL
 superinstruction 明显减少 CALL 边界和逐指令分发成本。DoString 分配多 1 alloc/op，来自新增 VM-local
 superinstruction 表；目标 wall-clock 收益显著，prepared 分配不变。非目标 mix 和 recursion 未显示稳定退化。
+后续复核确认默认完整 benchmark 的 `function_call` 源码实际是 `sum = add(sum, i)`，不是该 Go micro 形态，
+因此完整 benchmark 需要单独的官方赋值形态 fast path。
 
 ### 2026-07-03 `string.format("%d", i)` 固定结果 fastcall
 
@@ -555,6 +557,63 @@ benchmark 复核：
 明显。非目标 prepared 矩阵未显示该提交引入的稳定退化；`BenchmarkPreparedRecursion` 中一轮 `2.02 us/op`
 属于本机短测噪声，绝对值仍处于自递归 fast path 区间。
 
+### 2026-07-04 function_call 官方赋值形态 batch
+
+发现：默认完整 benchmark 的 `function_call` 源码是 `sum = add(sum, i)`，官方 Lua 5.3.6 和本项目热循环
+字节码均为 `MOVE; MOVE; MOVE; CALL; MOVE; FORLOOP`；此前 `MOVE; MOVE; LOADK; CALL; ADD; FORLOOP`
+只命中 Go micro 的 `sum = sum + add(i, 1)`。因此上一轮 micro 收益没有反映到默认完整 benchmark，
+后者仍约 `2.87x / 3.14x / 2.89x`，其中第二轮伴随其它项目大幅抖动，判断为机器噪声但也暴露了口径不一致。
+
+实现：新增 `FunctionCallAssignForLoopBatch` 和 `TryExecuteFunctionCallAssignForLoopBatch`，只覆盖
+官方完整 fixture 的 `sum = add(sum, i)` 数据流。构建期要求字节码精确为
+`MOVE; MOVE; MOVE; CALL; MOVE; FORLOOP`，其中 `CALL` 固定两实参单返回，`MOVE` 结果必须写回第一实参
+来源的 `sum` 寄存器，`FORLOOP` 必须回跳当前第一条 `MOVE`。同时新增
+`BenchmarkDoStringFunctionCallOfficial` 与 `BenchmarkPreparedFunctionCallOfficial`，避免后续把旧 micro
+与官方完整 benchmark 混用。
+
+语义 guard：
+
+- 仍只在无 hook、无 coroutine/continuation、无需精确逐 PC 同步且 context 窗口足够时启用。
+- runtime 批量方法在首个虚拟 CALL 的动态 guard 前先执行 `State.CheckContext()`，后续每个虚拟 CALL
+  前继续检查 context，保留 direct CALL 取消边界。
+- batch 绑定当前 Proto，callee 来源寄存器若被替换则回退；只覆盖 `return a+b` 叶子 Lua closure。
+- 执行期要求 `sum`、可见循环变量和 numeric-for 控制槽都是 integer；非 integer、寄存器别名或窗口不足
+  回退普通 VM，错误路径仍由原 `CALL/MOVE/FORLOOP` 处理。
+
+benchmark 复核：
+
+| 用例 | 结果 |
+| --- | ---: |
+| `BenchmarkDoStringFunctionCallOfficial` | `2.891 / 2.881 / 2.877 ms/op`，约 `63.3 KB/op`，`253 allocs/op` |
+| `BenchmarkPreparedFunctionCallOfficial` | `2.834 / 2.833 / 2.840 ms/op`，`402 B/op`，`2 allocs/op` |
+| `BenchmarkDoStringFunctionCall` | `109.9 / 109.4 / 111.6 us/op`，约 `63.7 KB/op`，`255 allocs/op` |
+| `BenchmarkPreparedFunctionCall` | `72.56 / 72.66 / 72.59 us/op`，`400 B/op`，`2 allocs/op` |
+| `BenchmarkPreparedArithAddLoopOfficial` | `17.28 / 17.31 / 17.28 ms/op`，`0 allocs/op` |
+| `BenchmarkPreparedArithMixLoopOfficial` | `17.40 / 18.44 / 17.50 ms/op`，`0 allocs/op` |
+| `BenchmarkPreparedArithChainTempOfficial` | `28.25 / 28.29 / 28.27 ms/op`，`0 allocs/op` |
+| `BenchmarkPreparedTableReadWriteOfficial` | `13.53 / 13.66 / 13.54 ms/op`，约 `11.21 MB/op`，`3 allocs/op` |
+| `BenchmarkPreparedClosureUpvalueOfficial` | `18.31 / 18.30 / 18.35 ms/op`，`512 B/op`，`4 allocs/op` |
+| `BenchmarkPreparedRecursion` | `1.656 / 1.658 / 1.654 us/op`，`224 B/op`，`2 allocs/op` |
+
+重建 `bin/glua` / `bin/gluac` 后，正确 Lua 5.3.6 默认完整 benchmark 三轮：
+
+| 用例 | 本项目/官方 |
+| --- | ---: |
+| `arith_add_loop` | `2.83x / 2.85x / 2.86x` |
+| `arith_mix_loop` | `1.94x / 1.94x / 1.93x` |
+| `arith_chain_temp` | `2.52x / 2.54x / 2.53x` |
+| `table_rw` | `2.68x / 2.65x / 2.66x` |
+| `function_call` | `1.03x / 1.03x / 1.02x` |
+| `string_concat` | `1.84x / 1.78x / 1.82x` |
+| `closure_upvalue` | `2.85x / 2.85x / 2.89x` |
+| `stdlib_math_string` | `1.54x / 1.53x / 1.52x` |
+| `recursion` | `1.05x / 1.04x / 1.05x` |
+| `compile_3000_functions` | `2.32x / 2.33x / 2.31x` |
+
+结论：官方赋值形态 batch 后，默认完整 `function_call` 从约 `2.9x` 边缘项降到约 `1.03x`，主要路径仍
+全部低于 `3x`。当前最接近边界的是 `closure_upvalue` 的 `2.85-2.89x` 和 `arith_add_loop` 的
+`2.83-2.86x`；后续若继续优化，应优先 profile 这些真实剩余边缘项，而不是继续扩展 function_call。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -634,7 +693,8 @@ benchmark 复核：
 - [x] 若继续推进，优先复核 `function_call` 默认完整 benchmark 的 3x 边缘波动；只有默认完整和 prepared Go micro 都证明稳定退化时，再设计新的调用边界优化。
 - [x] 若继续推进 `function_call`，先设计 `TryExecuteFunctionCallAddForLoop` 批量执行/guard hoisting 的语义方案，证明 context、PC、debug hook 和错误路径等价后再实现。
 - [x] 实现保守版 `function_call` guard hoisting 原型；每个虚拟 `CALL` 保留 context 检查，若收益不足或语义复杂度过高则记录证伪并回退。
-- [ ] 基于 function_call 批量路径重建 CLI 并复跑默认完整 benchmark，确认 `function_call` 倍率稳定改善且非目标路径无退化。
+- [x] 基于 function_call 批量路径重建 CLI 并复跑默认完整 benchmark，确认 `function_call` 倍率稳定改善且非目标路径无退化。
+- [ ] 若继续推进，优先 profile `closure_upvalue` 或 `arith_add_loop` 的剩余 2.8x 边缘项，确认存在全新语义等价切口后再实现。
 - [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准

@@ -2479,6 +2479,7 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 	addForLoopSuperInstructionEnabled := false
 	mulAddSubForLoopSuperInstructionEnabled := false
 	mixArithmeticForLoopSuperInstructionEnabled := false
+	functionCallAssignForLoopSuperInstructionEnabled := false
 	functionCallAddForLoopSuperInstructionEnabled := false
 	formatLenAddForLoopSuperInstructionEnabled := false
 	if !preciseFrameSync && !hooksEnabled {
@@ -2486,6 +2487,7 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 		addForLoopSuperInstructionEnabled = vm.PrepareAddForLoopSuperInstructions()
 		mulAddSubForLoopSuperInstructionEnabled = vm.PrepareMulAddSubForLoopSuperInstructions()
 		mixArithmeticForLoopSuperInstructionEnabled = vm.PrepareMixArithmeticForLoopSuperInstructions()
+		functionCallAssignForLoopSuperInstructionEnabled = vm.PrepareFunctionCallAssignForLoopSuperInstructions()
 		functionCallAddForLoopSuperInstructionEnabled = vm.PrepareFunctionCallAddForLoopSuperInstructions()
 		formatLenAddForLoopSuperInstructionEnabled = vm.PrepareFormatLenAddForLoopSuperInstructions()
 	}
@@ -2541,6 +2543,41 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 				previousPC = formatPC + 7
 				pc = nextPC
 				continue
+			}
+		}
+		if functionCallAssignForLoopSuperInstructionEnabled && !preciseFrameSync && !hooksEnabled && contextCheckCountdown >= 5 && vm.HasFunctionCallAssignForLoopAt(pc) {
+			// 六指令官方 function_call 循环会额外跳过 MOVE、MOVE、CALL、MOVE、FORLOOP 五个入口；
+			// 倒计时至少为 5 才能证明逐指令路径不会在被跳过区间触发 context 检查。
+			movePC := pc
+			callContextChecked := false
+			if batch, ok := vm.PrepareFunctionCallAssignForLoopBatch(movePC); ok {
+				// 保守批量路径只复用静态 guard；runtime 内部每个虚拟 CALL 前仍执行 context 检查。
+				nextPC, handledIterations, handled, err := vm.TryExecuteFunctionCallAssignForLoopBatch(batch, contextCheckCountdown/5, state)
+				callContextChecked = true
+				if err != nil {
+					// context 取消时同步到当前循环体入口，保持 direct CALL fast path 的错误 PC 边界。
+					if syncErr := syncCurrentFrame(movePC); syncErr != nil {
+						return nil, syncErr
+					}
+					return nil, err
+				}
+				if handled {
+					// superinstruction 已完成若干轮 MOVE、MOVE、MOVE、CALL、MOVE 与 FORLOOP；补偿被跳过入口。
+					contextCheckCountdown -= handledIterations * 5
+					previousPreviousPC = movePC + 4
+					previousPC = movePC + 5
+					pc = nextPC
+					continue
+				}
+			}
+			if !callContextChecked {
+				// 静态 PC 命中但 batch guard 失败时，仍保留一次 CALL 入口取消边界。
+				if err := state.CheckContext(); err != nil {
+					if syncErr := syncCurrentFrame(pc); syncErr != nil {
+						return nil, syncErr
+					}
+					return nil, err
+				}
 			}
 		}
 		if functionCallAddForLoopSuperInstructionEnabled && !preciseFrameSync && !hooksEnabled && contextCheckCountdown >= 5 && vm.HasFunctionCallAddForLoopAt(pc) {
