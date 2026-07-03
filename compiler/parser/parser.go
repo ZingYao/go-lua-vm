@@ -859,20 +859,38 @@ func (parser *Parser) parseReturnStatementUntil(extraEnd func(lexer.Token) bool)
 		// 调用方已经判断 return，该错误只作为防御。
 		return nil, err
 	}
-	var values []Expression
 	if parser.isReturnEndToken(parser.current, extraEnd) {
 		// return 后直接结束 block 或语句，表示无返回值。
 		if parser.current.Kind == lexer.TokenOperator && parser.current.Text == ";" {
 			// Lua 允许 `return;`，分号属于 return 语句自身而不是后续空语句。
 			parser.advance()
 		}
-		return &ReturnStatement{Values: values, Position: position}, nil
+		return &ReturnStatement{Position: position}, nil
 	}
-	var err error
-	values, err = parser.parseExpressionList()
+	firstExpression, err := parser.parseExpression()
 	if err != nil {
-		// return 后表达式列表解析失败时返回错误。
+		// return 后首个表达式解析失败时返回错误。
 		return nil, err
+	}
+	statement := &ReturnStatement{Position: position}
+	if parser.current.Kind == lexer.TokenOperator && parser.current.Text == "," {
+		// 多返回值才需要独立切片保存完整表达式列表。
+		values := []Expression{firstExpression}
+		for parser.current.Kind == lexer.TokenOperator && parser.current.Text == "," {
+			// 逗号后必须继续出现表达式。
+			parser.advance()
+			nextExpression, err := parser.parseExpression()
+			if err != nil {
+				// 缺少逗号后的表达式时返回错误。
+				return nil, err
+			}
+			values = append(values, nextExpression)
+		}
+		statement.Values = values
+	} else {
+		// 单返回值复用 return 节点内嵌槽，对外仍暴露普通切片语义。
+		statement.inlineValues[0] = firstExpression
+		statement.Values = statement.inlineValues[:1]
 	}
 	if parser.current.Kind == lexer.TokenOperator && parser.current.Text == ";" {
 		// return 后允许可选分号。
@@ -880,7 +898,7 @@ func (parser *Parser) parseReturnStatementUntil(extraEnd func(lexer.Token) bool)
 	}
 
 	// 返回 return 语句节点。
-	return &ReturnStatement{Values: values, Position: position}, nil
+	return statement, nil
 }
 
 // parseNameList 解析一个或多个逗号分隔名称。

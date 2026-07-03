@@ -609,6 +609,8 @@ func (statement *LabelStatement) statementNode() {
 type ReturnStatement struct {
 	// Values 保存 return 后的表达式列表。
 	Values []Expression
+	// inlineValues 保存最常见的单返回表达式，避免为 Values 单独分配底层数组。
+	inlineValues [1]Expression
 	// Position 保存 return 关键字位置。
 	Position lexer.Position
 }

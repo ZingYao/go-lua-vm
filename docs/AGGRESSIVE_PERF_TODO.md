@@ -1196,6 +1196,34 @@ benchmark 复核：
 后续若继续压缩 parser 分配，应优先 profile 真实表达式 AST 节点和 semantic `ScopeInfo`，而不是继续围绕
 函数体单参数做局部分支。
 
+### 2026-07-04 单返回值内嵌槽
+
+函数体单参数内嵌槽后的 profile 显示，`parseReturnStatementUntil`、`parseExpressionList` 与真实表达式 AST
+仍是 `compile_3000_functions` 的主要 parser 侧对象来源之一。官方规模源码中每个子函数都是单返回值
+`return x + N`，此前 return 解析会复用通用 `parseExpressionList`，为单元素 `Values []Expression`
+分配独立底层数组。
+
+实现：`ReturnStatement` 新增一元素内嵌表达式槽。`parseReturnStatementUntil` 先解析首个表达式，
+只有遇到逗号时才创建普通表达式切片并继续解析多返回值；单返回值让 `Values` 指向
+`ReturnStatement.inlineValues[:1]`。空 `return`/`return;`、多返回值、vararg/call open return、
+switch case/default 的额外结束 token 和 codegen/semantic 读取 `Values` 的对外语义不变。
+
+新增测试：
+
+| 用例 | 覆盖点 |
+| --- | --- |
+| `TestParserReturnStatementInlineSingleValue` | 单返回值的 `Values` 指向内嵌槽；多返回值仍保留普通切片顺序。 |
+
+benchmark 复核：
+
+| 用例 | 结果 |
+| --- | ---: |
+| `BenchmarkCompileSource3000Functions` | `6.932 / 6.920 / 6.915 / 6.910 / 6.896 ms/op`，约 `5.66 MB/op`，`54133 allocs/op` |
+
+对比函数体单参数内嵌槽后的约 `6.91-6.99 ms/op`、`57139 allocs/op`，该优化再减少约 `3000 allocs/op`；
+B/op 基本持平，wall-clock 在噪声内小幅向好。该切口只改变 AST 内部切片底层存储所有权；后续若继续推进
+编译期，应重新 profile 表达式 AST、semantic `ScopeInfo` 与 Proto/generator 实体成本。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -1292,7 +1320,8 @@ benchmark 复核：
 - [x] 若继续推进编译期，优先 profile 小容量预留后的 parser AST、semantic scope 与 namespace；只有出现新的结构性切口时再实现。
 - [x] 若继续推进编译期，优先 profile 简单函数名免 AST 节点后的 parser AST 与 semantic scope；只有出现新的结构性切口时再实现。
 - [x] 若继续推进编译期，优先 profile 函数命名空间内嵌栈后的剩余 parser AST、semantic scope 与 Proto/generator 实体成本。
-- [ ] 若继续推进编译期，优先 profile 函数体单参数内嵌槽后的真实表达式 AST、semantic `ScopeInfo` 与 Proto/generator 实体成本。
+- [x] 若继续推进编译期，优先 profile 函数体单参数内嵌槽后的真实表达式 AST、semantic `ScopeInfo` 与 Proto/generator 实体成本。
+- [ ] 若继续推进编译期，优先 profile 单返回值内嵌槽后的表达式 AST、semantic `ScopeInfo` 与 Proto/generator 实体成本。
 - [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准

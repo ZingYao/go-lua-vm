@@ -297,6 +297,44 @@ func TestParserFunctionBodyInlineSingleParam(t *testing.T) {
 	}
 }
 
+// TestParserReturnStatementInlineSingleValue 验证单返回值复用 return 节点内嵌表达式槽。
+//
+// 对外 Values 仍保持普通切片语义；多返回值继续使用普通切片保存完整表达式顺序。
+func TestParserReturnStatementInlineSingleValue(t *testing.T) {
+	parser := New("function one(x) return x end function pair(x) return x, x end")
+
+	chunk, err := parser.ParseChunk()
+	if err != nil {
+		// 两个普通函数都应成功解析。
+		t.Fatalf("parse functions failed: %v", err)
+	}
+	oneFunction, ok := chunk.Block.Statements[0].(*FunctionStatement)
+	if !ok {
+		// 第一条语句应为简单函数定义。
+		t.Fatalf("first statement should be function")
+	}
+	oneReturn := oneFunction.Body.Body.Return
+	if oneReturn == nil || len(oneReturn.Values) != 1 {
+		// 单返回值函数应保留一个返回表达式。
+		t.Fatalf("unexpected one return=%+v", oneReturn)
+	}
+	if &oneReturn.Values[0] != &oneReturn.inlineValues[0] {
+		// 单返回值的 Values 应指向 return 节点内嵌槽。
+		t.Fatalf("single return value should use inline slot")
+	}
+
+	pairFunction, ok := chunk.Block.Statements[1].(*FunctionStatement)
+	if !ok {
+		// 第二条语句应为简单函数定义。
+		t.Fatalf("second statement should be function")
+	}
+	pairReturn := pairFunction.Body.Body.Return
+	if pairReturn == nil || len(pairReturn.Values) != 2 {
+		// 多返回值函数必须保持源码返回值顺序。
+		t.Fatalf("unexpected pair return=%+v", pairReturn)
+	}
+}
+
 // TestParserIfWhileRepeatStatements 验证 if/elseif/else、while 和 repeat-until 语句。
 //
 // 条件表达式当前使用基础表达式，block 内使用已实现赋值语句。
