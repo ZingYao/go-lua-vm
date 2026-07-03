@@ -993,6 +993,38 @@ benchmark 复核：
 也不预期带来分配收益。下一步真正的性能切口是在 helper 已覆盖访问点后，单独启用单 local inline 槽，
 并按上面的语义验收矩阵验证 overflow map 行为、scope restore 和 captured 标记。
 
+### 2026-07-04 codegen 单 local inline 槽
+
+实现：`generator` 新增 `localInlineName`、`localInlineBinding` 和 `localInlineValid`，第一个可见 local
+优先写入 inline 槽；第二个及之后不同名称 local 继续进入 `locals` overflow map。同名重声明、
+captured 标记写回和 upvalue 捕获通过 `setLocal` 更新原槽位，`lookupLocal`、`forEachLocal`、
+`localCount`、`snapshotLocals` 与 `restoreLocalSnapshot` 统一处理 inline 槽和 overflow map。
+
+语义边界：
+
+- 该优化只改变 codegen 内部局部变量绑定存储，不改变 AST、Proto 字节码、LocalVars、Upvalues 或
+  debug 可见生命周期。
+- block scope snapshot 同时保存 inline 槽和 overflow map；退出 block 时一起恢复，避免内层遮蔽污染外层绑定。
+- `mergeCapturedLocalsIntoSnapshot` 会把内层 block 捕获外层 inline local 的 captured 标记合并回快照，
+  保证外层 block 退出时仍生成 close-only `JMP`。
+
+新增测试：
+
+| 用例 | 覆盖点 |
+| --- | --- |
+| `TestGeneratorLocalInlineUsesOverflowOnlyAfterSecondBinding` | 单 local 不创建 overflow map，第二个 local 进入 map。 |
+| `TestCompileNestedShadowRestoresInlineLocal` | 内层同名 local 退出后，`return x` 仍读取外层 inline local。 |
+| `TestCompileNestedBlockCaptureMergesInlineCapturedLocal` | 嵌套 block 捕获外层 inline local 时保留 close-only `JMP`。 |
+
+benchmark 复核：
+
+| 用例 | 结果 |
+| --- | ---: |
+| `BenchmarkCompileSource3000Functions` | `8.464 / 8.009 / 8.456 / 8.703 / 8.170 ms/op`，约 `6.28 MB/op`，`75144-75145 allocs/op` |
+
+对比 helper-only 的约 `7.58 MB/op`、`81145 allocs/op`，inline 槽减少约 6000 allocs/op 和约 1.30 MB/op。
+wall-clock 受机器状态影响在 `8.0-8.7 ms/op` 波动，本轮收益主要体现在分配减少；未观察到稳定退化。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -1082,7 +1114,8 @@ benchmark 复核：
 - [x] 若继续推进，优先 profile `compile_3000_functions`；如果没有新的编译期结构性切口，记录证伪，不再堆 parser/codegen 局部字段微调。
 - [x] 若继续推进编译期，先设计 codegen `locals map` 单局部 inline cache 的语义方案和测试矩阵；确认 name resolution、同作用域重声明、upvalue 捕获、scope snapshot、goto/label 和 debug local 生命周期后再实现。
 - [x] 若继续推进编译期，先新增 codegen locals helper 并替换直接访问点，保持 overflow map 行为等价；通过测试后再启用 inline 槽。
-- [ ] 启用 codegen 单 local inline 槽，优先验证单参数函数不创建 overflow map，同时保持同作用域重声明、内层遮蔽、upvalue captured、goto/label 和 debug local 生命周期等价。
+- [x] 启用 codegen 单 local inline 槽，优先验证单参数函数不创建 overflow map，同时保持同作用域重声明、内层遮蔽、upvalue captured、goto/label 和 debug local 生命周期等价。
+- [ ] 若继续推进编译期，基于 inline 槽后 profile 重新观察 `compile_3000_functions`，确认剩余分配是否仍有新的结构性切口。
 - [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准

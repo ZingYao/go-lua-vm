@@ -688,6 +688,64 @@ func TestCompileChunkClosesSameScopeShadowedLocal(t *testing.T) {
 	}
 }
 
+// TestGeneratorLocalInlineUsesOverflowOnlyAfterSecondBinding 验证单 local 优先使用 inline 槽。
+func TestGeneratorLocalInlineUsesOverflowOnlyAfterSecondBinding(t *testing.T) {
+	generator := newGenerator("inline-local")
+	firstBinding := localBinding{register: 0, localVarIndex: 0, scopeID: 1}
+	generator.setLocal("x", firstBinding)
+	if !generator.localInlineValid || generator.localInlineName != "x" || generator.localInlineBinding != firstBinding {
+		// 第一个 local 必须进入 inline 槽，避免单参数函数创建 overflow map。
+		t.Fatalf("unexpected inline local state: valid=%v name=%q binding=%+v", generator.localInlineValid, generator.localInlineName, generator.localInlineBinding)
+	}
+	if generator.locals != nil {
+		// 单 local 场景不应创建 overflow map，这是本轮优化的核心收益点。
+		t.Fatalf("single local should not allocate overflow map: %+v", generator.locals)
+	}
+	if binding, ok := generator.lookupLocal("x"); !ok || binding != firstBinding {
+		// helper 查找必须能读取 inline 槽。
+		t.Fatalf("lookup inline local = %+v, %v", binding, ok)
+	}
+
+	secondBinding := localBinding{register: 1, localVarIndex: 1, scopeID: 1}
+	generator.setLocal("y", secondBinding)
+	if generator.localCount() != 2 {
+		// inline 槽和 overflow map 都必须计入可见 local 数量。
+		t.Fatalf("local count=%d", generator.localCount())
+	}
+	if binding, ok := generator.lookupLocal("y"); !ok || binding != secondBinding {
+		// 第二个不同名称 local 必须进入 overflow map 并仍可通过 helper 查找。
+		t.Fatalf("lookup overflow local = %+v, %v", binding, ok)
+	}
+	if len(generator.locals) != 1 {
+		// overflow map 只应保存第二个及之后的不同名称 local。
+		t.Fatalf("unexpected overflow locals=%+v", generator.locals)
+	}
+}
+
+// TestCompileNestedShadowRestoresInlineLocal 验证内层遮蔽退出后恢复外层 inline local。
+func TestCompileNestedShadowRestoresInlineLocal(t *testing.T) {
+	chunk := parseChunkForCodegenTest(t, "local x = 1 do local x = 2 end return x")
+
+	proto, err := CompileChunk(chunk, "inline-shadow")
+	if err != nil {
+		// 合法内层遮蔽样例不应编译失败。
+		t.Fatalf("compile inline shadow failed: %v", err)
+	}
+	if len(proto.LocalVars) != 2 {
+		// 外层和内层 x 都必须保留独立调试局部变量生命周期。
+		t.Fatalf("unexpected local vars=%+v", proto.LocalVars)
+	}
+	if proto.LocalVars[0].Name != "x" || proto.LocalVars[1].Name != "x" {
+		// 同名遮蔽不能丢失任一 LocalVar 名称。
+		t.Fatalf("unexpected local names=%+v", proto.LocalVars)
+	}
+	returnInstruction := proto.Code[len(proto.Code)-1]
+	if returnInstruction.OpCode() != bytecode.OpReturn || returnInstruction.A() != 0 {
+		// block 结束后 return x 必须读取外层 R0，而不是内层遮蔽 local 的 R1。
+		t.Fatalf("return should read outer inline local R0: code=%v locals=%+v", proto.Code, proto.LocalVars)
+	}
+}
+
 // TestCompileChunkNestedFunctionCapturesUpvalue 验证嵌套函数 Proto 和 upvalue 捕获。
 //
 // local function 内读取外层 local 时，子 Proto 必须声明 InStack upvalue 并生成 GETUPVAL。
@@ -1438,6 +1496,28 @@ func TestCompileCapturedBlockLocalKeepsCloseJump(t *testing.T) {
 	if !hasCloseOnlyJump {
 		// 捕获 block local 时不能省略 close-only JMP。
 		t.Fatalf("missing close-only JMP for captured block local; code=%v", proto.Code)
+	}
+}
+
+// TestCompileNestedBlockCaptureMergesInlineCapturedLocal 验证嵌套 block 捕获会合并 inline captured 标记。
+func TestCompileNestedBlockCaptureMergesInlineCapturedLocal(t *testing.T) {
+	chunk := parseChunkForCodegenTest(t, "do local x = 1 do local function f() return x end end end")
+
+	proto, err := CompileChunk(chunk, "nested-inline-capture")
+	if err != nil {
+		// 捕获外层 block inline local 的样例必须可编译。
+		t.Fatalf("compile nested inline capture failed: %v", err)
+	}
+	hasCloseOnlyJump := false
+	for _, instruction := range proto.Code {
+		if instruction.OpCode() == bytecode.OpJmp && instruction.A() > 0 && instruction.SBx() == 0 {
+			// 内层 block 捕获外层 x 后，外层 block 退出时仍必须关闭 open upvalue。
+			hasCloseOnlyJump = true
+		}
+	}
+	if !hasCloseOnlyJump {
+		// snapshot 合并遗漏 captured 标记会导致这里缺少 close-only JMP。
+		t.Fatalf("missing close-only JMP for nested inline capture; code=%v locals=%+v", proto.Code, proto.LocalVars)
 	}
 }
 

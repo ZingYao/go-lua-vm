@@ -59,7 +59,13 @@ type generator struct {
 	maxRegister int
 	// constants 保存常量去重索引，按常量类型拆分以对齐 Lua 5.3 addk 的原值 key 语义。
 	constants constantIndexes
-	// locals 保存当前函数已声明局部变量到寄存器的映射。
+	// localInlineName 保存单局部 inline 槽的名称。
+	localInlineName string
+	// localInlineBinding 保存单局部 inline 槽的绑定。
+	localInlineBinding localBinding
+	// localInlineValid 表示单局部 inline 槽当前是否有效。
+	localInlineValid bool
+	// locals 保存当前函数第二个及之后局部变量到寄存器的 overflow 映射。
 	locals map[string]localBinding
 	// upvalues 保存当前函数已捕获 upvalue 到 upvalue 索引的映射。
 	upvalues map[string]int
@@ -99,19 +105,40 @@ type localBinding struct {
 
 // lookupLocal 返回当前函数内名称对应的可见局部变量绑定。
 //
-// 当前实现仍只读取 overflow map；后续启用 inline local 槽时，调用方不需要改动名称解析逻辑。
+// 先查单局部 inline 槽，再查 overflow map；调用方不需要关心当前函数是否已经创建 map。
 func (generator *generator) lookupLocal(name string) (localBinding, bool) {
-	// nil map 读取与空 map 等价，直接返回查找结果。
+	if generator.localInlineValid && generator.localInlineName == name {
+		// 命中 inline 槽时直接返回，避免单 local 函数创建 map。
+		return generator.localInlineBinding, true
+	}
+	// nil map 读取与空 map 等价，直接返回 overflow 查找结果。
 	binding, ok := generator.locals[name]
 	return binding, ok
 }
 
 // setLocal 写入当前函数内名称对应的可见局部变量绑定。
 //
-// 当前实现保持原有 map 行为；首次写入时延迟创建 map，维持既有分配时机。
+// 第一个局部绑定优先使用 inline 槽；同名更新保持原槽位，第二个及之后名称进入 overflow map。
 func (generator *generator) setLocal(name string, binding localBinding) {
+	if generator.localInlineValid && generator.localInlineName == name {
+		// 同名重声明或 captured 标记写回必须更新原 inline 槽。
+		generator.localInlineBinding = binding
+		return
+	}
+	if _, exists := generator.locals[name]; exists {
+		// 已经位于 overflow map 的绑定保持在 map 中，避免同名同时存在两份状态。
+		generator.locals[name] = binding
+		return
+	}
+	if !generator.localInlineValid && len(generator.locals) == 0 {
+		// 第一个局部变量使用 inline 槽，覆盖 compile_3000_functions 的单参数子函数热形态。
+		generator.localInlineName = name
+		generator.localInlineBinding = binding
+		generator.localInlineValid = true
+		return
+	}
 	if generator.locals == nil {
-		// 首次声明局部变量时才创建绑定表；nil map 的读取、遍历和 len 与空 map 等价。
+		// 第二个不同名称局部变量才创建 overflow map，保留多 local 的完整名称解析能力。
 		generator.locals = make(map[string]localBinding)
 	}
 	generator.locals[name] = binding
@@ -119,40 +146,51 @@ func (generator *generator) setLocal(name string, binding localBinding) {
 
 // forEachLocal 遍历当前函数内所有可见局部变量绑定。
 //
-// 当前实现沿用 map 遍历顺序；调用方不能依赖遍历顺序，后续 inline 槽也必须保持这一约束。
+// 调用方不能依赖遍历顺序；inline 槽和 overflow map 都只是当前函数可见绑定集合。
 func (generator *generator) forEachLocal(fn func(name string, binding localBinding)) {
+	if generator.localInlineValid {
+		// inline 槽是可见局部集合的一部分，必须和 overflow map 一起参与生命周期处理。
+		fn(generator.localInlineName, generator.localInlineBinding)
+	}
 	for name, binding := range generator.locals {
-		// 把绑定交给调用方处理，保持原 map 遍历行为。
+		// 把 overflow 绑定交给调用方处理，保持原 map 遍历行为。
 		fn(name, binding)
 	}
 }
 
 // localCount 返回当前函数可见局部变量绑定数量。
 func (generator *generator) localCount() int {
-	// 当前只有 overflow map，len(nil) 与 len(empty) 都为 0。
-	return len(generator.locals)
+	count := len(generator.locals)
+	if generator.localInlineValid {
+		// inline 槽有效时需要计入可见局部数量。
+		count++
+	}
+	return count
 }
 
-// snapshotLocals 复制当前函数可见局部变量绑定。
+// snapshotLocals 复制当前函数 overflow 局部变量绑定。
 //
-// 返回值用于 block scope 恢复；空局部表返回 nil，保持既有 snapshot 行为。
+// inline 槽由 scopeSnapshot 单独保存；空 overflow map 返回 nil，保持既有 map 快照行为。
 func (generator *generator) snapshotLocals() map[string]localBinding {
-	if generator.localCount() == 0 {
-		// 没有外层局部绑定时无需创建快照 map。
+	if len(generator.locals) == 0 {
+		// 没有 overflow 绑定时无需创建快照 map。
 		return nil
 	}
-	locals := make(map[string]localBinding, generator.localCount())
-	generator.forEachLocal(func(name string, binding localBinding) {
-		// 浅拷贝局部绑定，退出作用域时恢复外层同名变量。
+	locals := make(map[string]localBinding, len(generator.locals))
+	for name, binding := range generator.locals {
+		// 浅拷贝 overflow 绑定，退出作用域时恢复外层同名变量。
 		locals[name] = binding
-	})
+	}
 	return locals
 }
 
 // restoreLocalSnapshot 恢复 block 入口处保存的局部变量绑定快照。
-func (generator *generator) restoreLocalSnapshot(locals map[string]localBinding) {
-	// 当前实现仍直接恢复 overflow map；后续 inline 槽启用时集中在这里补充恢复逻辑。
-	generator.locals = locals
+func (generator *generator) restoreLocalSnapshot(snapshot scopeSnapshot) {
+	// inline 槽和 overflow map 必须一起恢复，确保退出 block 后外层遮蔽关系完全回到入口状态。
+	generator.localInlineName = snapshot.localInlineName
+	generator.localInlineBinding = snapshot.localInlineBinding
+	generator.localInlineValid = snapshot.localInlineValid
+	generator.locals = snapshot.locals
 }
 
 // constantIndexes 保存当前 Proto 的常量去重索引。
@@ -225,10 +263,16 @@ type assignmentTarget struct {
 
 // scopeSnapshot 保存进入嵌套 block 前的局部变量和寄存器状态。
 //
-// locals 是函数级局部绑定的浅拷贝；localVarCount 用于关闭本作用域新增调试局部变量；
-// nextRegister 用于退出作用域后复用内层临时和局部寄存器。
+// inline local 和 locals 都是函数级局部绑定的浅拷贝；localVarCount 用于关闭本作用域新增
+// 调试局部变量；nextRegister 用于退出作用域后复用内层临时和局部寄存器。
 type scopeSnapshot struct {
-	// locals 保存进入 block 前可见的局部变量绑定。
+	// localInlineName 保存进入 block 前 inline 局部变量名称。
+	localInlineName string
+	// localInlineBinding 保存进入 block 前 inline 局部变量绑定。
+	localInlineBinding localBinding
+	// localInlineValid 表示进入 block 前 inline 局部变量是否有效。
+	localInlineValid bool
+	// locals 保存进入 block 前 overflow 局部变量绑定。
 	locals map[string]localBinding
 	// localVarCount 保存进入 block 前 Proto.LocalVars 数量。
 	localVarCount int
@@ -4286,9 +4330,12 @@ func (generator *generator) currentScopeID() int {
 // 不回退已经生成的指令、常量或调试局部变量表。
 func (generator *generator) beginScope() scopeSnapshot {
 	return scopeSnapshot{
-		locals:        generator.snapshotLocals(),
-		localVarCount: len(generator.proto.LocalVars),
-		nextRegister:  generator.nextRegister,
+		localInlineName:    generator.localInlineName,
+		localInlineBinding: generator.localInlineBinding,
+		localInlineValid:   generator.localInlineValid,
+		locals:             generator.snapshotLocals(),
+		localVarCount:      len(generator.proto.LocalVars),
+		nextRegister:       generator.nextRegister,
 	}
 }
 
@@ -4305,8 +4352,8 @@ func (generator *generator) endScope(scope scopeSnapshot, endPC int) {
 		// 所有本作用域新增局部变量都在当前 block 末尾结束。
 		generator.proto.LocalVars[index].EndPC = endPC
 	}
-	generator.mergeCapturedLocalsIntoSnapshot(scope.locals)
-	generator.restoreLocalSnapshot(scope.locals)
+	generator.mergeCapturedLocalsIntoSnapshot(&scope)
+	generator.restoreLocalSnapshot(scope)
 	generator.nextRegister = scope.nextRegister
 }
 
@@ -4333,12 +4380,23 @@ func (generator *generator) hasCapturedLocalSince(localVarStart int) bool {
 // beginScope 会复制 locals 供退出 block 后恢复名称解析；若内层函数捕获了进入 block 前已存在的
 // local，resolveUpvalue 会先标记当前 binding。退出 block 时必须把该标记写回快照，否则外层后续
 // endScope 会误以为该 local 未被捕获，漏发 OP_JMP close 指令并让下一轮寄存器复用污染旧闭包。
-func (generator *generator) mergeCapturedLocalsIntoSnapshot(snapshot map[string]localBinding) {
-	if len(snapshot) == 0 || generator.localCount() == 0 {
+func (generator *generator) mergeCapturedLocalsIntoSnapshot(snapshot *scopeSnapshot) {
+	if snapshot == nil || (!snapshot.localInlineValid && len(snapshot.locals) == 0) || generator.localCount() == 0 {
 		// 没有外层快照或当前局部表为空时，无需合并捕获标记。
 		return
 	}
-	for name, snapshotBinding := range snapshot {
+	if snapshot.localInlineValid {
+		// inline 快照也可能在内层 block 被子函数捕获，必须把 captured 标记合并回去。
+		currentBinding, exists := generator.lookupLocal(snapshot.localInlineName)
+		if exists &&
+			currentBinding.localVarIndex == snapshot.localInlineBinding.localVarIndex &&
+			currentBinding.captured &&
+			!snapshot.localInlineBinding.captured {
+			// 当前 inline local 已在内层被捕获，恢复外层快照前必须保留 captured 标记。
+			snapshot.localInlineBinding.captured = true
+		}
+	}
+	for name, snapshotBinding := range snapshot.locals {
 		currentBinding, exists := generator.lookupLocal(name)
 		if !exists {
 			// 当前作用域中该名称已被完全遮蔽或移除，快照保持原值。
@@ -4349,7 +4407,7 @@ func (generator *generator) mergeCapturedLocalsIntoSnapshot(snapshot map[string]
 			continue
 		}
 		snapshotBinding.captured = true
-		snapshot[name] = snapshotBinding
+		snapshot.locals[name] = snapshotBinding
 	}
 }
 
