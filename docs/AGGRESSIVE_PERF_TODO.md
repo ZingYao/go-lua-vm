@@ -1398,6 +1398,46 @@ benchmark 复核：
 减少约 `6000 allocs/op`，B/op 小幅下降，wall-clock 小幅向好。后续若继续推进编译期，应重新 profile，
 再决定是否还存在比 AST/Proto 大重构更低风险的结构性切口。
 
+### 2026-07-04 Proto 单常量内嵌槽
+
+profile 复核：基于 Proto 短 `Code/LineInfo` 内嵌槽后，`BenchmarkCompileSource3000Functions`
+仍显示 `bytecode.(*Proto).AddConstant` 是稳定对象来源之一。8s profile 口径约 `6.67 ms/op`、
+`5.61 MB/op`、`39127 allocs/op`；alloc profile 中 `Proto.AddConstant` 约 `4.77M` objects、
+`771 MB` alloc_space，`compiler/codegen.newGenerator`、`bytecode.NewProto`、parser AST 和 semantic
+scope 仍是其它主要来源。
+
+实现：`bytecode.Proto` 新增单元素 `Constants` 内嵌槽，并新增 `PrepareInlineConstants` 作为
+codegen-only opt-in 入口。`bytecode.NewProto` 默认仍保持 `Constants == nil`，chunk loader、手写 Proto
+和外部嵌入方对空 Proto 的观察语义不变；`compiler/codegen.newGenerator` 创建 Proto 后显式准备
+单常量容量，覆盖 `compile_3000_functions` 中每个简单子函数只有一个 integer 常量的热形态。
+
+语义边界：
+
+- `Proto.AddConstant` 的索引、常量顺序和去重逻辑不变，调用方仍只看到公开 `Constants` 切片。
+- 第二个及之后常量自动走普通 slice 扩容；扩容后首个内嵌常量顺序必须保留。
+- `PrepareInlineConstants` 在已有 Constants 时保持无操作，避免误调用丢失 binary chunk loader 或手写
+  Proto 已经构造的常量表。
+- `StripDebug` 继续深拷贝 `Constants`，不会与原 Proto 共享内嵌短槽底层存储。
+
+新增/更新测试：
+
+| 用例 | 覆盖点 |
+| --- | --- |
+| `TestProtoPrepareInlineConstants` | 默认 `NewProto` nil 常量表、单常量 opt-in、第二个常量扩容后顺序、`StripDebug` 不共享 Constants。 |
+| `TestProtoAppendHelpers` | 默认 `NewProto` 仍保持 `Constants` nil。 |
+| `TestNewGeneratorPreallocatesCodeAndLineInfo` | codegen 同时 opt-in 短 `Code/LineInfo` 与单常量容量，并验证两个常量追加顺序。 |
+
+benchmark 复核：
+
+| 用例 | 结果 |
+| --- | ---: |
+| `BenchmarkCompileSource3000Functions` | `6.669 / 6.666 / 6.668 / 6.674 / 6.655 ms/op`，约 `5.61 MB/op`，`36132 allocs/op` |
+
+对比 Proto 短 `Code/LineInfo` 后 profile 的约 `39127 allocs/op`，单常量内嵌槽再减少约
+`3000 allocs/op`，B/op 与 wall-clock 基本持平。剩余主要成本回到 parser AST、semantic scope、
+`newGenerator/NewProto` 实体和多项最终元数据本体；后续若继续推进编译期，应先重新 profile，
+只在出现新的结构性切口时再实现，避免继续堆局部字段微调。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -1501,7 +1541,8 @@ benchmark 复核：
 - [x] 若继续推进编译期，优先 profile codegen 作用域栈内嵌槽后的 `newGenerator/NewProto`、真实表达式 AST 与常量记录成本。
 - [x] 若继续推进编译期，优先设计 `newGenerator/NewProto` 实体所有权、真实表达式 AST 布局或常量/指令存储的更大结构切口；未证明字节码、debug local 和错误语义等价前，不再堆局部字段或分支微调。
 - [x] 若继续推进编译期，优先实现 `Proto` 短 `Code/LineInfo` 内嵌槽原型；保持 `NewProto` 默认 nil 切片语义，只允许 codegen opt-in，并用官方 CLI/golden 门禁验证 bytecode/debug 输出不变。
-- [ ] 若继续推进编译期，基于 Proto 短槽后 profile 重新观察剩余 parser AST、semantic scope、Proto 常量/指令实体和 `newGenerator` 成本；无新结构性切口时记录证伪。
+- [x] 若继续推进编译期，基于 Proto 短槽后 profile 重新观察剩余 parser AST、semantic scope、Proto 常量/指令实体和 `newGenerator` 成本；无新结构性切口时记录证伪。
+- [ ] 若继续推进编译期，基于 Proto 单常量槽后 profile 重新观察剩余 parser AST、semantic scope、`newGenerator/NewProto` 和 LocalVar 成本；无新低风险结构切口时记录证伪。
 - [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准

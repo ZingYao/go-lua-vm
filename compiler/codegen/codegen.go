@@ -18,6 +18,8 @@ const (
 	maxProtoRegisters = 255
 	// initialCodeCapacity 是 codegen Proto 指令和行号表的最小预留容量。
 	initialCodeCapacity = 2
+	// initialConstantCapacity 是 codegen Proto 常量表的最小预留容量。
+	initialConstantCapacity = 1
 )
 
 // CompileChunk 将 parser.Chunk 编译为 Lua 5.3 Proto。
@@ -297,6 +299,7 @@ func newGenerator(source string) *generator {
 	// 初始化最小状态，寄存器从 0 开始按 Lua VM 约定分配。
 	proto := bytecode.NewProto(source)
 	proto.PrepareInlineCodeLineInfo(initialCodeCapacity)
+	proto.PrepareInlineConstants(initialConstantCapacity)
 	return &generator{
 		proto: proto,
 	}

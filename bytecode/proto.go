@@ -145,6 +145,8 @@ type Proto struct {
 	inlineCode [2]Instruction
 	// inlineLineInfo 保存 codegen 最常见的短函数行号槽，仅在显式 opt-in 后作为 LineInfo 的底层数组。
 	inlineLineInfo [2]int
+	// inlineConstants 保存 codegen 最常见的单常量槽，仅在显式 opt-in 后作为 Constants 的底层数组。
+	inlineConstants [1]Constant
 }
 
 // NewProto 创建一个空 Lua 函数原型。
@@ -180,6 +182,30 @@ func (proto *Proto) PrepareInlineCodeLineInfo(capacity int) {
 	// 超过短槽容量时按调用方请求预留普通切片，保持扩展函数的追加性能。
 	proto.Code = make([]Instruction, 0, capacity)
 	proto.LineInfo = make([]int, 0, capacity)
+}
+
+// PrepareInlineConstants 为 codegen 单常量函数准备常量表容量。
+//
+// capacity 表示调用方预期的最小常量数；该方法必须在写入 Constants 前调用。容量不超过内嵌短槽时
+// 复用 Proto 自身存储，超过短槽时退回普通切片分配。已有内容时保持原切片不变，避免误调用丢失
+// binary chunk loader 或手写 Proto 已经追加的常量表。
+func (proto *Proto) PrepareInlineConstants(capacity int) {
+	if proto == nil || capacity <= 0 {
+		// nil 或无效容量没有可准备对象，保持调用方状态不变。
+		return
+	}
+	if len(proto.Constants) != 0 {
+		// 已有常量时不能重绑定底层数组，否则会丢失已经构造的常量表。
+		return
+	}
+	if capacity <= len(proto.inlineConstants) {
+		// 单常量函数使用 Proto 内嵌槽，减少每个子函数一段小切片底层数组分配。
+		proto.Constants = proto.inlineConstants[:0]
+		return
+	}
+
+	// 超过短槽容量时按调用方请求预留普通切片，保持多常量函数的追加性能。
+	proto.Constants = make([]Constant, 0, capacity)
 }
 
 // StripDebug 深拷贝 Proto 并剥离 Lua 5.3 调试信息。

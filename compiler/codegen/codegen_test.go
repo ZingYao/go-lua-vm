@@ -802,6 +802,10 @@ func TestNewGeneratorPreallocatesCodeAndLineInfo(t *testing.T) {
 		// 小函数至少应能容纳常见的两条指令，减少首次 append 扩容。
 		t.Fatalf("unexpected code/lineinfo capacity: code=%d line=%d", cap(generator.proto.Code), cap(generator.proto.LineInfo))
 	}
+	if len(generator.proto.Constants) != 0 || cap(generator.proto.Constants) < initialConstantCapacity {
+		// codegen 的单常量热路径应具备 opt-in 容量，但不能提前写入可见常量。
+		t.Fatalf("unexpected constants capacity: len=%d cap=%d", len(generator.proto.Constants), cap(generator.proto.Constants))
+	}
 
 	generator.currentLine = 12
 	pc := generator.emitABC(bytecode.OpReturn, 0, 1, 0)
@@ -821,6 +825,21 @@ func TestNewGeneratorPreallocatesCodeAndLineInfo(t *testing.T) {
 	if generator.proto.LineInfo[0] != 12 || generator.proto.LineInfo[1] != 13 || generator.proto.LineInfo[2] != 14 {
 		// 扩容后行号表顺序仍必须和 emit 顺序一致。
 		t.Fatalf("line info changed after growth: %+v", generator.proto.LineInfo)
+	}
+
+	firstConstant := bytecode.IntegerConstant(1)
+	secondConstant := bytecode.IntegerConstant(2)
+	if firstIndex := generator.proto.AddConstant(firstConstant); firstIndex != 0 {
+		// codegen opt-in 后第一项常量仍从 0 号槽位开始。
+		t.Fatalf("first constant index=%d", firstIndex)
+	}
+	if secondIndex := generator.proto.AddConstant(secondConstant); secondIndex != 1 {
+		// 第二项常量触发扩容时仍必须保持常量表下标语义。
+		t.Fatalf("second constant index=%d", secondIndex)
+	}
+	if generator.proto.Constants[0] != firstConstant || generator.proto.Constants[1] != secondConstant {
+		// 常量表扩容后顺序必须保持。
+		t.Fatalf("constant order changed after growth: %+v", generator.proto.Constants)
 	}
 }
 

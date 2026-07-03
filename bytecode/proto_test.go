@@ -103,7 +103,7 @@ func TestProtoAppendHelpers(t *testing.T) {
 	proto := NewProto("@main.lua")
 
 	// 新建 Proto 必须记录 source，并保持切片为空。
-	if proto.Source != "@main.lua" || len(proto.Constants) != 0 || proto.Code != nil || len(proto.Protos) != 0 || proto.LineInfo != nil {
+	if proto.Source != "@main.lua" || proto.Constants != nil || proto.Code != nil || len(proto.Protos) != 0 || proto.LineInfo != nil {
 		t.Fatalf("new proto mismatch: source=%q constants=%d code=%v protos=%d line=%v", proto.Source, len(proto.Constants), proto.Code, len(proto.Protos), proto.LineInfo)
 	}
 
@@ -177,5 +177,48 @@ func TestProtoPrepareInlineCodeLineInfo(t *testing.T) {
 	if proto.Code[0] != first {
 		// StripDebug 返回值不得与原 Proto 共享 Code 底层数组。
 		t.Fatalf("stripped code shares storage with source")
+	}
+}
+
+// TestProtoPrepareInlineConstants 验证短函数常量表 opt-in 内嵌槽。
+//
+// NewProto 默认仍保持 nil 常量切片；只有 codegen 显式准备容量时，单常量函数才复用 Proto 内嵌槽。
+func TestProtoPrepareInlineConstants(t *testing.T) {
+	proto := NewProto("@inline-constant.lua")
+	if proto.Constants != nil {
+		// 默认 nil 常量表是 chunk loader 和手写 Proto 的兼容边界。
+		t.Fatalf("new proto should keep nil constants: constants=%v", proto.Constants)
+	}
+
+	proto.PrepareInlineConstants(1)
+	if len(proto.Constants) != 0 || cap(proto.Constants) != 1 {
+		// opt-in 后只预留容量，不能产生可见常量。
+		t.Fatalf("unexpected prepared constants: len/cap=%d/%d", len(proto.Constants), cap(proto.Constants))
+	}
+
+	first := StringConstant("hello")
+	second := IntegerConstant(7)
+	if index := proto.AddConstant(first); index != 0 {
+		// 第一项常量仍从 0 号槽位开始。
+		t.Fatalf("first constant index mismatch: %d", index)
+	}
+	if index := proto.AddConstant(second); index != 1 {
+		// 第二项常量会触发普通 slice 扩容，但索引语义不变。
+		t.Fatalf("second constant index mismatch: %d", index)
+	}
+	if len(proto.Constants) != 2 || proto.Constants[0] != first || proto.Constants[1] != second {
+		// 扩容后必须保留短槽中的首个常量顺序。
+		t.Fatalf("constant order changed: %+v", proto.Constants)
+	}
+
+	stripped := StripDebug(proto)
+	if len(stripped.Constants) != 2 || stripped.Constants[0] != first || stripped.Constants[1] != second {
+		// StripDebug 必须复制常量表，执行所需常量不能丢失。
+		t.Fatalf("unexpected stripped constants: %+v", stripped.Constants)
+	}
+	stripped.Constants[0] = StringConstant("changed")
+	if proto.Constants[0] != first {
+		// StripDebug 返回值不得与原 Proto 共享 Constants 底层数组。
+		t.Fatalf("stripped constants share storage with source")
 	}
 }
