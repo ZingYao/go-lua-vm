@@ -78,6 +78,10 @@ type VM struct {
 	addForLoopSuperInstructionProto *bytecode.Proto
 	// addForLoopSuperInstructions 按 PC 保存 ADD;FORLOOP superinstruction 预匹配结果。
 	addForLoopSuperInstructions []addForLoopSuperInstruction
+	// mulAddSubForLoopSuperInstructionProto 记录 MUL;ADD;SUB;FORLOOP superinstruction 表对应的 Proto。
+	mulAddSubForLoopSuperInstructionProto *bytecode.Proto
+	// mulAddSubForLoopSuperInstructions 按 PC 保存 MUL;ADD;SUB;FORLOOP superinstruction 预匹配结果。
+	mulAddSubForLoopSuperInstructions []mulAddSubForLoopSuperInstruction
 	// currentPC 保存当前执行指令位置，用于判断 Proto.LocalVars 中哪些局部变量仍然存活。
 	currentPC int
 	// openTop 保存上一条开放返回/开放 vararg 写入后的寄存器上界，-1 表示当前没有开放栈顶。
@@ -237,6 +241,41 @@ type addForLoopSuperInstruction struct {
 	// LoopPC 保存循环继续时的跳转 PC。
 	LoopPC int
 	// Valid 表示当前 PC 是否匹配 ADD;FORLOOP 形态。
+	Valid bool
+}
+
+// mulAddSubForLoopSuperInstruction 保存 `MUL; ADD; SUB; FORLOOP` 的预匹配形态。
+//
+// 该形态覆盖 `sum = sum + i * K1 - K2` 一类左结合整数算术链。所有操作数仍在运行期按
+// integer guard 检查；guard 不满足时调用方必须回退普通 VM，保留字符串数字、元方法和错误语义。
+type mulAddSubForLoopSuperInstruction struct {
+	// MulTarget 保存 MUL 的目标寄存器。
+	MulTarget int
+	// MulLeftOperand 保存 MUL 左操作数形态。
+	MulLeftOperand decodedRKOperand
+	// MulRightOperand 保存 MUL 右操作数形态。
+	MulRightOperand decodedRKOperand
+	// AddTarget 保存 ADD 的目标寄存器。
+	AddTarget int
+	// AddLeftOperand 保存 ADD 左操作数形态。
+	AddLeftOperand decodedRKOperand
+	// AddRightOperand 保存 ADD 右操作数形态。
+	AddRightOperand decodedRKOperand
+	// SubTarget 保存 SUB 的目标寄存器。
+	SubTarget int
+	// SubLeftOperand 保存 SUB 左操作数形态。
+	SubLeftOperand decodedRKOperand
+	// SubRightOperand 保存 SUB 右操作数形态。
+	SubRightOperand decodedRKOperand
+	// ForBase 保存 FORLOOP 的 base 寄存器。
+	ForBase int
+	// ForSBx 保存 FORLOOP 的有符号跳转偏移。
+	ForSBx int
+	// ExitPC 保存循环退出时的下一条 PC。
+	ExitPC int
+	// LoopPC 保存循环继续时的跳转 PC。
+	LoopPC int
+	// Valid 表示当前 PC 是否匹配 MUL;ADD;SUB;FORLOOP 形态。
 	Valid bool
 }
 
@@ -1398,6 +1437,8 @@ func (vm *VM) BindPrototype(proto *bytecode.Proto) {
 		vm.decodedInstructions = nil
 		vm.addForLoopSuperInstructionProto = nil
 		vm.addForLoopSuperInstructions = nil
+		vm.mulAddSubForLoopSuperInstructionProto = nil
+		vm.mulAddSubForLoopSuperInstructions = nil
 		vm.arithmeticIntRegisterCacheProto = nil
 		vm.arithmeticIntRegisterCache = nil
 		vm.arithmeticIntOperandCache = nil
@@ -1414,6 +1455,11 @@ func (vm *VM) BindPrototype(proto *bytecode.Proto) {
 		// VM 池切换到其他 Proto 时丢弃 superinstruction 预匹配表，避免相同 PC 误命中。
 		vm.addForLoopSuperInstructionProto = nil
 		vm.addForLoopSuperInstructions = nil
+	}
+	if vm.mulAddSubForLoopSuperInstructionProto != nil && vm.mulAddSubForLoopSuperInstructionProto != proto {
+		// VM 池切换到其他 Proto 时丢弃算术链 superinstruction 表，避免不同 Proto 的 PC 误命中。
+		vm.mulAddSubForLoopSuperInstructionProto = nil
+		vm.mulAddSubForLoopSuperInstructions = nil
 	}
 	if vm.arithmeticIntRegisterCacheProto != proto || len(vm.arithmeticIntRegisterCache) < len(proto.Code) || len(vm.arithmeticIntOperandCache) < len(proto.Code) {
 		// VM 池复用到不同 Proto 时必须重建缓存，避免 PC 相同但指令不同导致错误命中。
@@ -1703,6 +1749,192 @@ func (vm *VM) TryExecuteAddForLoop(pc int) (int, bool) {
 	return nextPC, true
 }
 
+// ensureMulAddSubForLoopSuperInstructions 返回当前 Proto 的 MUL;ADD;SUB;FORLOOP 预匹配表。
+//
+// 该表按 PC 与 Proto.Code 对齐，只记录完整循环体回跳当前 MUL 的算术链形态；运行期类型、
+// 寄存器窗口、hook 和 context guard 仍由调用方与 TryExecuteMulAddSubForLoop 检查。
+func (vm *VM) ensureMulAddSubForLoopSuperInstructions() []mulAddSubForLoopSuperInstruction {
+	// 按当前 Proto 懒构建算术链 superinstruction 表，并在 Proto 未变化时复用。
+	if vm == nil || vm.proto == nil {
+		// 缺少 VM 或 Proto 时没有可用 superinstruction 表。
+		return nil
+	}
+	if len(vm.proto.Code) < 4 {
+		// 少于四条指令不可能包含完整 `MUL;ADD;SUB;FORLOOP`。
+		vm.mulAddSubForLoopSuperInstructionProto = vm.proto
+		vm.mulAddSubForLoopSuperInstructions = nil
+		return nil
+	}
+	if vm.mulAddSubForLoopSuperInstructionProto == vm.proto {
+		// 当前 Proto 已完成扫描；nil 表示无匹配形态，非 nil 表示可按 PC 读取。
+		return vm.mulAddSubForLoopSuperInstructions
+	}
+
+	vm.mulAddSubForLoopSuperInstructionProto = vm.proto
+	vm.mulAddSubForLoopSuperInstructions = buildMulAddSubForLoopSuperInstructions(vm.proto)
+	return vm.mulAddSubForLoopSuperInstructions
+}
+
+// buildMulAddSubForLoopSuperInstructions 构建 `MUL; ADD; SUB; FORLOOP` 预匹配表。
+//
+// 返回表按 PC 对齐；没有匹配形态时返回 nil，表示该 Proto 不需要承担额外表分配。
+func buildMulAddSubForLoopSuperInstructions(proto *bytecode.Proto) []mulAddSubForLoopSuperInstruction {
+	// 空 Proto 或短函数没有可构建的算术链 superinstruction。
+	if proto == nil || len(proto.Code) < 4 {
+		return nil
+	}
+
+	var superInstructions []mulAddSubForLoopSuperInstruction
+	for pc := 0; pc+3 < len(proto.Code); pc++ {
+		// 只识别完整相邻 `MUL;ADD;SUB;FORLOOP`，其他形态保持零值表示无效。
+		mulInstruction := proto.Code[pc]
+		addInstruction := proto.Code[pc+1]
+		subInstruction := proto.Code[pc+2]
+		forLoopInstruction := proto.Code[pc+3]
+		if mulInstruction.OpCode() != bytecode.OpMul || addInstruction.OpCode() != bytecode.OpAdd || subInstruction.OpCode() != bytecode.OpSub || forLoopInstruction.OpCode() != bytecode.OpForLoop {
+			// 当前 PC 不匹配目标四指令模式，继续扫描后续指令。
+			continue
+		}
+		exitPC := pc + 4
+		loopPC := exitPC + forLoopInstruction.SBx()
+		if loopPC != pc {
+			// 只覆盖完整算术链循环体；回跳到其他 PC 的形态必须交给普通 VM 或后续更完整模式。
+			continue
+		}
+		if superInstructions == nil {
+			// 只有真实存在匹配形态时才分配 PC 对齐表，避免普通函数执行增加分配。
+			superInstructions = make([]mulAddSubForLoopSuperInstruction, len(proto.Code))
+		}
+		superInstructions[pc] = mulAddSubForLoopSuperInstruction{
+			MulTarget:       mulInstruction.A(),
+			MulLeftOperand:  decodeRKOperand(proto, mulInstruction.B()),
+			MulRightOperand: decodeRKOperand(proto, mulInstruction.C()),
+			AddTarget:       addInstruction.A(),
+			AddLeftOperand:  decodeRKOperand(proto, addInstruction.B()),
+			AddRightOperand: decodeRKOperand(proto, addInstruction.C()),
+			SubTarget:       subInstruction.A(),
+			SubLeftOperand:  decodeRKOperand(proto, subInstruction.B()),
+			SubRightOperand: decodeRKOperand(proto, subInstruction.C()),
+			ForBase:         forLoopInstruction.A(),
+			ForSBx:          forLoopInstruction.SBx(),
+			ExitPC:          exitPC,
+			LoopPC:          loopPC,
+			Valid:           true,
+		}
+	}
+	return superInstructions
+}
+
+// PrepareMulAddSubForLoopSuperInstructions 预构建当前 Proto 的 `MUL; ADD; SUB; FORLOOP` 表。
+//
+// 返回 true 表示当前 Proto 至少存在一个可尝试的算术链 superinstruction PC；返回 false 时调用方
+// 不应在热循环中反复调用 TryExecuteMulAddSubForLoop。
+func (vm *VM) PrepareMulAddSubForLoopSuperInstructions() bool {
+	// 预构建失败不影响普通 VM；后续 TryExecuteMulAddSubForLoop 会因为表不匹配而回退。
+	return len(vm.ensureMulAddSubForLoopSuperInstructions()) > 0
+}
+
+// TryExecuteMulAddSubForLoop 尝试执行 `MUL; ADD; SUB; FORLOOP` superinstruction。
+//
+// pc 必须指向当前 Proto.Code 中的 MUL 指令；返回 handled=false 表示 guard 不满足，调用方必须回退
+// 普通 VM。该 fast path 只覆盖 integer 算术链和 integer numeric-for，不触发元方法、不处理 hook、
+// 不处理 yield；调用方必须先确认当前执行环境允许跳过逐 PC 后处理和 context 检查。
+func (vm *VM) TryExecuteMulAddSubForLoop(pc int) (int, bool) {
+	// 先按 PC 读取已准备好的预匹配表；非目标 PC 必须快速失败，避免普通指令承担额外识别成本。
+	if vm == nil || vm.mulAddSubForLoopSuperInstructionProto != vm.proto {
+		// 调用方尚未为当前 Proto 准备表，回退普通 VM。
+		return 0, false
+	}
+	superInstructions := vm.mulAddSubForLoopSuperInstructions
+	if uint(pc) >= uint(len(superInstructions)) {
+		// 当前 PC 不在表范围内，回退普通 VM。
+		return 0, false
+	}
+	superInstruction := superInstructions[pc]
+	if !superInstruction.Valid {
+		// 当前 PC 没有匹配 MUL;ADD;SUB;FORLOOP 形态，回退普通 VM。
+		return 0, false
+	}
+
+	// 先完成全部寄存器和类型 guard，再写回任何寄存器，保证 guard 失败可以无副作用回退。
+	registers := vm.registers
+	if uint(superInstruction.MulTarget) >= uint(len(registers)) || uint(superInstruction.AddTarget) >= uint(len(registers)) || uint(superInstruction.SubTarget) >= uint(len(registers)) {
+		// 任一算术目标寄存器越界时交给普通 VM 报原始错误。
+		return 0, false
+	}
+	mulLeftInteger, mulLeftOK := vm.decodedIntegerOperandValue(superInstruction.MulLeftOperand)
+	if !mulLeftOK {
+		// MUL 左操作数不是 integer 寄存器或 integer 常量时回退完整算术语义。
+		return 0, false
+	}
+	mulRightInteger, mulRightOK := vm.decodedIntegerOperandValue(superInstruction.MulRightOperand)
+	if !mulRightOK {
+		// MUL 右操作数不是 integer 寄存器或 integer 常量时回退完整算术语义。
+		return 0, false
+	}
+	mulResult := mulLeftInteger * mulRightInteger
+
+	addLeftInteger, addLeftOK := vm.decodedIntegerOperandValueWithOverrides(superInstruction.AddLeftOperand, superInstruction.MulTarget, mulResult, true, -1, 0, false, -1, 0, false)
+	if !addLeftOK {
+		// ADD 左操作数不能在 MUL 后解析为 integer 时回退普通 VM。
+		return 0, false
+	}
+	addRightInteger, addRightOK := vm.decodedIntegerOperandValueWithOverrides(superInstruction.AddRightOperand, superInstruction.MulTarget, mulResult, true, -1, 0, false, -1, 0, false)
+	if !addRightOK {
+		// ADD 右操作数不能在 MUL 后解析为 integer 时回退普通 VM。
+		return 0, false
+	}
+	addResult := addLeftInteger + addRightInteger
+
+	subLeftInteger, subLeftOK := vm.decodedIntegerOperandValueWithOverrides(superInstruction.SubLeftOperand, superInstruction.MulTarget, mulResult, true, superInstruction.AddTarget, addResult, true, -1, 0, false)
+	if !subLeftOK {
+		// SUB 左操作数不能在 ADD 后解析为 integer 时回退普通 VM。
+		return 0, false
+	}
+	subRightInteger, subRightOK := vm.decodedIntegerOperandValueWithOverrides(superInstruction.SubRightOperand, superInstruction.MulTarget, mulResult, true, superInstruction.AddTarget, addResult, true, -1, 0, false)
+	if !subRightOK {
+		// SUB 右操作数不能在 ADD 后解析为 integer 时回退普通 VM。
+		return 0, false
+	}
+	subResult := subLeftInteger - subRightInteger
+
+	baseIndex := superInstruction.ForBase
+	if uint(baseIndex+3) >= uint(len(registers)) {
+		// FORLOOP 需要 R(A)..R(A+3) 四个控制槽，越界时回退普通 VM。
+		return 0, false
+	}
+	indexInteger, indexOK := vm.registerIntegerValueWithOverrides(baseIndex, superInstruction.MulTarget, mulResult, superInstruction.AddTarget, addResult, superInstruction.SubTarget, subResult)
+	limitInteger, limitOK := vm.registerIntegerValueWithOverrides(baseIndex+1, superInstruction.MulTarget, mulResult, superInstruction.AddTarget, addResult, superInstruction.SubTarget, subResult)
+	stepInteger, stepOK := vm.registerIntegerValueWithOverrides(baseIndex+2, superInstruction.MulTarget, mulResult, superInstruction.AddTarget, addResult, superInstruction.SubTarget, subResult)
+	if !indexOK || !limitOK || !stepOK {
+		// 只覆盖 integer numeric-for；float 或可转 number 字符串仍走普通 VM。
+		return 0, false
+	}
+
+	// guard 全部通过后，按 MUL、ADD、SUB 与 FORLOOP 顺序提交寄存器写入。
+	registers[superInstruction.MulTarget] = IntegerValue(mulResult)
+	registers[superInstruction.AddTarget] = IntegerValue(addResult)
+	registers[superInstruction.SubTarget] = IntegerValue(subResult)
+	nextIndex := indexInteger + stepInteger
+	nextPC := superInstruction.ExitPC
+	if forIntegerLoopContinues(nextIndex, limitInteger, stepInteger) {
+		// 循环继续时更新内部 index 和外部可见循环变量，并跳回 FORLOOP 的 sBx 目标。
+		registers[baseIndex] = IntegerValue(nextIndex)
+		registers[baseIndex+3] = IntegerValue(nextIndex)
+		nextPC = superInstruction.LoopPC
+		vm.pcOffset = superInstruction.ForSBx
+	} else {
+		// 循环结束时不更新 index 和外部变量，保持普通 FORLOOP 语义。
+		vm.pcOffset = 0
+	}
+	vm.currentPC = pc + 3
+	vm.skipNext = false
+	vm.closeFrom = -1
+	vm.hasCallRequest = false
+	vm.returned = false
+	return nextPC, true
+}
+
 // decodedIntegerOperandValue 读取预解码 RK 操作数的 integer 值。
 //
 // 常量操作数必须在预解码阶段已确认为 integer；寄存器操作数仍按当前寄存器窗口和动态类型检查。
@@ -1720,6 +1952,61 @@ func (vm *VM) decodedIntegerOperandValue(operand decodedRKOperand) (int64, bool)
 	value := vm.registers[operand.Index]
 	if value.Kind != KindInteger {
 		// 非 integer 寄存器值需要完整算术转换、元方法或错误路径。
+		return 0, false
+	}
+	return value.Integer, true
+}
+
+// decodedIntegerOperandValueWithOverrides 按顺序读取带临时写回覆盖的 RK integer 操作数。
+//
+// 覆盖项用于模拟同一 superinstruction 内前序指令已经写回的寄存器；后声明的覆盖项优先级更高，
+// 从而保持 `MUL`、`ADD`、`SUB` 的普通逐指令可见性。返回 ok=false 表示不能走 integer fast path。
+func (vm *VM) decodedIntegerOperandValueWithOverrides(operand decodedRKOperand, firstIndex int, firstValue int64, firstValid bool, secondIndex int, secondValue int64, secondValid bool, thirdIndex int, thirdValue int64, thirdValid bool) (int64, bool) {
+	// 常量操作数不受临时寄存器覆盖影响，直接复用预解码 integer 常量。
+	if operand.Constant {
+		// 非 integer 常量或越界常量不能使用 integer fast path。
+		return operand.IntegerConstant, operand.IntegerConstantOK
+	}
+	if thirdValid && operand.Index == thirdIndex {
+		// 第三覆盖项表示最新写回，优先返回。
+		return thirdValue, true
+	}
+	if secondValid && operand.Index == secondIndex {
+		// 第二覆盖项比第一覆盖项更新，优先于第一项返回。
+		return secondValue, true
+	}
+	if firstValid && operand.Index == firstIndex {
+		// 第一覆盖项表示最早的临时写回。
+		return firstValue, true
+	}
+	return vm.decodedIntegerOperandValue(operand)
+}
+
+// registerIntegerValueWithOverrides 读取带临时写回覆盖的寄存器 integer 值。
+//
+// 该 helper 专门用于 superinstruction 末尾的 FORLOOP 控制槽读取；如果算术链目标别名到控制槽，
+// FORLOOP 必须看到前序算术写回后的值，才能与普通逐指令执行一致。
+func (vm *VM) registerIntegerValueWithOverrides(registerIndex int, firstIndex int, firstValue int64, secondIndex int, secondValue int64, thirdIndex int, thirdValue int64) (int64, bool) {
+	// 覆盖项按普通执行顺序从新到旧检查，保证别名寄存器读取到最近一次写入。
+	if registerIndex == thirdIndex {
+		// SUB 是算术链中最新写回。
+		return thirdValue, true
+	}
+	if registerIndex == secondIndex {
+		// ADD 写回优先于 MUL 写回。
+		return secondValue, true
+	}
+	if registerIndex == firstIndex {
+		// MUL 写回是最早覆盖项。
+		return firstValue, true
+	}
+	if uint(registerIndex) >= uint(len(vm.registers)) {
+		// 寄存器越界必须回退普通 VM，以保留原始错误语义。
+		return 0, false
+	}
+	value := vm.registers[registerIndex]
+	if value.Kind != KindInteger {
+		// 非 integer 控制槽需要完整 FORLOOP number 转换或错误路径。
 		return 0, false
 	}
 	return value.Integer, true

@@ -2014,6 +2014,140 @@ func TestVMTryExecuteAddForLoopRejectsNonEntryAdd(t *testing.T) {
 	}
 }
 
+// TestVMTryExecuteMulAddSubForLoop 验证 `MUL; ADD; SUB; FORLOOP` superinstruction 的 integer 热路径。
+//
+// 该形态对应 `sum = sum + i * 3 - 7`，fast path 必须按普通逐指令顺序提交临时寄存器和
+// numeric-for 控制槽更新。
+func TestVMTryExecuteMulAddSubForLoop(t *testing.T) {
+	// 构造 `tmp = i * 3; tmp = sum + tmp; sum = tmp - 7; FORLOOP` 形态。
+	proto := bytecode.NewProto("mul-add-sub-forloop")
+	proto.Constants = []bytecode.Constant{bytecode.IntegerConstant(3), bytecode.IntegerConstant(7)}
+	proto.Code = []bytecode.Instruction{
+		bytecode.CreateABC(bytecode.OpMul, 5, 4, bytecode.RKAsK(0)),
+		bytecode.CreateABC(bytecode.OpAdd, 5, 0, 5),
+		bytecode.CreateABC(bytecode.OpSub, 0, 5, bytecode.RKAsK(1)),
+		bytecode.CreateAsBx(bytecode.OpForLoop, 1, -4),
+	}
+	vm := NewVMWithPrototypeData(6, proto.Constants, nil, nil, nil)
+	vm.BindPrototype(proto)
+	if !vm.PrepareMulAddSubForLoopSuperInstructions() {
+		// 完整循环体回跳到 MUL 时应能准备算术链 superinstruction。
+		t.Fatalf("expected MUL;ADD;SUB;FORLOOP superinstruction")
+	}
+	initialRegisters := []Value{IntegerValue(0), IntegerValue(1), IntegerValue(3), IntegerValue(1), IntegerValue(1), NilValue()}
+	for registerIndex, value := range initialRegisters {
+		// 初始化 sum 与 FORLOOP 控制寄存器，模拟 FORPREP 后进入循环体的状态。
+		if err := vm.SetRegister(registerIndex, value); err != nil {
+			t.Fatalf("set register %d failed: %v", registerIndex, err)
+		}
+	}
+
+	nextPC, handled := vm.TryExecuteMulAddSubForLoop(0)
+	if !handled || nextPC != 0 {
+		// 第一轮执行后循环仍应跳回 MUL。
+		t.Fatalf("first fast path mismatch: handled=%v nextPC=%d", handled, nextPC)
+	}
+	if value, ok := vm.Register(0); !ok || !value.RawEqual(IntegerValue(-4)) {
+		// 第一轮结果为 0 + 1*3 - 7。
+		t.Fatalf("first sum mismatch: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(5); !ok || !value.RawEqual(IntegerValue(3)) {
+		// 临时寄存器应保留普通 ADD 写回的中间结果，SUB 写回 sum 不会覆盖 tmp。
+		t.Fatalf("first temp mismatch: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(4); !ok || !value.RawEqual(IntegerValue(2)) {
+		// FORLOOP 继续时外部可见循环变量必须同步到下一轮。
+		t.Fatalf("first control variable mismatch: value=%#v ok=%v", value, ok)
+	}
+
+	nextPC, handled = vm.TryExecuteMulAddSubForLoop(0)
+	if !handled || nextPC != 0 {
+		// 第二轮执行后仍应继续循环。
+		t.Fatalf("second fast path mismatch: handled=%v nextPC=%d", handled, nextPC)
+	}
+	nextPC, handled = vm.TryExecuteMulAddSubForLoop(0)
+	if !handled || nextPC != 4 {
+		// 第三轮执行后越过 limit，应落到 FORLOOP 后一条指令。
+		t.Fatalf("third fast path mismatch: handled=%v nextPC=%d", handled, nextPC)
+	}
+	if value, ok := vm.Register(0); !ok || !value.RawEqual(IntegerValue(-3)) {
+		// 三轮链式算术结果必须等于 (((0+3-7)+6-7)+9-7)。
+		t.Fatalf("final sum mismatch: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(1); !ok || !value.RawEqual(IntegerValue(3)) {
+		// 循环退出时普通 FORLOOP 不写回越界后的内部 index。
+		t.Fatalf("final index mismatch: value=%#v ok=%v", value, ok)
+	}
+	if vm.currentPC != 3 || vm.pcOffset != 0 {
+		// fast path 后 VM 状态应等价于刚执行完 FORLOOP。
+		t.Fatalf("final pc state mismatch: currentPC=%d pcOffset=%d", vm.currentPC, vm.pcOffset)
+	}
+}
+
+// TestVMTryExecuteMulAddSubForLoopFallback 验证算术链 guard 失败时无副作用回退。
+//
+// 任一操作数不是 integer 时，fast path 必须返回 handled=false，不提前覆盖 sum 或临时寄存器。
+func TestVMTryExecuteMulAddSubForLoopFallback(t *testing.T) {
+	// 构造与官方 arith_chain_temp 同形态的四指令循环体。
+	proto := bytecode.NewProto("mul-add-sub-forloop-fallback")
+	proto.Constants = []bytecode.Constant{bytecode.IntegerConstant(3), bytecode.IntegerConstant(7)}
+	proto.Code = []bytecode.Instruction{
+		bytecode.CreateABC(bytecode.OpMul, 5, 4, bytecode.RKAsK(0)),
+		bytecode.CreateABC(bytecode.OpAdd, 5, 0, 5),
+		bytecode.CreateABC(bytecode.OpSub, 0, 5, bytecode.RKAsK(1)),
+		bytecode.CreateAsBx(bytecode.OpForLoop, 1, -4),
+	}
+	vm := NewVMWithPrototypeData(6, proto.Constants, nil, nil, nil)
+	vm.BindPrototype(proto)
+	vm.PrepareMulAddSubForLoopSuperInstructions()
+	initialRegisters := []Value{IntegerValue(11), IntegerValue(1), IntegerValue(1), IntegerValue(1), StringValue("not integer"), IntegerValue(99)}
+	for registerIndex, value := range initialRegisters {
+		// 初始化一个 MUL 左操作数不满足 integer guard 的场景。
+		if err := vm.SetRegister(registerIndex, value); err != nil {
+			t.Fatalf("set fallback register %d failed: %v", registerIndex, err)
+		}
+	}
+
+	nextPC, handled := vm.TryExecuteMulAddSubForLoop(0)
+	if handled || nextPC != 0 {
+		// guard 不满足时必须回退普通 VM。
+		t.Fatalf("fallback mismatch: handled=%v nextPC=%d", handled, nextPC)
+	}
+	if value, ok := vm.Register(0); !ok || !value.RawEqual(IntegerValue(11)) {
+		// 回退前不能覆盖 sum，确保普通 VM 仍能产生原始错误或元方法语义。
+		t.Fatalf("fallback sum mutated: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(5); !ok || !value.RawEqual(IntegerValue(99)) {
+		// 回退前不能覆盖临时寄存器。
+		t.Fatalf("fallback temp mutated: value=%#v ok=%v", value, ok)
+	}
+}
+
+// TestVMTryExecuteMulAddSubForLoopRejectsNonEntryLoop 验证非完整循环体不会误命中。
+//
+// 如果 FORLOOP 不回跳当前 MUL，说明四条相邻指令不是完整循环体，fast path 不能启用。
+func TestVMTryExecuteMulAddSubForLoopRejectsNonEntryLoop(t *testing.T) {
+	// 构造 `MUL;ADD;SUB;FORLOOP`，但 FORLOOP 回跳到 ADD 而不是 MUL。
+	proto := bytecode.NewProto("mul-add-sub-forloop-non-entry")
+	proto.Constants = []bytecode.Constant{bytecode.IntegerConstant(3), bytecode.IntegerConstant(7)}
+	proto.Code = []bytecode.Instruction{
+		bytecode.CreateABC(bytecode.OpMul, 5, 4, bytecode.RKAsK(0)),
+		bytecode.CreateABC(bytecode.OpAdd, 5, 0, 5),
+		bytecode.CreateABC(bytecode.OpSub, 0, 5, bytecode.RKAsK(1)),
+		bytecode.CreateAsBx(bytecode.OpForLoop, 1, -3),
+	}
+	vm := NewVMWithPrototypeData(6, proto.Constants, nil, nil, nil)
+	vm.BindPrototype(proto)
+	if vm.PrepareMulAddSubForLoopSuperInstructions() {
+		// 只有 FORLOOP 回跳当前 MUL 时才应启用算术链 fast path。
+		t.Fatalf("non-entry MUL;ADD;SUB;FORLOOP should not prepare superinstruction")
+	}
+	if nextPC, handled := vm.TryExecuteMulAddSubForLoop(0); handled || nextPC != 0 {
+		// 误命中会破坏循环体前序指令执行顺序。
+		t.Fatalf("non-entry fast path mismatch: handled=%v nextPC=%d", handled, nextPC)
+	}
+}
+
 // TestVMBinaryArithmeticErrors 验证二元算术指令的错误边界。
 //
 // 算术错误必须返回明确错误，并保持目标寄存器原值。

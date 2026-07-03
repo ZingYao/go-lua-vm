@@ -2477,9 +2477,11 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 		pc = resumeNextPC
 	}
 	addForLoopSuperInstructionEnabled := false
+	mulAddSubForLoopSuperInstructionEnabled := false
 	if !preciseFrameSync && !hooksEnabled {
 		// 普通主线程无 hook 路径可提前准备 superinstruction 表；hook/coroutine 路径必须保留逐 PC 语义。
 		addForLoopSuperInstructionEnabled = vm.PrepareAddForLoopSuperInstructions()
+		mulAddSubForLoopSuperInstructionEnabled = vm.PrepareMulAddSubForLoopSuperInstructions()
 	}
 	contextCheckCountdown := 0
 	for pc >= 0 && pc < len(proto.Code) {
@@ -2513,6 +2515,19 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 			if err := triggerLuaLineHook(state, debugEnvironment, proto, pc, previousPC, previousPreviousPC, &lastHookLine); err != nil {
 				// hook 内抛错必须中断当前 VM，交给 protected call 边界包装 traceback。
 				return nil, err
+			}
+		}
+		if mulAddSubForLoopSuperInstructionEnabled && !preciseFrameSync && !hooksEnabled && contextCheckCountdown >= 3 {
+			// 四指令算术链会额外跳过 ADD、SUB、FORLOOP 三个入口；倒计时至少为 3
+			// 才能证明普通逐指令路径也不会在被跳过的 FORLOOP 前触发 context 检查。
+			mulPC := pc
+			if nextPC, handled := vm.TryExecuteMulAddSubForLoop(mulPC); handled {
+				// superinstruction 已完成 MUL、ADD、SUB 与 FORLOOP；补偿被跳过三条指令的倒计时。
+				contextCheckCountdown -= 3
+				previousPreviousPC = mulPC + 2
+				previousPC = mulPC + 3
+				pc = nextPC
+				continue
 			}
 		}
 		if addForLoopSuperInstructionEnabled && !preciseFrameSync && !hooksEnabled && contextCheckCountdown > 0 {
