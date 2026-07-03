@@ -975,6 +975,24 @@ codegen 内部名称绑定数据结构，不改变 AST、Proto 字节码、Local
 再在 `setLocal` 中启用 inline fast path。这样如果语义测试失败，可以单独回滚 inline 启用逻辑，而保留
 helper 抽象不影响行为。
 
+### 2026-07-04 codegen locals helper 重构
+
+实现：在 `compiler/codegen` 的 `generator` 上新增 `lookupLocal`、`setLocal`、`forEachLocal`、
+`localCount`、`snapshotLocals` 和 `restoreLocalSnapshot`，并把直接读取、写入、遍历
+`generator.locals` 的路径机械收敛到 helper。该提交仍保持 `locals map[string]localBinding` 作为唯一
+存储，不启用 inline 槽，因此不改变 name resolution、同作用域重声明、scope snapshot、upvalue
+captured 标记、goto/label 生命周期、LocalVars/Upvalues 或字节码输出语义。
+
+benchmark 复核：
+
+| 用例 | 结果 |
+| --- | ---: |
+| `BenchmarkCompileSource3000Functions` | `8.217 / 8.218 / 8.169 ms/op`，约 `7.58 MB/op`，`81145 allocs/op` |
+
+对比上一轮 `8.319 / 8.291 / 8.302 ms/op`、`81145 allocs/op`，helper-only 重构未显示可见退化，
+也不预期带来分配收益。下一步真正的性能切口是在 helper 已覆盖访问点后，单独启用单 local inline 槽，
+并按上面的语义验收矩阵验证 overflow map 行为、scope restore 和 captured 标记。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -1063,7 +1081,8 @@ helper 抽象不影响行为。
 - [x] 若继续推进，优先 profile `arith_chain_temp` 的剩余项；如没有新的结构性切口，记录证伪，不再堆局部字段/分支微调。
 - [x] 若继续推进，优先 profile `compile_3000_functions`；如果没有新的编译期结构性切口，记录证伪，不再堆 parser/codegen 局部字段微调。
 - [x] 若继续推进编译期，先设计 codegen `locals map` 单局部 inline cache 的语义方案和测试矩阵；确认 name resolution、同作用域重声明、upvalue 捕获、scope snapshot、goto/label 和 debug local 生命周期后再实现。
-- [ ] 若继续推进编译期，先新增 codegen locals helper 并替换直接访问点，保持 overflow map 行为等价；通过测试后再启用 inline 槽。
+- [x] 若继续推进编译期，先新增 codegen locals helper 并替换直接访问点，保持 overflow map 行为等价；通过测试后再启用 inline 槽。
+- [ ] 启用 codegen 单 local inline 槽，优先验证单参数函数不创建 overflow map，同时保持同作用域重声明、内层遮蔽、upvalue captured、goto/label 和 debug local 生命周期等价。
 - [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准

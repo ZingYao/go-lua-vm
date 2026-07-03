@@ -97,6 +97,64 @@ type localBinding struct {
 	captured bool
 }
 
+// lookupLocal 返回当前函数内名称对应的可见局部变量绑定。
+//
+// 当前实现仍只读取 overflow map；后续启用 inline local 槽时，调用方不需要改动名称解析逻辑。
+func (generator *generator) lookupLocal(name string) (localBinding, bool) {
+	// nil map 读取与空 map 等价，直接返回查找结果。
+	binding, ok := generator.locals[name]
+	return binding, ok
+}
+
+// setLocal 写入当前函数内名称对应的可见局部变量绑定。
+//
+// 当前实现保持原有 map 行为；首次写入时延迟创建 map，维持既有分配时机。
+func (generator *generator) setLocal(name string, binding localBinding) {
+	if generator.locals == nil {
+		// 首次声明局部变量时才创建绑定表；nil map 的读取、遍历和 len 与空 map 等价。
+		generator.locals = make(map[string]localBinding)
+	}
+	generator.locals[name] = binding
+}
+
+// forEachLocal 遍历当前函数内所有可见局部变量绑定。
+//
+// 当前实现沿用 map 遍历顺序；调用方不能依赖遍历顺序，后续 inline 槽也必须保持这一约束。
+func (generator *generator) forEachLocal(fn func(name string, binding localBinding)) {
+	for name, binding := range generator.locals {
+		// 把绑定交给调用方处理，保持原 map 遍历行为。
+		fn(name, binding)
+	}
+}
+
+// localCount 返回当前函数可见局部变量绑定数量。
+func (generator *generator) localCount() int {
+	// 当前只有 overflow map，len(nil) 与 len(empty) 都为 0。
+	return len(generator.locals)
+}
+
+// snapshotLocals 复制当前函数可见局部变量绑定。
+//
+// 返回值用于 block scope 恢复；空局部表返回 nil，保持既有 snapshot 行为。
+func (generator *generator) snapshotLocals() map[string]localBinding {
+	if generator.localCount() == 0 {
+		// 没有外层局部绑定时无需创建快照 map。
+		return nil
+	}
+	locals := make(map[string]localBinding, generator.localCount())
+	generator.forEachLocal(func(name string, binding localBinding) {
+		// 浅拷贝局部绑定，退出作用域时恢复外层同名变量。
+		locals[name] = binding
+	})
+	return locals
+}
+
+// restoreLocalSnapshot 恢复 block 入口处保存的局部变量绑定快照。
+func (generator *generator) restoreLocalSnapshot(locals map[string]localBinding) {
+	// 当前实现仍直接恢复 overflow map；后续 inline 槽启用时集中在这里补充恢复逻辑。
+	generator.locals = locals
+}
+
 // constantIndexes 保存当前 Proto 的常量去重索引。
 //
 // Lua 5.3 addk 使用常量原值作为索引 key，并额外区分 integer 与 float；这里按类型拆分 map，
@@ -585,7 +643,7 @@ func (generator *generator) compileSingleGlobalSafeAssignment(statement *parser.
 		// 非名称左值不属于全局名写入。
 		return false, nil
 	}
-	if _, exists := generator.locals[targetName.Name]; exists {
+	if _, exists := generator.lookupLocal(targetName.Name); exists {
 		// 当前 local 写入交给 local 快路径或通用路径。
 		return false, nil
 	}
@@ -633,7 +691,7 @@ func (generator *generator) compileSingleLocalSafeAssignment(statement *parser.A
 		// 非名称左值需要保留普通赋值地址求值语义。
 		return false, nil
 	}
-	binding, ok := generator.locals[targetName.Name]
+	binding, ok := generator.lookupLocal(targetName.Name)
 	if !ok {
 		// upvalue/global 写回不进入该快路径。
 		return false, nil
@@ -660,7 +718,7 @@ func (generator *generator) isSafeDirectLocalAssignmentValue(expression parser.E
 		// 其他表达式可能触发调用、索引或全局读取。
 		return false
 	}
-	_, exists := generator.locals[nameExpression.Name]
+	_, exists := generator.lookupLocal(nameExpression.Name)
 	return exists
 }
 
@@ -683,7 +741,7 @@ func (generator *generator) compileSingleSafeTableAssignment(statement *parser.A
 		// receiver 不是名称时可能有调用或索引副作用，回退通用路径。
 		return false, nil
 	}
-	receiverBinding, ok := generator.locals[receiverName.Name]
+	receiverBinding, ok := generator.lookupLocal(receiverName.Name)
 	if !ok {
 		// upvalue/global receiver 读取需要额外指令或可能触发环境表访问，回退通用路径。
 		return false, nil
@@ -747,7 +805,7 @@ func (generator *generator) compileSingleLocalFieldSelfBinaryAssignment(statemen
 		// receiver 不是名称时可能包含调用或索引副作用，回退通用路径。
 		return false, nil
 	}
-	receiverBinding, ok := generator.locals[targetReceiver.Name]
+	receiverBinding, ok := generator.lookupLocal(targetReceiver.Name)
 	if !ok {
 		// upvalue/global receiver 读取需要额外指令或可能触发环境表访问，回退通用路径。
 		return false, nil
@@ -831,7 +889,7 @@ func (generator *generator) compileSingleLocalSelfBinaryAssignment(statement *pa
 		// 只有普通名称左值能直接写回寄存器。
 		return false, nil
 	}
-	binding, ok := generator.locals[targetName.Name]
+	binding, ok := generator.lookupLocal(targetName.Name)
 	if !ok {
 		// upvalue/global 写回有额外语义，不能用当前 local 寄存器快路径。
 		return false, nil
@@ -1224,7 +1282,7 @@ func (generator *generator) isSafePureBinaryExpression(expression parser.Express
 func (generator *generator) isSafeRKCandidate(expression parser.Expression) bool {
 	switch typedExpression := expression.(type) {
 	case *parser.NameExpression:
-		_, exists := generator.locals[typedExpression.Name]
+		_, exists := generator.lookupLocal(typedExpression.Name)
 		return exists
 	case *parser.LiteralExpression:
 		_, ok := literalConstant(typedExpression)
@@ -1277,7 +1335,7 @@ func (generator *generator) compileSelfBinaryRightExpressionTo(expression parser
 		// receiver 不是名称时可能有副作用，回退通用路径。
 		return false, nil
 	}
-	receiverBinding, ok := generator.locals[receiverName.Name]
+	receiverBinding, ok := generator.lookupLocal(receiverName.Name)
 	if !ok {
 		// upvalue/global receiver 需要额外读取或环境表访问，回退通用路径。
 		return false, nil
@@ -1316,7 +1374,7 @@ func (generator *generator) compileSafeLocalFieldAccessTo(expression *parser.Fie
 		// receiver 不是名称时可能包含调用或索引副作用，回退通用路径。
 		return false, nil
 	}
-	receiverBinding, ok := generator.locals[receiverName.Name]
+	receiverBinding, ok := generator.lookupLocal(receiverName.Name)
 	if !ok {
 		// upvalue/global receiver 需要额外读取或环境表访问，回退通用路径。
 		return false, nil
@@ -1356,7 +1414,7 @@ func (generator *generator) compileSingleLocalBinaryAssignment(statement *parser
 		// 只有普通名称左值能直接写回寄存器。
 		return false, nil
 	}
-	binding, ok := generator.locals[targetName.Name]
+	binding, ok := generator.lookupLocal(targetName.Name)
 	if !ok {
 		// upvalue/global 写回有额外语义，不能用当前 local 寄存器快路径。
 		return false, nil
@@ -1387,7 +1445,7 @@ func (generator *generator) compileSingleLocalSelfConcatAssignment(statement *pa
 		// 只有普通名称左值能直接写回寄存器。
 		return false, nil
 	}
-	binding, ok := generator.locals[targetName.Name]
+	binding, ok := generator.lookupLocal(targetName.Name)
 	if !ok {
 		// upvalue/global 写回有额外语义，不能用当前 local 寄存器快路径。
 		return false, nil
@@ -1495,7 +1553,7 @@ func (generator *generator) isSelfBinarySafeRightExpression(expression parser.Ex
 		// 非名称表达式可能包含调用、table 访问或嵌套运算，保守回退。
 		return false
 	}
-	if _, ok := generator.locals[nameExpression.Name]; ok {
+	if _, ok := generator.lookupLocal(nameExpression.Name); ok {
 		// 当前 local 读取只是寄存器 MOVE，不会触发元方法或调用。
 		return true
 	}
@@ -1524,7 +1582,7 @@ func (generator *generator) isSelfBinarySafeRightExpression(expression parser.Ex
 func (generator *generator) safeRKOperand(expression parser.Expression) (operand int, ok bool, err error) {
 	switch typedExpression := expression.(type) {
 	case *parser.NameExpression:
-		binding, exists := generator.locals[typedExpression.Name]
+		binding, exists := generator.lookupLocal(typedExpression.Name)
 		if !exists {
 			// 非当前 local 名称可能是 upvalue 或全局访问，不能直接作为 RK 寄存器。
 			return 0, false, nil
@@ -1556,7 +1614,7 @@ func (generator *generator) safeRKOperand(expression parser.Expression) (operand
 func (generator *generator) safeRKOperandWithRegister(expression parser.Expression) (operand int, register int, err error) {
 	switch typedExpression := expression.(type) {
 	case *parser.NameExpression:
-		binding, exists := generator.locals[typedExpression.Name]
+		binding, exists := generator.lookupLocal(typedExpression.Name)
 		if !exists {
 			// 调用方已筛选 safe candidate；防御性返回编译错误便于定位损坏状态。
 			return 0, -1, fmt.Errorf("codegen missing local %s", typedExpression.Name)
@@ -1623,7 +1681,7 @@ func (generator *generator) compileAssignmentTarget(expression parser.Expression
 	case *parser.NameExpression:
 		// 名称左值不需要提前分配地址寄存器，但 upvalue 名称要先于 RHS 登记。
 		target := assignmentTarget{name: targetExpression.Name, position: targetExpression.Position, resolvedUpvalue: -1, tableRegister: -1, keyRegister: -1}
-		if _, ok := generator.locals[targetExpression.Name]; ok {
+		if _, ok := generator.lookupLocal(targetExpression.Name); ok {
 			// 当前 local 写回不涉及 upvalue 捕获，保持普通名称目标。
 			return target, nil
 		}
@@ -1780,7 +1838,7 @@ func (generator *generator) emitAssignmentTarget(target assignmentTarget, valueR
 //
 // target 优先匹配当前 local，其次写回捕获 upvalue，最后按 Lua 5.3 语义写入 `_ENV[name]`。
 func (generator *generator) compileNameAssignmentFromRegister(target *parser.NameExpression, valueRegister int) error {
-	targetBinding, ok := generator.locals[target.Name]
+	targetBinding, ok := generator.lookupLocal(target.Name)
 	if ok {
 		// 当前作用域 local 直接 MOVE，避免 RHS 临时寄存器生命周期泄漏。
 		generator.emitABC(bytecode.OpMove, targetBinding.register, valueRegister, 0)
@@ -1808,7 +1866,7 @@ func (generator *generator) compileNameAssignmentFromRegister(target *parser.Nam
 //
 // target 是赋值左侧名称；rights 是完整右侧表达式列表；index 指向当前左值下标。
 func (generator *generator) compileNameAssignment(target *parser.NameExpression, rights []parser.Expression, index int) error {
-	targetBinding, ok := generator.locals[target.Name]
+	targetBinding, ok := generator.lookupLocal(target.Name)
 	if !ok {
 		if target.Name == envUpvalueName {
 			// 未声明 `_ENV` 写回隐式环境 upvalue，兼容模块内 `_ENV = {}`。
@@ -1984,7 +2042,7 @@ func functionExpressionClosureLine(expression *parser.FunctionExpression) lexer.
 //
 // 当前阶段支持函数名对应已有 local，未知函数名按 Lua 5.3 语义写入 `_ENV[name]`。
 func (generator *generator) compileFunctionStatement(statement *parser.FunctionStatement) error {
-	targetBinding, ok := generator.locals[statement.Name]
+	targetBinding, ok := generator.lookupLocal(statement.Name)
 	childIndex, err := generator.compileChildProto(statement.Body)
 	if err != nil {
 		// 子函数编译失败时返回错误。
@@ -2133,7 +2191,7 @@ func (generator *generator) compileIfComparisonCondition(clause parser.IfClause,
 // 临时寄存器以保留求值、副作用和错误语义。
 func (generator *generator) ifConditionRegister(expression parser.Expression) (register int, release bool) {
 	if nameExpression, ok := expression.(*parser.NameExpression); ok {
-		if binding, exists := generator.locals[nameExpression.Name]; exists {
+		if binding, exists := generator.lookupLocal(nameExpression.Name); exists {
 			// 当前 local 读取不会触发元方法或调用，TEST 可直接读取其寄存器。
 			return binding.register, false
 		}
@@ -2797,7 +2855,7 @@ func (generator *generator) compileSingleSafeNameReturn(statement *parser.Return
 		// 非名称表达式交给后续快路径或通用 return。
 		return false, nil
 	}
-	if binding, ok := generator.locals[nameExpression.Name]; ok {
+	if binding, ok := generator.lookupLocal(nameExpression.Name); ok {
 		// 当前 local 已在寄存器中，直接作为单返回值起点。
 		generator.emitABC(bytecode.OpReturn, binding.register, 2, 0)
 		generator.returned = true
@@ -2887,7 +2945,7 @@ func (generator *generator) isSafeBinaryReturnOperand(expression parser.Expressi
 		// 非名称表达式可能包含索引、调用或其他副作用。
 		return false
 	}
-	if _, ok := generator.locals[nameExpression.Name]; ok {
+	if _, ok := generator.lookupLocal(nameExpression.Name); ok {
 		// 当前 local 读取只访问寄存器。
 		return true
 	}
@@ -2905,7 +2963,7 @@ func (generator *generator) canResolveUpvalueName(name string) bool {
 
 // hasLocalOrUpvalueName 判断当前函数或祖先函数是否存在可捕获名称。
 func (generator *generator) hasLocalOrUpvalueName(name string) bool {
-	if _, ok := generator.locals[name]; ok {
+	if _, ok := generator.lookupLocal(name); ok {
 		// 直接命中当前函数 local。
 		return true
 	}
@@ -3389,7 +3447,7 @@ func (generator *generator) compileLiteralTo(expression *parser.LiteralExpressio
 //
 // 当前阶段优先读取局部和 upvalue；未知名称按 Lua 5.3 语义读取 `_ENV[name]`。
 func (generator *generator) compileNameTo(expression *parser.NameExpression, targetRegister int) error {
-	sourceBinding, ok := generator.locals[expression.Name]
+	sourceBinding, ok := generator.lookupLocal(expression.Name)
 	if !ok {
 		if expression.Name == envUpvalueName {
 			// 未声明的 `_ENV` 名称读取当前函数环境 upvalue，而不是读取 `_ENV["_ENV"]`。
@@ -3476,7 +3534,7 @@ func (generator *generator) compileGlobalNameTo(name string, targetRegister int)
 		// 全局名常量无法编码或加载时返回错误。
 		return err
 	}
-	if envBinding, ok := generator.locals[envUpvalueName]; ok {
+	if envBinding, ok := generator.lookupLocal(envUpvalueName); ok {
 		// 当前作用域显式声明 local _ENV 时，未声明名称必须访问该表而不是顶层 globals。
 		generator.emitABC(bytecode.OpGetTable, targetRegister, envBinding.register, keyOperand)
 	} else {
@@ -3535,7 +3593,7 @@ func (generator *generator) emitSetGlobalNameOperand(name string, valueOperand i
 		// 全局名常量无法编码或加载时返回错误。
 		return err
 	}
-	if envBinding, ok := generator.locals[envUpvalueName]; ok {
+	if envBinding, ok := generator.lookupLocal(envUpvalueName); ok {
 		// 当前作用域显式声明 local _ENV 时，未声明名称写入该环境表。
 		generator.emitABC(bytecode.OpSetTable, envBinding.register, keyOperand, valueOperand)
 	} else {
@@ -3618,7 +3676,7 @@ func (generator *generator) unaryLocalOperandRegister(expression parser.Expressi
 		// 非名称操作数不能直接映射寄存器。
 		return 0, false
 	}
-	binding, ok := generator.locals[nameExpression.Name]
+	binding, ok := generator.lookupLocal(nameExpression.Name)
 	if !ok {
 		// 只有当前函数可见 local 能直接复用寄存器。
 		return 0, false
@@ -3875,11 +3933,16 @@ func (generator *generator) binaryRightOperand(expression parser.Expression) (op
 // 若返回 true，表达式编译不能把该寄存器作为中间结果覆盖，否则后续子表达式读取同名 local
 // 会看到错误值。
 func (generator *generator) registerHasActiveLocal(register int) bool {
-	for _, binding := range generator.locals {
+	found := false
+	generator.forEachLocal(func(_ string, binding localBinding) {
 		// 任一可见 local 使用该寄存器时都视为不可复用。
 		if binding.register == register {
-			return true
+			found = true
 		}
+	})
+	if found {
+		// 命中活动 local 时，调用方不能把该寄存器作为临时目标。
+		return true
 	}
 
 	// 没有 active local 占用该寄存器。
@@ -3927,7 +3990,7 @@ func (generator *generator) compileComparisonTo(expression *parser.BinaryExpress
 func (generator *generator) compileShortCircuitTo(expression *parser.BinaryExpression, targetRegister int) error {
 	if leftName, ok := expression.Left.(*parser.NameExpression); ok {
 		// local 左操作数可用 TESTSET 合并复制和真假测试，对齐 Lua 5.3 官方 codegen。
-		if binding, found := generator.locals[leftName.Name]; found && binding.register != targetRegister {
+		if binding, found := generator.lookupLocal(leftName.Name); found && binding.register != targetRegister {
 			// TESTSET 条件满足时把左侧 local 复制到目标寄存器，随后 JMP 跳过右侧表达式。
 			if expression.Operator == "and" {
 				// and 在左侧为 false/nil 时保留左侧结果并跳过右侧。
@@ -4179,12 +4242,12 @@ func (generator *generator) releaseRegistersFrom(startRegister int) {
 // 否则后续临时寄存器会覆盖 numeric for 控制变量或同作用域后续 local。
 func (generator *generator) releaseCallArgumentsAfterFixedResult(targetRegister int, resultCount int) {
 	releaseFrom := targetRegister + resultCount
-	for _, binding := range generator.locals {
+	generator.forEachLocal(func(_ string, binding localBinding) {
 		if binding.register >= releaseFrom {
 			// 活跃 local 位于返回区间之后时，回收水位必须保留在该 local 后面。
 			releaseFrom = binding.register + 1
 		}
-	}
+	})
 	generator.releaseRegistersFrom(releaseFrom)
 }
 
@@ -4193,18 +4256,14 @@ func (generator *generator) releaseCallArgumentsAfterFixedResult(targetRegister 
 // name 是 Lua 局部变量名；register 是对应寄存器；position 当前保留给后续行号映射扩展。
 func (generator *generator) defineLocal(name string, register int, position lexer.Position) {
 	currentScopeID := generator.currentScopeID()
-	if previousBinding, exists := generator.locals[name]; exists && previousBinding.scopeID == currentScopeID {
+	if previousBinding, exists := generator.lookupLocal(name); exists && previousBinding.scopeID == currentScopeID {
 		// 同一词法作用域内重新声明同名 local 时，旧 local 从新声明生效处开始不可见。
 		generator.proto.LocalVars[previousBinding.localVarIndex].EndPC = len(generator.proto.Code)
 	}
 	localVar := bytecode.LocalVar{Name: name, Register: register, StartPC: len(generator.proto.Code), EndPC: len(generator.proto.Code)}
 	index := len(generator.proto.LocalVars)
 	generator.proto.LocalVars = append(generator.proto.LocalVars, localVar)
-	if generator.locals == nil {
-		// 首次声明局部变量时才创建绑定表；nil map 的读取、遍历和 len 与空 map 等价。
-		generator.locals = make(map[string]localBinding)
-	}
-	generator.locals[name] = localBinding{register: register, localVarIndex: index, scopeID: currentScopeID}
+	generator.setLocal(name, localBinding{register: register, localVarIndex: index, scopeID: currentScopeID})
 }
 
 // currentScopeID 返回当前 parser 作用域编号。
@@ -4226,17 +4285,8 @@ func (generator *generator) currentScopeID() int {
 // 返回快照必须传给 endScope；该机制只恢复 codegen 解析名称所需的 locals 与寄存器水位，
 // 不回退已经生成的指令、常量或调试局部变量表。
 func (generator *generator) beginScope() scopeSnapshot {
-	var locals map[string]localBinding
-	if len(generator.locals) > 0 {
-		// 只有外层确实存在局部绑定时才复制快照；空作用域用 nil map 表示即可。
-		locals = make(map[string]localBinding, len(generator.locals))
-		for name, binding := range generator.locals {
-			// 浅拷贝局部绑定，退出作用域时恢复外层同名变量。
-			locals[name] = binding
-		}
-	}
 	return scopeSnapshot{
-		locals:        locals,
+		locals:        generator.snapshotLocals(),
 		localVarCount: len(generator.proto.LocalVars),
 		nextRegister:  generator.nextRegister,
 	}
@@ -4256,17 +4306,22 @@ func (generator *generator) endScope(scope scopeSnapshot, endPC int) {
 		generator.proto.LocalVars[index].EndPC = endPC
 	}
 	generator.mergeCapturedLocalsIntoSnapshot(scope.locals)
-	generator.locals = scope.locals
+	generator.restoreLocalSnapshot(scope.locals)
 	generator.nextRegister = scope.nextRegister
 }
 
 // hasCapturedLocalSince 判断指定 LocalVars 起点之后是否存在被子函数捕获的局部变量。
 func (generator *generator) hasCapturedLocalSince(localVarStart int) bool {
-	for _, binding := range generator.locals {
+	found := false
+	generator.forEachLocal(func(_ string, binding localBinding) {
 		if binding.localVarIndex >= localVarStart && binding.captured {
 			// 只要有新增 local 被捕获，退出作用域就必须关闭对应 open upvalue。
-			return true
+			found = true
 		}
+	})
+	if found {
+		// 存在新增 captured local 时必须生成 close-only JMP。
+		return true
 	}
 
 	// 没有新增 captured local 时可省略 close-only JMP。
@@ -4279,12 +4334,12 @@ func (generator *generator) hasCapturedLocalSince(localVarStart int) bool {
 // local，resolveUpvalue 会先标记当前 binding。退出 block 时必须把该标记写回快照，否则外层后续
 // endScope 会误以为该 local 未被捕获，漏发 OP_JMP close 指令并让下一轮寄存器复用污染旧闭包。
 func (generator *generator) mergeCapturedLocalsIntoSnapshot(snapshot map[string]localBinding) {
-	if len(snapshot) == 0 || len(generator.locals) == 0 {
+	if len(snapshot) == 0 || generator.localCount() == 0 {
 		// 没有外层快照或当前局部表为空时，无需合并捕获标记。
 		return
 	}
 	for name, snapshotBinding := range snapshot {
-		currentBinding, exists := generator.locals[name]
+		currentBinding, exists := generator.lookupLocal(name)
 		if !exists {
 			// 当前作用域中该名称已被完全遮蔽或移除，快照保持原值。
 			continue
@@ -4302,10 +4357,10 @@ func (generator *generator) mergeCapturedLocalsIntoSnapshot(snapshot map[string]
 //
 // 未被嵌套 block 提前关闭的函数级 local 使用函数结束作为 EndPC。
 func (generator *generator) closeLocals(endPC int) {
-	for _, binding := range generator.locals {
+	generator.forEachLocal(func(_ string, binding localBinding) {
 		// 每个局部变量的 EndPC 使用函数最终指令位置。
 		generator.proto.LocalVars[binding.localVarIndex].EndPC = endPC
-	}
+	})
 }
 
 // resolveUpvalue 解析并登记当前函数需要捕获的 upvalue。
@@ -4321,7 +4376,7 @@ func (generator *generator) resolveUpvalue(name string, position lexer.Position)
 		// 顶层函数没有外层作用域，无法捕获 upvalue。
 		return 0, false, nil
 	}
-	if binding, exists := generator.parent.locals[name]; exists {
+	if binding, exists := generator.parent.lookupLocal(name); exists {
 		if len(generator.proto.Upvalues) >= maxProtoRegisters {
 			// Lua 5.3 单函数 upvalue 数量超过上限时报告源码行号。
 			return 0, true, tooManyUpvaluesError(position)
@@ -4331,7 +4386,7 @@ func (generator *generator) resolveUpvalue(name string, position lexer.Position)
 		generator.proto.Upvalues = append(generator.proto.Upvalues, bytecode.UpvalueDesc{Name: name, InStack: true, Index: uint8(binding.register)})
 		generator.setUpvalue(name, index)
 		binding.captured = true
-		generator.parent.locals[name] = binding
+		generator.parent.setLocal(name, binding)
 		return index, true, nil
 	}
 	parentIndex, exists, err := generator.parent.resolveUpvalue(name, position)
@@ -4383,12 +4438,12 @@ func (generator *generator) envUpvalueIndex() int {
 		generator.setUpvalue(envUpvalueName, index)
 		return index
 	}
-	if binding, exists := generator.parent.locals[envUpvalueName]; exists {
+	if binding, exists := generator.parent.lookupLocal(envUpvalueName); exists {
 		// 父函数显式 local _ENV 时，嵌套函数必须捕获该寄存器作为自身环境。
 		generator.proto.Upvalues = append(generator.proto.Upvalues, bytecode.UpvalueDesc{Name: envUpvalueName, InStack: true, Index: uint8(binding.register)})
 		generator.setUpvalue(envUpvalueName, index)
 		binding.captured = true
-		generator.parent.locals[envUpvalueName] = binding
+		generator.parent.setLocal(envUpvalueName, binding)
 		return index
 	}
 	parentIndex := generator.parent.envUpvalueIndex()
