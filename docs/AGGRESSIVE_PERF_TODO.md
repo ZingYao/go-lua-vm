@@ -1659,6 +1659,28 @@ B/op 略低于上一轮，wall-clock 小幅改善。alloc_objects 中 `parsePrim
 剩余主要集中在 `parseReturnStatementUntil`、`parseFunctionStatement`、`parseFunctionBody`、
 semantic `analyzeBlock/analyzeFunctionBody`、`codegen.newGenerator` 和 `bytecode.NewProto`。
 
+### 2026-07-04 Statement / FunctionBody arena 证伪
+
+尝试方向：基于表达式 AST 页式 arena 后的 profile，继续将 `ReturnStatement`、`FunctionStatement` 和
+`FunctionBody` 放入 parser 页式 arena，目标是减少 `compile_3000_functions` 中每个函数声明和 return
+语句的逐对象分配。该方向保持 AST 指针类型和字段不变，只改变 parser 内部节点所有权。
+
+验证过的变体：
+
+| 变体 | `BenchmarkCompileSource3000Functions` 结果 | 结论 |
+| --- | ---: | --- |
+| `ReturnStatement` + `FunctionStatement` + `FunctionBody`，页大小 256 | 约 `6.08-6.11 ms/op`，`5.37 MB/op`，`12149 allocs/op` | allocs 明显下降，但 B/op 高于表达式 arena 后的约 `5.31 MB/op`。 |
+| 同上，页大小 64 | 约 `6.06-6.08 ms/op`，`5.35 MB/op`，`12254 allocs/op` | 尾部浪费减少，但 B/op 仍回退。 |
+| 同上，页大小 16 | 约 `5.93-5.94 ms/op`，`5.41 MB/op`，`12677 allocs/op` | 小页增加页对象和管理成本，B/op 更差。 |
+| 仅 `ReturnStatement` + `FunctionStatement`，页大小 256 | 约 `6.01-6.05 ms/op`，`5.35 MB/op`，`15137 allocs/op` | 移除大 `FunctionBody` 后仍有 B/op 回退。 |
+| 仅 `ReturnStatement` + `FunctionStatement`，页大小 64 | 约 `5.97-5.98 ms/op`，`5.35 MB/op`，`15207 allocs/op` | allocs 下降，但 B/op 仍高于上一轮。 |
+| 仅 `ReturnStatement` + `FunctionStatement`，页大小 16 | 约 `6.02-6.03 ms/op`，`5.36 MB/op`，`15489 allocs/op` | 小页没有解决 B/op 回退。 |
+
+结论：statement / function body arena 可以稳定减少 `6000-9000 allocs/op`，wall-clock 也有轻微改善，
+但所有变体都让 B/op 高于表达式 arena 后的基线，违反“未证明 B/op 不退化前不实现”的 TODO 标准。
+本轮已撤回生产代码，不提交该优化。后续如果继续做 AST 所有权，需要先设计能按实际数量精确 sizing
+或更小字段布局的结构方案，而不是简单页式搬迁重节点。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -1769,7 +1791,8 @@ semantic `analyzeBlock/analyzeFunctionBody`、`codegen.newGenerator` 和 `byteco
 - [x] 若继续推进编译期，基于直接函数 block 容量预估后 profile 重新观察剩余 parser AST、semantic scope、`newGenerator/NewProto` 与最终 Proto 本体；若只剩 AST/semantic/Proto 本体成本则记录证伪，不再追加容量预估。
 - [x] 若继续推进编译期，先独立评估 lexer 数字扫描或 AST/semantic 大结构方案；没有收益证据前不再追加 codegen/Proto 容量预估。
 - [x] 若继续推进编译期，先设计 AST 紧凑表示、semantic scope 生命周期或 Proto/generator 所有权方案；没有明确语义等价和收益证据前，不再堆局部字段/容量微调。
-- [ ] 若继续推进编译期，基于表达式 AST 页式 arena 后重新 profile；优先评估 ReturnStatement/FunctionStatement 或 semantic ScopeInfo 页式所有权，未证明 B/op 不退化前不实现。
+- [x] 若继续推进编译期，基于表达式 AST 页式 arena 后重新 profile；优先评估 ReturnStatement/FunctionStatement 或 semantic ScopeInfo 页式所有权，未证明 B/op 不退化前不实现。
+- [ ] 若继续推进编译期，优先设计可精确 sizing 的 AST/semantic 所有权方案，或转向 `semantic ScopeInfo` 小对象 profile；简单页式搬迁重 AST 节点已证伪。
 - [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准
