@@ -206,7 +206,13 @@ type constantIndexes struct {
 	hasBool [2]bool
 	// boolIndex 保存 false/true 常量表下标。
 	boolIndex [2]int
-	// integers 保存 integer 原值到常量表下标的映射。
+	// hasInlineInteger 表示 integer inline 槽是否已保存首个 integer 常量。
+	hasInlineInteger bool
+	// inlineIntegerValue 保存首个 integer 常量原值。
+	inlineIntegerValue int64
+	// inlineIntegerIndex 保存首个 integer 常量表下标。
+	inlineIntegerIndex int
+	// integers 保存第二个及之后不同 integer 原值到常量表下标的 overflow 映射。
 	integers map[int64]int
 	// numbers 保存 float number 原值到常量表下标的映射。
 	numbers map[float64]int
@@ -4764,6 +4770,10 @@ func (generator *generator) constantIndex(constant bytecode.Constant) (int, bool
 		return generator.constants.boolIndex[boolSlot], generator.constants.hasBool[boolSlot]
 	case bytecode.ConstantInteger:
 		// integer 使用 int64 原值索引，避免和 float 同值碰撞。
+		if generator.constants.hasInlineInteger && generator.constants.inlineIntegerValue == constant.Integer {
+			// 单 integer 常量函数直接命中 inline 槽，避免创建 map。
+			return generator.constants.inlineIntegerIndex, true
+		}
 		index, ok := generator.constants.integers[constant.Integer]
 		return index, ok
 	case bytecode.ConstantNumber:
@@ -4799,8 +4809,25 @@ func (generator *generator) recordConstantIndex(constant bytecode.Constant, inde
 		generator.constants.hasBool[boolSlot] = true
 		generator.constants.boolIndex[boolSlot] = index
 	case bytecode.ConstantInteger:
+		if generator.constants.hasInlineInteger && generator.constants.inlineIntegerValue == constant.Integer {
+			// 理论上 addConstant 会先命中 constantIndex；这里保守更新，保持重复登记时下标一致。
+			generator.constants.inlineIntegerIndex = index
+			return
+		}
+		if _, exists := generator.constants.integers[constant.Integer]; exists {
+			// 已经进入 overflow map 的 integer 保持在 map 中。
+			generator.constants.integers[constant.Integer] = index
+			return
+		}
+		if !generator.constants.hasInlineInteger && len(generator.constants.integers) == 0 {
+			// 首个 integer 常量进入 inline 槽，覆盖单常量子函数热路径。
+			generator.constants.hasInlineInteger = true
+			generator.constants.inlineIntegerValue = constant.Integer
+			generator.constants.inlineIntegerIndex = index
+			return
+		}
 		if generator.constants.integers == nil {
-			// integer 常量首次出现时才创建索引表。
+			// 第二个不同 integer 常量首次出现时才创建 overflow 索引表。
 			generator.constants.integers = make(map[int64]int)
 		}
 		generator.constants.integers[constant.Integer] = index

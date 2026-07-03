@@ -722,6 +722,44 @@ func TestGeneratorLocalInlineUsesOverflowOnlyAfterSecondBinding(t *testing.T) {
 	}
 }
 
+// TestGeneratorIntegerConstantInlineUsesOverflowOnlyAfterSecondValue 验证单 integer 常量优先使用 inline 槽。
+func TestGeneratorIntegerConstantInlineUsesOverflowOnlyAfterSecondValue(t *testing.T) {
+	generator := newGenerator("inline-integer-constant")
+	firstIndex := generator.addConstant(bytecode.IntegerConstant(7))
+	if firstIndex != 0 {
+		// 首个常量必须进入常量表 0 号槽位。
+		t.Fatalf("first constant index=%d", firstIndex)
+	}
+	if !generator.constants.hasInlineInteger || generator.constants.inlineIntegerValue != 7 || generator.constants.inlineIntegerIndex != firstIndex {
+		// 单 integer 常量应登记在 inline 槽，避免创建 overflow map。
+		t.Fatalf("unexpected inline integer state: %+v", generator.constants)
+	}
+	if generator.constants.integers != nil {
+		// 单 integer 常量不应创建 map，这是本轮优化的核心收益点。
+		t.Fatalf("single integer constant should not allocate overflow map: %+v", generator.constants.integers)
+	}
+
+	reusedIndex := generator.addConstant(bytecode.IntegerConstant(7))
+	if reusedIndex != firstIndex || len(generator.proto.Constants) != 1 {
+		// 重复 integer 常量必须命中 inline 槽并复用原常量表下标。
+		t.Fatalf("reused index=%d first=%d constants=%+v", reusedIndex, firstIndex, generator.proto.Constants)
+	}
+
+	secondIndex := generator.addConstant(bytecode.IntegerConstant(9))
+	if secondIndex != 1 {
+		// 第二个不同 integer 常量应追加到常量表。
+		t.Fatalf("second constant index=%d", secondIndex)
+	}
+	if len(generator.constants.integers) != 1 || generator.constants.integers[9] != secondIndex {
+		// 第二个不同 integer 才进入 overflow map。
+		t.Fatalf("unexpected overflow integer map=%+v", generator.constants.integers)
+	}
+	if reusedSecondIndex := generator.addConstant(bytecode.IntegerConstant(9)); reusedSecondIndex != secondIndex || len(generator.proto.Constants) != 2 {
+		// overflow 中的重复 integer 仍必须复用原下标。
+		t.Fatalf("reused second index=%d second=%d constants=%+v", reusedSecondIndex, secondIndex, generator.proto.Constants)
+	}
+}
+
 // TestCompileNestedShadowRestoresInlineLocal 验证内层遮蔽退出后恢复外层 inline local。
 func TestCompileNestedShadowRestoresInlineLocal(t *testing.T) {
 	chunk := parseChunkForCodegenTest(t, "local x = 1 do local x = 2 end return x")
