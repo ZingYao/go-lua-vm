@@ -619,6 +619,47 @@ func TestFormatSupportsIntegerAndCharVerbs(t *testing.T) {
 	}
 }
 
+// TestFormatFixedExactDecimalFastPath 验证 string.format exact `%d` 固定结果快路径。
+//
+// 该快路径只覆盖成功的整数十进制格式；其它格式、缺参和参数错误必须返回未命中，让完整
+// formatWithState 保留 Lua 5.3 错误、debug frame 和 `__tostring` 语义。
+func TestFormatFixedExactDecimalFastPath(t *testing.T) {
+	// 固定结果槽模拟 VM CALL 的单返回写回缓冲。
+	slots := []runtime.Value{runtime.NilValue()}
+	resultCount, handled, err := FormatFixed4(slots, runtime.StringValue("%d"), runtime.StringValue(" 42 "), runtime.IntegerValue(99), runtime.NilValue(), 3)
+	if err != nil {
+		// 合法字符串整数不应失败。
+		t.Fatalf("FormatFixed4 exact decimal failed: %v", err)
+	}
+	if !handled || resultCount != 1 || slots[0].String != "42" {
+		// exact %d 必须写入一个十进制字符串并忽略多余实参。
+		t.Fatalf("FormatFixed4 exact decimal mismatch: handled=%v count=%d slots=%#v", handled, resultCount, slots)
+	}
+
+	result, resultCount, handled, err := FormatFixed4Single(runtime.StringValue("%d"), runtime.IntegerValue(-7), runtime.NilValue(), runtime.NilValue(), 2)
+	if err != nil {
+		// 合法 integer 不应失败。
+		t.Fatalf("FormatFixed4Single exact decimal failed: %v", err)
+	}
+	if !handled || resultCount != 1 || result.String != "-7" {
+		// 直接寄存器单返回入口必须与固定结果槽入口一致。
+		t.Fatalf("FormatFixed4Single exact decimal mismatch: handled=%v count=%d result=%#v", handled, resultCount, result)
+	}
+
+	if _, handled, err := FormatFixed(slots, runtime.StringValue("%04d"), runtime.IntegerValue(42)); err != nil || handled {
+		// 带宽度的格式必须回退通用实现，避免破坏 flag/width 语义。
+		t.Fatalf("FormatFixed width format should fallback: handled=%v err=%v", handled, err)
+	}
+	if _, handled, err := FormatFixed(slots, runtime.StringValue("%d")); err != nil || handled {
+		// 缺少格式值必须交给完整实现生成 `no value`。
+		t.Fatalf("FormatFixed missing value should fallback: handled=%v err=%v", handled, err)
+	}
+	if _, handled, err := FormatFixed(slots, runtime.StringValue("%d"), runtime.StringValue("not-int")); err != nil || handled {
+		// 非整数必须回退完整 bad argument 名称重写和 traceback 语义。
+		t.Fatalf("FormatFixed bad integer should fallback: handled=%v err=%v", handled, err)
+	}
+}
+
 // TestFormatSupportsHexFloatVerbs 验证 string.format 的十六进制浮点格式。
 //
 // Lua 5.3 官方 strings.lua 使用 `%a/%A` 验证浮点数可按 C99 十六进制指数形式往返。

@@ -102,10 +102,7 @@ func Open(state *runtime.State) error {
 	library.RawSetString("char", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Char)))
 	library.RawSetString("dump", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Dump)))
 	library.RawSetString("find", runtime.ReferenceValue(runtime.KindGoClosure, stringFixedResultsFunctions.findFunction))
-	library.RawSetString("format", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(func(args ...runtime.Value) ([]runtime.Value, error) {
-		// format 的 %s 需要当前 State 才能执行 Lua closure `__tostring` 元方法。
-		return formatWithState(state, args...)
-	})))
+	library.RawSetString("format", runtime.ReferenceValue(runtime.KindGoClosure, newFormatFixedResultsFunction(state)))
 	library.RawSetString("gmatch", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(GMatch)))
 	library.RawSetString("gsub", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(func(args ...runtime.Value) ([]runtime.Value, error) {
 		// gsub 的 Lua closure 替换函数需要当前 State 提供 Lua closure runner。
@@ -649,6 +646,94 @@ func isPlainPattern(pattern string) bool {
 func Format(args ...runtime.Value) ([]runtime.Value, error) {
 	// 不带 State 的入口保留给单测和纯 Go 元方法路径使用。
 	return formatWithState(nil, args...)
+}
+
+// newFormatFixedResultsFunction 构造 string.format 的固定单返回快路径描述。
+//
+// state 必须来自当前打开 string 库的 State；未命中 exact `%d` 热路径时，Fallback 会继续使用
+// formatWithState，从而保留 `%s` 调用 Lua closure `__tostring` 的能力与完整错误语义。
+func newFormatFixedResultsFunction(state *runtime.State) *runtime.GoFixedResultsFunction {
+	// format 永远最多返回一个字符串，窄快路径只负责无错误 exact `%d` 成功场景。
+	return &runtime.GoFixedResultsFunction{
+		MaxResults:      1,
+		Function4Single: FormatFixed4Single,
+		Function4:       FormatFixed4,
+		Function:        FormatFixed,
+		Fallback: func(args ...runtime.Value) ([]runtime.Value, error) {
+			// 未命中固定结果快路径时回到原始 State-aware 实现。
+			return formatWithState(state, args...)
+		},
+	}
+}
+
+// FormatFixed 实现 string.format exact `%d` 的固定单返回快路径。
+//
+// dst 至少需要容纳一个返回值；仅当格式串精确等于 `%d` 且第二参数可按 Lua 整数格式转换时
+// 返回 handled=true。缺参、错误参数、其它格式和需要 State 的 `%s` 都返回 handled=false，
+// 由 Fallback 保留 Lua 5.3 错误、debug frame 和 `__tostring` 语义。
+func FormatFixed(dst []runtime.Value, args ...runtime.Value) (int, bool, error) {
+	// 固定返回入口先校验结果槽，避免后续写越界。
+	if len(dst) < 1 {
+		// 调用方声明的 MaxResults 与结果槽不一致时不能安全处理。
+		return 0, false, runtime.ErrRegisterOutOfRange
+	}
+	if len(args) < 2 {
+		// 缺少格式串或格式参数时交给完整实现生成 Lua 错误文本。
+		return 0, false, nil
+	}
+
+	// 只需要前两个参数；exact `%d` 按 Lua 语义忽略多余实参。
+	return FormatFixed4(dst, args[0], args[1], runtime.NilValue(), runtime.NilValue(), len(args))
+}
+
+// FormatFixed4 实现最多四实参入口的 string.format exact `%d` 固定单返回快路径。
+//
+// dst 至少需要容纳一个返回值；argCount 表示实际参数数量。该入口只写入单个字符串结果，
+// 其它格式全部回退完整 Format，避免破坏宽度、精度、`%s` 元方法和错误路径。
+func FormatFixed4(dst []runtime.Value, arg0 runtime.Value, arg1 runtime.Value, arg2 runtime.Value, arg3 runtime.Value, argCount int) (int, bool, error) {
+	// 固定返回入口只写一个槽位，调用方按 MaxResults 分配 dst。
+	if len(dst) < 1 {
+		// 结果槽不足时不能安全写入。
+		return 0, false, runtime.ErrRegisterOutOfRange
+	}
+
+	result, resultCount, handled, err := FormatFixed4Single(arg0, arg1, arg2, arg3, argCount)
+	if err != nil || !handled {
+		// 错误或未命中都交给调用方保持既有回退语义。
+		return 0, handled, err
+	}
+	if resultCount > 0 {
+		// exact `%d` 成功路径返回一个格式化字符串。
+		dst[0] = result
+	}
+	return resultCount, true, nil
+}
+
+// FormatFixed4Single 实现 string.format("%d", value) 的单返回直接寄存器快路径。
+//
+// arg0 必须是精确格式串 `%d`，arg1 必须可按 string.format 的整数格式转换；其它形态返回
+// handled=false，由完整 formatWithState 保留 Lua 5.3 兼容边界。
+func FormatFixed4Single(arg0 runtime.Value, arg1 runtime.Value, _ runtime.Value, _ runtime.Value, argCount int) (runtime.Value, int, bool, error) {
+	// exact `%d` 至少需要格式串和值两个实参，缺参交给完整实现生成 `no value`。
+	if argCount < 2 {
+		// 不在快路径构造错误，避免绕过 debug-frame 回退。
+		return runtime.NilValue(), 0, false, nil
+	}
+	if arg0.Kind != runtime.KindString {
+		// 第一个实参不是格式字符串时回退完整参数错误。
+		return runtime.NilValue(), 0, false, nil
+	}
+	if arg0.String != "%d" {
+		// 只覆盖官方标准库 benchmark 的 exact `%d` 热格式。
+		return runtime.NilValue(), 0, false, nil
+	}
+
+	integerValue, ok := formatIntegerValue(arg1)
+	if !ok {
+		// 非整数参数必须回退完整 bad argument 名称重写和 traceback 语义。
+		return runtime.NilValue(), 0, false, nil
+	}
+	return runtime.StringValue(strconv.FormatInt(integerValue, 10)), 1, true, nil
 }
 
 // formatWithState 实现 Lua 5.3 `string.format`，并在可用时让 `%s` 执行 Lua closure `__tostring`。

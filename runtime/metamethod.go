@@ -292,8 +292,8 @@ func callMetamethodValue(runner LuaMetamethodRunner, method Value, name string, 
 
 // callGoClosureResults 调用当前阶段支持的 Go closure 并返回多返回值。
 //
-// method 必须是 KindGoClosure；Ref 可以是 GoFunction 或 GoResultsFunction。GoFunction 会
-// 被提升为单元素返回值切片，便于调用方统一处理 `__pairs` 等多返回值语义。
+// method 必须是 KindGoClosure；Ref 可以是 GoFunction、GoResultsFunction 或 GoFixedResultsFunction。
+// GoFunction 会被提升为单元素返回值切片，便于调用方统一处理 `__pairs` 等多返回值语义。
 func callGoClosureResults(method Value, args ...Value) ([]Value, error) {
 	if method.Kind != KindGoClosure {
 		// 非 Go closure 无法在当前阶段直接执行。
@@ -318,6 +318,26 @@ func callGoClosureResults(method Value, args ...Value) ([]Value, error) {
 			return nil, ErrUnsupportedMetamethod
 		}
 		return function(args...)
+	case *GoFixedResultsFunction:
+		// 固定上限回调先尝试窄快路径，未命中时回退完整多返回实现。
+		if function == nil || function.Function == nil {
+			return nil, ErrUnsupportedMetamethod
+		}
+		results := make([]Value, function.MaxResults)
+		resultCount, handled, err := function.Function(results, args...)
+		if err != nil {
+			// 函数自身错误必须原样上抛。
+			return nil, err
+		}
+		if handled {
+			// 命中固定结果路径时只返回实际写入的前缀。
+			return results[:resultCount], nil
+		}
+		if function.Fallback == nil {
+			// 没有完整回退函数时无法保留变长语义。
+			return nil, ErrUnsupportedMetamethod
+		}
+		return function.Fallback(args...)
 	case *GoClosureWithUpvalues:
 		// 带 debug upvalue 元数据的 Go closure 仍通过 Function 字段执行。
 		if function == nil || function.Function == nil {

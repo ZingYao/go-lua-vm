@@ -293,6 +293,42 @@ benchmark 复核：
 superinstruction 明显减少 CALL 边界和逐指令分发成本。DoString 分配多 1 alloc/op，来自新增 VM-local
 superinstruction 表；目标 wall-clock 收益显著，prepared 分配不变。非目标 mix 和 recursion 未显示稳定退化。
 
+### 2026-07-03 `string.format("%d", i)` 固定结果 fastcall
+
+实现：将 `string.format` 注册为 `runtime.GoFixedResultsFunction`，并新增只覆盖成功 exact `%d` 的
+`FormatFixed4Single` / `FormatFixed4` / `FormatFixed`。无 hook、固定单返回、格式串精确等于 `%d`
+且第二参数可按 Lua `string.format` 整数语义转换时，VM 可直接写回返回字符串，跳过 GoResultsFunction
+参数切片、结果切片和 debug frame。未命中时仍通过 `formatWithState(state, ...)` 回退完整实现。
+
+配套修复：`runtime.callGoClosureResults` 增加 `GoFixedResultsFunction` 支持，命中固定结果时返回固定槽
+前缀，未命中时调用 `Fallback`。这用于保持固定结果标准库函数在元方法、gsub replacement 和 runtime
+间接 Go closure 调用场景中的多返回值语义，不改变普通 VM CALL 的调度逻辑。
+
+语义 guard：
+
+- 只覆盖成功的 exact `%d`；`%i`、宽度/精度/flag、`%s/%q/%f/%g`、错误格式、缺参和非整数参数
+  全部返回未命中，交给完整 `formatWithState` 保留 Lua 5.3 错误文本、bad argument 名称重写、
+  traceback、debug frame 和 `__tostring` 语义。
+- `%d` 成功路径仍复用既有 `formatIntegerValue`，保留 integer、可无损转 integer 的 number 和
+  十进制整数字符串转换边界；多余实参按 Lua/C printf 语义忽略。
+- hook 启用时 VM 会走带 debug frame 的固定结果调用；未命中和错误路径不会绕过普通 Go closure frame。
+
+benchmark 复核：
+
+| 用例 | 结果 |
+| --- | ---: |
+| `BenchmarkDoStringStdlibMathString` | `25.53 / 25.86 / 25.77 ms/op`，约 `476.7 KB/op`，`80148 allocs/op` |
+| `BenchmarkDoStringStdlibMathString` 矩阵复核 | `25.75 / 25.56 / 25.44 ms/op`，约 `476.8 KB/op`，`80148 allocs/op` |
+| `BenchmarkDoStringFunctionCall` | `197.9 / 201.9 / 201.0 us/op`，约 `63.6 KB/op`，`255 allocs/op` |
+| `BenchmarkPreparedFunctionCall` | `162.1 / 166.2 / 162.0 us/op`，`400 B/op`，`2 allocs/op` |
+| `BenchmarkDoStringRecursion` | `41.8 / 42.8 / 45.0 us/op`，约 `64.4 KB/op`，`290 allocs/op` |
+| `BenchmarkPreparedRecursion` | `1.603 / 1.622 / 1.606 us/op`，`224 B/op`，`2 allocs/op` |
+
+对比本轮修改前 profile 中 `BenchmarkDoStringStdlibMathString` 约 `44.6-46.1 ms/op`、`38.88 MB/op`、
+`400148-400150 allocs/op`，固定结果 fastcall 消除了每次 `string.format("%d", i)` 的参数/结果切片和
+通用调用帧分配，wall-clock 与分配均明显下降。`function_call` 与 `recursion` 保持上一轮水平，未观察到
+该标准库注册改动引入的稳定退化。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -338,6 +374,12 @@ superinstruction 表；目标 wall-clock 收益显著，prepared 分配不变。
 
 针对 `recursion` 的 Lua CALL 边界，探索同一 closure 自调用的固定签名 fast path。该路径必须保留 stack overflow 检查和错误栈语义，且只在无 hook、无 coroutine、无 yield 的普通执行场景启用。
 
+### 6. 标准库固定结果 fastcall
+
+对已由 profile 证明高频且返回上限固定的标准库函数，优先迁移到 `GoFixedResultsFunction`。该方向只允许
+覆盖成功窄形态；缺参、类型错误、debug hook、Lua closure 元方法、变长结果和复杂格式必须回退完整
+`GoResultsFunction`，避免为了分配收益改变错误栈和调试可见性。
+
 ## TODO
 
 - [x] 跑激进分支基线：默认完整 benchmark 三轮、official-sized Go micro 矩阵、`BenchmarkPrepared*` 相关项。
@@ -354,6 +396,7 @@ superinstruction 表；目标 wall-clock 收益显著，prepared 分配不变。
 - [x] 基于 profile 重新评估 `recursion`，只在能证明自递归固定签名语义等价时设计 fast call。
 - [x] 增加 `function_call` prepared 口径，确认编译/OpenLibs 分配不是该项 wall-clock 主因。
 - [x] 实现 `MOVE; MOVE; LOADK; CALL; ADD; FORLOOP` superinstruction 原型，覆盖官方 `function_call`。
+- [x] 实现 `string.format("%d", i)` 固定结果 fastcall，降低 `stdlib_math_string` 通用 GoResultsFunction 成本。
 - [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准

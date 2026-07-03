@@ -36,6 +36,56 @@ func TestVMArithmeticMetamethod(t *testing.T) {
 	}
 }
 
+// TestCallGoClosureResultsSupportsFixedResultsFunction 验证低层 Go closure 调用支持固定结果函数。
+//
+// 标准库中 string.byte/sub/find/format 会注册为 GoFixedResultsFunction；元方法或 gsub replacement
+// 等间接调用场景必须能在命中快路径时返回固定结果，未命中时回退完整多返回函数。
+func TestCallGoClosureResultsSupportsFixedResultsFunction(t *testing.T) {
+	// fixedFunction 模拟标准库固定结果函数，integer 实参命中快路径，其他实参回退 Fallback。
+	fixedFunction := &GoFixedResultsFunction{
+		MaxResults: 1,
+		Function: func(dst []Value, args ...Value) (int, bool, error) {
+			// 结果槽由调用方按 MaxResults 预分配。
+			if len(dst) < 1 {
+				// 结果槽不足时返回寄存器边界错误。
+				return 0, false, ErrRegisterOutOfRange
+			}
+			if len(args) == 1 && args[0].Kind == KindInteger {
+				// 单个 integer 实参命中固定结果快路径。
+				dst[0] = StringValue("fixed")
+				return 1, true, nil
+			}
+			// 其它形态交给完整 fallback。
+			return 0, false, nil
+		},
+		Fallback: func(args ...Value) ([]Value, error) {
+			// fallback 返回可区分文本，确认调用方没有误用未命中结果槽。
+			return []Value{StringValue("fallback")}, nil
+		},
+	}
+	method := ReferenceValue(KindGoClosure, fixedFunction)
+
+	results, err := callGoClosureResults(method, IntegerValue(1))
+	if err != nil {
+		// 固定结果命中不应失败。
+		t.Fatalf("call fixed function failed: %v", err)
+	}
+	if len(results) != 1 || results[0].String != "fixed" {
+		// 命中快路径时必须返回固定结果槽写入值。
+		t.Fatalf("fixed function result mismatch: %#v", results)
+	}
+
+	results, err = callGoClosureResults(method, StringValue("x"))
+	if err != nil {
+		// fallback 也不应失败。
+		t.Fatalf("call fixed fallback failed: %v", err)
+	}
+	if len(results) != 1 || results[0].String != "fallback" {
+		// 未命中快路径时必须执行完整 fallback。
+		t.Fatalf("fixed fallback result mismatch: %#v", results)
+	}
+}
+
 // TestVMBitwiseMetamethod 验证位运算指令在 integer 转换失败后会调用位运算元方法。
 //
 // Lua 5.3 对 `&`、`|`、`~`、移位等操作在基础整数路径失败时查找对应元方法；当前用
