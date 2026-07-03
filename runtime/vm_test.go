@@ -2506,6 +2506,138 @@ func TestVMTryExecuteMixArithmeticForLoopRejectsNonEntryLoop(t *testing.T) {
 	}
 }
 
+// TestVMTryExecuteFunctionCallAddForLoop 验证 function_call 完整循环体 fast path。
+func TestVMTryExecuteFunctionCallAddForLoop(t *testing.T) {
+	proto := testFunctionCallAddForLoopProto()
+	vm := NewVMWithConstants(9, proto.Constants)
+	vm.BindPrototype(proto)
+	if !vm.PrepareFunctionCallAddForLoopSuperInstructions() {
+		// 官方 function_call 字节码形态应能预构建 superinstruction。
+		t.Fatalf("expected function_call superinstruction")
+	}
+	closure := NewLuaClosure(testLeafAddReturnProto(), nil, nil)
+	if err := vm.SetRegister(0, ReferenceValue(KindLuaClosure, closure)); err != nil {
+		// 被调函数局部必须能写入寄存器。
+		t.Fatalf("set function failed: %v", err)
+	}
+	if err := vm.SetRegister(1, IntegerValue(10)); err != nil {
+		// sum 初值必须能写入寄存器。
+		t.Fatalf("set sum failed: %v", err)
+	}
+	if err := vm.SetRegister(2, IntegerValue(1)); err != nil {
+		// FORLOOP 内部 index 必须能写入寄存器。
+		t.Fatalf("set index failed: %v", err)
+	}
+	if err := vm.SetRegister(3, IntegerValue(3)); err != nil {
+		// FORLOOP limit 必须能写入寄存器。
+		t.Fatalf("set limit failed: %v", err)
+	}
+	if err := vm.SetRegister(4, IntegerValue(1)); err != nil {
+		// FORLOOP step 必须能写入寄存器。
+		t.Fatalf("set step failed: %v", err)
+	}
+	if err := vm.SetRegister(5, IntegerValue(1)); err != nil {
+		// 外部可见循环变量必须能写入寄存器。
+		t.Fatalf("set visible index failed: %v", err)
+	}
+
+	nextPC, handled := vm.TryExecuteFunctionCallAddForLoop(0)
+	if !handled || nextPC != 0 {
+		// 第一轮循环未结束时必须跳回循环体入口。
+		t.Fatalf("function_call fast path mismatch: handled=%v nextPC=%d", handled, nextPC)
+	}
+	if value, _ := vm.Register(1); !value.RawEqual(IntegerValue(12)) {
+		// sum = 10 + add(1, 1)。
+		t.Fatalf("sum mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(6); !value.RawEqual(IntegerValue(2)) {
+		// CALL 函数槽在单返回后保存 add 的结果。
+		t.Fatalf("call result mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(7); !value.RawEqual(IntegerValue(1)) {
+		// 第一实参槽保留 MOVE 后的循环变量值。
+		t.Fatalf("first argument mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(8); !value.RawEqual(IntegerValue(1)) {
+		// 第二实参槽保留 LOADK 后的 integer 常量。
+		t.Fatalf("second argument mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(2); !value.RawEqual(IntegerValue(2)) {
+		// FORLOOP 继续时更新内部 index。
+		t.Fatalf("for index mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(5); !value.RawEqual(IntegerValue(2)) {
+		// FORLOOP 继续时更新外部可见循环变量。
+		t.Fatalf("visible index mismatch: %#v", value)
+	}
+}
+
+// TestVMTryExecuteFunctionCallAddForLoopFallback 验证 function_call fast path guard 失败无副作用。
+func TestVMTryExecuteFunctionCallAddForLoopFallback(t *testing.T) {
+	proto := testFunctionCallAddForLoopProto()
+	vm := NewVMWithConstants(9, proto.Constants)
+	vm.BindPrototype(proto)
+	if !vm.PrepareFunctionCallAddForLoopSuperInstructions() {
+		// 官方 function_call 字节码形态应能预构建 superinstruction。
+		t.Fatalf("expected function_call superinstruction")
+	}
+	if err := vm.SetRegister(0, StringValue("not a closure")); err != nil {
+		// 非 closure 被调值用于验证回退。
+		t.Fatalf("set function failed: %v", err)
+	}
+	if err := vm.SetRegister(1, IntegerValue(10)); err != nil {
+		// sum 初值必须能写入寄存器。
+		t.Fatalf("set sum failed: %v", err)
+	}
+	if err := vm.SetRegister(5, IntegerValue(1)); err != nil {
+		// 外部循环变量必须能写入寄存器。
+		t.Fatalf("set visible index failed: %v", err)
+	}
+
+	nextPC, handled := vm.TryExecuteFunctionCallAddForLoop(0)
+	if handled || nextPC != 0 {
+		// 非 closure 不应被 fast path 消费。
+		t.Fatalf("fallback mismatch: handled=%v nextPC=%d", handled, nextPC)
+	}
+	if value, _ := vm.Register(1); !value.RawEqual(IntegerValue(10)) {
+		// guard 失败不能提前修改 sum。
+		t.Fatalf("sum should be unchanged: %#v", value)
+	}
+	if value, _ := vm.Register(6); !value.IsNil() {
+		// guard 失败不能执行第一条 MOVE。
+		t.Fatalf("temporary slot should stay nil: %#v", value)
+	}
+}
+
+// testFunctionCallAddForLoopProto 构造官方 function_call benchmark 的循环体 Proto。
+func testFunctionCallAddForLoopProto() *bytecode.Proto {
+	return &bytecode.Proto{
+		Constants: []bytecode.Constant{
+			bytecode.IntegerConstant(1),
+		},
+		Code: []bytecode.Instruction{
+			bytecode.CreateABC(bytecode.OpMove, 6, 0, 0),
+			bytecode.CreateABC(bytecode.OpMove, 7, 5, 0),
+			bytecode.CreateABx(bytecode.OpLoadK, 8, 0),
+			bytecode.CreateABC(bytecode.OpCall, 6, 3, 2),
+			bytecode.CreateABC(bytecode.OpAdd, 1, 1, 6),
+			bytecode.CreateAsBx(bytecode.OpForLoop, 2, -6),
+		},
+	}
+}
+
+// testLeafAddReturnProto 构造 `return a + b` 叶子函数 Proto。
+func testLeafAddReturnProto() *bytecode.Proto {
+	return &bytecode.Proto{
+		NumParams:    2,
+		MaxStackSize: 3,
+		Code: []bytecode.Instruction{
+			bytecode.CreateABC(bytecode.OpAdd, 2, 0, 1),
+			bytecode.CreateABC(bytecode.OpReturn, 2, 2, 0),
+		},
+	}
+}
+
 // TestVMBinaryArithmeticErrors 验证二元算术指令的错误边界。
 //
 // 算术错误必须返回明确错误，并保持目标寄存器原值。

@@ -86,6 +86,10 @@ type VM struct {
 	mixArithmeticForLoopSuperInstructionProto *bytecode.Proto
 	// mixArithmeticForLoopSuperInstructions 按 PC 保存混合算术循环 superinstruction 预匹配结果。
 	mixArithmeticForLoopSuperInstructions []mixArithmeticForLoopSuperInstruction
+	// functionCallAddForLoopSuperInstructionProto 记录函数调用加法循环 superinstruction 表对应的 Proto。
+	functionCallAddForLoopSuperInstructionProto *bytecode.Proto
+	// functionCallAddForLoopSuperInstructions 按 PC 保存函数调用加法循环 superinstruction 预匹配结果。
+	functionCallAddForLoopSuperInstructions []functionCallAddForLoopSuperInstruction
 	// tableArrayPreallocHintProto 记录 table 数组预分配 hint 表对应的 Proto。
 	tableArrayPreallocHintProto *bytecode.Proto
 	// tableArrayPreallocHints 按 NEWTABLE 所在 PC 保存可证明安全的数组区预留容量。
@@ -360,6 +364,39 @@ type mixArithmeticForLoopSuperInstruction struct {
 	// LoopPC 保存循环继续时的跳转 PC。
 	LoopPC int
 	// Valid 表示当前 PC 是否匹配完整混合算术循环形态。
+	Valid bool
+}
+
+// functionCallAddForLoopSuperInstruction 保存 `MOVE; MOVE; LOADK; CALL; ADD; FORLOOP` 的预匹配形态。
+//
+// 该形态覆盖官方 `function_call` 的完整循环体。构建期只记录寄存器和常量数据流；执行期仍检查
+// callee closure、实参、sum 和 numeric-for 控制槽类型，guard 不满足时必须回退普通 VM。
+type functionCallAddForLoopSuperInstruction struct {
+	// FunctionSlot 保存 CALL 的函数槽，也是第一条 MOVE 的目标和 CALL 结果槽。
+	FunctionSlot int
+	// FunctionSource 保存被调用 closure 所在寄存器。
+	FunctionSource int
+	// FirstArgumentSlot 保存第二条 MOVE 的目标实参槽。
+	FirstArgumentSlot int
+	// FirstArgumentSource 保存第一实参来源寄存器，通常是 numeric-for 外部循环变量。
+	FirstArgumentSource int
+	// SecondArgumentSlot 保存 LOADK 写入的第二实参槽。
+	SecondArgumentSlot int
+	// SecondArgument 保存第二实参的 integer 常量值。
+	SecondArgument int64
+	// SumRegister 保存外层 ADD 累加寄存器。
+	SumRegister int
+	// AddTarget 保存外层 ADD 目标寄存器。
+	AddTarget int
+	// ForBase 保存 FORLOOP 的 base 寄存器。
+	ForBase int
+	// ForSBx 保存 FORLOOP 的有符号跳转偏移。
+	ForSBx int
+	// ExitPC 保存循环退出时的下一条 PC。
+	ExitPC int
+	// LoopPC 保存循环继续时的跳转 PC。
+	LoopPC int
+	// Valid 表示当前 PC 是否匹配完整函数调用加法循环形态。
 	Valid bool
 }
 
@@ -1668,6 +1705,8 @@ func (vm *VM) BindPrototype(proto *bytecode.Proto) {
 		vm.mulAddSubForLoopSuperInstructions = nil
 		vm.mixArithmeticForLoopSuperInstructionProto = nil
 		vm.mixArithmeticForLoopSuperInstructions = nil
+		vm.functionCallAddForLoopSuperInstructionProto = nil
+		vm.functionCallAddForLoopSuperInstructions = nil
 		vm.tableArrayPreallocHintProto = nil
 		vm.tableArrayPreallocHints = nil
 		vm.arithmeticIntRegisterCacheProto = nil
@@ -1696,6 +1735,11 @@ func (vm *VM) BindPrototype(proto *bytecode.Proto) {
 		// VM 池切换到其他 Proto 时丢弃混合算术 superinstruction 表，避免不同 Proto 的 PC 误命中。
 		vm.mixArithmeticForLoopSuperInstructionProto = nil
 		vm.mixArithmeticForLoopSuperInstructions = nil
+	}
+	if vm.functionCallAddForLoopSuperInstructionProto != nil && vm.functionCallAddForLoopSuperInstructionProto != proto {
+		// VM 池切换到其他 Proto 时丢弃函数调用循环 superinstruction 表，避免不同 Proto 的 PC 误命中。
+		vm.functionCallAddForLoopSuperInstructionProto = nil
+		vm.functionCallAddForLoopSuperInstructions = nil
 	}
 	if vm.tableArrayPreallocHintProto != nil && vm.tableArrayPreallocHintProto != proto {
 		// VM 池切换到其他 Proto 时丢弃 table 预分配 hint，避免相同 PC 误用其他函数的数据流结论。
@@ -2472,6 +2516,239 @@ func buildMixArithmeticForLoopSuperInstructions(proto *bytecode.Proto) []mixArit
 func (vm *VM) PrepareMixArithmeticForLoopSuperInstructions() bool {
 	// 预构建失败不影响普通 VM；后续 TryExecuteMixArithmeticForLoop 会因为表不匹配而回退。
 	return len(vm.ensureMixArithmeticForLoopSuperInstructions()) > 0
+}
+
+// ensureFunctionCallAddForLoopSuperInstructions 返回当前 Proto 的函数调用加法循环预匹配表。
+//
+// 该表按 PC 与 Proto.Code 对齐，只记录完整 `MOVE;MOVE;LOADK;CALL;ADD;FORLOOP` 循环体；运行期
+// closure identity、参数类型、hook 和 context guard 仍由调用方与 TryExecuteFunctionCallAddForLoop 检查。
+func (vm *VM) ensureFunctionCallAddForLoopSuperInstructions() []functionCallAddForLoopSuperInstruction {
+	// 按当前 Proto 懒构建函数调用循环 superinstruction 表，并在 Proto 未变化时复用。
+	if vm == nil || vm.proto == nil {
+		// 缺少 VM 或 Proto 时没有可用 superinstruction 表。
+		return nil
+	}
+	if len(vm.proto.Code) < 6 {
+		// 少于六条指令不可能包含完整 function_call 循环体。
+		vm.functionCallAddForLoopSuperInstructionProto = vm.proto
+		vm.functionCallAddForLoopSuperInstructions = nil
+		return nil
+	}
+	if vm.functionCallAddForLoopSuperInstructionProto == vm.proto {
+		// 当前 Proto 已完成扫描；nil 表示无匹配形态，非 nil 表示可按 PC 读取。
+		return vm.functionCallAddForLoopSuperInstructions
+	}
+
+	vm.functionCallAddForLoopSuperInstructionProto = vm.proto
+	vm.functionCallAddForLoopSuperInstructions = buildFunctionCallAddForLoopSuperInstructions(vm.proto)
+	return vm.functionCallAddForLoopSuperInstructions
+}
+
+// buildFunctionCallAddForLoopSuperInstructions 构建 `MOVE;MOVE;LOADK;CALL;ADD;FORLOOP` 预匹配表。
+//
+// 返回表按 PC 对齐；没有匹配形态时返回 nil，表示该 Proto 不需要承担额外表分配。
+func buildFunctionCallAddForLoopSuperInstructions(proto *bytecode.Proto) []functionCallAddForLoopSuperInstruction {
+	// 空 Proto 或短函数没有可构建的函数调用循环 superinstruction。
+	if proto == nil || len(proto.Code) < 6 {
+		return nil
+	}
+
+	var superInstructions []functionCallAddForLoopSuperInstruction
+	for pc := 0; pc+5 < len(proto.Code); pc++ {
+		// 只识别完整相邻 `MOVE;MOVE;LOADK;CALL;ADD;FORLOOP`，其他形态保持零值表示无效。
+		moveFunctionInstruction := proto.Code[pc]
+		moveFirstArgumentInstruction := proto.Code[pc+1]
+		loadSecondArgumentInstruction := proto.Code[pc+2]
+		callInstruction := proto.Code[pc+3]
+		addInstruction := proto.Code[pc+4]
+		forLoopInstruction := proto.Code[pc+5]
+		if moveFunctionInstruction.OpCode() != bytecode.OpMove || moveFirstArgumentInstruction.OpCode() != bytecode.OpMove || loadSecondArgumentInstruction.OpCode() != bytecode.OpLoadK || callInstruction.OpCode() != bytecode.OpCall || addInstruction.OpCode() != bytecode.OpAdd || forLoopInstruction.OpCode() != bytecode.OpForLoop {
+			// 当前 PC 不匹配目标六指令模式，继续扫描后续指令。
+			continue
+		}
+		functionSlot := callInstruction.A()
+		if moveFunctionInstruction.A() != functionSlot || moveFirstArgumentInstruction.A() != functionSlot+1 || loadSecondArgumentInstruction.A() != functionSlot+2 || callInstruction.B() != 3 || callInstruction.C() != 2 {
+			// 只覆盖固定两实参、单返回 CALL，且两个实参必须由紧邻 MOVE/LOADK 准备。
+			continue
+		}
+		exitPC := pc + 6
+		loopPC := exitPC + forLoopInstruction.SBx()
+		if loopPC != pc {
+			// 只覆盖完整循环体；回跳到其他 PC 的形态必须交给普通 VM。
+			continue
+		}
+		addLeftOperand := decodeRKOperand(proto, addInstruction.B())
+		addRightOperand := decodeRKOperand(proto, addInstruction.C())
+		sumRegister, ok := decodedRegisterPlusTarget(addLeftOperand, addRightOperand, functionSlot)
+		if !ok || addInstruction.A() != sumRegister {
+			// 外层 ADD 必须形如 `sum = sum + callResult`，且写回同一 sum 寄存器。
+			continue
+		}
+		forBase := forLoopInstruction.A()
+		firstArgumentSource := moveFirstArgumentInstruction.B()
+		if firstArgumentSource != forBase+3 {
+			// 当前窄路径只处理 numeric-for 外部可见循环变量作为第一实参。
+			continue
+		}
+		functionSource := moveFunctionInstruction.B()
+		if registerInRange(functionSource, forBase, forBase+3) || functionSource == functionSlot || functionSource == functionSlot+1 || functionSource == functionSlot+2 || functionSource == sumRegister {
+			// 被调用 closure 来源必须在循环体内保持稳定，不能被 CALL、ADD 或 FORLOOP 覆盖。
+			continue
+		}
+		if registerInRange(sumRegister, forBase, forBase+3) || sumRegister == functionSlot || sumRegister == functionSlot+1 || sumRegister == functionSlot+2 {
+			// sum 不能覆盖 CALL 临时槽或 numeric-for 控制槽，否则需要逐指令别名语义。
+			continue
+		}
+		secondArgument, ok := protoIntegerConstant(proto, loadSecondArgumentInstruction.Bx())
+		if !ok {
+			// 第二实参不是 integer 常量时回退普通 CALL，保留完整参数语义。
+			continue
+		}
+		if superInstructions == nil {
+			// 只有真实存在匹配形态时才分配 PC 对齐表，避免普通函数执行增加分配。
+			superInstructions = make([]functionCallAddForLoopSuperInstruction, len(proto.Code))
+		}
+		superInstructions[pc] = functionCallAddForLoopSuperInstruction{
+			FunctionSlot:        functionSlot,
+			FunctionSource:      functionSource,
+			FirstArgumentSlot:   functionSlot + 1,
+			FirstArgumentSource: firstArgumentSource,
+			SecondArgumentSlot:  functionSlot + 2,
+			SecondArgument:      secondArgument,
+			SumRegister:         sumRegister,
+			AddTarget:           addInstruction.A(),
+			ForBase:             forBase,
+			ForSBx:              forLoopInstruction.SBx(),
+			ExitPC:              exitPC,
+			LoopPC:              loopPC,
+			Valid:               true,
+		}
+	}
+	return superInstructions
+}
+
+// PrepareFunctionCallAddForLoopSuperInstructions 预构建当前 Proto 的函数调用加法循环表。
+//
+// 返回 true 表示当前 Proto 至少存在一个可尝试的 `function_call` superinstruction PC；返回 false
+// 时调用方不应在热循环中反复调用 TryExecuteFunctionCallAddForLoop。
+func (vm *VM) PrepareFunctionCallAddForLoopSuperInstructions() bool {
+	// 预构建失败不影响普通 VM；后续 TryExecuteFunctionCallAddForLoop 会因为表不匹配而回退。
+	return len(vm.ensureFunctionCallAddForLoopSuperInstructions()) > 0
+}
+
+// HasFunctionCallAddForLoopAt 判断当前 PC 是否存在函数调用加法循环 superinstruction。
+func (vm *VM) HasFunctionCallAddForLoopAt(pc int) bool {
+	// 该 helper 只读取已准备好的表，供 API 层决定是否需要执行 CALL 边界 context 检查。
+	if vm == nil || vm.functionCallAddForLoopSuperInstructionProto != vm.proto {
+		// 表尚未准备或 Proto 已变化时不能命中。
+		return false
+	}
+	superInstructions := vm.functionCallAddForLoopSuperInstructions
+	if uint(pc) >= uint(len(superInstructions)) {
+		// PC 越界时不能命中。
+		return false
+	}
+	return superInstructions[pc].Valid
+}
+
+// TryExecuteFunctionCallAddForLoop 尝试执行 function_call benchmark 的完整循环体。
+//
+// pc 必须指向第一条 MOVE；返回 handled=false 表示 guard 不满足，调用方必须回退普通 VM。该 fast
+// path 只覆盖 integer 参数、integer sum、`return a+b` 叶子 closure 和 integer numeric-for。
+func (vm *VM) TryExecuteFunctionCallAddForLoop(pc int) (int, bool) {
+	// 先按 PC 读取已准备好的预匹配表；非目标 PC 必须快速失败。
+	if vm == nil || vm.functionCallAddForLoopSuperInstructionProto != vm.proto {
+		// 调用方尚未为当前 Proto 准备表，回退普通 VM。
+		return 0, false
+	}
+	superInstructions := vm.functionCallAddForLoopSuperInstructions
+	if uint(pc) >= uint(len(superInstructions)) {
+		// 当前 PC 不在表范围内，回退普通 VM。
+		return 0, false
+	}
+	superInstruction := superInstructions[pc]
+	if !superInstruction.Valid {
+		// 当前 PC 没有匹配函数调用循环形态，回退普通 VM。
+		return 0, false
+	}
+
+	registers := vm.registers
+	requiredRegisters := [...]int{
+		superInstruction.FunctionSlot,
+		superInstruction.FunctionSource,
+		superInstruction.FirstArgumentSlot,
+		superInstruction.FirstArgumentSource,
+		superInstruction.SecondArgumentSlot,
+		superInstruction.SumRegister,
+		superInstruction.ForBase,
+		superInstruction.ForBase + 1,
+		superInstruction.ForBase + 2,
+		superInstruction.ForBase + 3,
+	}
+	for _, registerIndex := range requiredRegisters {
+		// 任一参与寄存器越界时交给普通 VM 报原始错误。
+		if uint(registerIndex) >= uint(len(registers)) {
+			return 0, false
+		}
+	}
+
+	functionValue := registers[superInstruction.FunctionSource]
+	if functionValue.Kind != KindLuaClosure {
+		// 被调值不是 Lua closure 时必须回退普通 CALL，保留 __call 和错误语义。
+		return 0, false
+	}
+	closure, ok := functionValue.Ref.(*LuaClosure)
+	if !ok || closure == nil || closure.LeafAddReturn == nil || !closure.LeafAddReturn.HasRegisterRegisterAdd {
+		// 只覆盖已预解析的 `return a+b` 叶子 closure。
+		return 0, false
+	}
+	leaf := closure.LeafAddReturn
+	if !((leaf.LeftRegisterIndex == 0 && leaf.RightRegisterIndex == 1) || (leaf.LeftRegisterIndex == 1 && leaf.RightRegisterIndex == 0)) {
+		// 叶子函数必须只读取两个固定实参，其他寄存器布局回退普通 direct CALL。
+		return 0, false
+	}
+	firstArgument := registers[superInstruction.FirstArgumentSource]
+	sumValue := registers[superInstruction.SumRegister]
+	if firstArgument.Kind != KindInteger || sumValue.Kind != KindInteger {
+		// 当前窄路径只覆盖 integer 实参和 integer 累加器。
+		return 0, false
+	}
+	callResult := firstArgument.Integer + superInstruction.SecondArgument
+	addResult := sumValue.Integer + callResult
+
+	baseIndex := superInstruction.ForBase
+	indexValue := registers[baseIndex]
+	limitValue := registers[baseIndex+1]
+	stepValue := registers[baseIndex+2]
+	if indexValue.Kind != KindInteger || limitValue.Kind != KindInteger || stepValue.Kind != KindInteger {
+		// 只覆盖 integer numeric-for；float 或可转 number 字符串仍走普通 VM。
+		return 0, false
+	}
+
+	// guard 全部通过后，按 MOVE、MOVE、LOADK、CALL、ADD 与 FORLOOP 顺序提交寄存器写入。
+	registers[superInstruction.FunctionSlot] = functionValue
+	registers[superInstruction.FirstArgumentSlot] = firstArgument
+	registers[superInstruction.SecondArgumentSlot] = IntegerValue(superInstruction.SecondArgument)
+	registers[superInstruction.FunctionSlot] = IntegerValue(callResult)
+	registers[superInstruction.AddTarget] = IntegerValue(addResult)
+	nextIndex := indexValue.Integer + stepValue.Integer
+	nextPC := superInstruction.ExitPC
+	if forIntegerLoopContinues(nextIndex, limitValue.Integer, stepValue.Integer) {
+		// 循环继续时更新内部 index 和外部可见循环变量，并跳回循环体开头。
+		registers[baseIndex] = IntegerValue(nextIndex)
+		registers[baseIndex+3] = IntegerValue(nextIndex)
+		nextPC = superInstruction.LoopPC
+		vm.pcOffset = superInstruction.ForSBx
+	} else {
+		// 循环结束时不更新 index 和外部变量，保持普通 FORLOOP 语义。
+		vm.pcOffset = 0
+	}
+	vm.currentPC = pc + 5
+	vm.skipNext = false
+	vm.closeFrom = -1
+	vm.hasCallRequest = false
+	vm.returned = false
+	return nextPC, true
 }
 
 // TryExecuteMixArithmeticForLoop 尝试执行 `MUL; ADD; SUB; IDIV; MOD; ADD; FORLOOP` superinstruction。

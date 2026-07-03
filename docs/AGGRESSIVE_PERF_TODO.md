@@ -262,6 +262,37 @@ CPU profile 观察：热点仍集中在 `executePreparedLuaClosureWithDebugNameT
 通用但可回退的固定签名 leaf CALL fast path，且必须完整证明 debug hook、coroutine/yield、traceback、
 error path 和 `debug.getinfo` 语义不变；本轮不改生产代码。
 
+### 2026-07-03 `MOVE; MOVE; LOADK; CALL; ADD; FORLOOP` superinstruction 原型
+
+实现：在 `runtime.VM` 中新增完整 `function_call` 循环体匹配和 `TryExecuteFunctionCallAddForLoop`，
+只覆盖官方 benchmark 的 `sum = sum + add(i, 1)` 形态。构建期要求字节码精确为
+`MOVE; MOVE; LOADK; CALL; ADD; FORLOOP`，其中 `CALL` 固定两实参单返回，`ADD` 必须写回同一个
+`sum` 寄存器，`FORLOOP` 必须回跳当前第一条 `MOVE`。
+
+语义 guard：
+
+- API 执行循环只在无 hook、无 coroutine/continuation、无需精确逐 PC 同步且 context 检查窗口能覆盖
+  被跳过五条指令时启用。
+- superinstruction 在跳过 `CALL` 前额外执行一次 `State.CheckContext()`，保留 direct CALL 入口的取消边界。
+- 执行期要求被调值仍是 `return a + b` 的 Lua leaf closure，且两个实参、`sum` 和 numeric-for 控制槽
+  都是 integer；其他类型、字符串数字、元方法、`__call`、错误路径和泛型调用全部回退普通 VM。
+- closure 来源寄存器必须不会被 CALL 临时槽、ADD 或 FORLOOP 覆盖；sum 也不能覆盖 CALL 临时槽和
+  numeric-for 控制槽，避免改变逐指令别名可见性。
+
+benchmark 复核：
+
+| 用例 | 结果 |
+| --- | ---: |
+| `BenchmarkDoStringFunctionCall` | `213.3 / 211.2 / 204.0 / 206.6 / 216.2 us/op`，约 `63.5 KB/op`，`254 allocs/op` |
+| `BenchmarkPreparedFunctionCall` | `168.1 / 168.7 / 170.0 / 164.2 / 163.4 us/op`，`400 B/op`，`2 allocs/op` |
+| `BenchmarkDoStringArithMixLoopOfficial` | `17.57-17.61 ms/op`，约 `68.8 KB/op`，`238 allocs/op` |
+| `BenchmarkPreparedArithMixLoopOfficial` | `17.55-17.57 ms/op`，`0 allocs/op` |
+| `BenchmarkPreparedRecursion` | `1.56-1.60 us/op`，`224 B/op`，`2 allocs/op` |
+
+对比上一轮 function_call prepared 约 `411-412 us/op`、DoString 约 `461-475 us/op`，循环级 CALL
+superinstruction 明显减少 CALL 边界和逐指令分发成本。DoString 分配多 1 alloc/op，来自新增 VM-local
+superinstruction 表；目标 wall-clock 收益显著，prepared 分配不变。非目标 mix 和 recursion 未显示稳定退化。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -322,6 +353,7 @@ error path 和 `debug.getinfo` 语义不变；本轮不改生产代码。
 - [x] 基于 profile 重新评估 `table_rw`，只在能证明 table 未逃逸时设计数组预分配。
 - [x] 基于 profile 重新评估 `recursion`，只在能证明自递归固定签名语义等价时设计 fast call。
 - [x] 增加 `function_call` prepared 口径，确认编译/OpenLibs 分配不是该项 wall-clock 主因。
+- [x] 实现 `MOVE; MOVE; LOADK; CALL; ADD; FORLOOP` superinstruction 原型，覆盖官方 `function_call`。
 - [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准

@@ -2479,11 +2479,13 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 	addForLoopSuperInstructionEnabled := false
 	mulAddSubForLoopSuperInstructionEnabled := false
 	mixArithmeticForLoopSuperInstructionEnabled := false
+	functionCallAddForLoopSuperInstructionEnabled := false
 	if !preciseFrameSync && !hooksEnabled {
 		// 普通主线程无 hook 路径可提前准备 superinstruction 表；hook/coroutine 路径必须保留逐 PC 语义。
 		addForLoopSuperInstructionEnabled = vm.PrepareAddForLoopSuperInstructions()
 		mulAddSubForLoopSuperInstructionEnabled = vm.PrepareMulAddSubForLoopSuperInstructions()
 		mixArithmeticForLoopSuperInstructionEnabled = vm.PrepareMixArithmeticForLoopSuperInstructions()
+		functionCallAddForLoopSuperInstructionEnabled = vm.PrepareFunctionCallAddForLoopSuperInstructions()
 	}
 	contextCheckCountdown := 0
 	for pc >= 0 && pc < len(proto.Code) {
@@ -2517,6 +2519,26 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 			if err := triggerLuaLineHook(state, debugEnvironment, proto, pc, previousPC, previousPreviousPC, &lastHookLine); err != nil {
 				// hook 内抛错必须中断当前 VM，交给 protected call 边界包装 traceback。
 				return nil, err
+			}
+		}
+		if functionCallAddForLoopSuperInstructionEnabled && !preciseFrameSync && !hooksEnabled && contextCheckCountdown >= 5 && vm.HasFunctionCallAddForLoopAt(pc) {
+			// 六指令 function_call 循环会额外跳过 MOVE、LOADK、CALL、ADD、FORLOOP 五个入口；
+			// 倒计时至少为 5 才能证明逐指令路径不会在被跳过区间触发 context 检查。
+			if err := state.CheckContext(); err != nil {
+				// 普通 direct CALL 入口会检查 context，superinstruction 在跳过 CALL 前保留该取消边界。
+				if syncErr := syncCurrentFrame(pc); syncErr != nil {
+					return nil, syncErr
+				}
+				return nil, err
+			}
+			movePC := pc
+			if nextPC, handled := vm.TryExecuteFunctionCallAddForLoop(movePC); handled {
+				// superinstruction 已完成 MOVE、MOVE、LOADK、CALL、ADD 与 FORLOOP；补偿被跳过五条指令的倒计时。
+				contextCheckCountdown -= 5
+				previousPreviousPC = movePC + 4
+				previousPC = movePC + 5
+				pc = nextPC
+				continue
 			}
 		}
 		if mixArithmeticForLoopSuperInstructionEnabled && !preciseFrameSync && !hooksEnabled && contextCheckCountdown >= 6 {
