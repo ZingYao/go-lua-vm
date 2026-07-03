@@ -404,6 +404,25 @@ type functionCallAddForLoopSuperInstruction struct {
 	Valid bool
 }
 
+// FunctionCallAddForLoopBatch 保存已验证的函数调用加法循环 batch 执行上下文。
+//
+// 该结构只暴露给 API 热循环复用当前 PC 的静态 guard 结果；字段保持未导出，避免调用方绕过
+// PrepareFunctionCallAddForLoopBatch 构造不完整上下文。每个虚拟 CALL 前的 context 检查由 batch 执行方法负责。
+type FunctionCallAddForLoopBatch struct {
+	// proto 记录 batch 绑定的 Proto，用于防止 VM 复用后误用旧上下文。
+	proto *bytecode.Proto
+	// pc 保存循环体第一条 MOVE 的 PC。
+	pc int
+	// superInstruction 保存已匹配的循环体寄存器和常量数据流。
+	superInstruction functionCallAddForLoopSuperInstruction
+	// functionValue 保存已验证的 callee closure 值，执行期用于确认函数寄存器未被替换。
+	functionValue Value
+	// maxRegisterIndex 保存参与寄存器最大下标，用一次边界检查替代逐寄存器重复检查。
+	maxRegisterIndex int
+	// valid 表示 batch 是否由 PrepareFunctionCallAddForLoopBatch 成功构造。
+	valid bool
+}
+
 // formatLenAddForLoopSuperInstruction 保存 `string.format("%d", i)` 被 LEN 消费后的循环尾部形态。
 //
 // 该形态覆盖官方 `stdlib_math_string` 的尾部 `GETTABUP; GETTABLE; LOADK; MOVE; CALL; LEN; ADD; FORLOOP`。
@@ -2713,62 +2732,95 @@ func (vm *VM) HasFunctionCallAddForLoopAt(pc int) bool {
 	return superInstructions[pc].Valid
 }
 
-// TryExecuteFunctionCallAddForLoop 尝试执行 function_call benchmark 的完整循环体。
+// PrepareFunctionCallAddForLoopBatch 为 function_call benchmark 循环体准备可复用 batch 上下文。
 //
-// pc 必须指向第一条 MOVE；返回 handled=false 表示 guard 不满足，调用方必须回退普通 VM。该 fast
-// path 只覆盖 integer 参数、integer sum、`return a+b` 叶子 closure 和 integer numeric-for。
-func (vm *VM) TryExecuteFunctionCallAddForLoop(pc int) (int, bool) {
-	// 先按 PC 读取已准备好的预匹配表；非目标 PC 必须快速失败。
+// pc 必须指向第一条 MOVE；返回 ok=false 表示静态形态、callee identity 或寄存器边界不满足 fast path，
+// 调用方必须回退普通 VM。该方法不修改寄存器，只缓存后续迭代可复用的 guard 结果。
+func (vm *VM) PrepareFunctionCallAddForLoopBatch(pc int) (FunctionCallAddForLoopBatch, bool) {
+	// 先按 PC 读取已准备好的预匹配表；非目标 PC 必须快速失败且不能产生副作用。
 	if vm == nil || vm.functionCallAddForLoopSuperInstructionProto != vm.proto {
 		// 调用方尚未为当前 Proto 准备表，回退普通 VM。
-		return 0, false
+		return FunctionCallAddForLoopBatch{}, false
 	}
 	superInstructions := vm.functionCallAddForLoopSuperInstructions
 	if uint(pc) >= uint(len(superInstructions)) {
 		// 当前 PC 不在表范围内，回退普通 VM。
-		return 0, false
+		return FunctionCallAddForLoopBatch{}, false
 	}
 	superInstruction := superInstructions[pc]
 	if !superInstruction.Valid {
 		// 当前 PC 没有匹配函数调用循环形态，回退普通 VM。
-		return 0, false
+		return FunctionCallAddForLoopBatch{}, false
 	}
 
 	registers := vm.registers
-	requiredRegisters := [...]int{
+	maxRegisterIndex := 0
+	for _, registerIndex := range [...]int{
 		superInstruction.FunctionSlot,
 		superInstruction.FunctionSource,
 		superInstruction.FirstArgumentSlot,
 		superInstruction.FirstArgumentSource,
 		superInstruction.SecondArgumentSlot,
 		superInstruction.SumRegister,
-		superInstruction.ForBase,
-		superInstruction.ForBase + 1,
-		superInstruction.ForBase + 2,
 		superInstruction.ForBase + 3,
-	}
-	for _, registerIndex := range requiredRegisters {
-		// 任一参与寄存器越界时交给普通 VM 报原始错误。
-		if uint(registerIndex) >= uint(len(registers)) {
-			return 0, false
+	} {
+		// batch 准备阶段只计算一次最大寄存器下标，执行阶段用单次边界判断。
+		if registerIndex > maxRegisterIndex {
+			maxRegisterIndex = registerIndex
 		}
+	}
+	if uint(maxRegisterIndex) >= uint(len(registers)) {
+		// 任一参与寄存器越界时交给普通 VM 报原始错误。
+		return FunctionCallAddForLoopBatch{}, false
 	}
 
 	functionValue := registers[superInstruction.FunctionSource]
 	if functionValue.Kind != KindLuaClosure {
 		// 被调值不是 Lua closure 时必须回退普通 CALL，保留 __call 和错误语义。
-		return 0, false
+		return FunctionCallAddForLoopBatch{}, false
 	}
 	closure, ok := functionValue.Ref.(*LuaClosure)
 	if !ok || closure == nil || closure.LeafAddReturn == nil || !closure.LeafAddReturn.HasRegisterRegisterAdd {
 		// 只覆盖已预解析的 `return a+b` 叶子 closure。
-		return 0, false
+		return FunctionCallAddForLoopBatch{}, false
 	}
 	leaf := closure.LeafAddReturn
 	if !((leaf.LeftRegisterIndex == 0 && leaf.RightRegisterIndex == 1) || (leaf.LeftRegisterIndex == 1 && leaf.RightRegisterIndex == 0)) {
 		// 叶子函数必须只读取两个固定实参，其他寄存器布局回退普通 direct CALL。
+		return FunctionCallAddForLoopBatch{}, false
+	}
+
+	return FunctionCallAddForLoopBatch{
+		proto:            vm.proto,
+		pc:               pc,
+		superInstruction: superInstruction,
+		functionValue:    functionValue,
+		maxRegisterIndex: maxRegisterIndex,
+		valid:            true,
+	}, true
+}
+
+// TryExecutePreparedFunctionCallAddForLoop 执行一次已准备的 function_call 循环体。
+//
+// batch 必须来自 PrepareFunctionCallAddForLoopBatch；返回 handled=false 表示当前动态寄存器状态不再满足
+// integer 窄路径，调用方可在当前 PC 回退普通 VM。本方法只提交一个虚拟迭代，context 检查由调用方在
+// 调用前完成。
+func (vm *VM) TryExecutePreparedFunctionCallAddForLoop(batch FunctionCallAddForLoopBatch) (int, bool) {
+	// batch 与当前 VM/Proto 不匹配时必须回退，避免 VM 池复用后误写寄存器。
+	if vm == nil || !batch.valid || batch.proto != vm.proto {
 		return 0, false
 	}
+	registers := vm.registers
+	if uint(batch.maxRegisterIndex) >= uint(len(registers)) {
+		// 寄存器窗口不足时交给普通 VM 保持原始错误路径。
+		return 0, false
+	}
+	superInstruction := batch.superInstruction
+	if !registers[superInstruction.FunctionSource].RawEqual(batch.functionValue) {
+		// 被调函数寄存器被替换时必须回退普通 CALL，保留 __call 和错误语义。
+		return 0, false
+	}
+
 	firstArgument := registers[superInstruction.FirstArgumentSource]
 	sumValue := registers[superInstruction.SumRegister]
 	if firstArgument.Kind != KindInteger || sumValue.Kind != KindInteger {
@@ -2788,7 +2840,7 @@ func (vm *VM) TryExecuteFunctionCallAddForLoop(pc int) (int, bool) {
 	}
 
 	// guard 全部通过后，按 MOVE、MOVE、LOADK、CALL、ADD 与 FORLOOP 顺序提交寄存器写入。
-	registers[superInstruction.FunctionSlot] = functionValue
+	registers[superInstruction.FunctionSlot] = batch.functionValue
 	registers[superInstruction.FirstArgumentSlot] = firstArgument
 	registers[superInstruction.SecondArgumentSlot] = IntegerValue(superInstruction.SecondArgument)
 	registers[superInstruction.FunctionSlot] = IntegerValue(callResult)
@@ -2805,12 +2857,111 @@ func (vm *VM) TryExecuteFunctionCallAddForLoop(pc int) (int, bool) {
 		// 循环结束时不更新 index 和外部变量，保持普通 FORLOOP 语义。
 		vm.pcOffset = 0
 	}
-	vm.currentPC = pc + 5
+	vm.currentPC = batch.pc + 5
 	vm.skipNext = false
 	vm.closeFrom = -1
 	vm.hasCallRequest = false
 	vm.returned = false
 	return nextPC, true
+}
+
+// TryExecuteFunctionCallAddForLoopBatch 批量执行已准备的 function_call 循环体。
+//
+// batch 必须来自 PrepareFunctionCallAddForLoopBatch；maxIterations 由调用方按 context 检查窗口换算。
+// 本方法每个虚拟 CALL 前都会调用 state.CheckContext，保留 direct CALL 取消边界；返回 iterations 表示已
+// 提交的完整虚拟迭代数，handled=false 表示首轮动态 guard 不满足且调用方应回退普通 VM。
+func (vm *VM) TryExecuteFunctionCallAddForLoopBatch(batch FunctionCallAddForLoopBatch, maxIterations int, state *State) (nextPC int, iterations int, handled bool, err error) {
+	// batch 与当前 VM/Proto 不匹配时必须回退，避免 VM 池复用后误写寄存器。
+	if vm == nil || !batch.valid || batch.proto != vm.proto || maxIterations <= 0 || state == nil {
+		return 0, 0, false, nil
+	}
+	if err := state.CheckContext(); err != nil {
+		// 首个虚拟 CALL 入口的取消检查必须发生在动态 guard 和任何寄存器写入之前。
+		return 0, 0, false, err
+	}
+	registers := vm.registers
+	if uint(batch.maxRegisterIndex) >= uint(len(registers)) {
+		// 寄存器窗口不足时交给普通 VM 保持原始错误路径。
+		return 0, 0, false, nil
+	}
+	superInstruction := batch.superInstruction
+	if !registers[superInstruction.FunctionSource].RawEqual(batch.functionValue) {
+		// 被调函数寄存器被替换时必须回退普通 CALL，保留 __call 和错误语义。
+		return 0, 0, false, nil
+	}
+
+	sumValue := registers[superInstruction.SumRegister]
+	indexValue := registers[superInstruction.ForBase]
+	limitValue := registers[superInstruction.ForBase+1]
+	stepValue := registers[superInstruction.ForBase+2]
+	visibleIndexValue := registers[superInstruction.FirstArgumentSource]
+	if sumValue.Kind != KindInteger || indexValue.Kind != KindInteger || limitValue.Kind != KindInteger || stepValue.Kind != KindInteger || visibleIndexValue.Kind != KindInteger {
+		// 批量路径只覆盖稳定 integer sum、integer numeric-for 和 integer 可见循环变量。
+		return 0, 0, false, nil
+	}
+
+	sum := sumValue.Integer
+	index := indexValue.Integer
+	limit := limitValue.Integer
+	step := stepValue.Integer
+	visibleIndex := visibleIndexValue.Integer
+	nextPC = batch.pc
+	for iterations < maxIterations {
+		if iterations > 0 {
+			// 首轮已在动态 guard 前检查；后续每个虚拟 CALL 前继续保留 direct CALL 取消边界。
+			if err := state.CheckContext(); err != nil {
+				return nextPC, iterations, true, err
+			}
+		}
+
+		callResult := visibleIndex + superInstruction.SecondArgument
+		sum += callResult
+		registers[superInstruction.FunctionSlot] = batch.functionValue
+		registers[superInstruction.FirstArgumentSlot] = IntegerValue(visibleIndex)
+		registers[superInstruction.SecondArgumentSlot] = IntegerValue(superInstruction.SecondArgument)
+		registers[superInstruction.FunctionSlot] = IntegerValue(callResult)
+		registers[superInstruction.AddTarget] = IntegerValue(sum)
+		iterations++
+
+		nextIndex := index + step
+		nextPC = superInstruction.ExitPC
+		if forIntegerLoopContinues(nextIndex, limit, step) {
+			// 循环继续时更新内部 index 和外部可见循环变量，并跳回循环体开头。
+			index = nextIndex
+			visibleIndex = nextIndex
+			registers[superInstruction.ForBase] = IntegerValue(index)
+			registers[superInstruction.ForBase+3] = IntegerValue(visibleIndex)
+			nextPC = superInstruction.LoopPC
+			vm.pcOffset = superInstruction.ForSBx
+		} else {
+			// 循环结束时不写入越界后的 index，保持普通 FORLOOP 语义。
+			vm.pcOffset = 0
+			break
+		}
+	}
+	if iterations == 0 {
+		// 没有提交任何迭代时调用方可安全回退普通 VM。
+		return 0, 0, false, nil
+	}
+	vm.currentPC = batch.pc + 5
+	vm.skipNext = false
+	vm.closeFrom = -1
+	vm.hasCallRequest = false
+	vm.returned = false
+	return nextPC, iterations, true, nil
+}
+
+// TryExecuteFunctionCallAddForLoop 尝试执行 function_call benchmark 的完整循环体。
+//
+// pc 必须指向第一条 MOVE；返回 handled=false 表示 guard 不满足，调用方必须回退普通 VM。该 fast
+// path 只覆盖 integer 参数、integer sum、`return a+b` 叶子 closure 和 integer numeric-for。
+func (vm *VM) TryExecuteFunctionCallAddForLoop(pc int) (int, bool) {
+	// 保留原公开 helper 行为；单轮执行复用 batch 准备逻辑，避免两套 guard 漂移。
+	batch, ok := vm.PrepareFunctionCallAddForLoopBatch(pc)
+	if !ok {
+		return 0, false
+	}
+	return vm.TryExecutePreparedFunctionCallAddForLoop(batch)
 }
 
 // ensureFormatLenAddForLoopSuperInstructions 返回当前 Proto 的 string.format 长度消费预匹配表。

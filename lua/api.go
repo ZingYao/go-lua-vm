@@ -2546,21 +2546,36 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 		if functionCallAddForLoopSuperInstructionEnabled && !preciseFrameSync && !hooksEnabled && contextCheckCountdown >= 5 && vm.HasFunctionCallAddForLoopAt(pc) {
 			// 六指令 function_call 循环会额外跳过 MOVE、LOADK、CALL、ADD、FORLOOP 五个入口；
 			// 倒计时至少为 5 才能证明逐指令路径不会在被跳过区间触发 context 检查。
-			if err := state.CheckContext(); err != nil {
-				// 普通 direct CALL 入口会检查 context，superinstruction 在跳过 CALL 前保留该取消边界。
-				if syncErr := syncCurrentFrame(pc); syncErr != nil {
-					return nil, syncErr
-				}
-				return nil, err
-			}
 			movePC := pc
-			if nextPC, handled := vm.TryExecuteFunctionCallAddForLoop(movePC); handled {
-				// superinstruction 已完成 MOVE、MOVE、LOADK、CALL、ADD 与 FORLOOP；补偿被跳过五条指令的倒计时。
-				contextCheckCountdown -= 5
-				previousPreviousPC = movePC + 4
-				previousPC = movePC + 5
-				pc = nextPC
-				continue
+			callContextChecked := false
+			if batch, ok := vm.PrepareFunctionCallAddForLoopBatch(movePC); ok {
+				// 保守批量路径只复用静态 guard；runtime 内部每个虚拟 CALL 前仍执行 context 检查。
+				nextPC, handledIterations, handled, err := vm.TryExecuteFunctionCallAddForLoopBatch(batch, contextCheckCountdown/5, state)
+				callContextChecked = true
+				if err != nil {
+					// context 取消时同步到当前循环体入口，保持旧 function_call fast path 的错误 PC 边界。
+					if syncErr := syncCurrentFrame(movePC); syncErr != nil {
+						return nil, syncErr
+					}
+					return nil, err
+				}
+				if handled {
+					// superinstruction 已完成若干轮 MOVE、MOVE、LOADK、CALL、ADD 与 FORLOOP；补偿被跳过入口。
+					contextCheckCountdown -= handledIterations * 5
+					previousPreviousPC = movePC + 4
+					previousPC = movePC + 5
+					pc = nextPC
+					continue
+				}
+			}
+			if !callContextChecked {
+				// 静态 PC 命中但 batch guard 失败时，仍按旧单轮路径保留一次 CALL 入口取消边界。
+				if err := state.CheckContext(); err != nil {
+					if syncErr := syncCurrentFrame(pc); syncErr != nil {
+						return nil, syncErr
+					}
+					return nil, err
+				}
 			}
 		}
 		if mixArithmeticForLoopSuperInstructionEnabled && !preciseFrameSync && !hooksEnabled && contextCheckCountdown >= 6 {

@@ -517,6 +517,44 @@ PC 检查和静态 guard 成本。该方向只作为 `MOVE; MOVE; LOADK; CALL; A
 - 全量正确性仍需通过 `CGO_ENABLED=0 go test ./...`、`./scripts/check-go-gates.sh`；如果触碰 VM 执行
   行为，还必须重建 `bin/glua` / `bin/gluac` 并跑三个官方兼容脚本。
 
+### 2026-07-03 function_call 保守批量 superinstruction
+
+实现：在 `runtime.VM` 中为已匹配的 `MOVE; MOVE; LOADK; CALL; ADD; FORLOOP` 新增
+`FunctionCallAddForLoopBatch`，把静态 PC 形态、callee closure identity、leaf `return a+b` 元数据和
+寄存器边界检查从每轮执行中提到 batch 准备阶段。API 层命中当前 PC 后只准备一次 batch，再调用
+`TryExecuteFunctionCallAddForLoopBatch` 按 `contextCheckCountdown/5` 的窗口连续执行多轮。
+
+语义 guard：
+
+- 仍只在无 hook、无 coroutine/continuation、无需精确逐 PC 同步且 context 窗口足够时启用。
+- runtime 批量方法在首个虚拟 CALL 的动态 guard 前先执行 `State.CheckContext()`，后续每个虚拟 CALL
+  前继续检查 context；因此不放宽 direct CALL 取消边界。
+- batch 绑定当前 Proto，VM 复用或 Proto 切换后不能误用旧上下文；callee 来源寄存器若被替换则回退。
+- batch 内只覆盖 integer sum、integer 可见循环变量和 integer numeric-for；非 integer、寄存器窗口不足
+  或其它动态 guard 失败时回退普通 VM，错误路径仍由原 `CALL/ADD/FORLOOP` 产生。
+- 批量退出时 `currentPC` 对齐最后一个虚拟 `FORLOOP`，API 层仍把 `previousPreviousPC/previousPC`
+  对齐虚拟 `ADD/FORLOOP`。
+
+中间证伪：第一版只在 API 层循环调用 prepared 单轮 helper，`BenchmarkPreparedFunctionCall` 反而升至
+约 `175-179 us/op`，说明跨 API/runtime 的每轮方法调用抵消了 guard 复用收益；已改为 runtime 内部批量。
+
+benchmark 复核：
+
+| 用例 | 结果 |
+| --- | ---: |
+| `BenchmarkDoStringFunctionCall` | `110.8 / 110.3 / 110.6 / 109.5 / 111.9 us/op`，约 `63.6 KB/op`，`255 allocs/op` |
+| `BenchmarkPreparedFunctionCall` | `72.78 / 73.73 / 73.24 / 73.72 / 73.75 us/op`，`400 B/op`，`2 allocs/op` |
+| `BenchmarkPreparedArithAddLoopOfficial` | `17.48 / 17.55 / 17.31 ms/op`，`0 allocs/op` |
+| `BenchmarkPreparedArithMixLoopOfficial` | `17.80 / 17.77 / 17.85 ms/op`，`0 allocs/op` |
+| `BenchmarkPreparedArithChainTempOfficial` | `28.60 / 28.61 / 28.62 ms/op`，`0 allocs/op` |
+| `BenchmarkPreparedTableReadWriteOfficial` | `13.34 / 13.41 / 13.38 ms/op`，约 `11.21 MB/op`，`3 allocs/op` |
+| `BenchmarkPreparedClosureUpvalueOfficial` | `18.19 / 17.80 / 17.85 ms/op`，`511 B/op`，`4 allocs/op` |
+| `BenchmarkPreparedRecursion` | `1.62 / 2.02 / 1.62 us/op`，`224 B/op`，`2 allocs/op` |
+
+对比上一轮 function_call prepared 约 `160-165 us/op`、DoString 约 `200-214 us/op`，保守批量路径收益
+明显。非目标 prepared 矩阵未显示该提交引入的稳定退化；`BenchmarkPreparedRecursion` 中一轮 `2.02 us/op`
+属于本机短测噪声，绝对值仍处于自递归 fast path 区间。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -595,7 +633,8 @@ PC 检查和静态 guard 成本。该方向只作为 `MOVE; MOVE; LOADK; CALL; A
 - [x] 评估 `#string.format("%d", i)` 表达式级快路径，目标是消除 `stdlib_math_string` 剩余 FormatInt 字符串分配。
 - [x] 若继续推进，优先复核 `function_call` 默认完整 benchmark 的 3x 边缘波动；只有默认完整和 prepared Go micro 都证明稳定退化时，再设计新的调用边界优化。
 - [x] 若继续推进 `function_call`，先设计 `TryExecuteFunctionCallAddForLoop` 批量执行/guard hoisting 的语义方案，证明 context、PC、debug hook 和错误路径等价后再实现。
-- [ ] 实现保守版 `function_call` guard hoisting 原型；每个虚拟 `CALL` 保留 context 检查，若收益不足或语义复杂度过高则记录证伪并回退。
+- [x] 实现保守版 `function_call` guard hoisting 原型；每个虚拟 `CALL` 保留 context 检查，若收益不足或语义复杂度过高则记录证伪并回退。
+- [ ] 基于 function_call 批量路径重建 CLI 并复跑默认完整 benchmark，确认 `function_call` 倍率稳定改善且非目标路径无退化。
 - [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准
