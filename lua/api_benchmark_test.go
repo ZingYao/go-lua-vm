@@ -317,6 +317,21 @@ return sum
 	}
 }
 
+// BenchmarkPreparedFunctionCall 度量预编译后重复执行 Lua 函数调用循环。
+func BenchmarkPreparedFunctionCall(b *testing.B) {
+	source := `
+local function add(a, b)
+  return a + b
+end
+local sum = 0
+for i = 1, 5000 do
+  sum = sum + add(i, 1)
+end
+return sum
+`
+	benchmarkPreparedClosure(b, source)
+}
+
 // BenchmarkDoStringClosureUpvalueOfficial 度量官方完整 benchmark 同规模的闭包 upvalue 写读调用热路径。
 func BenchmarkDoStringClosureUpvalueOfficial(b *testing.B) {
 	source := `

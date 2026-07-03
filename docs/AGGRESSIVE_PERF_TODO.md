@@ -239,6 +239,29 @@ hook、yield、traceback、错误路径和调用深度等价。
 结论：激进分支当前主要路径在该抽样中全部低于 3x，`recursion` 已从上一轮唯一 3x 观察项变为
 接近官方 C Lua。该结果来自极窄固定签名 fast path，不能泛化为普通 Lua 递归调用边界已经解决。
 
+### 2026-07-03 function_call prepared 口径复核
+
+实现：新增 `BenchmarkPreparedFunctionCall`，使用与 `BenchmarkDoStringFunctionCall` 相同的 Lua 源码，
+但只在 benchmark 初始化阶段编译一次 chunk，并在循环中重复调用同一个顶层 closure，用于拆分
+`function_call` 的纯运行期 CALL 成本与 DoString/OpenLibs/编译分配噪声。
+
+benchmark 复核：
+
+| 用例 | 结果 |
+| --- | ---: |
+| `BenchmarkDoStringFunctionCall` | `462.8 / 460.8 / 461.4 / 466.9 / 474.8 us/op`，约 `61.9 KB/op`，`253 allocs/op` |
+| `BenchmarkPreparedFunctionCall` | `412.4 / 411.3 / 411.7 / 411.8 / 412.5 us/op`，约 `400 B/op`，`2 allocs/op` |
+
+CPU profile 观察：热点仍集中在 `executePreparedLuaClosureWithDebugNameTailFromArgs`、`VM.Step`、
+`executeLuaCallRequest`、`executeCall`、`executeLuaCallRequestDirect`、`TryExecuteLeafAddReturnInCaller`、
+`tryLeafRegisterRegisterAdd` 和 `executeForLoop`。alloc profile 中 DoString/OpenLibs/compile 仍贡献主要
+对象数，但 prepared 口径说明这些分配不是该用例 wall-clock 的主因。
+
+结论：`function_call` 的端到端 wall-clock 主要仍是运行期 Lua CALL 边界、caller-side leaf add 和
+循环分发成本；预编译只能小幅降低 wall-clock，并主要减少分配。下一步若要继续压缩该项，需要设计更
+通用但可回退的固定签名 leaf CALL fast path，且必须完整证明 debug hook、coroutine/yield、traceback、
+error path 和 `debug.getinfo` 语义不变；本轮不改生产代码。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -298,6 +321,7 @@ hook、yield、traceback、错误路径和调用深度等价。
 - [x] 评估 `arith_mix_loop` 的 IDIV/MOD superinstruction 是否收益稳定；若收益不稳定，记录证伪并回退。
 - [x] 基于 profile 重新评估 `table_rw`，只在能证明 table 未逃逸时设计数组预分配。
 - [x] 基于 profile 重新评估 `recursion`，只在能证明自递归固定签名语义等价时设计 fast call。
+- [x] 增加 `function_call` prepared 口径，确认编译/OpenLibs 分配不是该项 wall-clock 主因。
 - [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准
