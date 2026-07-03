@@ -1942,6 +1942,31 @@ semantic/codegen 在整个编译期持有稳定地址。继续消除这批对象
 方案，并用官方反汇编、debug local 生命周期、错误语义和 B/op 不退化作为进入实现门槛；不要继续追加
 局部字段、容量预估或 statement arena。
 
+### 2026-07-04 激进分支收尾完整 benchmark
+
+重建 `bin/glua` / `bin/gluac` 后，显式使用官方 Lua/Luac 5.3.6，按 `scripts/benchmark-official.sh`
+默认参数三轮复核：
+
+| 用例 | 本项目/官方 |
+| --- | ---: |
+| `arith_add_loop` | `1.20x / 1.20x / 1.21x` |
+| `arith_mix_loop` | `1.97x / 1.92x / 1.91x` |
+| `arith_chain_temp` | `0.77x / 0.76x / 0.78x` |
+| `table_rw` | `1.45x / 1.44x / 1.46x` |
+| `function_call` | `0.98x / 1.01x / 1.02x` |
+| `string_concat` | `1.82x / 1.84x / 1.82x` |
+| `closure_upvalue` | `0.86x / 0.86x / 0.86x` |
+| `stdlib_math_string` | `1.55x / 1.53x / 1.54x` |
+| `recursion` | `1.06x / 1.03x / 1.03x` |
+| `compile_3000_functions` | `2.01x / 1.91x / 1.90x` |
+
+结论：激进分支当前默认完整 benchmark 已没有 3x 边缘项，最高项转为 `compile_3000_functions`
+约 `1.9-2.0x`，其次是 `arith_mix_loop` 和 `string_concat` 约 `1.8-2.0x`。运行期已被本专项覆盖的
+`function_call`、`closure_upvalue`、`recursion`、`table_rw`、`arith_add_loop` 和 `arith_chain_temp`
+均进入接近官方或明显低于 1.5x 的区间。后续如果继续推进，应作为新专项重新选择目标：要么设计更通用的
+typed statement / AST 生命周期结构处理编译期，要么针对 `string_concat` 或 `arith_mix_loop` 重新 profile；
+不应继续在当前 TODO 下堆局部字段、容量预估或 benchmark 定向 fast path。
+
 ## 优化路线
 
 ### 1. Proto 预解码
