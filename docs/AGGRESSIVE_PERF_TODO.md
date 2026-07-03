@@ -131,6 +131,29 @@ benchmark 复核：
 
 对比激进分支基线中 `arith_chain_temp` prepared 约 `33.7 ms/op`，链式 superinstruction 有明显收益。`arith_mix_loop` 同轮看起来高于历史基线，但用上一提交 `5ad32e2` 的临时 worktree 在同机同口径复跑也为 `31.7-33.1 ms/op`，因此判断为本轮机器状态下的基线漂移，而非该提交引入的稳定退化。下一步若继续 arithmetic，应进入完整 `MUL; ADD; SUB; IDIV; MOD; ADD; FORLOOP`，不能用局部邻接模式处理 mix。
 
+### 2026-07-03 `MUL; ADD; SUB; IDIV; MOD; ADD; FORLOOP` superinstruction 原型
+
+实现：在 `runtime.VM` 中新增完整 `arith_mix_loop` 数据流匹配和 `TryExecuteMixArithmeticForLoop`，只覆盖 `sum = (sum + i * K1 - K2) // K3 + i % K4` 形态。构建期要求 `FORLOOP` 回跳当前 `MUL`、`MUL/MOD` 使用外部 numeric-for 控制变量、两条 ADD/SUB/IDIV/MOD 的寄存器数据流与官方 benchmark 一致，且 `IDIV/MOD` 右侧都是非零 integer 常量。
+
+语义 guard：
+
+- 执行期要求 sum、外部循环变量和 numeric-for 控制槽都是 integer；任何 number、字符串数字、元方法相关值、寄存器越界或 Proto 不匹配都回退普通 VM。
+- 零除常量构建期直接拒绝，执行期仍保留防御回退；因此零除错误路径、前序写回和 traceback 仍由普通 VM 处理。
+- 算术目标不能覆盖 numeric-for 控制槽；复杂别名形态不走 fast path，避免改变逐指令可见性。
+- API 执行循环只在无 hook、无 coroutine/continuation、无需精确逐 PC 同步且 context 检查窗口能覆盖被跳过六条指令时启用。
+
+benchmark 复核：
+
+| 用例 | 结果 |
+| --- | ---: |
+| `BenchmarkDoStringArithMixLoopOfficial` | `18.32 / 18.13 / 18.15 ms/op`，约 `68.7 KB/op`，`238 allocs/op` |
+| `BenchmarkPreparedArithMixLoopOfficial` | `18.35 / 17.98 / 17.99 ms/op`，`0 allocs/op` |
+| `BenchmarkDoStringArithChainTempOfficial` | `27.86 / 27.85 / 27.87 ms/op`，约 `62.5 KB/op`，`224 allocs/op` |
+| `BenchmarkPreparedArithChainTempOfficial` | `27.70 / 27.73 / 27.75 ms/op`，`0 allocs/op` |
+| `BenchmarkDoStringArithAddLoopOfficial` | `16.61 / 16.94 / 16.75 ms/op`，约 `59.6 KB/op`，`217 allocs/op` |
+
+对比激进分支基线中 `arith_mix_loop` prepared 约 `28.3 ms/op`，完整 mix superinstruction 收益明显。非目标 `arith_chain_temp` 和 `arith_add_loop` 维持上一轮水平；`table_rw` 仍主要受 33.5MB/op 数组区扩容影响，`recursion` 仍有机器噪声慢轮，不属于本轮触达路径。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -187,7 +210,7 @@ benchmark 复核：
 - [x] 复跑 `BenchmarkDoStringArithAddLoopOfficial` 与 `BenchmarkPreparedArithAddLoopOfficial`，记录收益和误差。
 - [x] 实现 `MUL; ADD; SUB; FORLOOP` superinstruction 原型。
 - [x] 复跑 `BenchmarkDoStringArithChainTempOfficial` 与 `BenchmarkPreparedArithChainTempOfficial`，确认低于 3x 且无退化。
-- [ ] 评估 `arith_mix_loop` 的 IDIV/MOD superinstruction 是否收益稳定；若收益不稳定，记录证伪并回退。
+- [x] 评估 `arith_mix_loop` 的 IDIV/MOD superinstruction 是否收益稳定；若收益不稳定，记录证伪并回退。
 - [ ] 基于 profile 重新评估 `table_rw`，只在能证明 table 未逃逸时设计数组预分配。
 - [ ] 基于 profile 重新评估 `recursion`，只在能证明自递归固定签名语义等价时设计 fast call。
 - [ ] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。

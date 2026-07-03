@@ -2478,10 +2478,12 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 	}
 	addForLoopSuperInstructionEnabled := false
 	mulAddSubForLoopSuperInstructionEnabled := false
+	mixArithmeticForLoopSuperInstructionEnabled := false
 	if !preciseFrameSync && !hooksEnabled {
 		// 普通主线程无 hook 路径可提前准备 superinstruction 表；hook/coroutine 路径必须保留逐 PC 语义。
 		addForLoopSuperInstructionEnabled = vm.PrepareAddForLoopSuperInstructions()
 		mulAddSubForLoopSuperInstructionEnabled = vm.PrepareMulAddSubForLoopSuperInstructions()
+		mixArithmeticForLoopSuperInstructionEnabled = vm.PrepareMixArithmeticForLoopSuperInstructions()
 	}
 	contextCheckCountdown := 0
 	for pc >= 0 && pc < len(proto.Code) {
@@ -2515,6 +2517,19 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 			if err := triggerLuaLineHook(state, debugEnvironment, proto, pc, previousPC, previousPreviousPC, &lastHookLine); err != nil {
 				// hook 内抛错必须中断当前 VM，交给 protected call 边界包装 traceback。
 				return nil, err
+			}
+		}
+		if mixArithmeticForLoopSuperInstructionEnabled && !preciseFrameSync && !hooksEnabled && contextCheckCountdown >= 6 {
+			// 七指令混合算术链会额外跳过 ADD、SUB、IDIV、MOD、ADD、FORLOOP 六个入口；
+			// 倒计时至少为 6 才能证明普通逐指令路径不会在被跳过区间触发 context 检查。
+			mixPC := pc
+			if nextPC, handled := vm.TryExecuteMixArithmeticForLoop(mixPC); handled {
+				// superinstruction 已完成完整混合算术循环体；补偿被跳过六条指令的倒计时。
+				contextCheckCountdown -= 6
+				previousPreviousPC = mixPC + 5
+				previousPC = mixPC + 6
+				pc = nextPC
+				continue
 			}
 		}
 		if mulAddSubForLoopSuperInstructionEnabled && !preciseFrameSync && !hooksEnabled && contextCheckCountdown >= 3 {

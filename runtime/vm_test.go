@@ -2148,6 +2148,161 @@ func TestVMTryExecuteMulAddSubForLoopRejectsNonEntryLoop(t *testing.T) {
 	}
 }
 
+// TestVMTryExecuteMixArithmeticForLoop 验证 `arith_mix_loop` 完整 superinstruction 热路径。
+//
+// 该形态对应 `sum = sum + i * 3 - 7; sum = sum // 2 + i % 5`，fast path 必须按普通逐指令
+// 顺序处理 IDIV、MOD 和末尾 ADD，并保持 numeric-for 控制槽更新一致。
+func TestVMTryExecuteMixArithmeticForLoop(t *testing.T) {
+	// 构造官方 arith_mix_loop 的完整循环体。
+	proto := bytecode.NewProto("mix-arithmetic-forloop")
+	proto.Constants = []bytecode.Constant{
+		bytecode.IntegerConstant(3),
+		bytecode.IntegerConstant(7),
+		bytecode.IntegerConstant(2),
+		bytecode.IntegerConstant(5),
+	}
+	proto.Code = []bytecode.Instruction{
+		bytecode.CreateABC(bytecode.OpMul, 5, 4, bytecode.RKAsK(0)),
+		bytecode.CreateABC(bytecode.OpAdd, 5, 0, 5),
+		bytecode.CreateABC(bytecode.OpSub, 0, 5, bytecode.RKAsK(1)),
+		bytecode.CreateABC(bytecode.OpIDiv, 5, 0, bytecode.RKAsK(2)),
+		bytecode.CreateABC(bytecode.OpMod, 6, 4, bytecode.RKAsK(3)),
+		bytecode.CreateABC(bytecode.OpAdd, 0, 5, 6),
+		bytecode.CreateAsBx(bytecode.OpForLoop, 1, -7),
+	}
+	vm := NewVMWithPrototypeData(7, proto.Constants, nil, nil, nil)
+	vm.BindPrototype(proto)
+	if !vm.PrepareMixArithmeticForLoopSuperInstructions() {
+		// 完整循环体回跳到 MUL 时应能准备混合算术 superinstruction。
+		t.Fatalf("expected mix arithmetic superinstruction")
+	}
+	initialRegisters := []Value{IntegerValue(0), IntegerValue(1), IntegerValue(3), IntegerValue(1), IntegerValue(1), NilValue(), NilValue()}
+	for registerIndex, value := range initialRegisters {
+		// 初始化 sum 与 FORLOOP 控制寄存器，模拟 FORPREP 后进入循环体的状态。
+		if err := vm.SetRegister(registerIndex, value); err != nil {
+			t.Fatalf("set register %d failed: %v", registerIndex, err)
+		}
+	}
+
+	nextPC, handled := vm.TryExecuteMixArithmeticForLoop(0)
+	if !handled || nextPC != 0 {
+		// 第一轮执行后循环仍应跳回 MUL。
+		t.Fatalf("first fast path mismatch: handled=%v nextPC=%d", handled, nextPC)
+	}
+	if value, ok := vm.Register(0); !ok || !value.RawEqual(IntegerValue(-1)) {
+		// 第一轮结果为 (0 + 1*3 - 7)//2 + 1%5。
+		t.Fatalf("first sum mismatch: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(5); !ok || !value.RawEqual(IntegerValue(-2)) {
+		// R5 最终应保存 IDIV 结果。
+		t.Fatalf("first idiv temp mismatch: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(6); !ok || !value.RawEqual(IntegerValue(1)) {
+		// R6 最终应保存 MOD 结果。
+		t.Fatalf("first mod temp mismatch: value=%#v ok=%v", value, ok)
+	}
+
+	nextPC, handled = vm.TryExecuteMixArithmeticForLoop(0)
+	if !handled || nextPC != 0 {
+		// 第二轮执行后仍应继续循环。
+		t.Fatalf("second fast path mismatch: handled=%v nextPC=%d", handled, nextPC)
+	}
+	nextPC, handled = vm.TryExecuteMixArithmeticForLoop(0)
+	if !handled || nextPC != 7 {
+		// 第三轮执行后越过 limit，应落到 FORLOOP 后一条指令。
+		t.Fatalf("third fast path mismatch: handled=%v nextPC=%d", handled, nextPC)
+	}
+	if value, ok := vm.Register(0); !ok || !value.RawEqual(IntegerValue(4)) {
+		// 三轮混合算术结果必须与普通 VM 一致。
+		t.Fatalf("final sum mismatch: value=%#v ok=%v", value, ok)
+	}
+	if vm.currentPC != 6 || vm.pcOffset != 0 {
+		// fast path 后 VM 状态应等价于刚执行完 FORLOOP。
+		t.Fatalf("final pc state mismatch: currentPC=%d pcOffset=%d", vm.currentPC, vm.pcOffset)
+	}
+}
+
+// TestVMTryExecuteMixArithmeticForLoopFallback 验证混合算术 guard 失败时无副作用回退。
+//
+// 除数为 0 或操作数类型不满足 integer guard 时，fast path 必须回退普通 VM，让普通路径保留
+// 前序写回和零除错误语义。
+func TestVMTryExecuteMixArithmeticForLoopFallback(t *testing.T) {
+	// 构造 IDIV 除数为 0 的形态，fast path 必须拒绝处理。
+	proto := bytecode.NewProto("mix-arithmetic-forloop-fallback")
+	proto.Constants = []bytecode.Constant{
+		bytecode.IntegerConstant(3),
+		bytecode.IntegerConstant(7),
+		bytecode.IntegerConstant(0),
+		bytecode.IntegerConstant(5),
+	}
+	proto.Code = []bytecode.Instruction{
+		bytecode.CreateABC(bytecode.OpMul, 5, 4, bytecode.RKAsK(0)),
+		bytecode.CreateABC(bytecode.OpAdd, 5, 0, 5),
+		bytecode.CreateABC(bytecode.OpSub, 0, 5, bytecode.RKAsK(1)),
+		bytecode.CreateABC(bytecode.OpIDiv, 5, 0, bytecode.RKAsK(2)),
+		bytecode.CreateABC(bytecode.OpMod, 6, 4, bytecode.RKAsK(3)),
+		bytecode.CreateABC(bytecode.OpAdd, 0, 5, 6),
+		bytecode.CreateAsBx(bytecode.OpForLoop, 1, -7),
+	}
+	vm := NewVMWithPrototypeData(7, proto.Constants, nil, nil, nil)
+	vm.BindPrototype(proto)
+	vm.PrepareMixArithmeticForLoopSuperInstructions()
+	initialRegisters := []Value{IntegerValue(11), IntegerValue(1), IntegerValue(1), IntegerValue(1), IntegerValue(1), IntegerValue(99), IntegerValue(88)}
+	for registerIndex, value := range initialRegisters {
+		// 初始化可执行到 IDIV 零除 guard 的寄存器状态。
+		if err := vm.SetRegister(registerIndex, value); err != nil {
+			t.Fatalf("set fallback register %d failed: %v", registerIndex, err)
+		}
+	}
+
+	nextPC, handled := vm.TryExecuteMixArithmeticForLoop(0)
+	if handled || nextPC != 0 {
+		// 零除必须回退普通 VM，不能在 fast path 内吞掉错误路径。
+		t.Fatalf("fallback mismatch: handled=%v nextPC=%d", handled, nextPC)
+	}
+	if value, ok := vm.Register(0); !ok || !value.RawEqual(IntegerValue(11)) {
+		// 回退前不能提前覆盖 sum。
+		t.Fatalf("fallback sum mutated: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(5); !ok || !value.RawEqual(IntegerValue(99)) {
+		// 回退前不能提前覆盖临时寄存器。
+		t.Fatalf("fallback temp mutated: value=%#v ok=%v", value, ok)
+	}
+}
+
+// TestVMTryExecuteMixArithmeticForLoopRejectsNonEntryLoop 验证非完整混合循环不会误命中。
+//
+// 如果 FORLOOP 不回跳当前 MUL，说明七条相邻指令不是完整循环体，fast path 不能启用。
+func TestVMTryExecuteMixArithmeticForLoopRejectsNonEntryLoop(t *testing.T) {
+	// 构造完整 opcode 序列，但 FORLOOP 回跳到 ADD 而不是 MUL。
+	proto := bytecode.NewProto("mix-arithmetic-forloop-non-entry")
+	proto.Constants = []bytecode.Constant{
+		bytecode.IntegerConstant(3),
+		bytecode.IntegerConstant(7),
+		bytecode.IntegerConstant(2),
+		bytecode.IntegerConstant(5),
+	}
+	proto.Code = []bytecode.Instruction{
+		bytecode.CreateABC(bytecode.OpMul, 5, 4, bytecode.RKAsK(0)),
+		bytecode.CreateABC(bytecode.OpAdd, 5, 0, 5),
+		bytecode.CreateABC(bytecode.OpSub, 0, 5, bytecode.RKAsK(1)),
+		bytecode.CreateABC(bytecode.OpIDiv, 5, 0, bytecode.RKAsK(2)),
+		bytecode.CreateABC(bytecode.OpMod, 6, 4, bytecode.RKAsK(3)),
+		bytecode.CreateABC(bytecode.OpAdd, 0, 5, 6),
+		bytecode.CreateAsBx(bytecode.OpForLoop, 1, -6),
+	}
+	vm := NewVMWithPrototypeData(7, proto.Constants, nil, nil, nil)
+	vm.BindPrototype(proto)
+	if vm.PrepareMixArithmeticForLoopSuperInstructions() {
+		// 只有 FORLOOP 回跳当前 MUL 时才应启用混合算术 fast path。
+		t.Fatalf("non-entry mix arithmetic should not prepare superinstruction")
+	}
+	if nextPC, handled := vm.TryExecuteMixArithmeticForLoop(0); handled || nextPC != 0 {
+		// 误命中会破坏循环体前序指令执行顺序。
+		t.Fatalf("non-entry fast path mismatch: handled=%v nextPC=%d", handled, nextPC)
+	}
+}
+
 // TestVMBinaryArithmeticErrors 验证二元算术指令的错误边界。
 //
 // 算术错误必须返回明确错误，并保持目标寄存器原值。

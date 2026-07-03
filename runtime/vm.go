@@ -82,6 +82,10 @@ type VM struct {
 	mulAddSubForLoopSuperInstructionProto *bytecode.Proto
 	// mulAddSubForLoopSuperInstructions 按 PC 保存 MUL;ADD;SUB;FORLOOP superinstruction 预匹配结果。
 	mulAddSubForLoopSuperInstructions []mulAddSubForLoopSuperInstruction
+	// mixArithmeticForLoopSuperInstructionProto 记录混合算术循环 superinstruction 表对应的 Proto。
+	mixArithmeticForLoopSuperInstructionProto *bytecode.Proto
+	// mixArithmeticForLoopSuperInstructions 按 PC 保存混合算术循环 superinstruction 预匹配结果。
+	mixArithmeticForLoopSuperInstructions []mixArithmeticForLoopSuperInstruction
 	// currentPC 保存当前执行指令位置，用于判断 Proto.LocalVars 中哪些局部变量仍然存活。
 	currentPC int
 	// openTop 保存上一条开放返回/开放 vararg 写入后的寄存器上界，-1 表示当前没有开放栈顶。
@@ -276,6 +280,71 @@ type mulAddSubForLoopSuperInstruction struct {
 	// LoopPC 保存循环继续时的跳转 PC。
 	LoopPC int
 	// Valid 表示当前 PC 是否匹配 MUL;ADD;SUB;FORLOOP 形态。
+	Valid bool
+}
+
+// mixArithmeticForLoopSuperInstruction 保存 `MUL; ADD; SUB; IDIV; MOD; ADD; FORLOOP` 的预匹配形态。
+//
+// 该形态覆盖官方 `arith_mix_loop` 的完整循环体。所有操作数和除数仍在运行期按 integer guard
+// 检查；guard 不满足时调用方必须回退普通 VM，保留字符串数字、元方法、零除和错误栈语义。
+type mixArithmeticForLoopSuperInstruction struct {
+	// MulTarget 保存 MUL 的目标寄存器。
+	MulTarget int
+	// MulLeftOperand 保存 MUL 左操作数形态。
+	MulLeftOperand decodedRKOperand
+	// MulRightOperand 保存 MUL 右操作数形态。
+	MulRightOperand decodedRKOperand
+	// FirstAddTarget 保存第一条 ADD 的目标寄存器。
+	FirstAddTarget int
+	// FirstAddLeftOperand 保存第一条 ADD 左操作数形态。
+	FirstAddLeftOperand decodedRKOperand
+	// FirstAddRightOperand 保存第一条 ADD 右操作数形态。
+	FirstAddRightOperand decodedRKOperand
+	// SubTarget 保存 SUB 的目标寄存器。
+	SubTarget int
+	// SubLeftOperand 保存 SUB 左操作数形态。
+	SubLeftOperand decodedRKOperand
+	// SubRightOperand 保存 SUB 右操作数形态。
+	SubRightOperand decodedRKOperand
+	// IDivTarget 保存 IDIV 的目标寄存器。
+	IDivTarget int
+	// IDivLeftOperand 保存 IDIV 左操作数形态。
+	IDivLeftOperand decodedRKOperand
+	// IDivRightOperand 保存 IDIV 右操作数形态。
+	IDivRightOperand decodedRKOperand
+	// ModTarget 保存 MOD 的目标寄存器。
+	ModTarget int
+	// ModLeftOperand 保存 MOD 左操作数形态。
+	ModLeftOperand decodedRKOperand
+	// ModRightOperand 保存 MOD 右操作数形态。
+	ModRightOperand decodedRKOperand
+	// FinalAddTarget 保存末尾 ADD 的目标寄存器。
+	FinalAddTarget int
+	// FinalAddLeftOperand 保存末尾 ADD 左操作数形态。
+	FinalAddLeftOperand decodedRKOperand
+	// FinalAddRightOperand 保存末尾 ADD 右操作数形态。
+	FinalAddRightOperand decodedRKOperand
+	// SumRegister 保存循环内被累积更新的 sum 寄存器。
+	SumRegister int
+	// LoopRegister 保存循环体读取的外部可见 numeric-for 控制变量寄存器。
+	LoopRegister int
+	// MulConstant 保存 MUL 使用的 integer 常量。
+	MulConstant int64
+	// SubConstant 保存 SUB 使用的 integer 常量。
+	SubConstant int64
+	// IDivConstant 保存 IDIV 使用的非零 integer 常量。
+	IDivConstant int64
+	// ModConstant 保存 MOD 使用的非零 integer 常量。
+	ModConstant int64
+	// ForBase 保存 FORLOOP 的 base 寄存器。
+	ForBase int
+	// ForSBx 保存 FORLOOP 的有符号跳转偏移。
+	ForSBx int
+	// ExitPC 保存循环退出时的下一条 PC。
+	ExitPC int
+	// LoopPC 保存循环继续时的跳转 PC。
+	LoopPC int
+	// Valid 表示当前 PC 是否匹配完整混合算术循环形态。
 	Valid bool
 }
 
@@ -1439,6 +1508,8 @@ func (vm *VM) BindPrototype(proto *bytecode.Proto) {
 		vm.addForLoopSuperInstructions = nil
 		vm.mulAddSubForLoopSuperInstructionProto = nil
 		vm.mulAddSubForLoopSuperInstructions = nil
+		vm.mixArithmeticForLoopSuperInstructionProto = nil
+		vm.mixArithmeticForLoopSuperInstructions = nil
 		vm.arithmeticIntRegisterCacheProto = nil
 		vm.arithmeticIntRegisterCache = nil
 		vm.arithmeticIntOperandCache = nil
@@ -1460,6 +1531,11 @@ func (vm *VM) BindPrototype(proto *bytecode.Proto) {
 		// VM 池切换到其他 Proto 时丢弃算术链 superinstruction 表，避免不同 Proto 的 PC 误命中。
 		vm.mulAddSubForLoopSuperInstructionProto = nil
 		vm.mulAddSubForLoopSuperInstructions = nil
+	}
+	if vm.mixArithmeticForLoopSuperInstructionProto != nil && vm.mixArithmeticForLoopSuperInstructionProto != proto {
+		// VM 池切换到其他 Proto 时丢弃混合算术 superinstruction 表，避免不同 Proto 的 PC 误命中。
+		vm.mixArithmeticForLoopSuperInstructionProto = nil
+		vm.mixArithmeticForLoopSuperInstructions = nil
 	}
 	if vm.arithmeticIntRegisterCacheProto != proto || len(vm.arithmeticIntRegisterCache) < len(proto.Code) || len(vm.arithmeticIntOperandCache) < len(proto.Code) {
 		// VM 池复用到不同 Proto 时必须重建缓存，避免 PC 相同但指令不同导致错误命中。
@@ -1933,6 +2009,360 @@ func (vm *VM) TryExecuteMulAddSubForLoop(pc int) (int, bool) {
 	vm.hasCallRequest = false
 	vm.returned = false
 	return nextPC, true
+}
+
+// ensureMixArithmeticForLoopSuperInstructions 返回当前 Proto 的混合算术循环预匹配表。
+//
+// 该表按 PC 与 Proto.Code 对齐，只记录完整循环体回跳当前 MUL 的 `arith_mix_loop` 形态；运行期
+// 类型、寄存器窗口、除数、hook 和 context guard 仍由调用方与 TryExecuteMixArithmeticForLoop 检查。
+func (vm *VM) ensureMixArithmeticForLoopSuperInstructions() []mixArithmeticForLoopSuperInstruction {
+	// 按当前 Proto 懒构建混合算术 superinstruction 表，并在 Proto 未变化时复用。
+	if vm == nil || vm.proto == nil {
+		// 缺少 VM 或 Proto 时没有可用 superinstruction 表。
+		return nil
+	}
+	if len(vm.proto.Code) < 7 {
+		// 少于七条指令不可能包含完整混合算术循环体。
+		vm.mixArithmeticForLoopSuperInstructionProto = vm.proto
+		vm.mixArithmeticForLoopSuperInstructions = nil
+		return nil
+	}
+	if vm.mixArithmeticForLoopSuperInstructionProto == vm.proto {
+		// 当前 Proto 已完成扫描；nil 表示无匹配形态，非 nil 表示可按 PC 读取。
+		return vm.mixArithmeticForLoopSuperInstructions
+	}
+
+	vm.mixArithmeticForLoopSuperInstructionProto = vm.proto
+	vm.mixArithmeticForLoopSuperInstructions = buildMixArithmeticForLoopSuperInstructions(vm.proto)
+	return vm.mixArithmeticForLoopSuperInstructions
+}
+
+// buildMixArithmeticForLoopSuperInstructions 构建 `MUL; ADD; SUB; IDIV; MOD; ADD; FORLOOP` 预匹配表。
+//
+// 返回表按 PC 对齐；没有匹配形态时返回 nil，表示该 Proto 不需要承担额外表分配。
+func buildMixArithmeticForLoopSuperInstructions(proto *bytecode.Proto) []mixArithmeticForLoopSuperInstruction {
+	// 空 Proto 或短函数没有可构建的混合算术 superinstruction。
+	if proto == nil || len(proto.Code) < 7 {
+		return nil
+	}
+
+	var superInstructions []mixArithmeticForLoopSuperInstruction
+	for pc := 0; pc+6 < len(proto.Code); pc++ {
+		// 只识别完整相邻 `MUL;ADD;SUB;IDIV;MOD;ADD;FORLOOP`，其他形态保持零值表示无效。
+		mulInstruction := proto.Code[pc]
+		firstAddInstruction := proto.Code[pc+1]
+		subInstruction := proto.Code[pc+2]
+		iDivInstruction := proto.Code[pc+3]
+		modInstruction := proto.Code[pc+4]
+		finalAddInstruction := proto.Code[pc+5]
+		forLoopInstruction := proto.Code[pc+6]
+		if mulInstruction.OpCode() != bytecode.OpMul || firstAddInstruction.OpCode() != bytecode.OpAdd || subInstruction.OpCode() != bytecode.OpSub || iDivInstruction.OpCode() != bytecode.OpIDiv || modInstruction.OpCode() != bytecode.OpMod || finalAddInstruction.OpCode() != bytecode.OpAdd || forLoopInstruction.OpCode() != bytecode.OpForLoop {
+			// 当前 PC 不匹配目标七指令模式，继续扫描后续指令。
+			continue
+		}
+		exitPC := pc + 7
+		loopPC := exitPC + forLoopInstruction.SBx()
+		if loopPC != pc {
+			// 只覆盖完整混合算术循环体；回跳到其他 PC 的形态必须交给普通 VM。
+			continue
+		}
+		forBase := forLoopInstruction.A()
+		mulLeftOperand := decodeRKOperand(proto, mulInstruction.B())
+		mulRightOperand := decodeRKOperand(proto, mulInstruction.C())
+		mulRegister, mulConstant, ok := decodedRegisterIntegerConstantPair(mulLeftOperand, mulRightOperand)
+		if !ok || mulRegister != forBase+3 {
+			// 官方 mix 形态必须使用外部可见循环变量乘以 integer 常量。
+			continue
+		}
+		firstAddLeftOperand := decodeRKOperand(proto, firstAddInstruction.B())
+		firstAddRightOperand := decodeRKOperand(proto, firstAddInstruction.C())
+		sumRegister, ok := decodedRegisterPlusTarget(firstAddLeftOperand, firstAddRightOperand, mulInstruction.A())
+		if !ok || firstAddInstruction.A() != mulInstruction.A() {
+			// 第一条 ADD 必须把 sum 与 MUL 临时结果累加回同一临时寄存器。
+			continue
+		}
+		subLeftOperand := decodeRKOperand(proto, subInstruction.B())
+		subRightOperand := decodeRKOperand(proto, subInstruction.C())
+		subLeftRegister, ok := decodedRegisterOperand(subLeftOperand)
+		if !ok || subInstruction.A() != sumRegister || subLeftRegister != firstAddInstruction.A() {
+			// SUB 必须从第一条 ADD 的临时结果减常量并写回 sum。
+			continue
+		}
+		subConstant, ok := decodedIntegerConstantOperand(subRightOperand)
+		if !ok {
+			// SUB 右侧不是 integer 常量时交给普通 VM 保留完整语义。
+			continue
+		}
+		iDivLeftOperand := decodeRKOperand(proto, iDivInstruction.B())
+		iDivRightOperand := decodeRKOperand(proto, iDivInstruction.C())
+		iDivLeftRegister, ok := decodedRegisterOperand(iDivLeftOperand)
+		if !ok || iDivInstruction.A() != firstAddInstruction.A() || iDivLeftRegister != subInstruction.A() {
+			// IDIV 必须读取更新后的 sum 并写回临时寄存器。
+			continue
+		}
+		iDivConstant, ok := decodedIntegerConstantOperand(iDivRightOperand)
+		if !ok || iDivConstant == 0 {
+			// 非 integer 或零除常量不能进入 fast path，保留普通错误语义。
+			continue
+		}
+		modLeftOperand := decodeRKOperand(proto, modInstruction.B())
+		modRightOperand := decodeRKOperand(proto, modInstruction.C())
+		modLeftRegister, ok := decodedRegisterOperand(modLeftOperand)
+		if !ok || modLeftRegister != mulRegister {
+			// MOD 必须读取同一个外部循环变量。
+			continue
+		}
+		modConstant, ok := decodedIntegerConstantOperand(modRightOperand)
+		if !ok || modConstant == 0 {
+			// 非 integer 或零除常量不能进入 fast path，保留普通错误语义。
+			continue
+		}
+		finalAddLeftOperand := decodeRKOperand(proto, finalAddInstruction.B())
+		finalAddRightOperand := decodeRKOperand(proto, finalAddInstruction.C())
+		if finalAddInstruction.A() != sumRegister || !decodedRegistersMatchPair(finalAddLeftOperand, finalAddRightOperand, iDivInstruction.A(), modInstruction.A()) {
+			// 末尾 ADD 必须把 IDIV 和 MOD 临时结果相加写回 sum。
+			continue
+		}
+		if registerInRange(sumRegister, forBase, forBase+3) || registerInRange(mulInstruction.A(), forBase, forBase+3) || registerInRange(modInstruction.A(), forBase, forBase+3) {
+			// 算术目标不能覆盖 numeric-for 控制槽，否则需要逐指令别名语义。
+			continue
+		}
+		if superInstructions == nil {
+			// 只有真实存在匹配形态时才分配 PC 对齐表，避免普通函数执行增加分配。
+			superInstructions = make([]mixArithmeticForLoopSuperInstruction, len(proto.Code))
+		}
+		superInstructions[pc] = mixArithmeticForLoopSuperInstruction{
+			MulTarget:            mulInstruction.A(),
+			MulLeftOperand:       mulLeftOperand,
+			MulRightOperand:      mulRightOperand,
+			FirstAddTarget:       firstAddInstruction.A(),
+			FirstAddLeftOperand:  firstAddLeftOperand,
+			FirstAddRightOperand: firstAddRightOperand,
+			SubTarget:            subInstruction.A(),
+			SubLeftOperand:       subLeftOperand,
+			SubRightOperand:      subRightOperand,
+			IDivTarget:           iDivInstruction.A(),
+			IDivLeftOperand:      iDivLeftOperand,
+			IDivRightOperand:     iDivRightOperand,
+			ModTarget:            modInstruction.A(),
+			ModLeftOperand:       modLeftOperand,
+			ModRightOperand:      modRightOperand,
+			FinalAddTarget:       finalAddInstruction.A(),
+			FinalAddLeftOperand:  finalAddLeftOperand,
+			FinalAddRightOperand: finalAddRightOperand,
+			SumRegister:          sumRegister,
+			LoopRegister:         mulRegister,
+			MulConstant:          mulConstant,
+			SubConstant:          subConstant,
+			IDivConstant:         iDivConstant,
+			ModConstant:          modConstant,
+			ForBase:              forBase,
+			ForSBx:               forLoopInstruction.SBx(),
+			ExitPC:               exitPC,
+			LoopPC:               loopPC,
+			Valid:                true,
+		}
+	}
+	return superInstructions
+}
+
+// PrepareMixArithmeticForLoopSuperInstructions 预构建当前 Proto 的混合算术循环表。
+//
+// 返回 true 表示当前 Proto 至少存在一个可尝试的 `arith_mix_loop` superinstruction PC；返回 false
+// 时调用方不应在热循环中反复调用 TryExecuteMixArithmeticForLoop。
+func (vm *VM) PrepareMixArithmeticForLoopSuperInstructions() bool {
+	// 预构建失败不影响普通 VM；后续 TryExecuteMixArithmeticForLoop 会因为表不匹配而回退。
+	return len(vm.ensureMixArithmeticForLoopSuperInstructions()) > 0
+}
+
+// TryExecuteMixArithmeticForLoop 尝试执行 `MUL; ADD; SUB; IDIV; MOD; ADD; FORLOOP` superinstruction。
+//
+// pc 必须指向当前 Proto.Code 中的 MUL 指令；返回 handled=false 表示 guard 不满足，调用方必须回退
+// 普通 VM。该 fast path 只覆盖 integer 算术和 integer numeric-for，不触发元方法、不处理 hook、
+// 不处理 yield；除数为 0 时也回退普通 VM，以保留原始零除错误路径和前序写回语义。
+func (vm *VM) TryExecuteMixArithmeticForLoop(pc int) (int, bool) {
+	// 先按 PC 读取已准备好的预匹配表；非目标 PC 必须快速失败，避免普通指令承担额外识别成本。
+	if vm == nil || vm.mixArithmeticForLoopSuperInstructionProto != vm.proto {
+		// 调用方尚未为当前 Proto 准备表，回退普通 VM。
+		return 0, false
+	}
+	superInstructions := vm.mixArithmeticForLoopSuperInstructions
+	if uint(pc) >= uint(len(superInstructions)) {
+		// 当前 PC 不在表范围内，回退普通 VM。
+		return 0, false
+	}
+	superInstruction := superInstructions[pc]
+	if !superInstruction.Valid {
+		// 当前 PC 没有匹配混合算术循环形态，回退普通 VM。
+		return 0, false
+	}
+
+	registers := vm.registers
+	targets := [...]int{
+		superInstruction.MulTarget,
+		superInstruction.FirstAddTarget,
+		superInstruction.SubTarget,
+		superInstruction.IDivTarget,
+		superInstruction.ModTarget,
+		superInstruction.FinalAddTarget,
+	}
+	for _, targetIndex := range targets {
+		// 任一算术目标寄存器越界时交给普通 VM 报原始错误。
+		if uint(targetIndex) >= uint(len(registers)) {
+			return 0, false
+		}
+	}
+
+	if uint(superInstruction.SumRegister) >= uint(len(registers)) || uint(superInstruction.LoopRegister) >= uint(len(registers)) {
+		// sum 或外部循环变量寄存器越界时交给普通 VM 报原始错误。
+		return 0, false
+	}
+	sumValue := registers[superInstruction.SumRegister]
+	loopValue := registers[superInstruction.LoopRegister]
+	if sumValue.Kind != KindInteger || loopValue.Kind != KindInteger {
+		// 当前窄路径只覆盖 integer sum 与 integer 外部循环变量。
+		return 0, false
+	}
+	if superInstruction.IDivConstant == 0 || superInstruction.ModConstant == 0 {
+		// 构建期已排除零除常量；这里保留防御性回退以维持普通错误路径。
+		return 0, false
+	}
+
+	// 该窄路径只匹配构建期证明的数据流：sum = (sum + i*K1 - K2)//K3 + i%K4。
+	mulResult := loopValue.Integer * superInstruction.MulConstant
+	firstAddResult := sumValue.Integer + mulResult
+	subResult := firstAddResult - superInstruction.SubConstant
+	iDivResult := integerFloorDiv(subResult, superInstruction.IDivConstant)
+	modResult := integerModulo(loopValue.Integer, superInstruction.ModConstant)
+	finalAddResult := iDivResult + modResult
+
+	baseIndex := superInstruction.ForBase
+	if uint(baseIndex+3) >= uint(len(registers)) {
+		// FORLOOP 需要 R(A)..R(A+3) 四个控制槽，越界时回退普通 VM。
+		return 0, false
+	}
+	indexValue := registers[baseIndex]
+	limitValue := registers[baseIndex+1]
+	stepValue := registers[baseIndex+2]
+	if indexValue.Kind != KindInteger || limitValue.Kind != KindInteger || stepValue.Kind != KindInteger {
+		// 只覆盖 integer numeric-for；float 或可转 number 字符串仍走普通 VM。
+		return 0, false
+	}
+
+	// guard 全部通过后，按普通指令顺序提交寄存器写入。
+	registers[superInstruction.MulTarget] = IntegerValue(mulResult)
+	registers[superInstruction.FirstAddTarget] = IntegerValue(firstAddResult)
+	registers[superInstruction.SubTarget] = IntegerValue(subResult)
+	registers[superInstruction.IDivTarget] = IntegerValue(iDivResult)
+	registers[superInstruction.ModTarget] = IntegerValue(modResult)
+	registers[superInstruction.FinalAddTarget] = IntegerValue(finalAddResult)
+	nextIndex := indexValue.Integer + stepValue.Integer
+	nextPC := superInstruction.ExitPC
+	if forIntegerLoopContinues(nextIndex, limitValue.Integer, stepValue.Integer) {
+		// 循环继续时更新内部 index 和外部可见循环变量，并跳回 FORLOOP 的 sBx 目标。
+		registers[baseIndex] = IntegerValue(nextIndex)
+		registers[baseIndex+3] = IntegerValue(nextIndex)
+		nextPC = superInstruction.LoopPC
+		vm.pcOffset = superInstruction.ForSBx
+	} else {
+		// 循环结束时不更新 index 和外部变量，保持普通 FORLOOP 语义。
+		vm.pcOffset = 0
+	}
+	vm.currentPC = pc + 6
+	vm.skipNext = false
+	vm.closeFrom = -1
+	vm.hasCallRequest = false
+	vm.returned = false
+	return nextPC, true
+}
+
+// decodedRegisterOperand 返回预解码 RK 操作数中的寄存器下标。
+//
+// ok=false 表示该操作数来自常量表，不能作为固定寄存器数据流参与 superinstruction 匹配。
+func decodedRegisterOperand(operand decodedRKOperand) (int, bool) {
+	// 只有非常量 RK 才表示寄存器操作数。
+	if operand.Constant {
+		// 常量操作数不是寄存器数据流。
+		return 0, false
+	}
+	return operand.Index, true
+}
+
+// decodedIntegerConstantOperand 返回预解码 RK 操作数中的 integer 常量。
+//
+// ok=false 表示该操作数不是可直接用于 integer fast path 的 Proto 常量。
+func decodedIntegerConstantOperand(operand decodedRKOperand) (int64, bool) {
+	// 只有已确认的 integer 常量可作为构建期常量写入 superinstruction。
+	if !operand.Constant || !operand.IntegerConstantOK {
+		// 寄存器、非 integer 常量或越界常量都不能在构建期固定。
+		return 0, false
+	}
+	return operand.IntegerConstant, true
+}
+
+// decodedRegisterIntegerConstantPair 识别一个寄存器和一个 integer 常量组成的二元操作数。
+//
+// 乘法等交换律场景可使用该 helper；返回的 registerIndex 是寄存器操作数，constantValue 是
+// 另一侧 integer 常量。其他形态返回 ok=false。
+func decodedRegisterIntegerConstantPair(left decodedRKOperand, right decodedRKOperand) (int, int64, bool) {
+	// 优先匹配左寄存器右常量，这是当前 codegen 的主路径。
+	if registerIndex, registerOK := decodedRegisterOperand(left); registerOK {
+		if constantValue, constantOK := decodedIntegerConstantOperand(right); constantOK {
+			// 左寄存器右常量命中。
+			return registerIndex, constantValue, true
+		}
+	}
+	if registerIndex, registerOK := decodedRegisterOperand(right); registerOK {
+		if constantValue, constantOK := decodedIntegerConstantOperand(left); constantOK {
+			// 右寄存器左常量命中。
+			return registerIndex, constantValue, true
+		}
+	}
+	return 0, 0, false
+}
+
+// decodedRegisterPlusTarget 识别一侧为指定临时目标、另一侧为寄存器的 ADD 操作数。
+//
+// 返回的寄存器表示除 targetRegister 外的累加寄存器；其他形态返回 ok=false。
+func decodedRegisterPlusTarget(left decodedRKOperand, right decodedRKOperand, targetRegister int) (int, bool) {
+	// ADD 具备交换律，允许 targetRegister 出现在任一侧。
+	leftRegister, leftOK := decodedRegisterOperand(left)
+	rightRegister, rightOK := decodedRegisterOperand(right)
+	if !leftOK || !rightOK {
+		// 当前窄模式只接受双寄存器 ADD。
+		return 0, false
+	}
+	if leftRegister == targetRegister {
+		// 左侧为临时目标时，右侧是被累加的寄存器。
+		return rightRegister, true
+	}
+	if rightRegister == targetRegister {
+		// 右侧为临时目标时，左侧是被累加的寄存器。
+		return leftRegister, true
+	}
+	return 0, false
+}
+
+// decodedRegistersMatchPair 判断两个操作数是否刚好匹配两个寄存器。
+//
+// ADD 具备交换律，因此两个寄存器可按任意顺序出现。
+func decodedRegistersMatchPair(left decodedRKOperand, right decodedRKOperand, firstRegister int, secondRegister int) bool {
+	// 先读取两个寄存器操作数；任一侧为常量时不属于当前窄模式。
+	leftRegister, leftOK := decodedRegisterOperand(left)
+	rightRegister, rightOK := decodedRegisterOperand(right)
+	if !leftOK || !rightOK {
+		// 当前窄模式只接受双寄存器 ADD。
+		return false
+	}
+	return (leftRegister == firstRegister && rightRegister == secondRegister) || (leftRegister == secondRegister && rightRegister == firstRegister)
+}
+
+// registerInRange 判断寄存器是否落在闭区间 [start, end]。
+//
+// 该 helper 用于构建期排除算术目标覆盖 numeric-for 控制槽的形态。
+func registerInRange(registerIndex int, start int, end int) bool {
+	// 边界是闭区间，覆盖 R(A)..R(A+3) 四个 numeric-for 控制槽。
+	return registerIndex >= start && registerIndex <= end
 }
 
 // decodedIntegerOperandValue 读取预解码 RK 操作数的 integer 值。
