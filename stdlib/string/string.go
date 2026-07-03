@@ -3098,7 +3098,7 @@ func tableReplacementValue(state *runtime.State, tableValue *runtime.Table, key 
 // callGSubGoReplacement 调用 gsub 的 Go closure 替换函数。
 //
 // replacement 必须是 KindGoClosure；arguments 已按 Lua pattern capture 规则排列。
-// GoResultsFunction 保留多返回值，GoFunction 被适配成单返回值。
+// GoResultsFunction 保留多返回值，GoFunction 和一元函数被适配成单返回值。
 func callGSubGoReplacement(replacement runtime.Value, arguments []runtime.Value) ([]runtime.Value, error) {
 	// 只有 Go closure 可在 string 库无 State 的上下文中直接执行。
 	if replacement.Kind != runtime.KindGoClosure {
@@ -3126,10 +3126,75 @@ func callGSubGoReplacement(replacement runtime.Value, arguments []runtime.Value)
 			return nil, err
 		}
 		return []runtime.Value{result}, nil
+	case runtime.GoUnaryFunction:
+		// 一元函数只消费首个 capture；Lua 调用允许替换函数忽略多余参数。
+		if function == nil {
+			// nil 函数负载不可执行。
+			return nil, runtime.ErrExpectedCallable
+		}
+		result, err := function(firstGSubReplacementArgument(arguments))
+		if err != nil {
+			// 替换函数错误直接返回给 gsub。
+			return nil, err
+		}
+		return []runtime.Value{result}, nil
+	case *runtime.GoFastUnaryFunction:
+		// 标准库一元 fastcall 描述在 gsub 替换函数位置仍按普通一元函数执行。
+		if function == nil || function.Function == nil {
+			// 损坏注册不能进入 nil 函数调用。
+			return nil, runtime.ErrExpectedCallable
+		}
+		result, err := function.Function(firstGSubReplacementArgument(arguments))
+		if err != nil {
+			// 替换函数错误直接返回给 gsub。
+			return nil, err
+		}
+		return []runtime.Value{result}, nil
+	case *runtime.GoFixedResultsFunction:
+		// 固定结果函数复用声明的结果上限；未命中时回退完整函数，保持变长语义。
+		if function == nil || function.Function == nil {
+			// 损坏注册不能进入 nil 函数调用。
+			return nil, runtime.ErrExpectedCallable
+		}
+		results := make([]runtime.Value, function.MaxResults)
+		resultCount, handled, err := function.Function(results, arguments...)
+		if err != nil {
+			// 替换函数错误直接返回给 gsub。
+			return nil, err
+		}
+		if handled {
+			// 命中固定结果快路径时只返回实际写入的前缀。
+			return results[:resultCount], nil
+		}
+		if function.Fallback == nil {
+			// 没有回退函数时表示注册不完整。
+			return nil, runtime.ErrExpectedCallable
+		}
+		return function.Fallback(arguments...)
+	case *runtime.GoClosureWithUpvalues:
+		// 带 debug upvalue 元数据的 Go closure 仍通过内部 Function 执行。
+		if function == nil || function.Function == nil {
+			// 损坏注册不能进入 nil 函数调用。
+			return nil, runtime.ErrExpectedCallable
+		}
+		return function.Function(arguments...)
 	default:
 		// Go closure 引用负载损坏时按不可调用处理。
 		return nil, runtime.ErrExpectedCallable
 	}
+}
+
+// firstGSubReplacementArgument 返回 gsub 替换函数的一元调用实参。
+//
+// arguments 已经由 patternValues 按 Lua 规则构造；空结果只可能来自内部异常路径，此时用 nil
+// 进入一元函数，让其按自身参数错误语义返回。
+func firstGSubReplacementArgument(arguments []runtime.Value) runtime.Value {
+	// 没有 capture 或完整匹配值时使用 nil 触发一元函数自己的参数检查。
+	if len(arguments) == 0 {
+		// nil 实参保持 Lua 缺参调用的错误边界。
+		return runtime.NilValue()
+	}
+	return arguments[0]
 }
 
 // gsubReplacementResult 把替换函数返回值转换为最终替换文本。

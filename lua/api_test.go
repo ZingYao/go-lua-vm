@@ -281,6 +281,82 @@ assert(status == nil and message == "message" and code == 1)
 	}
 }
 
+// TestDoStringLoopLocalUpvalueClosesEachIteration 验证循环体局部 upvalue 每轮独立闭合。
+//
+// Lua 5.3 closure.lua 会在 numeric for 中创建捕获块内 local 的闭包；每轮结束时必须通过
+// OP_JMP close 关闭该 local 的 open upvalue，否则后续迭代或后续 local 复用寄存器会污染旧闭包。
+func TestDoStringLoopLocalUpvalueClosesEachIteration(t *testing.T) {
+	// 使用完整标准库执行 assert/collectgarbage，覆盖官方 closure.lua 的关键失败形态。
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库打开失败时无法执行 Lua 断言和 GC。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+	if err := DoString(state, `
+local A, B = 0, {g = 10}
+function f(x)
+  local a = {}
+  for i = 1, 10 do
+    local y = 0
+    do
+      a[i] = function ()
+        B.g = B.g + 1
+        y = y + x
+        return y + A
+      end
+    end
+  end
+  local dummy = function () return a[A] end
+  collectgarbage()
+  A = 1; assert(dummy() == a[1]); A = 0
+  assert(a[1]() == x)
+  assert(a[1]() == x + x)
+  assert(a[3]() == x)
+  collectgarbage()
+  assert(B.g == 13)
+end
+f(10)
+`); err != nil {
+		// 任一断言失败都说明 loop-local upvalue 生命周期与官方 Lua 5.3 不一致。
+		t.Fatalf("loop local upvalue close failed: %v", err)
+	}
+}
+
+// TestDoStringBreakClosesCapturedForControlVariable 验证 break 会闭合被捕获的 for 控制变量。
+//
+// 官方 closure.lua 要求每轮 numeric-for 可见控制变量拥有独立 upvalue cell；break 跳出循环时
+// 也必须携带 OP_JMP close 参数，否则 break 会跳过循环体末尾 close-only JMP，导致前几轮闭包共享
+// 同一个寄存器 cell。
+func TestDoStringBreakClosesCapturedForControlVariable(t *testing.T) {
+	// 打开标准库以使用 assert，脚本直接复现官方 closure.lua 第 60-70 行的控制变量场景。
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库打开失败时无法执行 Lua 断言。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+	if err := DoString(state, `
+local a = {}
+for i = 1, 10 do
+  a[i] = {
+    set = function(x) i = x end,
+    get = function() return i end,
+  }
+  if i == 3 then break end
+end
+assert(a[4] == nil)
+a[1].set(10)
+assert(a[2].get() == 2)
+a[2].set("a")
+assert(a[3].get() == 3)
+assert(a[2].get() == "a")
+`); err != nil {
+		// break 必须关闭当前迭代的控制变量，不得让 a[2] 的写入污染 a[3]。
+		t.Fatalf("break for-control upvalue close failed: %v", err)
+	}
+}
+
 // TestCoroutineLibraryRunsLuaClosureToYield 验证 coroutine 标准库能执行 Lua closure 到 yield。
 //
 // 该用例覆盖官方 gc.lua 的 self-referenced threads 前置需求：create/resume/yield 全局可用，
@@ -1405,6 +1481,55 @@ assert(not ok and string.find(message, "field 'huge'", 1, true), message)
 	if err := DoString(state, source); err != nil {
 		// bitwise integer 转换错误必须保留官方期望的 field 名称格式。
 		t.Fatalf("DoString math.huge bitwise error failed: %v", err)
+	}
+}
+
+// TestDoStringMathLogHonorsExplicitBase 验证 math.log 的可选底数参数。
+//
+// 官方 math.lua 用 `math.log(math.maxinteger, 2)` 推导整数位数；标准库注册层必须保留第二个
+// base 参数，不能把 math.log 当成纯一元 fastcall 后忽略多余实参。
+func TestDoStringMathLogHonorsExplicitBase(t *testing.T) {
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// math 和 assert 来自标准库。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+
+	source := `
+local maxint = math.maxinteger
+local intbits = math.floor(math.log(maxint, 2) + 0.5) + 1
+assert(intbits == 64)
+assert((1 << intbits) == 0)
+`
+	if err := DoString(state, source); err != nil {
+		// 显式 base 参数必须对齐 Lua 5.3 math.log(x, base) 语义。
+		t.Fatalf("DoString math.log explicit base failed: %v", err)
+	}
+}
+
+// TestDoStringMathAtanHonorsOptionalX 验证 math.atan 的可选 x 参数。
+//
+// Lua 5.3 `math.atan(y [, x])` 使用 atan2(y, x)；标准库注册层必须保留第二个参数，不能把
+// math.atan 当成纯一元 fastcall 后忽略 x。
+func TestDoStringMathAtanHonorsOptionalX(t *testing.T) {
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// math 和 assert 来自标准库。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+
+	source := `
+local function eq(a, b)
+  return a == b or math.abs(a - b) < 1e-12
+end
+assert(eq(math.atan(1), math.pi / 4))
+assert(eq(math.atan(1, 0), math.pi / 2))
+`
+	if err := DoString(state, source); err != nil {
+		// 可选 x 参数必须对齐 Lua 5.3 math.atan(y, x) 语义。
+		t.Fatalf("DoString math.atan optional x failed: %v", err)
 	}
 }
 
@@ -2645,6 +2770,113 @@ assert(not success and type(message) == "string" and string.find(message, "error
 	}
 }
 
+// TestDoStringCollectGarbageInsideHookDefersFinalizers 验证 hook 回调内 GC 不重入 table finalizer。
+//
+// Lua 5.3 官方 db.lua 会在 debug hook 中调用 collectgarbage；本运行时的 table `__gc` 会执行 Lua
+// 函数，因此 hook 内必须延后 finalizer，避免 `__gc` 产生的 Lua 调用扰动当前 hook 栈。普通
+// collectgarbage 仍应在 hook 退出后执行已排队的 finalizer。
+func TestDoStringCollectGarbageInsideHookDefersFinalizers(t *testing.T) {
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库打开不应失败。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+	source := `
+local finalized = 0
+do
+  local object = setmetatable({}, {__gc = function() finalized = finalized + 1 end})
+  object = nil
+end
+local observed = false
+debug.sethook(function()
+  observed = true
+  collectgarbage()
+  for i = 1, 32 do local temporary = {} end
+  assert(finalized == 0)
+end, "l")
+local line = 1
+debug.sethook()
+collectgarbage()
+assert(observed and finalized == 1 and line == 1)
+`
+	if err := DoString(state, source); err != nil {
+		// hook 内重入 finalizer 或 hook 退出后未执行 finalizer 都会触发断言。
+		t.Fatalf("DoString hook collectgarbage finalizer deferral failed: %v", err)
+	}
+}
+
+// TestDoStringTableFinalizerSuppressesDebugHooks 验证 table finalizer 内部调用不污染用户 hook。
+//
+// Lua 5.3 的 GC 元方法属于 VM 内部清理路径；当用户正在收集 call hook 事件时，`__gc` 内部调用
+// 不应被当成被测程序调用。官方 all.lua 先运行 gc.lua 再运行 db.lua，会留下会调用 print 的
+// finalizer，本用例用本地 marker 函数复现同类污染。
+func TestDoStringTableFinalizerSuppressesDebugHooks(t *testing.T) {
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库打开不应失败。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+	source := `
+local seen = {}
+local markerCalls = 0
+local function marker() markerCalls = markerCalls + 1 end
+do
+  local object = setmetatable({}, {__gc = function() marker() end})
+  object = nil
+end
+debug.sethook(function(event)
+  if event == "call" then
+    local info = debug.getinfo(2, "f")
+    seen[info.func] = true
+  end
+end, "c")
+collectgarbage()
+debug.sethook()
+assert(markerCalls == 1 and not seen[marker])
+`
+	if err := DoString(state, source); err != nil {
+		// finalizer 内部 marker 调用若被 hook 捕获会触发断言。
+		t.Fatalf("DoString table finalizer hook suppression failed: %v", err)
+	}
+}
+
+// TestDoStringAutoFinalizerKeepsReachableGlobal 验证自动 GC 不提前终结全局强引用对象。
+//
+// Lua 5.3 官方 gc.lua 会把一个带 `__gc` 的 table 保存在全局变量里，期望它只在关闭 State 时
+// 终结；其 finalizer 会复活自身并创建新的 finalizable table。自动 GC 如果忽略全局强根，会在
+// 后续分配压力下提前执行该 finalizer，并可能不断创建新待终结对象，导致 all.lua 长时间无法结束。
+func TestDoStringAutoFinalizerKeepsReachableGlobal(t *testing.T) {
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库打开不应失败。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+	source := `
+local finalized = 0
+local mt = {}
+mt.__gc = function(o)
+  finalized = finalized + 1
+  _G.kept = o
+  setmetatable({}, mt)
+end
+_G.kept = setmetatable({}, mt)
+for i = 1, 1024 do
+  local temporary = {}
+end
+assert(finalized == 0)
+_G.kept = nil
+collectgarbage()
+assert(finalized == 1)
+`
+	if err := DoString(state, source); err != nil {
+		// 全局强引用被自动 GC 忽略或释放后 finalizer 未运行都会触发断言。
+		t.Fatalf("DoString auto finalizer global reachability failed: %v", err)
+	}
+}
+
 // TestDoStringExpandsOpenVarargRegisters 验证开放 VARARG 会按运行期实参数扩展寄存器窗口。
 //
 // Lua 5.3 中 `string.format(p, ...)` 会生成 VARARG B=0；当实参多于 codegen 静态窗口时，
@@ -2939,6 +3171,44 @@ assert(hookCalls >= 2)
 	}
 }
 
+// TestDoStringDebugSetHookSkipsCurrentLine 验证设置 line hook 后不报告当前行。
+//
+// 官方 db.lua 在 `debug.sethook(f,"l"); load(s)(); debug.sethook()` 同一行安装 hook 并执行新
+// chunk；line hook 必须只看到新 chunk 的行号，不能额外报告 sethook 所在调用方行号。
+func TestDoStringDebugSetHookSkipsCurrentLine(t *testing.T) {
+	// 创建完整标准库 State，确保 debug.sethook、load 和 math.sin 可用。
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库打开不应失败。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+
+	source := `
+local seen = {}
+local chunk = [[if
+math.sin(1)
+then
+  a=1
+else
+  a=2
+end
+]]
+local function hook(event, line)
+  assert(event == "line")
+  seen[#seen + 1] = line
+end
+debug.sethook(hook, "l"); assert(load(chunk))(); debug.sethook()
+assert(#seen == 4, table.concat(seen, ","))
+assert(seen[1] == 2 and seen[2] == 3 and seen[3] == 4 and seen[4] == 7,
+       table.concat(seen, ","))
+`
+	if err := DoString(state, source); err != nil {
+		// line hook 轨迹必须与 Lua 5.3 官方 db.lua 的首个 test 用例一致。
+		t.Fatalf("DoString sethook current line skip failed: %v", err)
+	}
+}
+
 // TestDoStringDebugThreadLineHookRuns 验证 debug.sethook 的 thread 重载会绑定到目标协程。
 //
 // 官方 db.lua 使用 debug.sethook(co, hook, "lcr") 调试挂起协程；主线程 hook 不应被污染，
@@ -2976,6 +3246,70 @@ assert(not debug.gethook(co))
 	if err := DoString(state, source); err != nil {
 		// 协程专属 line hook 必须执行，并与主线程 hook 状态隔离。
 		t.Fatalf("DoString debug thread line hook failed: %v", err)
+	}
+}
+
+// TestDoStringDebugSetHookInsideCoroutineDoesNotPolluteMain 验证协程内无参 sethook 不污染主线程。
+//
+// 官方 all.lua 会先在 db.lua 的协程内设置 line hook，随后在 big.lua 中通过
+// xpcall(debug.traceback) 检查 `__newindex` 元方法帧；协程 hook 若错误泄漏到主线程，会让后续
+// traceback 丢失元方法名称。
+func TestDoStringDebugSetHookInsideCoroutineDoesNotPolluteMain(t *testing.T) {
+	// 创建完整标准库 State，确保 coroutine、debug.sethook、load 和 xpcall 可用。
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库打开不应失败。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+
+	source := `
+local debug = require "debug"
+local co = coroutine.wrap(function ()
+  debug.sethook(function () end, "l")
+  for i = 1, 2 do local x = i end
+  assert(debug.gethook())
+end)
+co()
+assert(not debug.gethook())
+
+local env = {}
+setmetatable(env, {__newindex = function () error("hi") end})
+local f = assert(load("X = 1", nil, nil, env))
+local ok, msg = xpcall(f, debug.traceback)
+assert(not ok and msg:find("'__newindex'"))
+`
+	if err := DoString(state, source); err != nil {
+		// 协程内无参 sethook 不能污染主线程后续 traceback。
+		t.Fatalf("DoString coroutine sethook isolation failed: %v", err)
+	}
+}
+
+// TestDoStringDebugTracebackUsesLibraryWhenGlobalCleared 验证全局 debug 被清空后 traceback 仍识别自身帧。
+//
+// 官方 all.lua 会先执行 `debug = nil`，后续 big.lua 通过 `local debug = require"debug"` 获得库表并把
+// `debug.traceback` 作为 xpcall handler 裸传；此时不能依赖 `_G.debug` 反查 debug API 帧。
+func TestDoStringDebugTracebackUsesLibraryWhenGlobalCleared(t *testing.T) {
+	// 创建完整标准库 State，确保 require、debug.traceback、load 和 xpcall 可用。
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库打开不应失败。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+
+	source := `
+debug = nil
+local debug = require "debug"
+local env = {}
+setmetatable(env, {__newindex = function () error("hi") end})
+local f = assert(load("X = 1", nil, nil, env))
+local ok, msg = xpcall(f, debug.traceback)
+assert(not ok and msg:find("'__newindex'"))
+`
+	if err := DoString(state, source); err != nil {
+		// debug.traceback 必须使用注册时缓存的库表识别自身 Go 帧。
+		t.Fatalf("DoString debug traceback after global clear failed: %v", err)
 	}
 }
 
@@ -3957,6 +4291,66 @@ end, {"le", "sub"}) == "<")
 	if err := DoString(state, source); err != nil {
 		// __eq yield 恢复必须回到原比较表达式并产生 false 分支结果。
 		t.Fatalf("DoString equality metamethod yield failed: %v", err)
+	}
+}
+
+// TestDoStringCoroutineYieldInConcatMetamethod 验证连续 CONCAT 元方法 yield 后继续折叠。
+//
+// 官方 coroutine.lua 会在 `a .. b .. c .. a` 这类单条 OP_CONCAT 内连续多次触发
+// __concat 并 yield；恢复时必须把每次元方法返回值作为中间折叠结果，而不是提前跳到下一条
+// 指令返回半成品。
+func TestDoStringCoroutineYieldInConcatMetamethod(t *testing.T) {
+	// 创建完整标准库 State，确保 coroutine 与 Lua 元方法 runner 都可用。
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库打开失败时无法执行协程兼容脚本。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+
+	source := `
+local mt = {
+  __concat = function(a, b)
+    coroutine.yield(nil, "concat")
+    a = type(a) == "table" and a.x or a
+    b = type(b) == "table" and b.x or b
+    return a .. b
+  end,
+}
+local function new(x)
+  return setmetatable({x = x}, mt)
+end
+local a = new(10)
+local b = new(12)
+local c = new("hello")
+
+local function run(fn, expected)
+  local index = 1
+  local co = coroutine.wrap(fn)
+  while true do
+    local result, status = co()
+    if result then
+      assert(expected[index] == nil)
+      return result
+    end
+    assert(status == expected[index])
+    index = index + 1
+  end
+end
+
+assert(run(function()
+  return a .. b
+end, {"concat"}) == "1012")
+assert(run(function()
+  return a .. b .. c .. a
+end, {"concat", "concat", "concat"}) == "1012hello10")
+assert(run(function()
+  return "a" .. "b" .. a .. "c" .. c .. b .. "x"
+end, {"concat", "concat", "concat"}) == "ab10chello12x")
+`
+	if err := DoString(state, source); err != nil {
+		// 连续 CONCAT yield 必须保持官方 coroutine.lua 的恢复顺序和最终结果。
+		t.Fatalf("DoString concat metamethod yield failed: %v", err)
 	}
 }
 

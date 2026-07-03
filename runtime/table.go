@@ -66,12 +66,16 @@ type Table struct {
 	mutationVersion uint64
 	// iterationCache 保存当前版本的 raw next 稳定迭代快照。
 	iterationCache []tableEntry
+	// iterationIndexCache 保存当前迭代快照中 key 到位置的索引，避免 next 每步线性查找继续 key。
+	iterationIndexCache map[tableKey]int
 	// iterationCacheVersion 保存 iterationCache 对应的 table raw 写入版本。
 	iterationCacheVersion uint64
 	// iterationCacheValid 表示 iterationCache 是否可复用。
 	iterationCacheValid bool
 	// staleIterationCache 保存最近一次失效前的 raw next 快照，用于兼容迭代中删除当前 key 后继续 next。
 	staleIterationCache []tableEntry
+	// staleIterationIndexCache 保存失效前快照的 key 位置索引，用于删除当前 key 后继续迭代。
+	staleIterationIndexCache map[tableKey]int
 	// staleIterationCacheValid 表示 staleIterationCache 可作为已删除当前 key 的续迭代兜底。
 	staleIterationCacheValid bool
 }
@@ -422,24 +426,77 @@ func (table *Table) RawNext(key Value) (Value, Value, bool, error) {
 		return entries[0].key, entries[0].value, true, nil
 	}
 
-	for index, entry := range entries {
-		if entry.key.RawEqual(key) {
-			// 找到当前 key 后，返回它后面的第一个元素。
-			return table.rawNextFromEntries(entries, index+1)
-		}
+	if nextIndex, ok := table.rawNextIndexFromCurrentCache(entries, key); ok {
+		// 找到当前 key 后，返回它后面的第一个元素。
+		return table.rawNextFromEntries(entries, nextIndex)
 	}
 	if table.staleIterationCacheValid {
 		// Lua 允许在遍历时删除当前 key；删除会重建当前快照，但继续 key 仍可在旧快照中定位后继。
-		for index, entry := range table.staleIterationCache {
-			if entry.key.RawEqual(key) {
-				// 从旧快照后继继续，并跳过已经被删除或改为 nil 的项。
-				return table.rawNextFromEntries(table.staleIterationCache, index+1)
-			}
+		if nextIndex, ok := table.rawNextIndexFromStaleCache(key); ok {
+			// 从旧快照后继继续，并跳过已经被删除或改为 nil 的项。
+			return table.rawNextFromEntries(table.staleIterationCache, nextIndex)
 		}
 	}
 
 	// key 不属于当前迭代快照时，按 Lua next 错误边界返回明确错误。
 	return NilValue(), NilValue(), false, ErrInvalidTableIterationKey
+}
+
+// rawNextIndexFromCurrentCache 返回当前快照中 key 后继项的起始位置。
+//
+// entries 必须来自当前 table 版本；索引按需构建并跟随 iterationCacheVersion 失效。该方法只改变
+// 查找复杂度，不改变 next 的迭代顺序或非法 key 错误边界。
+func (table *Table) rawNextIndexFromCurrentCache(entries []tableEntry, key Value) (int, bool) {
+	if table.iterationIndexCache == nil {
+		// 第一次非 nil 继续 key 才构建索引，避免只取首元素的 next(table) 承担 map 分配。
+		table.iterationIndexCache = buildRawIterationIndex(entries)
+	}
+
+	// 使用 tableKey 定位继续 key；Lua 合法 table key 都能编码，找不到时交给调用方返回 invalid key。
+	return rawNextIndexFromCache(table.iterationIndexCache, key)
+}
+
+// rawNextIndexFromStaleCache 返回失效前快照中 key 后继项的起始位置。
+//
+// 该路径仅服务遍历中删除当前 key 的兼容行为；旧快照中的后继项仍会通过当前 table RawGet 复核。
+func (table *Table) rawNextIndexFromStaleCache(key Value) (int, bool) {
+	if table.staleIterationIndexCache == nil {
+		// 旧快照索引按需构建，避免每次 mutation 都为极少触发的删除续迭代路径分配 map。
+		table.staleIterationIndexCache = buildRawIterationIndex(table.staleIterationCache)
+	}
+
+	// 使用旧快照索引定位被删除的当前 key。
+	return rawNextIndexFromCache(table.staleIterationIndexCache, key)
+}
+
+// rawNextIndexFromCache 在快照索引中查找 key 后继项的起始位置。
+func rawNextIndexFromCache(indexCache map[tableKey]int, key Value) (int, bool) {
+	lookupKey, err := makeTableKey(key)
+	if err != nil {
+		// 非法或不支持的 key 不属于任何快照，保留 RawNext 的 invalid key 行为。
+		return 0, false
+	}
+	position, ok := indexCache[lookupKey]
+	if !ok {
+		// key 不在该快照中，由 RawNext 统一返回 invalid key。
+		return 0, false
+	}
+	return position + 1, true
+}
+
+// buildRawIterationIndex 为 raw next 快照构建 key 到位置的索引。
+func buildRawIterationIndex(entries []tableEntry) map[tableKey]int {
+	indexCache := make(map[tableKey]int, len(entries))
+	for index, entry := range entries {
+		// 快照项都应来自合法 table key；无法编码的历史异常项跳过，让 RawNext 回退为 invalid key。
+		lookupKey, err := makeTableKey(entry.key)
+		if err != nil {
+			// 跳过异常 key，避免索引构建影响已有容错边界。
+			continue
+		}
+		indexCache[lookupKey] = index
+	}
+	return indexCache
 }
 
 // rawNextFromEntries 从指定快照位置开始返回仍存在的下一项。
@@ -820,10 +877,12 @@ func (table *Table) noteMutation() {
 	if table.iterationCacheValid {
 		// 保留失效前快照，允许 next(table, deletedCurrentKey) 按旧位置找到后继。
 		table.staleIterationCache = append(table.staleIterationCache[:0], table.iterationCache...)
+		table.staleIterationIndexCache = nil
 		table.staleIterationCacheValid = true
 	}
 	table.mutationVersion++
 	table.iterationCacheValid = false
+	table.iterationIndexCache = nil
 }
 
 // updateLengthCacheForIntegerSet 根据正整数 key 写入维护长度缓存。
@@ -1087,6 +1146,7 @@ func (table *Table) rawIterationEntries() []tableEntry {
 
 	// 缓存数组区和 hash 区合并后的稳定快照，供同一版本后续 next 继续迭代复用。
 	table.iterationCache = entries
+	table.iterationIndexCache = nil
 	table.iterationCacheVersion = table.mutationVersion
 	table.iterationCacheValid = true
 

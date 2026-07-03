@@ -22,7 +22,9 @@ const (
 	// GCRootTypeCoroutineStack 表示协程独立栈根样本。
 	GCRootTypeCoroutineStack GCRootType = "coroutine-stack-root"
 	// autoGCSweepInterval 表示自动 GC 在分配压力下每多少次可收集对象分配推进一次 weak sweep。
-	autoGCSweepInterval int64 = 96
+	// 弱表显式 collectgarbage 仍走完整扫描；自动路径使用独立低频节拍，既避免 finalizer-only
+	// 16 次周期误清普通弱表，也满足官方 closure.lua 等待弱引用在 100 次分配压力内消失的语义。
+	autoGCSweepInterval int64 = 80
 	// autoGCFinalizerInterval 表示存在待终结 table 时自动 GC 的推进频率。
 	autoGCFinalizerInterval int64 = 16
 )
@@ -140,16 +142,44 @@ func (state *State) FullGC(liveRoots int64) error {
 	}
 	// finalizer 运行后再执行完整弱表 sweep，清理 weak key 和 weak key/value 项。
 	state.SweepWeakTables()
+	if state.hasWeakTables {
+		// 完整 GC 后重新判断是否仍有可达弱表；不可达弱表不能让后续普通分配长期触发自动 weak sweep。
+		state.hasWeakTables = state.hasReachableWeakTables()
+	}
 	if liveRoots < 1 {
 		// 计数至少保留 1，避免后续倍率比较因 0 失真。
 		liveRoots = 1
 	}
 
 	// 完整 GC 后把可见计数压到根数量附近，并重置 step 周期。
+	state.updateFullGCMetric(liveRoots)
+	return nil
+}
+
+// FullGCDeferredFinalizers 在不能安全重入终结器时只推进可见 GC 计数。
+//
+// liveRoots 是调用方当前采样出的根数量；该路径用于 debug hook 回调内的显式 collectgarbage。
+// Lua 5.3 允许 hook 内调用 GC，但本兼容层的 table finalizer 会再次执行 Lua 代码，容易扰动
+// 当前 hook 调用栈；因此保留 finalizer 队列给后续非 hook GC 处理，只更新计数指标。
+func (state *State) FullGCDeferredFinalizers(liveRoots int64) {
+	// nil 或关闭 State 没有可更新的 Lua GC 计数。
+	if state == nil || state.closed {
+		// 生命周期无效时直接忽略，保持 collect 命令幂等。
+		return
+	}
+	if liveRoots < 1 {
+		// 计数至少保留 1，避免后续倍率比较因 0 失真。
+		liveRoots = 1
+	}
+	state.updateFullGCMetric(liveRoots)
+}
+
+// updateFullGCMetric 更新 Lua 视角完整 GC 后的计数指标。
+func (state *State) updateFullGCMetric(liveRoots int64) {
+	// 完整 GC 后把可见计数压到根数量附近，并重置 step 周期。
 	state.gcCountMetric = liveRoots
 	state.gcStepProgress = 0
 	state.gcSuppressStoppedCountOnce = false
-	return nil
 }
 
 // GCCount 返回 Lua 视角的 collectgarbage("count") 计数。
@@ -244,30 +274,46 @@ func (state *State) NoteTableAllocation() {
 		return
 	}
 
-	sweepInterval := autoGCSweepInterval
-	if len(state.finalizableTables) > 0 {
-		// finalizer 兼容测试依赖较短分配压力周期，否则小循环内观察不到 __gc 运行。
-		sweepInterval = autoGCFinalizerInterval
-	}
 	state.autoGCAllocations++
-	if state.autoGCAllocations < sweepInterval {
-		// 自动 GC 只需在分配压力下周期性推进；每次分配都全图 weak sweep 会让字符串拼接热路径失真。
+	finalizerTick := len(state.finalizableTables) > 0 && state.autoGCAllocations%autoGCFinalizerInterval == 0
+	weakSweepTick := state.hasWeakTables && state.autoGCAllocations%autoGCSweepInterval == 0
+	if !finalizerTick && !weakSweepTick {
+		// 自动 GC 只需在分配压力下周期性推进；每次分配都全图 weak sweep 会让普通热路径失真。
 		return
 	}
-	state.autoGCAllocations = 0
-	if !state.hasWeakTables && len(state.finalizableTables) == 0 {
-		// 没有弱表或待终结 table 时，自动 GC 无需扫描对象图；显式 collectgarbage 仍执行完整流程。
-		return
-	}
-	state.SweepWeakValuesBeforeFinalizers()
-	if len(state.finalizableTables) > 0 {
+	if finalizerTick && !state.debugHookActive() {
 		// 只有存在待终结对象时才运行自动 finalizer，避免普通分配走无意义路径。
 		state.RunTableFinalizersForAuto()
 	}
-	if state.hasWeakTables {
+	if weakSweepTick {
 		// 只有 State 中出现过弱表时才需要自动 weak sweep，避免普通字符串拼接反复扫描全局对象图。
+		state.SweepWeakValuesBeforeFinalizers()
 		state.SweepWeakTables()
 	}
+}
+
+// hookActiveDebugEnvironment 表示运行时只需要查询 debug 环境是否正在 hook 回调内。
+type hookActiveDebugEnvironment interface {
+	// HookActive 返回当前 debug 环境是否正在执行 hook 回调。
+	HookActive() bool
+}
+
+// debugHookActive 判断当前 State 是否处于 debug hook 回调内部。
+//
+// State 只保存 debug 环境的抽象引用，避免 runtime 反向依赖 stdlib/debug；没有环境或环境类型不支持
+// HookActive 时返回 false。
+func (state *State) debugHookActive() bool {
+	// nil State 没有关联 debug 环境。
+	if state == nil {
+		// 缺少 State 时不可能处于 hook 回调。
+		return false
+	}
+	environment, ok := state.DebugEnvironment().(hookActiveDebugEnvironment)
+	if !ok {
+		// 未打开 debug 库或环境不支持 HookActive 时视为普通运行路径。
+		return false
+	}
+	return environment.HookActive()
 }
 
 // maxInt64 返回两个 int64 中较大的值。
@@ -722,7 +768,8 @@ func (state *State) RegisterTableFinalizer(table *Table) {
 // RegisterWeakTable 登记 State 中存在弱表。
 //
 // table 必须是已经设置元表的 table；只有元表 `__mode` 字段包含 `k` 或 `v` 时才标记。
-// 标记一旦置位不会回退，避免弱表后续被普通表覆盖元表时遗漏历史弱边清理需求。
+// 标记会在显式完整 GC 后按可达图收敛；这既保留弱表存在期间的自动 sweep，也避免弱表不可达后
+// 后续普通热循环继续承担全图扫描成本。
 func (state *State) RegisterWeakTable(table *Table) {
 	if state == nil || state.closed || table == nil {
 		// 无效 State 或 nil table 没有可登记对象。
@@ -736,6 +783,149 @@ func (state *State) RegisterWeakTable(table *Table) {
 
 	// 记录当前 State 已出现弱表，后续自动 GC 在分配压力下需要保留 weak sweep。
 	state.hasWeakTables = true
+}
+
+// hasReachableWeakTables 判断当前可达图中是否仍存在弱表。
+//
+// 该方法只服务完整 GC 后刷新自动 weak sweep 开关；它遵循弱表清理时同一套强边遍历规则，不会清理
+// 任何表项，也不会改变 table 迭代顺序。
+func (state *State) hasReachableWeakTables() bool {
+	if state == nil || state.closed {
+		// 无效 State 没有可达对象图。
+		return false
+	}
+
+	visitedTables := make(map[*Table]bool)
+	visitedClosures := make(map[*LuaClosure]bool)
+	if state.registry != nil {
+		// registry 是全局可达入口之一。
+		if state.valueGraphHasWeakTable(ReferenceValue(KindTable, state.registry), visitedTables, visitedClosures) {
+			return true
+		}
+	}
+	if state.globals != nil {
+		// globals 保存脚本全局变量。
+		if state.valueGraphHasWeakTable(ReferenceValue(KindTable, state.globals), visitedTables, visitedClosures) {
+			return true
+		}
+	}
+	for index := range state.stack {
+		// 主栈上的值可能直接或间接持有弱表。
+		if state.valueGraphHasWeakTable(state.stack[index], visitedTables, visitedClosures) {
+			return true
+		}
+	}
+	for _, vm := range state.activeVMs {
+		if vm == nil {
+			// nil VM 占位跳过，避免 panic。
+			continue
+		}
+		registers := vm.ActiveRegistersSnapshot()
+		for index := range registers {
+			// 活动寄存器是当前执行中的强根。
+			if state.valueGraphHasWeakTable(registers[index], visitedTables, visitedClosures) {
+				return true
+			}
+		}
+	}
+	for _, thread := range state.threads {
+		if thread == nil {
+			// nil 协程占位跳过。
+			continue
+		}
+		for index := range thread.stack {
+			// 协程栈保留暂停状态下的可达值。
+			if state.valueGraphHasWeakTable(thread.stack[index], visitedTables, visitedClosures) {
+				return true
+			}
+		}
+		if state.valueGraphHasWeakTable(thread.function, visitedTables, visitedClosures) {
+			// 协程入口函数可能通过 upvalue 持有弱表。
+			return true
+		}
+	}
+	for _, frame := range state.callFrames {
+		if state.valueGraphHasWeakTable(frame.Function, visitedTables, visitedClosures) {
+			// 活动调用帧函数也可能通过 upvalue 持有弱表。
+			return true
+		}
+	}
+	return false
+}
+
+// valueGraphHasWeakTable 判断 value 的强可达图中是否包含弱表。
+func (state *State) valueGraphHasWeakTable(value Value, visitedTables map[*Table]bool, visitedClosures map[*LuaClosure]bool) bool {
+	switch value.Kind {
+	case KindTable:
+		// table 值进入 table 图扫描。
+		table, ok := value.Ref.(*Table)
+		if !ok || table == nil {
+			// 损坏 table 引用不能提供可达弱表。
+			return false
+		}
+		return state.tableGraphHasWeakTable(table, visitedTables, visitedClosures)
+	case KindLuaClosure:
+		// Lua closure 通过 upvalue 持有强引用。
+		closure, ok := value.Ref.(*LuaClosure)
+		if !ok || closure == nil {
+			// 损坏闭包引用不能继续扫描。
+			return false
+		}
+		if visitedClosures[closure] {
+			// 闭包/upvalue 图可能成环，已访问闭包不重复展开。
+			return false
+		}
+		visitedClosures[closure] = true
+		for index := range closure.Upvalues {
+			// 每个 upvalue 都按普通强引用继续扫描。
+			if state.valueGraphHasWeakTable(closure.Upvalues[index], visitedTables, visitedClosures) {
+				return true
+			}
+		}
+		return false
+	default:
+		// 其他值类型没有 table 子图。
+		return false
+	}
+}
+
+// tableGraphHasWeakTable 判断 table 的强可达图中是否包含弱表。
+func (state *State) tableGraphHasWeakTable(table *Table, visitedTables map[*Table]bool, visitedClosures map[*LuaClosure]bool) bool {
+	if table == nil {
+		// nil table 不包含弱表。
+		return false
+	}
+	if visitedTables[table] {
+		// table 图可能自引用，已访问节点不重复展开。
+		return false
+	}
+	visitedTables[table] = true
+
+	weakKeys, weakValues := table.weakMode()
+	if weakKeys || weakValues {
+		// 当前 table 自身仍是可达弱表，自动 weak sweep 标志必须保留。
+		return true
+	}
+	entries := table.rawIterationEntries()
+	for index := range entries {
+		if !weakKeys {
+			// key 非弱时才作为强边继续扫描。
+			if state.valueGraphHasWeakTable(entries[index].key, visitedTables, visitedClosures) {
+				return true
+			}
+		}
+		if !weakValues {
+			// value 非弱时才作为强边继续扫描。
+			if state.valueGraphHasWeakTable(entries[index].value, visitedTables, visitedClosures) {
+				return true
+			}
+		}
+	}
+	if table.metatable != nil {
+		// 元表是 table 的强可达结构。
+		return state.tableGraphHasWeakTable(table.metatable, visitedTables, visitedClosures)
+	}
+	return false
 }
 
 // RunTableFinalizers 对已登记且当前不可达的 table 执行 `__gc` 元方法。
@@ -809,8 +999,9 @@ func (state *State) RunTableFinalizers() error {
 
 // RunTableFinalizersForAuto 在自动 GC 节拍中尽力执行 table finalizer。
 //
-// 自动路径只跳过仍被活动寄存器直接持有的 table，不使用完整强根图；这用于模拟 Lua 在分配压力
-// 下推进收集，让外层 table 已被覆盖但仍残留在寄存器窗口中的对象能够完成终结。
+// 自动路径必须尊重当前 State 强根，避免把 `_G`、registry、活动寄存器或协程栈仍可达的对象
+// 提前终结。Lua 5.3 官方 gc.lua 会把待关闭阶段终结的对象挂在全局变量上；若这里只检查活动
+// 寄存器，该对象会被提前终结并在 finalizer 中持续创建新对象，导致官方 all.lua 长时间无法结束。
 func (state *State) RunTableFinalizersForAuto() {
 	if state == nil || state.closed || len(state.finalizableTables) == 0 {
 		// 无效状态或没有登记对象时无需处理。
@@ -821,6 +1012,8 @@ func (state *State) RunTableFinalizersForAuto() {
 		state.finalizedTables = make(map[*Table]bool)
 	}
 
+	sweptWeakValues := false
+	ranFinalizer := false
 	for index := len(state.finalizableTables) - 1; index >= 0; index-- {
 		table := state.finalizableTables[index]
 		if table == nil || state.finalizedTables[table] {
@@ -828,8 +1021,8 @@ func (state *State) RunTableFinalizersForAuto() {
 			state.finalizableTables = append(state.finalizableTables[:index], state.finalizableTables[index+1:]...)
 			continue
 		}
-		if state.TableInActiveRegisters(table) {
-			// 直接活动寄存器仍持有该 table 时不自动执行 __gc。
+		if state.TableInActiveRegisters(table) || state.tableReachableFromAutoRoots(table) {
+			// 当前强根仍持有该 table 时不自动执行 __gc。
 			continue
 		}
 
@@ -838,8 +1031,14 @@ func (state *State) RunTableFinalizersForAuto() {
 			// 自动 GC 不提前终结非函数 __gc，允许后续把 bless 标记替换为真实函数。
 			continue
 		}
+		if state.hasWeakTables && !sweptWeakValues {
+			// 只有真正要运行自动 finalizer 时才执行 finalizer 前弱 value 清理，避免强可达队列拖慢普通分配。
+			state.SweepWeakValuesBeforeFinalizers()
+			sweptWeakValues = true
+		}
 		state.finalizedTables[table] = true
 		state.finalizableTables = append(state.finalizableTables[:index], state.finalizableTables[index+1:]...)
+		ranFinalizer = true
 		if state.tableFinalizerRunner == nil {
 			// 缺少执行器时无法调用 Lua finalizer。
 			continue
@@ -849,6 +1048,137 @@ func (state *State) RunTableFinalizersForAuto() {
 			continue
 		}
 	}
+	if ranFinalizer && state.hasWeakTables {
+		// 真正执行过自动 finalizer 才代表一个自动 GC 周期，可安全推进完整 weak sweep。
+		state.SweepWeakTables()
+		state.hasWeakTables = state.hasReachableWeakTables()
+	}
+}
+
+// tableReachableFromAutoRoots 判断 table 是否仍可从自动 GC 的轻量强根到达。
+//
+// 自动 GC 在分配热点上触发，不能像显式 collectgarbage 那样每轮构建完整 ephemeron 强引用集合；
+// 这里只沿 registry、_G、栈、活动 VM 寄存器、协程栈和调用帧函数做直接强边递归，足以避免把
+// 官方 gc.lua 中挂在 `_G.___Glob` 下、预期关闭 State 时才终结的对象提前执行。
+func (state *State) tableReachableFromAutoRoots(table *Table) bool {
+	if state == nil || table == nil {
+		// 无效输入不可能从强根到达。
+		return false
+	}
+	visitedTables := make(map[*Table]bool)
+	visitedClosures := make(map[*LuaClosure]bool)
+	target := ReferenceValue(KindTable, table)
+	if state.valueStronglyReferencesTable(ReferenceValue(KindTable, state.registry), target, visitedTables, visitedClosures) {
+		// registry 是自动 GC 的稳定强根。
+		return true
+	}
+	if state.valueStronglyReferencesTable(ReferenceValue(KindTable, state.globals), target, visitedTables, visitedClosures) {
+		// _G 中的普通强引用必须阻止自动 finalizer。
+		return true
+	}
+	for index := range state.stack {
+		if state.valueStronglyReferencesTable(state.stack[index], target, visitedTables, visitedClosures) {
+			// 主栈仍可达时不能自动终结。
+			return true
+		}
+	}
+	for _, vm := range state.activeVMs {
+		if vm == nil {
+			// nil VM 占位跳过。
+			continue
+		}
+		registers := vm.ActiveRegistersSnapshot()
+		for index := range registers {
+			if state.valueStronglyReferencesTable(registers[index], target, visitedTables, visitedClosures) {
+				// 活动寄存器图仍可达时不能自动终结。
+				return true
+			}
+		}
+	}
+	for _, thread := range state.threads {
+		if thread == nil {
+			// nil 协程占位跳过。
+			continue
+		}
+		for index := range thread.stack {
+			if state.valueStronglyReferencesTable(thread.stack[index], target, visitedTables, visitedClosures) {
+				// 协程私有栈仍可达时不能自动终结。
+				return true
+			}
+		}
+		if state.valueStronglyReferencesTable(thread.function, target, visitedTables, visitedClosures) {
+			// 协程入口函数的 upvalue 图仍可达时不能自动终结。
+			return true
+		}
+	}
+	for _, frame := range state.callFrames {
+		if state.valueStronglyReferencesTable(frame.Function, target, visitedTables, visitedClosures) {
+			// 当前调用帧函数仍可达时不能自动终结。
+			return true
+		}
+	}
+	return false
+}
+
+// valueStronglyReferencesTable 判断 value 的普通强引用图是否能到达目标 table。
+//
+// 该 helper 服务自动 GC 的轻量可达性过滤；它遵守弱表 `__mode` 的 k/v 规则，但不做 ephemeron
+// 固定点扩展，避免在高频分配路径构建完整强引用集合。
+func (state *State) valueStronglyReferencesTable(value Value, target Value, visitedTables map[*Table]bool, visitedClosures map[*LuaClosure]bool) bool {
+	if value.RawEqual(target) {
+		// 当前值就是目标 table，说明强根直接命中。
+		return true
+	}
+	if value.Kind == KindLuaClosure {
+		if closure, ok := value.Ref.(*LuaClosure); ok && closure != nil {
+			if visitedClosures[closure] {
+				// 闭包/upvalue 图可能自引用，已访问闭包不能继续递归。
+				return false
+			}
+			visitedClosures[closure] = true
+			// Lua closure 的 upvalue 可能间接持有目标 table。
+			for index := range closure.Upvalues {
+				if state.valueStronglyReferencesTable(closure.Upvalues[index], target, visitedTables, visitedClosures) {
+					// upvalue 快照命中目标 table。
+					return true
+				}
+			}
+			for index := range closure.UpvalueCells {
+				cell := closure.UpvalueCells[index]
+				if cell != nil && state.valueStronglyReferencesTable(cell.Value(), target, visitedTables, visitedClosures) {
+					// 共享 upvalue cell 当前值命中目标 table。
+					return true
+				}
+			}
+		}
+	}
+	if value.Kind != KindTable {
+		// 非 table/closure 值没有可继续递归的强边。
+		return false
+	}
+	table, ok := value.Ref.(*Table)
+	if !ok || table == nil || visitedTables[table] {
+		// 损坏引用或已访问 table 不重复扫描。
+		return false
+	}
+	visitedTables[table] = true
+	weakKeys, weakValues := table.weakMode()
+	entries := table.rawIterationEntries()
+	for index := range entries {
+		if !weakKeys && state.valueStronglyReferencesTable(entries[index].key, target, visitedTables, visitedClosures) {
+			// 非弱 key 是强边，可以继续查找。
+			return true
+		}
+		if !weakValues && state.valueStronglyReferencesTable(entries[index].value, target, visitedTables, visitedClosures) {
+			// 非弱 value 是强边，可以继续查找。
+			return true
+		}
+	}
+	if table.metatable != nil && state.valueStronglyReferencesTable(ReferenceValue(KindTable, table.metatable), target, visitedTables, visitedClosures) {
+		// 元表是 table 的强引用，也可能间接命中目标。
+		return true
+	}
+	return false
 }
 
 // tableHasWeakAssociation 判断 table 是否仍作为弱表 key 出现在当前可扫描 table 图中。

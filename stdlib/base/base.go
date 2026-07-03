@@ -180,7 +180,13 @@ func CollectGarbage(state *runtime.State, args ...runtime.Value) ([]runtime.Valu
 	switch command {
 	case "collect":
 		// 完整 GC 当前只更新 Lua 视角计数，不影响宿主 Go GC。
-		if err := state.FullGC(int64(countSnapshotValues(state.SnapshotGCRoots()))); err != nil {
+		liveRoots := int64(countSnapshotValues(state.SnapshotGCRoots()))
+		if debugHookActive(state) {
+			// debug hook 回调内部不能安全重入 table finalizer，先更新可见计数并延后终结器。
+			state.FullGCDeferredFinalizers(liveRoots)
+			return nil, nil
+		}
+		if err := state.FullGC(liveRoots); err != nil {
 			// table `__gc` 错误需要原样传播给 pcall/调用方。
 			return nil, err
 		}
@@ -227,6 +233,29 @@ func CollectGarbage(state *runtime.State, args ...runtime.Value) ([]runtime.Valu
 		// 未知命令必须显式报错，避免调用方误以为 Lua GC 指令已完整支持。
 		return nil, runtime.RaiseError(runtime.StringValue("bad argument #1 to 'collectgarbage' (invalid option)"))
 	}
+}
+
+// hookActiveDebugEnvironment 表示 base 库只关心 debug 环境是否正在 hook 回调内。
+type hookActiveDebugEnvironment interface {
+	// HookActive 返回当前 debug 环境是否正在执行 hook 回调。
+	HookActive() bool
+}
+
+// debugHookActive 判断当前 State 是否正在执行 debug hook 回调。
+//
+// state 必须允许访问绑定的 debug 环境；未打开 debug 库或环境类型不匹配时返回 false。
+func debugHookActive(state *runtime.State) bool {
+	// collectgarbage 的调用方已校验 State，这里保留防御性 nil 边界。
+	if state == nil {
+		// nil State 没有关联 debug 环境，视为不在 hook 内。
+		return false
+	}
+	environment, ok := state.DebugEnvironment().(hookActiveDebugEnvironment)
+	if !ok {
+		// 未打开 debug 库或环境不支持 HookActive 时走普通 GC 路径。
+		return false
+	}
+	return environment.HookActive()
 }
 
 // collectGarbageIntegerArg 解析 collectgarbage 的整数参数。

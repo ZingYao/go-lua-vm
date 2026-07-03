@@ -928,6 +928,52 @@ func TestTableRawNextCacheInvalidatesOnMutation(t *testing.T) {
 	}
 }
 
+// TestTableRawNextUsesIndexedContinuation 验证大表 RawNext 复用继续 key 索引。
+//
+// next 热路径会在同一 table 版本下反复用上一个 key 查找后继；索引缓存应把该查找维持在 O(1)，
+// 同时保留删除当前 key 后通过旧快照继续迭代的 Lua 兼容语义。
+func TestTableRawNextUsesIndexedContinuation(t *testing.T) {
+	table := NewTable()
+	for index := int64(1); index <= 128; index++ {
+		// 构造足够大的数组区 table，确保线性继续查找会被放大。
+		table.RawSetInteger(index, IntegerValue(index))
+	}
+
+	firstKey, _, ok, err := table.RawNext(NilValue())
+	if err != nil || !ok {
+		// 首次 next(table) 应返回第一个数组项。
+		t.Fatalf("first raw next failed: ok=%v err=%v", ok, err)
+	}
+	if table.iterationIndexCache != nil {
+		// nil 起始 key 不应提前构建索引，避免只取首项时多一次 map 分配。
+		t.Fatalf("iteration index should be lazy")
+	}
+
+	secondKey, _, ok, err := table.RawNext(firstKey)
+	if err != nil || !ok || !secondKey.RawEqual(IntegerValue(2)) {
+		// 非 nil 继续 key 应通过索引找到下一个数组项。
+		t.Fatalf("second raw next mismatch: key=%#v ok=%v err=%v", secondKey, ok, err)
+	}
+	if len(table.iterationIndexCache) != 128 {
+		// 建好的索引必须覆盖当前快照中的每个有效 key。
+		t.Fatalf("iteration index length mismatch: got %d", len(table.iterationIndexCache))
+	}
+
+	if err := table.RawSet(firstKey, NilValue()); err != nil {
+		// 删除当前 key 必须仍是合法 raw 写入。
+		t.Fatalf("delete current key failed: %v", err)
+	}
+	thirdKey, _, ok, err := table.RawNext(firstKey)
+	if err != nil || !ok || !thirdKey.RawEqual(IntegerValue(2)) {
+		// 删除当前 key 后继续应使用 stale 快照定位，并跳过已删除项。
+		t.Fatalf("raw next after deleting current key mismatch: key=%#v ok=%v err=%v", thirdKey, ok, err)
+	}
+	if len(table.staleIterationIndexCache) != 128 {
+		// stale 索引按需构建后也必须覆盖旧快照。
+		t.Fatalf("stale iteration index length mismatch: got %d", len(table.staleIterationIndexCache))
+	}
+}
+
 // TestTableRawNextSkipsNilEntries 验证 RawNext 跳过 nil 槽位和值。
 //
 // nil 表示 table 中没有该字段，迭代时不能返回。

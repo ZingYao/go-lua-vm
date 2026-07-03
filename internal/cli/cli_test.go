@@ -453,7 +453,7 @@ func TestRunIgnoreEnvironmentOption(t *testing.T) {
 	t.Setenv("LUA_CPATH", "xxx")
 
 	scriptPath := filepath.Join(t.TempDir(), "script.lua")
-	script := "assert(not string.find(package.path, 'xxx', 1, true)); assert(not string.find(package.cpath, 'xxx', 1, true))\n"
+	script := "assert(not string.find(package.path, 'xxx', 1, true)); assert(string.find(package.path, 'lua', 1, true)); assert(not string.find(package.cpath, 'xxx', 1, true)); assert(string.find(package.cpath, 'lua', 1, true))\n"
 	if err := os.WriteFile(scriptPath, []byte(script), 0o600); err != nil {
 		// 测试脚本写入不应失败。
 		t.Fatalf("WriteFile script failed: %v", err)
@@ -1313,7 +1313,7 @@ func TestMainOfficialLuaErrorOutputGolden(t *testing.T) {
 			wantStderr: []string{
 				"runtime.lua:1: boom",
 				"stack traceback:",
-				"[C]: in global 'error'",
+				"[C]: in function 'error'",
 				"runtime.lua:1: in main chunk",
 				"[C]: in ?",
 			},
@@ -1325,7 +1325,7 @@ func TestMainOfficialLuaErrorOutputGolden(t *testing.T) {
 			wantStderr: []string{
 				"(string):1: boom",
 				"stack traceback:",
-				"[C]: in global 'error'",
+				"[C]: in function 'error'",
 				"(string):1: in main chunk",
 				"[C]: in ?",
 			},
@@ -1337,7 +1337,7 @@ func TestMainOfficialLuaErrorOutputGolden(t *testing.T) {
 			wantStderr: []string{
 				"attempt to yield from outside a coroutine",
 				"stack traceback:",
-				"[C]: in field 'yield'",
+				"[C]: in function 'yield'",
 				"yield.lua:1: in main chunk",
 				"[C]: in ?",
 			},

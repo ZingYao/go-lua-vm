@@ -67,6 +67,8 @@ type generator struct {
 	breakJumps [][]int
 	// continueJumps 保存嵌套循环中待回填的 continue 跳转列表。
 	continueJumps [][]int
+	// loopCloseRegisters 保存每层循环跳出时 OP_JMP A 字段需要使用的 close 起点。
+	loopCloseRegisters []int
 	// labelPCs 保存当前函数内已遇到的 label 名称到目标 PC 和作用域水位列表的映射。
 	labelPCs map[string][]labelInfo
 	// pendingGotos 保存当前函数内尚未回填的 goto 占位跳转。
@@ -2429,7 +2431,7 @@ func (generator *generator) compileBreakStatement() error {
 		return fmt.Errorf("codegen break outside loop")
 	}
 
-	breakPC := generator.emitJump(0)
+	breakPC := generator.emitJump(generator.currentLoopCloseRegister())
 	lastLoopIndex := len(generator.breakJumps) - 1
 	generator.breakJumps[lastLoopIndex] = append(generator.breakJumps[lastLoopIndex], breakPC)
 	return nil
@@ -4253,6 +4255,7 @@ func (generator *generator) endScope(scope scopeSnapshot, endPC int) {
 		// 所有本作用域新增局部变量都在当前 block 末尾结束。
 		generator.proto.LocalVars[index].EndPC = endPC
 	}
+	generator.mergeCapturedLocalsIntoSnapshot(scope.locals)
 	generator.locals = scope.locals
 	generator.nextRegister = scope.nextRegister
 }
@@ -4268,6 +4271,31 @@ func (generator *generator) hasCapturedLocalSince(localVarStart int) bool {
 
 	// 没有新增 captured local 时可省略 close-only JMP。
 	return false
+}
+
+// mergeCapturedLocalsIntoSnapshot 将内层 block 期间产生的外层 local 捕获标记合并回快照。
+//
+// beginScope 会复制 locals 供退出 block 后恢复名称解析；若内层函数捕获了进入 block 前已存在的
+// local，resolveUpvalue 会先标记当前 binding。退出 block 时必须把该标记写回快照，否则外层后续
+// endScope 会误以为该 local 未被捕获，漏发 OP_JMP close 指令并让下一轮寄存器复用污染旧闭包。
+func (generator *generator) mergeCapturedLocalsIntoSnapshot(snapshot map[string]localBinding) {
+	if len(snapshot) == 0 || len(generator.locals) == 0 {
+		// 没有外层快照或当前局部表为空时，无需合并捕获标记。
+		return
+	}
+	for name, snapshotBinding := range snapshot {
+		currentBinding, exists := generator.locals[name]
+		if !exists {
+			// 当前作用域中该名称已被完全遮蔽或移除，快照保持原值。
+			continue
+		}
+		if currentBinding.localVarIndex != snapshotBinding.localVarIndex || !currentBinding.captured || snapshotBinding.captured {
+			// 同名内层 local 的捕获不能污染外层；已是 captured 时也无需重复写回。
+			continue
+		}
+		snapshotBinding.captured = true
+		snapshot[name] = snapshotBinding
+	}
 }
 
 // closeLocals 将当前函数所有局部变量生命周期结束位置回填为 endPC。
@@ -4522,6 +4550,7 @@ func (generator *generator) beginLoop() int {
 	// 每个循环拥有独立 break/continue 列表，嵌套循环只回填最内层控制流。
 	generator.breakJumps = append(generator.breakJumps, nil)
 	generator.continueJumps = append(generator.continueJumps, nil)
+	generator.loopCloseRegisters = append(generator.loopCloseRegisters, generator.nextRegister+1)
 	return len(generator.breakJumps) - 1
 }
 
@@ -4537,12 +4566,14 @@ func (generator *generator) discardLoop(loopIndex int) {
 		// 正常路径丢弃最内层循环记录。
 		generator.breakJumps = generator.breakJumps[:loopIndex]
 		generator.continueJumps = generator.continueJumps[:loopIndex]
+		generator.loopCloseRegisters = generator.loopCloseRegisters[:loopIndex]
 		return
 	}
 
 	// 非最内层异常极少发生，保守清理到该层，避免外层 break 列表错位。
 	generator.breakJumps = generator.breakJumps[:loopIndex]
 	generator.continueJumps = generator.continueJumps[:loopIndex]
+	generator.loopCloseRegisters = generator.loopCloseRegisters[:loopIndex]
 }
 
 // patchLoopBreaks 回填当前循环内所有 break 跳转。
@@ -4559,6 +4590,7 @@ func (generator *generator) patchLoopBreaks(loopIndex int, targetPC int) {
 	}
 	generator.breakJumps = generator.breakJumps[:loopIndex]
 	generator.continueJumps = generator.continueJumps[:loopIndex]
+	generator.loopCloseRegisters = generator.loopCloseRegisters[:loopIndex]
 }
 
 // patchLoopContinues 回填当前循环内所有 continue 跳转。
@@ -4573,6 +4605,17 @@ func (generator *generator) patchLoopContinues(loopIndex int, targetPC int) {
 		// 每个 continue 都跳到当前循环的下一轮入口。
 		generator.patchJump(continuePC, targetPC)
 	}
+}
+
+// currentLoopCloseRegister 返回当前最内层循环跳转离开时应关闭的寄存器起点。
+func (generator *generator) currentLoopCloseRegister() int {
+	if len(generator.loopCloseRegisters) == 0 {
+		// 缺失循环状态时保守返回 0，让上层错误路径保持原来的无 close JMP。
+		return 0
+	}
+
+	// OP_JMP A 字段使用寄存器下标加一；beginLoop 已保存该编码值。
+	return generator.loopCloseRegisters[len(generator.loopCloseRegisters)-1]
 }
 
 // addConstant 追加或复用 Proto 常量。

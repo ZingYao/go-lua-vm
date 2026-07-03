@@ -307,6 +307,10 @@ func TestRequireErrorsWhenModuleMissing(t *testing.T) {
 		// 错误文本必须包含模块名和当前 Lua 文件候选路径。
 		t.Fatalf("Require missing object = %#v", errorObject)
 	}
+	if !strings.Contains(errorObject.String, "./missing.so") || !strings.Contains(errorObject.String, "C loader disabled") {
+		// 默认 C searcher 不打开动态库，但 require 诊断必须包含 package.cpath 候选。
+		t.Fatalf("Require missing C diagnostics = %#v", errorObject)
+	}
 	if _, err := environment.Require(runtime.IntegerValue(1)); !errors.Is(err, runtime.ErrLuaError) {
 		// 非 string 模块名必须是 Lua 参数错误。
 		t.Fatalf("Require argument error = %v, want Lua error", err)
@@ -470,25 +474,25 @@ func TestCLoadingPolicyDocumentsUnsupportedDynamicLibraries(t *testing.T) {
 	}
 }
 
-// TestDefaultCPathDocumentsPlatformCandidates 验证默认无 CGO 策略下不自动搜索动态库。
+// TestDefaultCPathDocumentsPlatformCandidates 验证默认 cpath 展示平台候选但不启用内置动态库加载。
 //
-// 默认 package.cpath 为空，表示 require 不搜索 C 模块；Windows 诊断仍说明 .dll 与 .lib/import
-// library 的运行期和链接期边界，供宿主自定义 loader 时参考。
+// package.cpath 保留 Lua 5.3 风格候选，满足 CLI 和 require 诊断兼容；实际打开动态库仍需要宿主
+// 显式注册 loader，Windows 诊断继续说明 .dll 与 .lib/import library 的运行期和链接期边界。
 func TestDefaultCPathDocumentsPlatformCandidates(t *testing.T) {
-	// Unix 默认 cpath 为空，默认 require 不搜索动态库。
+	// Unix 默认 cpath 展示 Lua 5.3 风格 .so 候选，默认 loader 仍保持禁用。
 	unixCPath := DefaultCPathForGOOS("linux")
-	if unixCPath != "" {
-		// 无 CGO 默认策略下 Linux 不应自动搜索 .so 或 .dylib。
+	if !strings.Contains(unixCPath, "/usr/local/lib/lua/5.3/?.so") || !strings.Contains(unixCPath, "./?.so") {
+		// Linux 需要保留 Lua 5.3 常见 C 模块候选，供 package.cpath 和诊断展示。
 		t.Fatalf("unix cpath = %q", unixCPath)
 	}
 	darwinCPath := DefaultCPathForGOOS("darwin")
-	if darwinCPath != "" {
-		// 无 CGO 默认策略下 macOS 不应自动搜索 .so 或 .dylib。
+	if !strings.Contains(darwinCPath, "/usr/local/lib/lua/5.3/?.so") || !strings.Contains(darwinCPath, "./?.so") {
+		// macOS 同样复用 Lua 5.3 常见 C 模块候选，实际打开仍由宿主 loader 决定。
 		t.Fatalf("darwin cpath = %q", darwinCPath)
 	}
 	windowsCPath := DefaultCPathForGOOS("windows")
-	if windowsCPath != "" {
-		// 无 CGO 默认策略下 Windows 不应自动搜索 .dll。
+	if !strings.Contains(windowsCPath, "?.dll") || !strings.Contains(windowsCPath, "loadall.dll") {
+		// Windows 需要保留 .dll 运行期候选，便于 package.cpath 兼容展示。
 		t.Fatalf("windows cpath = %q", windowsCPath)
 	}
 	windowsNote := DynamicLibraryPlatformNote("windows")
@@ -500,19 +504,20 @@ func TestDefaultCPathDocumentsPlatformCandidates(t *testing.T) {
 
 // TestSearchersAreRegistered 验证 package.searchers 的默认无 CGO 搜索器槽位。
 //
-// 默认只注册 preload 与 Lua/GLua 文件搜索器；C 动态库搜索器不进入 require 默认链路。
+// 默认注册 preload、Lua/GLua 文件、C 和 C root 搜索器；C 搜索器在无宿主 loader 时只报告
+// package.cpath 候选，不打开动态库。
 func TestSearchersAreRegistered(t *testing.T) {
 	// 新建环境后 searchers 应立即可用。
 	environment := NewEnvironment()
-	for index := int64(1); index <= 2; index++ {
+	for index := int64(1); index <= 4; index++ {
 		// 默认启用的 searcher 都必须是 Go closure。
 		if got := environment.Searchers().RawGetInteger(index); got.Kind != runtime.KindGoClosure {
 			t.Fatalf("searcher[%d] kind = %v, want Go closure", index, got.Kind)
 		}
 	}
-	if got := environment.Searchers().RawGetInteger(3); !got.IsNil() {
-		// 第三个槽位不注册 C searcher，避免默认 require 尝试动态库。
-		t.Fatalf("searcher[3] = %#v, want nil", got)
+	if got := environment.Searchers().RawGetInteger(5); !got.IsNil() {
+		// 第五个槽位保持 nil，符合 Lua searchers 数组结束语义。
+		t.Fatalf("searcher[5] = %#v, want nil", got)
 	}
 }
 

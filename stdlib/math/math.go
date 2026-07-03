@@ -26,13 +26,11 @@ var mathFastUnaryFunctions = struct {
 	abs   *runtime.GoFastUnaryFunction
 	acos  *runtime.GoFastUnaryFunction
 	asin  *runtime.GoFastUnaryFunction
-	atan  *runtime.GoFastUnaryFunction
 	ceil  *runtime.GoFastUnaryFunction
 	cos   *runtime.GoFastUnaryFunction
 	deg   *runtime.GoFastUnaryFunction
 	exp   *runtime.GoFastUnaryFunction
 	floor *runtime.GoFastUnaryFunction
-	log   *runtime.GoFastUnaryFunction
 	rad   *runtime.GoFastUnaryFunction
 	sin   *runtime.GoFastUnaryFunction
 	sqrt  *runtime.GoFastUnaryFunction
@@ -41,13 +39,11 @@ var mathFastUnaryFunctions = struct {
 	abs:   &runtime.GoFastUnaryFunction{Function: AbsUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
 	acos:  &runtime.GoFastUnaryFunction{Function: ACosUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
 	asin:  &runtime.GoFastUnaryFunction{Function: ASinUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
-	atan:  &runtime.GoFastUnaryFunction{Function: ATanUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
 	ceil:  &runtime.GoFastUnaryFunction{Function: CeilUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
 	cos:   &runtime.GoFastUnaryFunction{Function: CosUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
 	deg:   &runtime.GoFastUnaryFunction{Function: DegUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
 	exp:   &runtime.GoFastUnaryFunction{Function: ExpUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
 	floor: &runtime.GoFastUnaryFunction{Function: FloorUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
-	log:   &runtime.GoFastUnaryFunction{Function: LogUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
 	rad:   &runtime.GoFastUnaryFunction{Function: RadUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
 	sin:   &runtime.GoFastUnaryFunction{Function: SinUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
 	sqrt:  &runtime.GoFastUnaryFunction{Function: SqrtUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
@@ -76,7 +72,7 @@ func Open(state *runtime.State) error {
 	library.RawSetString("abs", runtime.ReferenceValue(runtime.KindGoClosure, mathFastUnaryFunctions.abs))
 	library.RawSetString("acos", runtime.ReferenceValue(runtime.KindGoClosure, mathFastUnaryFunctions.acos))
 	library.RawSetString("asin", runtime.ReferenceValue(runtime.KindGoClosure, mathFastUnaryFunctions.asin))
-	library.RawSetString("atan", runtime.ReferenceValue(runtime.KindGoClosure, mathFastUnaryFunctions.atan))
+	library.RawSetString("atan", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(ATan)))
 	library.RawSetString("ceil", runtime.ReferenceValue(runtime.KindGoClosure, mathFastUnaryFunctions.ceil))
 	library.RawSetString("cos", runtime.ReferenceValue(runtime.KindGoClosure, mathFastUnaryFunctions.cos))
 	library.RawSetString("deg", runtime.ReferenceValue(runtime.KindGoClosure, mathFastUnaryFunctions.deg))
@@ -84,7 +80,7 @@ func Open(state *runtime.State) error {
 	library.RawSetString("floor", runtime.ReferenceValue(runtime.KindGoClosure, mathFastUnaryFunctions.floor))
 	library.RawSetString("fmod", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(FMod)))
 	library.RawSetString("huge", runtime.NumberValue(math.Inf(1)))
-	library.RawSetString("log", runtime.ReferenceValue(runtime.KindGoClosure, mathFastUnaryFunctions.log))
+	library.RawSetString("log", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Log)))
 	library.RawSetString("max", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Max)))
 	library.RawSetString("maxinteger", runtime.IntegerValue(math.MaxInt64))
 	library.RawSetString("min", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(Min)))

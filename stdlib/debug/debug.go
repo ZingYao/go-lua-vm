@@ -68,6 +68,8 @@ type hookState struct {
 type Environment struct {
 	// state 保存 debug 库绑定的运行时状态。
 	state *runtime.State
+	// library 保存 Open 注册时创建的 debug 库表，用于 `_G.debug` 被用户清空后仍识别自身 API 帧。
+	library *runtime.Table
 	// hook 保存当前 hook 函数；nil 表示未设置 hook。
 	hook runtime.Value
 	// hookMask 保存当前 hook 掩码字符串。
@@ -82,6 +84,10 @@ type Environment struct {
 	threadHooks map[*runtime.Thread]*hookState
 	// activeThreadHookCount 记录可能触发的协程专属 hook 数量，避免无协程 hook 热路径读取 running thread。
 	activeThreadHookCount int
+	// lineHookSkipProto 保存默认 line hook 刚设置时所在调用方 Proto，用于跳过 sethook 当前行。
+	lineHookSkipProto *bytecode.Proto
+	// lineHookSkipLine 保存默认 line hook 刚设置时所在调用方源码行。
+	lineHookSkipLine int64
 	// hookActive 标记当前是否正在执行 hook，用于避免 hook 重入递归。
 	hookActive bool
 	// debugInput 保存 debug.debug 交互输入，默认绑定宿主 stdin。
@@ -148,6 +154,28 @@ func (environment *Environment) HookActive() bool {
 	return environment.hookActive
 }
 
+// RunWithHooksSuppressed 在临界区内临时屏蔽 debug hook 派发。
+//
+// runner 必须封装一段不应被用户 hook 观察的 VM 内部执行，例如 table `__gc` finalizer。该方法只
+// 抑制 hook 触发，不修改 debug.gethook 可见的 hook 三元组；runner 的错误会原样返回。
+func (environment *Environment) RunWithHooksSuppressed(runner func() error) error {
+	if runner == nil {
+		// 空 runner 没有可执行工作，保持幂等返回。
+		return nil
+	}
+	if environment == nil {
+		// 未打开 debug 库时无需维护 hookActive 状态，直接执行临界区。
+		return runner()
+	}
+	previous := environment.hookActive
+	environment.hookActive = true
+	defer func() {
+		// 恢复进入前状态，支持在 hook 回调内嵌套压制 finalizer hook。
+		environment.hookActive = previous
+	}()
+	return runner()
+}
+
 // HasActiveHook 判断当前运行线程是否存在任意可触发 hook。
 //
 // 返回 true 表示 VM 执行循环需要继续检查 call、return、line 或 count 事件；返回 false 时
@@ -161,11 +189,8 @@ func (environment *Environment) HasActiveHook() bool {
 		// 没有默认 hook 且没有任何活跃协程 hook 时，VM 热路径无需读取协程状态。
 		return false
 	}
-	if state := environment.activeThreadHookState(); state != nil {
-		// 协程专属 hook 存在时只看该协程状态，避免主线程 hook 干扰协程。
-		return !state.hook.IsNil() && (state.mask != "" || state.count > 0)
-	}
-	return environment.defaultHookActive
+	// 按当前 running thread 读取 hook，避免主线程 hook 泄漏到没有专属 hook 的协程。
+	return threadHookCanTrigger(environment.activeHookState())
 }
 
 // HookEnabledFor 判断指定 hook 事件当前是否可能触发。
@@ -177,34 +202,8 @@ func (environment *Environment) HookEnabledFor(event string) bool {
 		// 缺少环境或 hook 回调正在执行时，当前指令不应触发新的 hook。
 		return false
 	}
-	if state := environment.activeThreadHookState(); state != nil {
-		// 协程专属 hook 存在时使用协程状态，避免主线程默认 hook 影响协程。
-		return hookStateEnabledFor(state, event)
-	}
-	if environment.hook.IsNil() {
-		// 主线程未设置 hook 时直接跳过 VM 热路径上的 hook 派发。
-		return false
-	}
-	switch event {
-	case HookEventCall:
-		// call 事件由 c mask 控制。
-		return strings.Contains(environment.hookMask, "c")
-	case HookEventTailCall:
-		// tail call 事件同样由 c mask 控制。
-		return strings.Contains(environment.hookMask, "c")
-	case HookEventReturn:
-		// return 事件由 r mask 控制。
-		return strings.Contains(environment.hookMask, "r")
-	case HookEventLine:
-		// line 事件由 l mask 控制。
-		return strings.Contains(environment.hookMask, "l")
-	case HookEventCount:
-		// count 事件只依赖正数 count 间隔。
-		return environment.hookCount > 0
-	default:
-		// 未知事件保持不触发，避免扩展事件误进 VM hook 热路径。
-		return false
-	}
+	// 事件判断必须与派发使用同一个 hook 状态，保持 thread 隔离语义。
+	return hookStateEnabledFor(environment.activeHookState(), event)
 }
 
 // NewEnvironment 创建 debug 标准库运行环境。
@@ -242,6 +241,7 @@ func (environment *Environment) Table() *runtime.Table {
 	library.RawSetString("traceback", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(environment.Traceback)))
 	library.RawSetString("upvalueid", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(UpvalueID)))
 	library.RawSetString("upvaluejoin", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(UpvalueJoin)))
+	environment.library = library
 	return library
 }
 
@@ -345,6 +345,15 @@ func (environment *Environment) GetHook(args ...runtime.Value) ([]runtime.Value,
 		state := environment.threadHookState(args[0])
 		if state == nil || state.hook.IsNil() {
 			// 未设置协程 hook 时按 Lua 语义返回默认三元组。
+			return []runtime.Value{runtime.NilValue(), runtime.StringValue(""), runtime.IntegerValue(0)}, nil
+		}
+		return []runtime.Value{state.hook, runtime.StringValue(state.mask), runtime.IntegerValue(state.count)}, nil
+	}
+	if thread := environment.runningCoroutineHookThread(); thread != nil {
+		// 无参 gethook 在协程内读取当前协程自己的 hook，不回退主线程默认 hook。
+		state := environment.threadHooks[thread]
+		if state == nil || state.hook.IsNil() {
+			// 当前协程未设置 hook 时按 Lua 5.3 返回空三元组。
 			return []runtime.Value{runtime.NilValue(), runtime.StringValue(""), runtime.IntegerValue(0)}, nil
 		}
 		return []runtime.Value{state.hook, runtime.StringValue(state.mask), runtime.IntegerValue(state.count)}, nil
@@ -572,6 +581,8 @@ func (environment *Environment) SetHook(args ...runtime.Value) ([]runtime.Value,
 	}
 
 	thread, hasThreadArgument := setHookThreadArgument(args)
+	targetThread := thread
+	implicitCurrentCoroutine := false
 	hookArgumentPosition := 1
 	maskArgumentPosition := 2
 	countArgumentPosition := 3
@@ -581,6 +592,10 @@ func (environment *Environment) SetHook(args ...runtime.Value) ([]runtime.Value,
 		hookArgumentPosition = 2
 		maskArgumentPosition = 3
 		countArgumentPosition = 4
+	} else if currentThread := environment.runningCoroutineHookThread(); currentThread != nil {
+		// 无 thread 参数时，Lua 5.3 把 hook 写入当前 running thread；协程内不能污染主线程。
+		targetThread = currentThread
+		implicitCurrentCoroutine = true
 	}
 
 	hook := runtime.NilValue()
@@ -614,9 +629,13 @@ func (environment *Environment) SetHook(args ...runtime.Value) ([]runtime.Value,
 
 	if hook.IsNil() {
 		// nil hook 表示清除 hook，同时清空 mask 和 count。
-		if hasThreadArgument {
-			// thread 重载只清除目标协程 hook，不影响主线程默认 hook。
-			environment.clearThreadHook(thread)
+		if targetThread != nil {
+			// 协程 hook 只清除目标协程，不影响主线程默认 hook。
+			environment.clearThreadHook(targetThread)
+			if implicitCurrentCoroutine {
+				// 当前协程清除 hook 时也清掉可能尚未消费的当前行抑制状态。
+				environment.clearPendingLineHookSkip()
+			}
 			return nil, nil
 		}
 		environment.hook = runtime.NilValue()
@@ -624,6 +643,7 @@ func (environment *Environment) SetHook(args ...runtime.Value) ([]runtime.Value,
 		environment.hookCount = 0
 		environment.instructionCount = 0
 		environment.defaultHookActive = false
+		environment.clearPendingLineHookSkip()
 		return nil, nil
 	}
 	if hook.Kind != runtime.KindGoClosure && hook.Kind != runtime.KindLuaClosure {
@@ -631,13 +651,17 @@ func (environment *Environment) SetHook(args ...runtime.Value) ([]runtime.Value,
 		return nil, runtime.RaiseError(runtime.StringValue(fmt.Sprintf("bad argument #%d to 'sethook' (function expected)", hookArgumentPosition)))
 	}
 
-	if hasThreadArgument {
+	if targetThread != nil {
 		// 协程 hook 独立保存，VM 触发时会按当前 running thread 优先读取。
-		environment.setThreadHook(thread, &hookState{
+		environment.setThreadHook(targetThread, &hookState{
 			hook:  hook,
 			mask:  mask,
 			count: count,
 		})
+		if implicitCurrentCoroutine {
+			// 当前协程设置 line hook 后，同样需要跳过 sethook 所在源码行。
+			environment.primePendingLineHookSkip(mask)
+		}
 		return nil, nil
 	}
 	environment.hook = hook
@@ -645,7 +669,72 @@ func (environment *Environment) SetHook(args ...runtime.Value) ([]runtime.Value,
 	environment.hookCount = count
 	environment.instructionCount = 0
 	environment.defaultHookActive = hookStateCanTrigger(hook, mask, count)
+	environment.primePendingLineHookSkip(mask)
 	return nil, nil
+}
+
+// primePendingLineHookSkip 记录默认 line hook 设置点所在源码行。
+//
+// Lua 5.3 不会在 debug.sethook 返回后的同一源码行立刻触发 line hook；记录当前可见 Lua
+// 调用帧的 Proto 与行号，执行循环下一次遇到同一 Proto 同一行时只更新 lastHookLine 而不回调。
+func (environment *Environment) primePendingLineHookSkip(mask string) {
+	if !strings.ContainsRune(mask, 'l') {
+		// 非 line hook 不需要当前行抑制状态。
+		environment.clearPendingLineHookSkip()
+		return
+	}
+	proto, line := environment.currentVisibleLuaLine()
+	if proto == nil || line <= 0 {
+		// 无可见 Lua 调用点时无法安全抑制，保持普通首次 line hook 行为。
+		environment.clearPendingLineHookSkip()
+		return
+	}
+	environment.lineHookSkipProto = proto
+	environment.lineHookSkipLine = line
+}
+
+// clearPendingLineHookSkip 清理默认 line hook 当前行抑制状态。
+func (environment *Environment) clearPendingLineHookSkip() {
+	// 清理 Proto 和行号，避免后续新 hook 复用旧状态。
+	environment.lineHookSkipProto = nil
+	environment.lineHookSkipLine = 0
+}
+
+// ConsumePendingLineHookSkip 判断当前 line hook 是否应跳过 sethook 所在行。
+//
+// proto 和 line 来自即将触发 line hook 的 Lua closure；只有与记录的调用点完全一致时才跳过，
+// 防止 `load` 出的新 chunk 恰好使用相同行号时被误抑制。
+func (environment *Environment) ConsumePendingLineHookSkip(proto *bytecode.Proto, line int64) bool {
+	if environment == nil || environment.lineHookSkipLine <= 0 {
+		// 没有待消费状态时不影响 line hook。
+		return false
+	}
+	shouldSkip := environment.lineHookSkipProto == proto && environment.lineHookSkipLine == line
+	environment.clearPendingLineHookSkip()
+	return shouldSkip
+}
+
+// currentVisibleLuaLine 返回 debug API 调用方当前源码行。
+//
+// visibleCallFrames 会隐藏当前 debug.sethook 的 Go/C 帧；返回的第一帧即用户 Lua 调用点。
+func (environment *Environment) currentVisibleLuaLine() (*bytecode.Proto, int64) {
+	frames := environment.visibleCallFrames()
+	if len(frames) == 0 {
+		// 没有可见调用帧时无法推断源码行。
+		return nil, 0
+	}
+	frame := frames[0]
+	proto := frameProto(frame)
+	if proto == nil || frame.CurrentPC < 0 || frame.CurrentPC >= len(proto.LineInfo) {
+		// 非 Lua 帧或 PC 不在行号表范围内时不抑制。
+		return nil, 0
+	}
+	line := int64(proto.LineInfo[frame.CurrentPC])
+	if line <= 0 {
+		// 无效行号不参与抑制。
+		return nil, 0
+	}
+	return proto, line
 }
 
 // setThreadHook 写入协程专属 hook，并同步活跃 hook 计数缓存。
@@ -1850,16 +1939,21 @@ func (environment *Environment) isDebugLibraryFunctionFrame(frame runtime.CallFr
 		// 缺少环境、State 或非 Go 帧时不能按 debug 库函数识别。
 		return false
 	}
-	globals := environment.state.Globals()
-	if globals == nil {
-		// 全局表不可用时无法反查 debug 标准库。
-		return false
-	}
-	debugValue := globals.RawGetString("debug")
-	debugTable, ok := debugValue.Ref.(*runtime.Table)
-	if debugValue.Kind != runtime.KindTable || !ok || debugTable == nil {
-		// debug 全局未打开或被用户改写时不做裸函数识别。
-		return false
+	debugTable := environment.library
+	if debugTable == nil {
+		// 兼容直接构造 Environment 的低层测试，缺少缓存表时再尝试全局 debug 字段。
+		globals := environment.state.Globals()
+		if globals == nil {
+			// 全局表不可用时无法反查 debug 标准库。
+			return false
+		}
+		debugValue := globals.RawGetString("debug")
+		var ok bool
+		debugTable, ok = debugValue.Ref.(*runtime.Table)
+		if debugValue.Kind != runtime.KindTable || !ok || debugTable == nil {
+			// debug 全局未打开或被用户改写时不做裸函数识别。
+			return false
+		}
 	}
 	for _, functionName := range []string{
 		"debug", "gethook", "getinfo", "getlocal", "getmetatable", "getregistry", "getupvalue",
@@ -2697,17 +2791,9 @@ func (environment *Environment) triggerCountHookState(state *hookState, runner H
 //
 // 当前运行主线程、无 State 或协程未设置专属 hook 时返回 nil，由调用方继续使用默认 hook。
 func (environment *Environment) activeThreadHookState() *hookState {
-	if environment == nil || environment.state == nil {
-		// 缺少环境或 State 时没有 running coroutine 可读。
-		return nil
-	}
-	if len(environment.threadHooks) == 0 {
-		// 没有任何协程专属 hook 时无需读取 running thread，主线程与协程都回退默认 hook。
-		return nil
-	}
-	thread, isMain := environment.state.Running()
-	if thread == nil || isMain {
-		// 主线程使用默认 hook 状态。
+	thread := environment.runningCoroutineHookThread()
+	if thread == nil || len(environment.threadHooks) == 0 {
+		// 主线程或没有任何协程 hook 时没有协程专属状态。
 		return nil
 	}
 	return environment.threadHooks[thread]
@@ -2721,9 +2807,12 @@ func (environment *Environment) activeHookState() *hookState {
 		// nil 环境没有 hook 状态。
 		return nil
 	}
-	if state := environment.activeThreadHookState(); state != nil {
-		// 当前运行的是协程且协程存在专属 hook 时，必须隔离主线程 hook。
-		return state
+	if thread := environment.runningCoroutineHookThread(); thread != nil {
+		// 当前运行的是协程时只读取该协程 hook；没有设置时不继承主线程默认 hook。
+		if len(environment.threadHooks) == 0 {
+			return nil
+		}
+		return environment.threadHooks[thread]
 	}
 	return &hookState{
 		hook:             environment.hook,
@@ -2731,6 +2820,23 @@ func (environment *Environment) activeHookState() *hookState {
 		count:            environment.hookCount,
 		instructionCount: environment.instructionCount,
 	}
+}
+
+// runningCoroutineHookThread 返回当前 running 的非主协程。
+//
+// Lua 5.3 的 hook 状态属于 thread；无 thread 参数的 debug.sethook/gethook 操作当前 running
+// thread。主线程返回 nil，调用方据此使用默认 hook 字段。
+func (environment *Environment) runningCoroutineHookThread() *runtime.Thread {
+	if environment == nil || environment.state == nil {
+		// 缺少环境或 State 时没有 running thread 可读。
+		return nil
+	}
+	thread, isMain := environment.state.Running()
+	if thread == nil || isMain {
+		// 主线程使用环境默认 hook。
+		return nil
+	}
+	return thread
 }
 
 // threadHookState 解析 thread 值并返回已保存的协程 hook 状态。

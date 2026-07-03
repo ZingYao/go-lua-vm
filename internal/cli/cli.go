@@ -14,6 +14,8 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/zing/go-lua-vm/bytecode"
 	"github.com/zing/go-lua-vm/compiler/codegen"
@@ -33,8 +35,8 @@ const (
 	ExitFailure = 1
 	// ExitInterrupted 表示 CLI 被 Ctrl-C 中断。
 	ExitInterrupted = 130
-	// VersionText 是 glua 当前 CLI 版本输出。
-	VersionText = "glua 0.1.0  go-lua-vm (Lua 5.3.6 compatible)"
+	// VersionText 是 Lua 5.3.6 官方兼容版本输出。
+	VersionText = "Lua 5.3.6  Copyright (C) 1994-2020 Lua.org, PUC-Rio"
 )
 
 var errCLIInterrupted = errors.New("interrupted")
@@ -231,13 +233,8 @@ func cliTracebackFrameLine(frame runtime.CallFrame) (string, bool) {
 	if frame.Function.Kind != runtime.KindLuaClosure {
 		// Go closure 对应官方 traceback 中的 C 帧。
 		if frame.Name != "" {
-			// 有调用点名称时展示官方 `in global 'error'` 等格式。
-			nameWhat := frame.NameWhat
-			if nameWhat == "" {
-				// 缺失名称来源时使用 function 兜底。
-				nameWhat = "function"
-			}
-			return fmt.Sprintf("[C]: in %s '%s'", nameWhat, frame.Name), true
+			// Lua CLI 对 C 函数帧统一展示 `function`，即使 debug name 来源是 global/field。
+			return fmt.Sprintf("[C]: in function '%s'", frame.Name), true
 		}
 		return "[C]: in ?", true
 	}
@@ -411,12 +408,15 @@ func Run(ctx context.Context, args []string, streams Streams) error {
 // enableSignalInterrupts 将宿主 SIGINT 转换为 Lua 级一次性中断。
 //
 // state 必须是当前 CLI 执行使用的 State；返回函数必须在 Run 退出时调用，以释放 signal.Notify
-// 注册。该路径不取消 context，因为 Lua 5.3 允许 pcall 捕获一次 Ctrl-C 错误后继续执行后续语句。
+// 注册。第一次 Ctrl-C 不取消 context，因为 Lua 5.3 允许 pcall 捕获一次 Ctrl-C 错误后继续执行
+// 后续语句；短时间内的后续 Ctrl-C 直接结束进程，用于打断长时间停留在 Go/C 函数内部、无法回到
+// VM 检查点的执行。
 func enableSignalInterrupts(state *lua.State) func() {
 	signalChannel := make(chan os.Signal, 1)
 	signal.Notify(signalChannel, os.Interrupt)
 	done := make(chan struct{})
 	stopped := make(chan struct{})
+	var pendingSignals atomic.Int32
 	go func() {
 		defer close(stopped)
 		for {
@@ -426,8 +426,25 @@ func enableSignalInterrupts(state *lua.State) func() {
 				// Run 退出后停止监听，避免测试或多次 CLI 调用泄漏 goroutine。
 				return
 			case <-signalChannel:
+				if pendingSignals.Add(1) > 1 {
+					// 第二次 Ctrl-C 说明脚本可能卡在无法检查中断的 Go/C 风格长调用中，直接退出进程。
+					os.Exit(ExitInterrupted)
+				}
 				// Ctrl-C 对齐 Lua 5.3 行为，下一次 VM 检查点抛出 interrupted!。
 				state.RequestInterrupt()
+				go func() {
+					// 若首次中断已被 Lua 代码捕获并继续运行，稍后允许新的 Ctrl-C 再次走可捕获路径。
+					timer := time.NewTimer(2 * time.Second)
+					defer timer.Stop()
+					select {
+					case <-done:
+						// Run 退出后无需重置中断窗口。
+						return
+					case <-timer.C:
+						// 超出短窗口后恢复第一次 Ctrl-C 的 Lua 级可捕获语义。
+						pendingSignals.Store(0)
+					}
+				}()
 			}
 		}
 	}()

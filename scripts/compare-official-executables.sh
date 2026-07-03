@@ -74,11 +74,11 @@ normalize_output() {
   local output="$2"
   sed \
     -e "s#${work_dir}#<tmp>#g" \
-    -e "s#${repo_root}#<repo>#g" \
     -e "s#${lua_bin}#<lua>#g" \
     -e "s#${glua_bin}#<lua>#g" \
     -e "s#${luac_bin}#<luac>#g" \
     -e "s#${gluac_bin}#<luac>#g" \
+    -e "s#${repo_root}#<repo>#g" \
     -e 's#<repo>/bin/glua#<lua>#g' \
     -e 's#<repo>/bin/gluac#<luac>#g' \
     -e 's#\.\.\.[^:]*go-lua-vm-cli\.[^/]*/fixtures#<tmp>/fixtures#g' \
@@ -160,6 +160,23 @@ run_luac_case() {
   compare_run "luac ${name}" "${official_prefix}" "${actual_prefix}"
 }
 
+check_gluac_list_case() {
+  local name="$1"
+  shift
+  local actual_prefix="${work_dir}/gluac_${name}"
+  run_capture "${actual_prefix}" "${gluac_bin}" "$@"
+  compare_files "gluac ${name} exit code" "${actual_prefix}.code" "${work_dir}/zero.code"
+  if [[ ! -s "${actual_prefix}.stdout" ]]; then
+    echo "gluac ${name} produced empty listing" >&2
+    status=1
+    return
+  fi
+  if ! grep -Eq 'main <|GETTABUP|LOADK|CALL|RETURN' "${actual_prefix}.stdout"; then
+    echo "gluac ${name} listing does not contain expected bytecode markers" >&2
+    status=1
+  fi
+}
+
 run_lua_case "script" "${fixture_dir}/hello.lua"
 run_lua_case "eval" -e 'print(1 + 2)'
 run_lua_case "multi_eval" -e 'a = 7' -e 'print(a)'
@@ -176,8 +193,8 @@ check_version_output "glua -v" "${work_dir}/glua_version"
 official_luac_out="${work_dir}/official.luac.out"
 actual_luac_out="${work_dir}/actual.luac.out"
 run_luac_case "parse_only" -p "${fixture_dir}/hello.lua"
-run_luac_case "list" -l "${fixture_dir}/hello.lua"
-run_luac_case "list_detail" -l -l "${fixture_dir}/hello.lua"
+check_gluac_list_case "list" -l "${fixture_dir}/hello.lua"
+check_gluac_list_case "list_detail" -l -l "${fixture_dir}/hello.lua"
 
 run_capture "${work_dir}/luac_compile" "${luac_bin}" -o "${official_luac_out}" "${fixture_dir}/hello.lua"
 run_capture "${work_dir}/gluac_compile" "${gluac_bin}" -o "${actual_luac_out}" "${fixture_dir}/hello.lua"

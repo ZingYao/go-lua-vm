@@ -648,12 +648,15 @@ func finishXPCallCall(state *State, handler Value, callResults []Value, callErr 
 		results = append(results, callResults...)
 		return results, nil
 	}
-	errorFrames := state.PendingErrorTracebackFrames()
-	if len(errorFrames) == 0 {
-		// 非调用深度溢出的普通错误在这里保存失败现场。
-		errorFrames = state.TracebackFrames()
-		state.SetPendingErrorTracebackFrames(errorFrames)
+	errorFrames := state.TracebackFrames()
+	if isCallDepthOverflow(callErr) {
+		// 调用深度溢出会在最深失败点提前保存 traceback；外层 xpcall 不能用较浅现场覆盖它。
+		if pendingFrames := state.PendingErrorTracebackFrames(); len(pendingFrames) > 0 {
+			errorFrames = pendingFrames
+		}
 	}
+	// 普通错误必须刷新为当前失败现场，避免前序 protected call 残留快照污染错误处理器。
+	state.SetPendingErrorTracebackFrames(errorFrames)
 	// 调用错误处理器前释放真实调用帧，避免深栈溢出后 handler 再次压帧失败。
 	popCallFramesAbove(state, baseCallDepth)
 	state.EnterErrorHandler()
@@ -1537,7 +1540,18 @@ func callTableFinalizerWithDebugFrame(state *State, tableValue Value, finalizerV
 		}
 	}()
 
-	_, err = Call(state, finalizerValue, tableValue)
+	runFinalizer := func() error {
+		// finalizer 自身可以执行 Lua/Go closure；返回值被 Lua 5.3 GC 语义丢弃。
+		_, callErr := Call(state, finalizerValue, tableValue)
+		return callErr
+	}
+	if environment, ok := debuglib.EnvironmentForState((*runtime.State)(state)); ok {
+		// GC finalizer 不应被当前用户 hook 观察，否则官方 db.lua 会把 gc.lua 的 print 当成被测调用。
+		err = environment.RunWithHooksSuppressed(runFinalizer)
+	} else {
+		// 未打开 debug 库时直接执行 finalizer。
+		err = runFinalizer()
+	}
 	if err != nil {
 		// finalizer 错误交给 GC 路径决定传播或吞掉，当前 helper 不包装错误。
 		return err
@@ -1957,6 +1971,18 @@ func isComparisonContinuationInstruction(instruction bytecode.Instruction) bool 
 	}
 }
 
+// isConcatContinuationInstruction 判断指令是否是可由 __concat 元方法 yield 挂起的 CONCAT。
+func isConcatContinuationInstruction(instruction bytecode.Instruction) bool {
+	switch instruction.OpCode() {
+	case bytecode.OpConcat:
+		// CONCAT 可能需要在一个 opcode 内连续触发多个 __concat 元方法。
+		return true
+	default:
+		// 其他指令的元方法返回值可由通用寄存器写回或比较恢复逻辑处理。
+		return false
+	}
+}
+
 // saveInstructionContinuation 保存 VM 单条指令触发 coroutine.yield 后的外层执行现场。
 //
 // 该 continuation 不绑定 CallRequest：恢复时只按 opcode 需要写回元方法结果，然后从下一条
@@ -1984,6 +2010,21 @@ func saveInstructionContinuation(state *State, coroutineThread *runtime.Thread, 
 		previousPreviousPC: previousPC,
 		lastHookLine:       lastHookLine,
 	})
+}
+
+// saveResumedInstructionContinuation 保存指令 continuation 恢复过程中再次 yield 的外层现场。
+//
+// 当前 continuation 已经被 takeLuaContinuation 取出；若恢复同一条指令时又触发元方法 yield，
+// 必须重新保存一个不带 parent 的副本。未执行的父 continuation 会由 executeLuaThreadClosure
+// 在捕获 ErrCoroutineYield 后统一挂回，避免父链重复。
+func saveResumedInstructionContinuation(continuation *luaCoroutineContinuation) {
+	if continuation == nil {
+		// 缺少 continuation 时没有可重挂现场。
+		return
+	}
+	resumedContinuation := *continuation
+	resumedContinuation.parent = nil
+	saveLuaContinuation(&resumedContinuation)
 }
 
 // prepareLuaExecutionState 准备 Lua closure 执行所需的 closure、Proto 和 VM。
@@ -2391,8 +2432,22 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 			if err := writeLuaCallResults(vm, continuation.callRequest, args); err != nil {
 				return nil, err
 			}
+		} else if isConcatContinuationInstruction(continuation.resumeInstruction) {
+			// CONCAT 元方法 yield 后，返回值只是当前相邻对的折叠结果，可能还要继续折叠左侧寄存器。
+			resultValue := runtime.NilValue()
+			if len(args) > 0 {
+				// 元方法返回至少一个值时，Lua 运算只读取第一个返回值。
+				resultValue = args[0]
+			}
+			if err := vm.ApplyConcatContinuationResult(resultValue); err != nil {
+				if errors.Is(err, runtime.ErrCoroutineYield) {
+					// 连续 CONCAT 可能再次触发 __concat yield，需要把同一条外层指令现场重新挂回。
+					saveResumedInstructionContinuation(continuation)
+				}
+				return nil, err
+			}
 		} else if continuation.resumeRegister >= 0 {
-			// 元方法驱动的 GETTABLE/GETTABUP yield 后，内层元方法返回值写回原目标寄存器。
+			// 元方法驱动的取值、算术、位运算或一元运算 yield 后，元方法返回值写回原目标寄存器。
 			resultValue := runtime.NilValue()
 			if len(args) > 0 {
 				resultValue = args[0]
@@ -3075,6 +3130,11 @@ func triggerLuaLineHook(state *State, environment *debuglib.Environment, proto *
 		return nil
 	}
 	instruction := proto.Code[pc]
+	if environment.ConsumePendingLineHookSkip(proto, line) {
+		// debug.sethook 设置 line hook 后，官方 Lua 不会立即报告 sethook 所在的当前源码行。
+		*lastHookLine = line
+		return nil
+	}
 	if line == *lastHookLine && !sameLineLoopHookInstruction(proto, instruction, previousPC, previousPreviousPC) {
 		// 同一源码行的普通连续指令只触发一次；循环控制指令允许同一行重复触发。
 		return nil

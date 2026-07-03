@@ -31,7 +31,7 @@ func (generator *generator) compileContinueStatement() error {
 		return fmt.Errorf("codegen continue outside loop")
 	}
 
-	continuePC := generator.emitJump(0)
+	continuePC := generator.emitJump(generator.currentLoopCloseRegister())
 	lastLoopIndex := len(generator.continueJumps) - 1
 	generator.continueJumps[lastLoopIndex] = append(generator.continueJumps[lastLoopIndex], continuePC)
 	return nil

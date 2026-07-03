@@ -2,7 +2,7 @@
 //
 // 本包当前提供 package 表、require 的 loaded/searchers 路径、package.config/path/cpath/loaded、
 // package.preload、package.searchers、package.searchpath、Lua 文件 loader 和 package.loadlib 的
-// 内置无 CGO 策略。默认 require 只搜索 preload 与 Lua/GLua 文件，不自动尝试动态库。
+// 内置无 CGO 策略。默认 require 会报告 C 模块候选，但没有宿主 loader 时不自动打开动态库。
 package packagelib
 
 import (
@@ -20,10 +20,15 @@ const (
 	DefaultConfig = "/\n;\n?\n!\n-\n"
 	// DefaultPath 是当前纯 Go package.path 默认模板。
 	DefaultPath = "./?.glua;./?.lua;./?/init.glua;./?/init.lua"
-	// DefaultCPath 是当前无 CGO 策略下的默认 C 模块搜索模板；空值表示 require 不搜索动态库。
-	DefaultCPath = ""
-	// DefaultWindowsCPath 是 Windows 默认 C 模块搜索模板；空值表示 require 不搜索动态库。
-	DefaultWindowsCPath = ""
+	// DefaultCPath 是 Unix 风格平台下的 Lua 5.3 默认 C 模块搜索模板。
+	//
+	// 默认 CGO-free 构建仍不会打开动态库；该模板只用于保持 package.cpath 和 require 诊断与
+	// Lua 5.3 CLI 接近，实际加载能力由 PackageDynamicLibraryLoader 显式接入。
+	DefaultCPath = "/usr/local/lib/lua/5.3/?.so;/usr/local/lib/lua/5.3/loadall.so;./?.so"
+	// DefaultWindowsCPath 是 Windows 风格平台下的 Lua 5.3 默认 C 模块搜索模板。
+	//
+	// 默认 CGO-free 构建仍不会打开动态库；该模板只用于 package.cpath 兼容展示和候选诊断。
+	DefaultWindowsCPath = ".\\?.dll;.\\?53.dll;C:\\Program Files\\Lua\\5.3\\?.dll;C:\\Program Files\\Lua\\5.3\\?53.dll;C:\\Program Files\\Lua\\5.3\\clibs\\?.dll;C:\\Program Files\\Lua\\5.3\\clibs\\?53.dll;C:\\Program Files\\Lua\\5.3\\loadall.dll;C:\\Program Files\\Lua\\5.3\\clibs\\loadall.dll"
 	// CLoadingPolicyText 说明当前项目默认 Lua C 动态库 loader 的固定策略。
 	CLoadingPolicyText = "built-in dynamic C library loading is disabled in the default CGO-free build to keep cross-system builds simple; embedding programs may register their own loader"
 	// defaultPathSeparator 是 package.path 多模板之间的分隔符。
@@ -135,7 +140,8 @@ func OpenWithLuaFileLoader(state *runtime.State, luaFileLoader LuaFileLoader) er
 // NewEnvironment 创建 package 标准库运行环境。
 //
 // 返回环境包含 package 表、loaded/preload/searchers 表、path/cpath/config 常量和 loadlib
-// 函数。默认 searchers 只注册 preload 与 Lua/GLua 文件搜索器。
+// 函数。默认 searchers 注册 preload、Lua/GLua 文件、C 和 C root 搜索器；C 搜索器在无宿主
+// loader 时只返回候选诊断，不打开动态库。
 func NewEnvironment() *Environment {
 	// 默认环境不接入 Lua 文件执行器，调用方可使用 NewEnvironmentWithLuaFileLoader 覆盖。
 	return NewEnvironmentWithLuaFileLoader(nil)
@@ -193,6 +199,8 @@ func NewEnvironmentWithOptions(luaFileLoader LuaFileLoader, options runtime.Opti
 	packageTable.RawSetString("searchpath", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(environment.SearchPath)))
 	searchersTable.RawSetInteger(1, runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(environment.PreloadSearcher)))
 	searchersTable.RawSetInteger(2, runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(environment.LuaSearcher)))
+	searchersTable.RawSetInteger(3, runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(environment.CSearcher)))
+	searchersTable.RawSetInteger(4, runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(environment.CRootSearcher)))
 	return environment
 }
 

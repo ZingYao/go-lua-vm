@@ -294,6 +294,130 @@ func TestSweepWeakTablesEphemeronChain(t *testing.T) {
 	}
 }
 
+// TestFullGCRefreshesReachableWeakTableFlag 验证完整 GC 后会收敛自动 weak sweep 标志。
+//
+// 弱表一旦出现需要登记自动清理，但当该弱表已从可达图移除时，后续普通分配不应继续承担
+// 周期性全图 weak sweep；显式 collectgarbage 仍会执行完整弱表清理。
+func TestFullGCRefreshesReachableWeakTableFlag(t *testing.T) {
+	state := NewState()
+	weakTable := NewTable()
+	metatable := NewTable()
+	metatable.RawSetString("__mode", StringValue("v"))
+	weakTable.SetMetatable(metatable)
+
+	state.RegisterWeakTable(weakTable)
+	state.SetGlobal("weak", ReferenceValue(KindTable, weakTable))
+	if !state.hasWeakTables {
+		// 登记后必须开启自动 weak sweep 标志。
+		t.Fatalf("weak table flag should be set after registration")
+	}
+	if err := state.FullGC(1); err != nil {
+		// 可达弱表存在时完整 GC 不应失败。
+		t.Fatalf("FullGC with reachable weak table failed: %v", err)
+	}
+	if !state.hasWeakTables {
+		// 弱表仍挂在 globals 中，标志不能被误清。
+		t.Fatalf("reachable weak table should keep weak sweep flag")
+	}
+
+	state.SetGlobal("weak", NilValue())
+	if err := state.FullGC(1); err != nil {
+		// 移除 root 后完整 GC 应重新计算弱表可达性。
+		t.Fatalf("FullGC after dropping weak table failed: %v", err)
+	}
+	if state.hasWeakTables {
+		// 不可达弱表不应让后续分配继续触发自动 weak sweep。
+		t.Fatalf("unreachable weak table should clear weak sweep flag")
+	}
+}
+
+// TestNoteTableAllocationSeparatesFinalizerAndWeakSweep 验证自动 finalizer 节拍不连带 weak sweep。
+//
+// 强可达 finalizer 对象会让 finalizer 队列保持非空；这种状态不能导致普通分配每 16 次就执行
+// finalizer 前弱值全图扫描，否则官方 all.lua 在 gc.lua 后会拖慢后续 constructs.lua。
+func TestNoteTableAllocationSeparatesFinalizerAndWeakSweep(t *testing.T) {
+	state := NewState()
+	weakTable := NewTable()
+	weakMetatable := NewTable()
+	weakMetatable.RawSetString("__mode", StringValue("v"))
+	weakTable.SetMetatable(weakMetatable)
+	state.RegisterWeakTable(weakTable)
+	state.SetGlobal("weak", ReferenceValue(KindTable, weakTable))
+
+	weakValue := NewTable()
+	weakTable.RawSetString("item", ReferenceValue(KindTable, weakValue))
+
+	finalizerTarget := NewTable()
+	finalizerMetatable := NewTable()
+	finalizerCalls := 0
+	finalizerMetatable.RawSetString("__gc", ReferenceValue(KindGoClosure, GoResultsFunction(func(values ...Value) ([]Value, error) {
+		// 强可达对象不应被自动 finalizer 执行。
+		finalizerCalls++
+		return nil, nil
+	})))
+	finalizerTarget.SetMetatable(finalizerMetatable)
+	state.RegisterTableFinalizer(finalizerTarget)
+	state.SetGlobal("target", ReferenceValue(KindTable, finalizerTarget))
+
+	for index := int64(0); index < autoGCFinalizerInterval*4; index++ {
+		// 多次跨过 finalizer 节拍；强可达 finalizer 不应触发弱值表清理。
+		state.NoteTableAllocation()
+	}
+	if finalizerCalls != 0 {
+		// target 仍在 globals 中，自动 GC 不能执行其 __gc。
+		t.Fatalf("reachable finalizer should not run automatically: %d", finalizerCalls)
+	}
+	if weakTable.RawGetString("item").IsNil() {
+		// 没有显式 collectgarbage，也没有实际执行 finalizer 时，weak value 不应被 finalizer 节拍误清。
+		t.Fatalf("weak value should not be swept by finalizer-only ticks")
+	}
+}
+
+// TestNoteTableAllocationSweepsWeakTablesAfterAutoFinalizer 验证自动终结周期会推进 weak sweep。
+//
+// 官方 gc.lua 的 GC() 通过分配压力等待自动 finalizer 运行；该周期也必须清理 weak key/value，
+// 否则 ephemeron 链在压力 GC 后不会收敛。
+func TestNoteTableAllocationSweepsWeakTablesAfterAutoFinalizer(t *testing.T) {
+	state := NewState()
+	weakTable := NewTable()
+	weakMetatable := NewTable()
+	weakMetatable.RawSetString("__mode", StringValue("v"))
+	weakTable.SetMetatable(weakMetatable)
+	state.RegisterWeakTable(weakTable)
+	state.SetGlobal("weak", ReferenceValue(KindTable, weakTable))
+
+	weakValue := NewTable()
+	weakTable.RawSetString("item", ReferenceValue(KindTable, weakValue))
+
+	finalizerTarget := NewTable()
+	finalizerMetatable := NewTable()
+	finalizerMetatable.RawSetString("__gc", ReferenceValue(KindGoClosure, GoResultsFunction(func(values ...Value) ([]Value, error) {
+		// finalizer 函数本体只作为可调用标记，实际调用由 runner 计数。
+		return nil, nil
+	})))
+	finalizerTarget.SetMetatable(finalizerMetatable)
+	state.RegisterTableFinalizer(finalizerTarget)
+
+	finalizerCalls := 0
+	state.SetTableFinalizerRunner(func(tableValue Value, finalizerValue Value) error {
+		// 自动 finalizer 成功运行后应触发一轮完整 weak sweep。
+		finalizerCalls++
+		return nil
+	})
+	for index := int64(0); index < autoGCFinalizerInterval; index++ {
+		// 跨过一次自动 finalizer 节拍。
+		state.NoteTableAllocation()
+	}
+	if finalizerCalls != 1 {
+		// 不可达 finalizer 对象应在自动周期中运行一次。
+		t.Fatalf("auto finalizer calls = %d, want 1", finalizerCalls)
+	}
+	if !weakTable.RawGetString("item").IsNil() {
+		// 自动终结周期应跟随完整 weak sweep，清理只由 weak value 持有的对象。
+		t.Fatalf("weak value should be swept after auto finalizer")
+	}
+}
+
 // TestSweepWeakValuesBeforeFinalizersClearsWeakKVMetatableGraph 验证 finalizer 前弱表顺序。
 //
 // Lua 5.3 在执行 table `__gc` 前，会让待终结对象元表图里的普通 weak key/value 项不可见；

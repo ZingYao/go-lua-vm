@@ -6,7 +6,7 @@
 
 - `glua` 对齐官方 `lua` 的调用方式，扩展能力不得改变 `-e`、`-i`、`-l`、`-v`、`-E`、`--`、`-` 的官方语义。
 - `gluac` 对齐官方 `luac` 的调用方式，扩展能力不得改变 `-l`、`-o`、`-p`、`-s`、`-v`、`--`、`-` 的官方语义。
-- `-v` 必须保持调用行为兼容，但输出内容应标明本项目产物，例如 `glua`/`gluac`、项目版本和 Lua 5.3.6 兼容说明，不伪装成官方 `lua`/`luac`。
+- `-v` 必须保持调用行为兼容；当前为通过 Lua 5.3.6 官方 standalone 测试，输出使用官方 Lua 5.3.6 版权行。
 - 对比验收以 Lua 5.3.6 官方工具为基线，至少比较 stdout、stderr、退出码、输出文件是否存在和 binary chunk 可加载性。
 
 ## lua CLI 参数矩阵
@@ -15,7 +15,7 @@
 | --- | --- | --- | --- |
 | 无参数，TTY | `lua` | 打印项目 banner 后进入 REPL | 伪终端交互测试 |
 | 无参数，stdin 管道 | `printf 'print(1)' \| lua` | 执行 stdin chunk，不进入交互提示符 | stdout/stderr/exit code golden |
-| 版本 | `lua -v` | 输出 `glua`/项目版本和 Lua 5.3.6 兼容说明，退出码为 0 | 版本输出语义检查 |
+| 版本 | `lua -v` | 输出 Lua 5.3.6 官方兼容版权行，退出码为 0 | 版本输出语义检查 |
 | 屏蔽环境变量 | `lua -E ...` | 不读取 Lua 环境变量，参数顺序保持官方语义 | 环境变量夹具 |
 | 强制交互 | `lua -i script.lua` | 执行脚本后进入 REPL | 伪终端交互测试 |
 | 执行片段 | `lua -e 'print(1)'` | 按传入顺序执行片段 | stdout/stderr/exit code golden |
@@ -31,7 +31,7 @@
 
 | 场景 | 官方行为基线 | `glua` 期望 | 验收方式 |
 | --- | --- | --- | --- |
-| 启动 banner | 打印 Lua 版本、版权与提示 | 打印 `glua`/项目版本，并明确 Lua 5.3.6 兼容 | 伪终端输出检查 |
+| 启动 banner | 打印 Lua 版本、版权与提示 | 打印 Lua 5.3.6 官方兼容版权行与提示 | 伪终端输出检查 |
 | 主提示符 | `> ` | 输出后提示符仍从列首开始，不因多余空格后移 | 伪终端输出检查 |
 | 续行提示符 | `>> ` | 未完成语句进入续行提示符 | 多行输入夹具 |
 | 表达式输入 | `=1+2` 输出 `3` | 支持表达式快捷输入 | REPL golden |
@@ -61,7 +61,7 @@
 | 场景 | 官方调用 | `gluac` 期望 | 验收方式 |
 | --- | --- | --- | --- |
 | 无参数 | `luac` | 按官方方式处理 stdin 或用法错误，以实测官方 5.3.6 为准 | stdout/stderr/exit code golden |
-| 版本 | `luac -v` | 输出 `gluac`/项目版本和 Lua 5.3.6 兼容说明，退出码为 0 | 版本输出语义检查 |
+| 版本 | `luac -v` | 输出 Lua 5.3.6 官方兼容版权行，退出码为 0 | 版本输出语义检查 |
 | 反汇编 | `luac -l script.lua` | 输出反汇编，退出码对齐官方 | stdout/stderr/exit code golden |
 | 详细反汇编 | `luac -l -l script.lua` | 输出详细反汇编 | stdout/stderr/exit code golden |
 | 指定输出 | `luac -o out.luac script.lua` | 写出 binary chunk | 输出文件存在和可加载性 |

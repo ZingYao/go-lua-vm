@@ -1291,6 +1291,20 @@ func TestGSubGoFunctionReplacement(t *testing.T) {
 		t.Fatalf("GSub Go closure result mismatch: %#v", results)
 	}
 
+	fastUnary, err := GSub(
+		runtime.StringValue("a ab"),
+		runtime.StringValue("(%a+)"),
+		runtime.ReferenceValue(runtime.KindGoClosure, stringFastUnaryFunctions.upper),
+	)
+	if err != nil {
+		// 标准库 string.upper 注册为 GoFastUnaryFunction，作为 gsub 替换函数时也必须可调用。
+		t.Fatalf("GSub fast unary replacement failed: %v", err)
+	}
+	if len(fastUnary) != 2 || fastUnary[0].String != "A AB" || fastUnary[1].Integer != 2 {
+		// fast unary 替换应消费每次匹配的第一个 capture 并返回替换文本。
+		t.Fatalf("GSub fast unary replacement result mismatch: %#v", fastUnary)
+	}
+
 	keepOriginal := runtime.GoResultsFunction(func(values ...runtime.Value) ([]runtime.Value, error) {
 		// 返回 false 应保留原匹配文本。
 		return []runtime.Value{runtime.BooleanValue(false)}, nil

@@ -80,6 +80,8 @@ type VM struct {
 	pendingSetList *pendingSetList
 	// pendingComparison 保存比较元方法 yield 后需要恢复的测试指令语义。
 	pendingComparison *pendingComparisonContinuation
+	// pendingConcat 保存 CONCAT 元方法 yield 后需要继续折叠的寄存器区间。
+	pendingConcat *pendingConcatContinuation
 	// skipNext 标记上一条指令是否要求跳过下一条指令。
 	skipNext bool
 	// pcOffset 保存上一条控制流指令请求的 pc 偏移量。
@@ -602,6 +604,19 @@ type pendingComparisonContinuation struct {
 	instruction bytecode.Instruction
 	// invert 表示恢复元方法返回值时需要先做逻辑取反。
 	invert bool
+}
+
+// pendingConcatContinuation 记录 CONCAT 元方法 yield 后继续右结合折叠所需的状态。
+//
+// CONCAT 会从右向左依次折叠 R(B)..R(C)。当某一对操作数触发 __concat 并 yield 时，
+// 元方法返回值只是这一对的中间结果；恢复后仍需继续处理更左侧的寄存器。
+type pendingConcatContinuation struct {
+	// targetIndex 保存最终结果写回的 A 寄存器。
+	targetIndex int
+	// startIndex 保存 CONCAT 区间的 B 寄存器。
+	startIndex int
+	// nextIndex 保存元方法返回后下一次要折叠的左侧寄存器。
+	nextIndex int
 }
 
 // NewVM 创建带指定寄存器数量的最小 VM。
@@ -1688,6 +1703,24 @@ func (vm *VM) ApplyComparisonContinuationResult(result Value) (bool, error) {
 	vm.skipNext = comparisonResult != (vm.pendingComparison.instruction.A() != 0)
 	vm.pendingComparison = nil
 	return vm.skipNext, nil
+}
+
+// ApplyConcatContinuationResult 应用 CONCAT 元方法 yield 恢复后的返回值。
+//
+// result 是刚恢复的 __concat 元方法返回值；它只代表上次挂起的相邻两项拼接结果。本方法会
+// 继续按 Lua 5.3 右结合顺序折叠剩余左侧寄存器，并在完成后写入原 A 寄存器。若后续折叠
+// 再次触发 __concat yield，会更新 pendingConcat 后返回 ErrCoroutineYield，供 lua 层重新保存
+// 外层 continuation。
+func (vm *VM) ApplyConcatContinuationResult(result Value) error {
+	if vm == nil || vm.pendingConcat == nil {
+		// 没有待恢复 CONCAT 时，调用方不能安全解释元方法返回值。
+		return ErrUnsupportedInstruction
+	}
+
+	// 取出待恢复状态后先清空；若后续再次 yield，会由 finishConcatContinuation 重新写入新状态。
+	pending := *vm.pendingConcat
+	vm.pendingConcat = nil
+	return vm.finishConcatContinuation(pending.targetIndex, pending.startIndex, pending.nextIndex, result)
 }
 
 // PCOffset 返回上一条控制流指令请求的 pc 偏移。
@@ -3950,6 +3983,10 @@ func (vm *VM) executeConcat(instruction bytecode.Instruction) error {
 		leftValue := vm.registers[registerIndex]
 		combined, err := vm.concatPair(leftValue, result)
 		if err != nil {
+			if errors.Is(err, ErrCoroutineYield) {
+				// __concat yield 后需要从当前相邻对的返回值继续折叠更左侧寄存器。
+				vm.pendingConcat = &pendingConcatContinuation{targetIndex: targetIndex, startIndex: startIndex, nextIndex: registerIndex - 1}
+			}
 			// 当前二元拼接无法完成且无元方法时，目标寄存器保持原值。
 			return err
 		}
@@ -3957,6 +3994,39 @@ func (vm *VM) executeConcat(instruction bytecode.Instruction) error {
 	}
 
 	// 全部转换成功后一次性写入目标寄存器。
+	vm.registers[targetIndex] = result
+	return nil
+}
+
+// finishConcatContinuation 从 __concat 元方法返回值继续完成 CONCAT 右结合折叠。
+//
+// targetIndex/startIndex/nextIndex 来自 pendingConcat；result 是最近一次 __concat 的返回值。
+// 若继续折叠时再次触发 yield，本方法会保存新的 pendingConcat，并保持目标寄存器不变。
+func (vm *VM) finishConcatContinuation(targetIndex int, startIndex int, nextIndex int, result Value) error {
+	if targetIndex < 0 || targetIndex >= len(vm.registers) {
+		// 目标寄存器越界时不能写入，避免破坏寄存器窗口。
+		return ErrRegisterOutOfRange
+	}
+	if startIndex < 0 || nextIndex >= len(vm.registers) {
+		// 保存的区间已经不合法，不能继续解释恢复值。
+		return ErrRegisterOutOfRange
+	}
+	for registerIndex := nextIndex; registerIndex >= startIndex; registerIndex-- {
+		// 恢复后继续按 Lua 5.3 右结合顺序向左折叠剩余操作数。
+		leftValue := vm.registers[registerIndex]
+		combined, err := vm.concatPair(leftValue, result)
+		if err != nil {
+			if errors.Is(err, ErrCoroutineYield) {
+				// 下一次恢复仍使用同一条 CONCAT 指令，但从更左侧寄存器继续。
+				vm.pendingConcat = &pendingConcatContinuation{targetIndex: targetIndex, startIndex: startIndex, nextIndex: registerIndex - 1}
+			}
+			// 拼接失败时保持目标寄存器原值。
+			return err
+		}
+		result = combined
+	}
+
+	// 所有剩余操作数折叠完成后，才把最终结果写入目标寄存器。
 	vm.registers[targetIndex] = result
 	return nil
 }
