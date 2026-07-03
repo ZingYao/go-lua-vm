@@ -102,6 +102,10 @@ type VM struct {
 	formatLenAddForLoopSuperInstructionProto *bytecode.Proto
 	// formatLenAddForLoopSuperInstructions 按 PC 保存 string.format 长度消费循环 superinstruction 预匹配结果。
 	formatLenAddForLoopSuperInstructions []formatLenAddForLoopSuperInstruction
+	// tableWriteForLoopSuperInstructionProto 记录连续 table 数组写入循环 superinstruction 表对应的 Proto。
+	tableWriteForLoopSuperInstructionProto *bytecode.Proto
+	// tableWriteForLoopSuperInstructions 按 PC 保存连续 table 数组写入循环 superinstruction 预匹配结果。
+	tableWriteForLoopSuperInstructions []tableWriteForLoopSuperInstruction
 	// tableArrayPreallocHintProto 记录 table 数组预分配 hint 表对应的 Proto。
 	tableArrayPreallocHintProto *bytecode.Proto
 	// tableArrayPreallocHints 按 NEWTABLE 所在 PC 保存可证明安全的数组区预留容量。
@@ -254,6 +258,41 @@ type tableArrayPreallocHint struct {
 	Capacity int
 	// Valid 表示当前 PC 的 NEWTABLE 是否存在可用预分配 hint。
 	Valid bool
+}
+
+// tableWriteForLoopSuperInstruction 保存 `SETTABLE; FORLOOP` 的预匹配形态。
+//
+// 该形态只覆盖 `t[i] = i` 的连续 numeric-for 写入。执行期仍检查 table identity、元表、寄存器
+// 类型和 numeric-for 控制槽；guard 不满足时必须回退普通 SETTABLE/FORLOOP 路径。
+type tableWriteForLoopSuperInstruction struct {
+	// TableRegister 保存被写入 table 所在寄存器。
+	TableRegister int
+	// ForBase 保存 FORLOOP 的 base 寄存器。
+	ForBase int
+	// ForSBx 保存 FORLOOP 的有符号跳转偏移。
+	ForSBx int
+	// ExitPC 保存循环退出时的下一条 PC。
+	ExitPC int
+	// LoopPC 保存循环继续时的跳转 PC。
+	LoopPC int
+	// Valid 表示当前 PC 是否匹配连续 table 写入循环形态。
+	Valid bool
+}
+
+// TableWriteForLoopBatch 保存已验证的连续 table 写入 batch 执行上下文。
+//
+// 字段保持未导出，调用方只能通过 PrepareTableWriteForLoopBatch 获取已验证上下文。
+type TableWriteForLoopBatch struct {
+	// proto 记录 batch 绑定的 Proto，用于防止 VM 复用后误用旧上下文。
+	proto *bytecode.Proto
+	// pc 保存循环体 SETTABLE 的 PC。
+	pc int
+	// superInstruction 保存已匹配的 SETTABLE;FORLOOP 寄存器数据流。
+	superInstruction tableWriteForLoopSuperInstruction
+	// maxRegisterIndex 保存参与寄存器最大下标，用一次边界检查替代逐寄存器重复检查。
+	maxRegisterIndex int
+	// valid 表示 batch 是否由 PrepareTableWriteForLoopBatch 成功构造。
+	valid bool
 }
 
 // addForLoopSuperInstruction 保存 `ADD; FORLOOP` 的预匹配形态。
@@ -1893,6 +1932,8 @@ func (vm *VM) BindPrototype(proto *bytecode.Proto) {
 		vm.closureUpvalueForLoopSuperInstructions = nil
 		vm.formatLenAddForLoopSuperInstructionProto = nil
 		vm.formatLenAddForLoopSuperInstructions = nil
+		vm.tableWriteForLoopSuperInstructionProto = nil
+		vm.tableWriteForLoopSuperInstructions = nil
 		vm.tableArrayPreallocHintProto = nil
 		vm.tableArrayPreallocHints = nil
 		vm.arithmeticIntRegisterCacheProto = nil
@@ -1941,6 +1982,11 @@ func (vm *VM) BindPrototype(proto *bytecode.Proto) {
 		// VM 池切换到其他 Proto 时丢弃 string.format 长度消费表，避免不同 Proto 的 PC 误命中。
 		vm.formatLenAddForLoopSuperInstructionProto = nil
 		vm.formatLenAddForLoopSuperInstructions = nil
+	}
+	if vm.tableWriteForLoopSuperInstructionProto != nil && vm.tableWriteForLoopSuperInstructionProto != proto {
+		// VM 池切换到其他 Proto 时丢弃 table 写入循环表，避免不同 Proto 的 PC 误命中。
+		vm.tableWriteForLoopSuperInstructionProto = nil
+		vm.tableWriteForLoopSuperInstructions = nil
 	}
 	if vm.tableArrayPreallocHintProto != nil && vm.tableArrayPreallocHintProto != proto {
 		// VM 池切换到其他 Proto 时丢弃 table 预分配 hint，避免相同 PC 误用其他函数的数据流结论。
@@ -2233,6 +2279,206 @@ func (vm *VM) tableArrayPreallocCapacityAt(pc int) int {
 		return 0
 	}
 	return hint.Capacity
+}
+
+// ensureTableWriteForLoopSuperInstructions 返回当前 Proto 的连续 table 写入循环预匹配表。
+//
+// 该表按 PC 与 Proto.Code 对齐，只记录完整 `SETTABLE;FORLOOP` 循环体；运行期 table 元表、寄存器类型、
+// hook 和 context guard 仍由调用方与 batch 执行方法检查。
+func (vm *VM) ensureTableWriteForLoopSuperInstructions() []tableWriteForLoopSuperInstruction {
+	// 按当前 Proto 懒构建 table 写入循环预匹配表，并在 Proto 未变化时复用。
+	if vm == nil || vm.proto == nil {
+		// 缺少 VM 或 Proto 时没有可用 superinstruction 表。
+		return nil
+	}
+	if len(vm.proto.Code) < 2 {
+		// 少于两条指令不可能包含 `SETTABLE; FORLOOP`。
+		vm.tableWriteForLoopSuperInstructionProto = vm.proto
+		vm.tableWriteForLoopSuperInstructions = nil
+		return nil
+	}
+	if vm.tableWriteForLoopSuperInstructionProto == vm.proto {
+		// 当前 Proto 已完成扫描；nil 表示无匹配形态，非 nil 表示可按 PC 读取。
+		return vm.tableWriteForLoopSuperInstructions
+	}
+
+	vm.tableWriteForLoopSuperInstructionProto = vm.proto
+	vm.tableWriteForLoopSuperInstructions = buildTableWriteForLoopSuperInstructions(vm.proto)
+	return vm.tableWriteForLoopSuperInstructions
+}
+
+// buildTableWriteForLoopSuperInstructions 构建 `SETTABLE; FORLOOP` 预匹配表。
+//
+// 返回表按 PC 对齐；没有匹配形态时返回 nil，表示该 Proto 不需要承担额外表分配。
+func buildTableWriteForLoopSuperInstructions(proto *bytecode.Proto) []tableWriteForLoopSuperInstruction {
+	// 空 Proto 或单条指令没有可构建的 table 写入循环。
+	if proto == nil || len(proto.Code) < 2 {
+		return nil
+	}
+
+	var superInstructions []tableWriteForLoopSuperInstruction
+	for pc := 0; pc+1 < len(proto.Code); pc++ {
+		// 只识别相邻的 SETTABLE;FORLOOP，其他形态保持零值表示无效。
+		setTableInstruction := proto.Code[pc]
+		forLoopInstruction := proto.Code[pc+1]
+		if setTableInstruction.OpCode() != bytecode.OpSetTable || forLoopInstruction.OpCode() != bytecode.OpForLoop {
+			// 当前 PC 不匹配目标邻接模式，继续扫描后续指令。
+			continue
+		}
+		exitPC := pc + 2
+		loopPC := exitPC + forLoopInstruction.SBx()
+		if loopPC != pc {
+			// 只覆盖完整循环体只有 SETTABLE 的连续写入形态。
+			continue
+		}
+		forBase := forLoopInstruction.A()
+		tableRegister := setTableInstruction.A()
+		if registerInRange(tableRegister, forBase, forBase+3) {
+			// table 寄存器不能覆盖 numeric-for 控制槽或外部可见循环变量。
+			continue
+		}
+		if bytecode.IsK(setTableInstruction.B()) || bytecode.IsK(setTableInstruction.C()) {
+			// 当前 batch 只覆盖 key/value 都来自外部循环变量寄存器的 `t[i] = i`。
+			continue
+		}
+		keyRegister := bytecode.IndexK(setTableInstruction.B())
+		valueRegister := bytecode.IndexK(setTableInstruction.C())
+		if keyRegister != forBase+3 || valueRegister != forBase+3 {
+			// 不是 `t[i] = i` 数据流时保留普通 SETTABLE 语义。
+			continue
+		}
+
+		if superInstructions == nil {
+			// 只有真实存在匹配形态时才分配 PC 对齐表，避免普通函数执行增加分配。
+			superInstructions = make([]tableWriteForLoopSuperInstruction, len(proto.Code))
+		}
+		superInstructions[pc] = tableWriteForLoopSuperInstruction{
+			TableRegister: tableRegister,
+			ForBase:       forBase,
+			ForSBx:        forLoopInstruction.SBx(),
+			ExitPC:        exitPC,
+			LoopPC:        loopPC,
+			Valid:         true,
+		}
+	}
+	return superInstructions
+}
+
+// PrepareTableWriteForLoopSuperInstructions 预构建当前 Proto 的连续 table 写入循环表。
+func (vm *VM) PrepareTableWriteForLoopSuperInstructions() bool {
+	// 预构建失败不影响普通 VM；后续 batch 准备会因为表不匹配而回退。
+	return len(vm.ensureTableWriteForLoopSuperInstructions()) > 0
+}
+
+// HasTableWriteForLoopAt 判断当前 PC 是否存在连续 table 写入循环 superinstruction。
+func (vm *VM) HasTableWriteForLoopAt(pc int) bool {
+	// 该 helper 只读取已准备好的表，供 API 层决定是否尝试 batch。
+	if vm == nil || vm.tableWriteForLoopSuperInstructionProto != vm.proto {
+		// 表尚未准备或 Proto 已变化时不能命中。
+		return false
+	}
+	superInstructions := vm.tableWriteForLoopSuperInstructions
+	if uint(pc) >= uint(len(superInstructions)) {
+		// PC 越界时不能命中。
+		return false
+	}
+	return superInstructions[pc].Valid
+}
+
+// PrepareTableWriteForLoopBatch 为连续 table 写入循环体准备可复用 batch 上下文。
+func (vm *VM) PrepareTableWriteForLoopBatch(pc int) (TableWriteForLoopBatch, bool) {
+	// 先按 PC 读取已准备好的预匹配表；非目标 PC 必须快速失败且不能产生副作用。
+	if vm == nil || vm.tableWriteForLoopSuperInstructionProto != vm.proto {
+		return TableWriteForLoopBatch{}, false
+	}
+	superInstructions := vm.tableWriteForLoopSuperInstructions
+	if uint(pc) >= uint(len(superInstructions)) {
+		return TableWriteForLoopBatch{}, false
+	}
+	superInstruction := superInstructions[pc]
+	if !superInstruction.Valid {
+		return TableWriteForLoopBatch{}, false
+	}
+	maxRegisterIndex := superInstruction.ForBase + 3
+	if superInstruction.TableRegister > maxRegisterIndex {
+		// table 寄存器可能高于 numeric-for 控制槽，需要纳入边界检查。
+		maxRegisterIndex = superInstruction.TableRegister
+	}
+	return TableWriteForLoopBatch{
+		proto:            vm.proto,
+		pc:               pc,
+		superInstruction: superInstruction,
+		maxRegisterIndex: maxRegisterIndex,
+		valid:            true,
+	}, true
+}
+
+// TryExecuteTableWriteForLoopBatch 批量执行已准备的连续 table 写入循环体。
+//
+// batch 必须来自 PrepareTableWriteForLoopBatch；maxIterations 由调用方按 context 检查窗口换算。
+// 返回 handled=false 表示当前动态寄存器状态不满足 guard，调用方必须回退普通 VM。
+func (vm *VM) TryExecuteTableWriteForLoopBatch(batch TableWriteForLoopBatch, maxIterations int) (nextPC int, iterations int, handled bool) {
+	// batch 与当前 VM/Proto 不匹配时必须回退，避免 VM 池复用后误写寄存器。
+	if vm == nil || !batch.valid || batch.proto != vm.proto || maxIterations <= 0 {
+		return 0, 0, false
+	}
+	registers := vm.registers
+	if uint(batch.maxRegisterIndex) >= uint(len(registers)) {
+		return 0, 0, false
+	}
+	superInstruction := batch.superInstruction
+	tableValue := registers[superInstruction.TableRegister]
+	if tableValue.Kind != KindTable {
+		// 非 table 值必须回退普通 SETTABLE，保留错误名和 __newindex 语义边界。
+		return 0, 0, false
+	}
+	table, ok := tableValue.Ref.(*Table)
+	if !ok || table == nil || table.metatable != nil {
+		// table 损坏或带元表时必须回退普通 SETTABLE，以保留元方法链和错误语义。
+		return 0, 0, false
+	}
+	indexValue := registers[superInstruction.ForBase]
+	limitValue := registers[superInstruction.ForBase+1]
+	stepValue := registers[superInstruction.ForBase+2]
+	visibleIndexValue := registers[superInstruction.ForBase+3]
+	if indexValue.Kind != KindInteger || limitValue.Kind != KindInteger || stepValue.Kind != KindInteger || visibleIndexValue.Kind != KindInteger {
+		// 只覆盖 integer numeric-for；其他类型保留完整 FORLOOP 错误和转换语义。
+		return 0, 0, false
+	}
+	index := indexValue.Integer
+	limit := limitValue.Integer
+	step := stepValue.Integer
+	visibleIndex := visibleIndexValue.Integer
+	nextPC = batch.pc
+	for iterations < maxIterations {
+		table.RawSetPositiveIntegerNonNil(visibleIndex, IntegerValue(visibleIndex))
+		iterations++
+
+		nextIndex := index + step
+		nextPC = superInstruction.ExitPC
+		if forIntegerLoopContinues(nextIndex, limit, step) {
+			// 循环继续时更新内部 index 和外部可见循环变量，并跳回 SETTABLE。
+			index = nextIndex
+			visibleIndex = nextIndex
+			registers[superInstruction.ForBase] = IntegerValue(index)
+			registers[superInstruction.ForBase+3] = IntegerValue(visibleIndex)
+			nextPC = superInstruction.LoopPC
+			vm.pcOffset = superInstruction.ForSBx
+		} else {
+			// 循环结束时不写入越界后的 index，保持普通 FORLOOP 语义。
+			vm.pcOffset = 0
+			break
+		}
+	}
+	if iterations == 0 {
+		return 0, 0, false
+	}
+	vm.currentPC = batch.pc + 1
+	vm.skipNext = false
+	vm.closeFrom = -1
+	vm.hasCallRequest = false
+	vm.returned = false
+	return nextPC, iterations, true
 }
 
 // ensureAddForLoopSuperInstructions 返回当前 Proto 的 ADD;FORLOOP 预匹配表。

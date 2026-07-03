@@ -736,6 +736,65 @@ benchmark 复核：
 benchmark 中最接近边界的是 `table_rw` 的 `2.71-2.74x`，其次是 `arith_chain_temp` 的 `2.57-2.61x`。
 后续若继续推进，应优先重新 profile 这两个剩余项，并确认是否存在新的语义等价切口。
 
+### 2026-07-04 table_rw 批量 `SETTABLE;FORLOOP`
+
+profile 观察：`BenchmarkPreparedTableReadWriteOfficial` 在 arith_add_loop batch 后约 `13.68 ms/op`，
+CPU 主要集中在 `executePreparedLuaClosureWithDebugNameTailFromArgs`、`VM.Step`、`executeGetTable`、
+`executeForLoop`、`executeSetTable`、`RawSetPositiveIntegerNonNil` 和 `tryCachedIntegerAddArithmetic`。
+此时 `table_rw` 已不是扩容分配主导，剩余成本主要来自写入段 `SETTABLE;FORLOOP` 与读取段
+`GETTABLE;ADD;FORLOOP` 的解释器分发和 guard。
+
+实现：新增 `TableWriteForLoopBatch` 和 `TryExecuteTableWriteForLoopBatch`，只覆盖官方 table_rw 写入段的
+`t[i] = i` 数据流。构建期要求字节码精确为 `SETTABLE;FORLOOP`，其中 `SETTABLE` 的 key/value 都必须来自
+numeric-for 外部可见循环变量，`FORLOOP` 必须回跳当前 `SETTABLE`，table 寄存器不能覆盖 numeric-for
+控制槽。
+
+语义 guard：
+
+- 仍只在无 hook、无 coroutine/continuation、无需精确逐 PC 同步且 context 窗口足够时启用。
+- API 层在进入 batch 前已经消费当前 `SETTABLE` 入口的 context 检查；批量提交 `N` 轮会额外跳过
+  `2*N-1` 个虚拟指令入口，因此最多提交 `(contextCheckCountdown+1)/2` 轮，并按 `2*N-1` 扣减倒计时。
+- 执行期要求目标值仍是 table 且没有元表，numeric-for 控制槽和外部可见循环变量都是 integer；带元表、
+  非 table、非 integer、寄存器越界、非目标数据流、hook/debug/coroutine 路径全部回退普通 VM。
+- 写入仍通过 `RawSetPositiveIntegerNonNil`，保留 table mutation version、数组 len 扩展、hash fallback、
+  `#`/`next` 可见性和 raw 写入语义；本轮不绕过 table 写入方法。
+
+benchmark 复核：
+
+| 用例 | 结果 |
+| --- | ---: |
+| `BenchmarkDoStringTableReadWriteOfficial` | `12.43 / 12.24 / 12.36 ms/op`，约 `11.27 MB/op`，`253 allocs/op` |
+| `BenchmarkPreparedTableReadWriteOfficial` | `11.79 / 11.73 / 11.28 ms/op`，约 `11.21 MB/op`，`3 allocs/op` |
+| `BenchmarkPreparedArithAddLoopOfficial` | `5.02 / 5.00 / 5.00 ms/op`，`0 allocs/op` |
+| `BenchmarkPreparedArithMixLoopOfficial` | `17.27 / 17.44 / 17.45 ms/op`，`0 allocs/op` |
+| `BenchmarkPreparedArithChainTempOfficial` | `29.07 / 29.10 / 29.05 ms/op`，`0 allocs/op` |
+| `BenchmarkPreparedFunctionCallOfficial` | `2.793 / 2.792 / 2.794 ms/op`，`2 allocs/op` |
+| `BenchmarkPreparedClosureUpvalueOfficial` | `2.807 / 2.806 / 2.807 ms/op`，`4 allocs/op` |
+| `BenchmarkPreparedRecursion` | `1.659 / 1.662 / 1.659 us/op`，`2 allocs/op` |
+
+对比上一轮 `BenchmarkPreparedTableReadWriteOfficial` 约 `13.7 ms/op`，写入段 batch 有稳定收益；非目标
+prepared 矩阵未显示该提交引入的稳定退化。读取段 `GETTABLE;ADD;FORLOOP` 仍未批量化，后续如果继续
+压缩 `table_rw`，应先 profile 读取段是否已经成为主要热点，再设计新的可证明等价切口。
+
+重建 `bin/glua` / `bin/gluac` 后，正确 Lua 5.3.6 默认完整 benchmark 三轮：
+
+| 用例 | 本项目/官方 |
+| --- | ---: |
+| `arith_add_loop` | `1.21x / 1.11x / 1.14x` |
+| `arith_mix_loop` | `1.99x / 1.94x / 1.98x` |
+| `arith_chain_temp` | `2.71x / 2.66x / 2.64x` |
+| `table_rw` | `2.28x / 2.31x / 2.27x` |
+| `function_call` | `1.01x / 1.03x / 1.00x` |
+| `string_concat` | `1.76x / 1.83x / 1.78x` |
+| `closure_upvalue` | `0.84x / 0.84x / 0.84x` |
+| `stdlib_math_string` | `1.55x / 1.54x / 1.55x` |
+| `recursion` | `1.09x / 1.05x / 1.04x` |
+| `compile_3000_functions` | `2.33x / 2.29x / 2.32x` |
+
+结论：默认完整 `table_rw` 从上一轮约 `2.71-2.74x` 降到 `2.27-2.31x`，写入段 batch 明确反映到
+官方完整口径。当前最接近边界的是 `arith_chain_temp` 的 `2.64-2.71x`；`table_rw` 读取段仍可能存在
+后续空间，但本轮已不继续扩大改动面。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -819,7 +878,8 @@ benchmark 中最接近边界的是 `table_rw` 的 `2.71-2.74x`，其次是 `arit
 - [x] 若继续推进，优先 profile `closure_upvalue` 或 `arith_add_loop` 的剩余 2.8x 边缘项，确认存在全新语义等价切口后再实现。
 - [x] 基于 closure_upvalue 批量 leaf-upvalue 路径重建 CLI 并复跑默认完整 benchmark，确认 `closure_upvalue` 倍率稳定改善且非目标路径无退化。
 - [x] 若继续推进，优先 profile `arith_add_loop` 的剩余 2.8x 边缘项，确认不是机器/官方基线波动后再寻找新的语义等价切口。
-- [ ] 若继续推进，优先 profile `table_rw` 或 `arith_chain_temp` 的剩余 2.6-2.7x 项，确认存在全新语义等价切口后再实现。
+- [x] 若继续推进，优先 profile `table_rw` 或 `arith_chain_temp` 的剩余 2.6-2.7x 项，确认存在全新语义等价切口后再实现。
+- [ ] 若继续推进，优先 profile `table_rw` 读取段 `GETTABLE;ADD;FORLOOP` 或 `arith_chain_temp` 的剩余项，确认存在全新语义等价切口后再实现。
 - [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准

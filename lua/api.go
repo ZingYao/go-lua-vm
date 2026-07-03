@@ -2483,6 +2483,7 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 	functionCallAddForLoopSuperInstructionEnabled := false
 	closureUpvalueForLoopSuperInstructionEnabled := false
 	formatLenAddForLoopSuperInstructionEnabled := false
+	tableWriteForLoopSuperInstructionEnabled := false
 	if !preciseFrameSync && !hooksEnabled {
 		// 普通主线程无 hook 路径可提前准备 superinstruction 表；hook/coroutine 路径必须保留逐 PC 语义。
 		addForLoopSuperInstructionEnabled = vm.PrepareAddForLoopSuperInstructions()
@@ -2492,6 +2493,7 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 		functionCallAddForLoopSuperInstructionEnabled = vm.PrepareFunctionCallAddForLoopSuperInstructions()
 		closureUpvalueForLoopSuperInstructionEnabled = vm.PrepareClosureUpvalueForLoopSuperInstructions()
 		formatLenAddForLoopSuperInstructionEnabled = vm.PrepareFormatLenAddForLoopSuperInstructions()
+		tableWriteForLoopSuperInstructionEnabled = vm.PrepareTableWriteForLoopSuperInstructions()
 	}
 	contextCheckCountdown := 0
 	for pc >= 0 && pc < len(proto.Code) {
@@ -2525,6 +2527,23 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 			if err := triggerLuaLineHook(state, debugEnvironment, proto, pc, previousPC, previousPreviousPC, &lastHookLine); err != nil {
 				// hook 内抛错必须中断当前 VM，交给 protected call 边界包装 traceback。
 				return nil, err
+			}
+		}
+		if tableWriteForLoopSuperInstructionEnabled && !preciseFrameSync && !hooksEnabled && contextCheckCountdown > 0 && vm.HasTableWriteForLoopAt(pc) {
+			// 两指令 table 连续写入循环会额外跳过 FORLOOP，批量 N 轮会额外跳过 2*N-1 个入口。
+			setTablePC := pc
+			if batch, ok := vm.PrepareTableWriteForLoopBatch(setTablePC); ok {
+				// 当前 SETTABLE 入口的 context 已在本轮循环顶部消费；N 轮 batch 按窗口上限保守提交。
+				maxIterations := (contextCheckCountdown + 1) / 2
+				nextPC, handledIterations, handled := vm.TryExecuteTableWriteForLoopBatch(batch, maxIterations)
+				if handled {
+					// superinstruction 已完成若干轮 SETTABLE 与 FORLOOP；补偿被跳过的 SETTABLE/FORLOOP 入口。
+					contextCheckCountdown -= handledIterations*2 - 1
+					previousPreviousPC = setTablePC
+					previousPC = setTablePC + 1
+					pc = nextPC
+					continue
+				}
 			}
 		}
 		if formatLenAddForLoopSuperInstructionEnabled && !preciseFrameSync && !hooksEnabled && contextCheckCountdown >= 7 && vm.HasFormatLenAddForLoopAt(pc) {
