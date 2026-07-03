@@ -212,6 +212,55 @@ func TestParserFunctionStatements(t *testing.T) {
 	}
 }
 
+// TestParserFieldAndMethodFunctionStatements 验证字段函数和方法函数定义。
+//
+// 字段函数会降级为赋值语句；冒号方法还会在函数体参数列表前补入 self。
+func TestParserFieldAndMethodFunctionStatements(t *testing.T) {
+	parser := New("function mod.add(x) return x end function mod:inc(y) return y end")
+
+	chunk, err := parser.ParseChunk()
+	if err != nil {
+		// 字段函数和方法函数都属于 Lua 5.3 普通函数定义语法。
+		t.Fatalf("parse field and method functions failed: %v", err)
+	}
+	if len(chunk.Block.Statements) != 2 {
+		// 输入应解析出两个函数定义赋值语句。
+		t.Fatalf("unexpected statement count=%d", len(chunk.Block.Statements))
+	}
+
+	fieldAssignment, ok := chunk.Block.Statements[0].(*AssignmentStatement)
+	if !ok {
+		// 字段函数定义应降级为字段赋值。
+		t.Fatalf("field function should become assignment")
+	}
+	fieldTarget, ok := fieldAssignment.Left[0].(*FieldAccessExpression)
+	if !ok || fieldTarget.Field != "add" {
+		// 赋值左侧应保留 mod.add 字段访问。
+		t.Fatalf("unexpected field function target=%+v", fieldAssignment.Left[0])
+	}
+	fieldReceiver, ok := fieldTarget.Receiver.(*NameExpression)
+	if !ok || fieldReceiver.Name != "mod" {
+		// 字段访问接收者应保留 mod 名称。
+		t.Fatalf("unexpected field receiver=%+v", fieldTarget.Receiver)
+	}
+	fieldFunction, ok := fieldAssignment.Right[0].(*FunctionExpression)
+	if !ok || len(fieldFunction.Body.Params) != 1 || fieldFunction.Body.Params[0] != "x" {
+		// 字段函数右侧应是保留原参数的匿名函数表达式。
+		t.Fatalf("unexpected field function body=%+v", fieldAssignment.Right[0])
+	}
+
+	methodAssignment, ok := chunk.Block.Statements[1].(*AssignmentStatement)
+	if !ok {
+		// 方法函数定义同样应降级为字段赋值。
+		t.Fatalf("method function should become assignment")
+	}
+	methodFunction, ok := methodAssignment.Right[0].(*FunctionExpression)
+	if !ok || len(methodFunction.Body.Params) != 2 || methodFunction.Body.Params[0] != "self" || methodFunction.Body.Params[1] != "y" {
+		// 冒号方法必须在参数列表前注入 self。
+		t.Fatalf("unexpected method function body=%+v", methodAssignment.Right[0])
+	}
+}
+
 // TestParserIfWhileRepeatStatements 验证 if/elseif/else、while 和 repeat-until 语句。
 //
 // 条件表达式当前使用基础表达式，block 内使用已实现赋值语句。

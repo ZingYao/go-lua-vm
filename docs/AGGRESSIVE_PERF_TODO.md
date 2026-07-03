@@ -1112,6 +1112,35 @@ benchmark 复核：
 semantic scope、namespace 以及 Proto/常量/指令实体本身；后续应先 profile，再决定是否值得进入更重的
 parser AST 或 Proto 结构设计。
 
+### 2026-07-04 简单函数名解析免 AST 节点
+
+profile 复核小容量预留后，`compile_3000_functions` 的剩余对象仍集中在 parser AST、semantic scope 和
+namespace。先尝试过把函数体参数从 `[]localDeclaration` 直通为 AST 参数名称切片，但
+`BenchmarkCompileSource3000Functions` 仍为约 `7.20-7.27 ms/op`、`5.78 MB/op`、`66140 allocs/op`，
+没有减少对象数，判断该临时结构已被栈分配或被其它路径覆盖，因此未保留该改动。
+
+保留的切口是 `parseFunctionName`：普通 `function f(...)` 之前会先创建 `NameExpression`，随后
+`parseFunctionStatement` 又将其拆回 `FunctionStatement.Name` 字符串。官方规模
+`compile_3000_functions` 全部是简单函数名，因此该中间 AST 节点没有语义价值。改动后简单函数名通过
+`simpleName` 字符串直接返回；只有 `function t.f(...)` 和 `function t:m(...)` 仍构造字段访问表达式并
+降级为赋值语句。字段函数、方法函数、冒号方法注入 `self`、codegen 输出和 Lua 5.3 用户可见语义不变。
+
+新增测试：
+
+| 用例 | 覆盖点 |
+| --- | --- |
+| `TestParserFieldAndMethodFunctionStatements` | 字段函数仍降级为字段赋值；冒号方法仍在函数体参数前注入 `self`。 |
+
+benchmark 复核：
+
+| 用例 | 结果 |
+| --- | ---: |
+| `BenchmarkCompileSource3000Functions` | `7.149 / 7.153 / 7.176 / 7.198 / 7.177 ms/op`，约 `5.64 MB/op`，`63140 allocs/op` |
+
+对比小容量预留后的约 `7.29-7.34 ms/op`、`5.78 MB/op`、`66136 allocs/op`，简单函数名免 AST 节点再减少
+约 `3000 allocs/op` 和约 `0.14 MB/op`，wall-clock 小幅改善。剩余 parser AST 成本主要来自真实表达式和
+函数体节点，继续优化需要更大 AST 布局设计，不应再针对已证伪的参数预声明临时切片做局部改动。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -1205,7 +1234,8 @@ parser AST 或 Proto 结构设计。
 - [x] 若继续推进编译期，基于 inline 槽后 profile 重新观察 `compile_3000_functions`，确认剩余分配是否仍有新的结构性切口。
 - [x] 若继续推进编译期，优先拆分 `recordConstantIndex`、`newGenerator/NewProto` 与 parser AST/namespace 分配；只有能证明字节码、debug local 和错误语义等价时再实现。
 - [x] 若继续推进编译期，优先 profile 单 integer 常量 inline 后的 `newGenerator/NewProto`、parser AST/namespace 与 semantic scope；只有出现新的结构性切口时再实现。
-- [ ] 若继续推进编译期，优先 profile 小容量预留后的 parser AST、semantic scope 与 namespace；只有出现新的结构性切口时再实现。
+- [x] 若继续推进编译期，优先 profile 小容量预留后的 parser AST、semantic scope 与 namespace；只有出现新的结构性切口时再实现。
+- [ ] 若继续推进编译期，优先 profile 简单函数名免 AST 节点后的 parser AST 与 semantic scope；只有出现新的结构性切口时再实现。
 - [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准

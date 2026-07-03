@@ -379,7 +379,7 @@ func (parser *Parser) parseFunctionStatement() (Statement, error) {
 		// 调用方已经判断 function，该错误只作为防御。
 		return nil, err
 	}
-	targetExpression, isMethod, err := parser.parseFunctionName()
+	targetExpression, simpleName, isMethod, err := parser.parseFunctionName()
 	if err != nil {
 		// function 后必须有合法函数名。
 		return nil, err
@@ -394,9 +394,9 @@ func (parser *Parser) parseFunctionStatement() (Statement, error) {
 		// 冒号定义等价于函数体首个形参为 self。
 		body.Params = append([]string{"self"}, body.Params...)
 	}
-	if nameExpression, ok := targetExpression.(*NameExpression); ok && !isMethod {
+	if simpleName != "" && !isMethod {
 		// 简单函数名保留原有 AST，兼容既有 codegen 路径。
-		return &FunctionStatement{Name: nameExpression.Name, Body: body, Position: startPosition}, nil
+		return &FunctionStatement{Name: simpleName, Body: body, Position: startPosition}, nil
 	}
 
 	// 字段或方法函数定义等价于一次赋值语句。
@@ -409,14 +409,18 @@ func (parser *Parser) parseFunctionStatement() (Statement, error) {
 
 // parseFunctionName 解析 function 语句中的函数名。
 //
-// 名称必须以 identifier 开始；点号字段可重复；冒号方法只能出现在末尾。返回表达式可作为
-// 赋值左值使用，isMethod 表示调用方需要向函数体注入 self 参数。
-func (parser *Parser) parseFunctionName() (Expression, bool, error) {
+// 名称必须以 identifier 开始；点号字段可重复；冒号方法只能出现在末尾。简单名称通过 simpleName
+// 返回；字段或方法定义返回可作为赋值左值的表达式，isMethod 表示调用方需要向函数体注入 self 参数。
+func (parser *Parser) parseFunctionName() (Expression, string, bool, error) {
 	nameToken := parser.current
 	name, err := parser.expectIdentifier()
 	if err != nil {
 		// function 后必须以 identifier 开始。
-		return nil, false, err
+		return nil, "", false, err
+	}
+	if !(parser.current.Kind == lexer.TokenOperator && (parser.current.Text == "." || parser.current.Text == ":")) {
+		// 简单函数名直接返回名称字符串，避免构造随后会被拆回字符串的 NameExpression。
+		return nil, name, false, nil
 	}
 	var targetExpression Expression = &NameExpression{Name: name, Position: nameToken.Position}
 	for parser.current.Kind == lexer.TokenOperator && parser.current.Text == "." {
@@ -425,7 +429,7 @@ func (parser *Parser) parseFunctionName() (Expression, bool, error) {
 		fieldName, err := parser.expectIdentifier()
 		if err != nil {
 			// 点号后必须跟字段名。
-			return nil, false, err
+			return nil, "", false, err
 		}
 		targetExpression = &FieldAccessExpression{Receiver: targetExpression, Field: fieldName, Position: targetExpression.Pos()}
 	}
@@ -435,13 +439,13 @@ func (parser *Parser) parseFunctionName() (Expression, bool, error) {
 		methodName, err := parser.expectIdentifier()
 		if err != nil {
 			// 冒号后必须跟方法名。
-			return nil, false, err
+			return nil, "", false, err
 		}
-		return &FieldAccessExpression{Receiver: targetExpression, Field: methodName, Position: targetExpression.Pos()}, true, nil
+		return &FieldAccessExpression{Receiver: targetExpression, Field: methodName, Position: targetExpression.Pos()}, "", true, nil
 	}
 
 	// 未出现冒号时是普通函数或字段函数定义。
-	return targetExpression, false, nil
+	return targetExpression, "", false, nil
 }
 
 // parseIfStatement 解析 if/elseif/else 语句。
