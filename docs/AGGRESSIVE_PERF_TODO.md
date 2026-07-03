@@ -154,6 +154,44 @@ benchmark 复核：
 
 对比激进分支基线中 `arith_mix_loop` prepared 约 `28.3 ms/op`，完整 mix superinstruction 收益明显。非目标 `arith_chain_temp` 和 `arith_add_loop` 维持上一轮水平；`table_rw` 仍主要受 33.5MB/op 数组区扩容影响，`recursion` 仍有机器噪声慢轮，不属于本轮触达路径。
 
+### 2026-07-03 table_rw 数组区预分配原型
+
+实现：在 `runtime.VM` 中新增 VM-local Proto 扫描，识别精确 `local t = {}; for i = 1, N do t[i] = i end` 字节码形态：`NEWTABLE; LOADK; LOADK; LOADK; FORPREP; SETTABLE; FORLOOP`。当三个 `LOADK` 证明 numeric-for 为 `1..N`、步长 `1`，循环体唯一 `SETTABLE` 证明写入 `t[i] = i`，且 table 寄存器没有覆盖 for 控制槽时，`NEWTABLE` 创建 table 时预留数组区 `cap=N`、`len=0`。
+
+语义 guard：
+
+- 优化只改变新 table 的数组区底层容量，不跳过 `FORPREP`、`SETTABLE`、`FORLOOP` 或后续 `GETTABLE`，因此错误装饰、hook PC、traceback、普通 table 写入和读取路径仍由原 VM 处理。
+- `NEWTABLE` 到 `SETTABLE` 之间只能出现三个 `LOADK` 和 `FORPREP`，table 在预分配前不能逃逸到函数调用、upvalue、全局、metatable 或 debug 可见写入路径。
+- 只覆盖 `init=1`、`step=1`、`limit` 为正 integer 且不超过当前数组区上限的形态；非 `t[i]=i`、寄存器别名、非常量边界、非正步长或稀疏写入全部回退普通扩容。
+- 预留使用 `len=0`，`RawGetInteger`、`ArraySize`、`Len` 和 `next` 仍观察到空 table。
+
+benchmark 复核：
+
+| 用例 | 结果 |
+| --- | ---: |
+| `BenchmarkDoStringTableReadWriteOfficial` | `13.71 / 13.77 / 14.02 / 14.17 / 14.12 ms/op`，约 `11.27 MB/op`，`251 allocs/op` |
+| `BenchmarkPreparedTableReadWriteOfficial` | `14.21 / 15.94 / 16.01 / 16.87 / 14.40 ms/op`，约 `11.21 MB/op`，`3 allocs/op` |
+| `BenchmarkPreparedTableReadWriteOfficial` + profile | `12.67 ms/op`，`11.21 MB/op`，`3 allocs/op` |
+
+对比上一轮 table_rw profile 的 prepared 约 `33.5 MB/op`、`18 allocs/op`，数组区预分配把连续扩容分配压缩为一次预留，`runtime.(*Table).ensureArraySize` 已从 alloc_space 热点消失，alloc_space 主要转为 `runtime.newTableWithArrayCapacity`。非目标矩阵复核中 `arith_chain_temp` 约 `27.3 ms/op`、`arith_mix_loop` prepared 约 `18.0-19.6 ms/op`、`function_call` 约 `0.46 ms/op`、`recursion` prepared 约 `7.86-7.96 ms/op`，未观察到该提交引入的稳定退化。
+
+默认完整 benchmark 单轮抽样：
+
+| 用例 | 本项目/官方 |
+| --- | ---: |
+| `arith_add_loop` | `2.72x` |
+| `arith_mix_loop` | `1.93x` |
+| `arith_chain_temp` | `2.45x` |
+| `table_rw` | `2.53x` |
+| `function_call` | `2.91x` |
+| `string_concat` | `1.78x` |
+| `closure_upvalue` | `2.78x` |
+| `stdlib_math_string` | `2.29x` |
+| `recursion` | `3.12x` |
+| `compile_3000_functions` | `2.34x` |
+
+结论：`table_rw` 从上一轮 3x 边缘进入明显低于 3x 区间；`recursion` 仍是当前默认完整 benchmark 中唯一高于 3x 的观察项，下一轮应回到自递归固定签名或调用边界 profile。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -211,7 +249,7 @@ benchmark 复核：
 - [x] 实现 `MUL; ADD; SUB; FORLOOP` superinstruction 原型。
 - [x] 复跑 `BenchmarkDoStringArithChainTempOfficial` 与 `BenchmarkPreparedArithChainTempOfficial`，确认低于 3x 且无退化。
 - [x] 评估 `arith_mix_loop` 的 IDIV/MOD superinstruction 是否收益稳定；若收益不稳定，记录证伪并回退。
-- [ ] 基于 profile 重新评估 `table_rw`，只在能证明 table 未逃逸时设计数组预分配。
+- [x] 基于 profile 重新评估 `table_rw`，只在能证明 table 未逃逸时设计数组预分配。
 - [ ] 基于 profile 重新评估 `recursion`，只在能证明自递归固定签名语义等价时设计 fast call。
 - [ ] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 

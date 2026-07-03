@@ -1107,6 +1107,100 @@ func TestVMNewTable(t *testing.T) {
 	}
 }
 
+// TestVMNewTablePreallocatesNumericForArray 验证强约束 numeric-for 数组写入会预留 table 数组容量。
+//
+// 该优化只改变 table 数组区底层 cap，不改变 NEWTABLE 后的空表可见语义；后续 SETTABLE 仍逐条执行。
+func TestVMNewTablePreallocatesNumericForArray(t *testing.T) {
+	proto := &bytecode.Proto{
+		Constants: []bytecode.Constant{
+			bytecode.IntegerConstant(1),
+			bytecode.IntegerConstant(200000),
+		},
+		Code: []bytecode.Instruction{
+			bytecode.CreateABC(bytecode.OpNewTable, 0, 0, 0),
+			bytecode.CreateABx(bytecode.OpLoadK, 1, 0),
+			bytecode.CreateABx(bytecode.OpLoadK, 2, 1),
+			bytecode.CreateABx(bytecode.OpLoadK, 3, 0),
+			bytecode.CreateAsBx(bytecode.OpForPrep, 1, 1),
+			bytecode.CreateABC(bytecode.OpSetTable, 0, 4, 4),
+			bytecode.CreateAsBx(bytecode.OpForLoop, 1, -2),
+		},
+	}
+	vm := NewVM(5)
+	vm.BindPrototype(proto)
+	vm.SetCurrentPC(0)
+	if err := vm.Step(proto.Code[0]); err != nil {
+		// NEWTABLE 写入合法目标寄存器必须成功。
+		t.Fatalf("newtable failed: %v", err)
+	}
+
+	value, ok := vm.Register(0)
+	if !ok || value.Kind != KindTable {
+		// 目标寄存器必须保存 table 引用值。
+		t.Fatalf("newtable value mismatch: value=%#v ok=%v", value, ok)
+	}
+	table, ok := value.Ref.(*Table)
+	if !ok || table == nil {
+		// table 引用负载必须是可用的 *Table。
+		t.Fatalf("newtable ref mismatch: ref=%#v ok=%v", value.Ref, ok)
+	}
+	if table.ArraySize() != 0 || table.HashSize() != 0 {
+		// 预留容量不能暴露为可见数组元素或 hash 元素。
+		t.Fatalf("preallocated table should still be empty: array=%d hash=%d", table.ArraySize(), table.HashSize())
+	}
+	if cap(table.arrayValues) != 200000 {
+		// 精确 t[i]=i 形态应按循环上界预留数组区容量。
+		t.Fatalf("array capacity mismatch: got %d", cap(table.arrayValues))
+	}
+	if got := table.RawGetInteger(1); !got.IsNil() {
+		// 预留槽位在写入前必须仍按 nil 读取。
+		t.Fatalf("reserved slot should read nil: %#v", got)
+	}
+}
+
+// TestVMNewTablePreallocRejectsNonIdentityValue 验证非 t[i]=i 形态不会触发表数组预留。
+//
+// value 表达式不是循环变量时，后续 SETTABLE 可能包含更复杂数据流；当前优化必须保守回退。
+func TestVMNewTablePreallocRejectsNonIdentityValue(t *testing.T) {
+	proto := &bytecode.Proto{
+		Constants: []bytecode.Constant{
+			bytecode.IntegerConstant(1),
+			bytecode.IntegerConstant(200000),
+		},
+		Code: []bytecode.Instruction{
+			bytecode.CreateABC(bytecode.OpNewTable, 0, 0, 0),
+			bytecode.CreateABx(bytecode.OpLoadK, 1, 0),
+			bytecode.CreateABx(bytecode.OpLoadK, 2, 1),
+			bytecode.CreateABx(bytecode.OpLoadK, 3, 0),
+			bytecode.CreateAsBx(bytecode.OpForPrep, 1, 1),
+			bytecode.CreateABC(bytecode.OpSetTable, 0, 4, 1),
+			bytecode.CreateAsBx(bytecode.OpForLoop, 1, -2),
+		},
+	}
+	vm := NewVM(5)
+	vm.BindPrototype(proto)
+	vm.SetCurrentPC(0)
+	if err := vm.Step(proto.Code[0]); err != nil {
+		// NEWTABLE 写入合法目标寄存器必须成功。
+		t.Fatalf("newtable failed: %v", err)
+	}
+
+	value, ok := vm.Register(0)
+	if !ok || value.Kind != KindTable {
+		// 目标寄存器必须保存 table 引用值。
+		t.Fatalf("newtable value mismatch: value=%#v ok=%v", value, ok)
+	}
+	table, ok := value.Ref.(*Table)
+	if !ok || table == nil {
+		// table 引用负载必须是可用的 *Table。
+		t.Fatalf("newtable ref mismatch: ref=%#v ok=%v", value.Ref, ok)
+	}
+	if cap(table.arrayValues) != 0 {
+		// 非精确 t[i]=i 数据流不能提前预留容量，避免误覆盖更复杂语义。
+		t.Fatalf("unexpected array capacity: got %d", cap(table.arrayValues))
+	}
+}
+
 // TestVMTableInstructionErrors 验证 table 指令的主要错误边界。
 //
 // 错误路径需要保持寄存器状态稳定，避免损坏字节码导致部分写入。

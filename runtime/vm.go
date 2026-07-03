@@ -86,6 +86,10 @@ type VM struct {
 	mixArithmeticForLoopSuperInstructionProto *bytecode.Proto
 	// mixArithmeticForLoopSuperInstructions 按 PC 保存混合算术循环 superinstruction 预匹配结果。
 	mixArithmeticForLoopSuperInstructions []mixArithmeticForLoopSuperInstruction
+	// tableArrayPreallocHintProto 记录 table 数组预分配 hint 表对应的 Proto。
+	tableArrayPreallocHintProto *bytecode.Proto
+	// tableArrayPreallocHints 按 NEWTABLE 所在 PC 保存可证明安全的数组区预留容量。
+	tableArrayPreallocHints []tableArrayPreallocHint
 	// currentPC 保存当前执行指令位置，用于判断 Proto.LocalVars 中哪些局部变量仍然存活。
 	currentPC int
 	// openTop 保存上一条开放返回/开放 vararg 写入后的寄存器上界，-1 表示当前没有开放栈顶。
@@ -223,6 +227,17 @@ type decodedInstruction struct {
 	BOperand decodedRKOperand
 	// COperand 保存 C 字段按 RK 语义预解码后的形态。
 	COperand decodedRKOperand
+}
+
+// tableArrayPreallocHint 保存 `NEWTABLE` 后连续 numeric-for 数组写入的预留容量。
+//
+// 当前只覆盖精确 `local t = {}; for i = 1, N do t[i] = i end` 形态。容量 hint 只影响 table
+// 底层数组区 cap，不跳过后续 SETTABLE、FORPREP 或 FORLOOP 指令。
+type tableArrayPreallocHint struct {
+	// Capacity 保存可安全预留的数组区容量。
+	Capacity int
+	// Valid 表示当前 PC 的 NEWTABLE 是否存在可用预分配 hint。
+	Valid bool
 }
 
 // addForLoopSuperInstruction 保存 `ADD; FORLOOP` 的预匹配形态。
@@ -1510,6 +1525,8 @@ func (vm *VM) BindPrototype(proto *bytecode.Proto) {
 		vm.mulAddSubForLoopSuperInstructions = nil
 		vm.mixArithmeticForLoopSuperInstructionProto = nil
 		vm.mixArithmeticForLoopSuperInstructions = nil
+		vm.tableArrayPreallocHintProto = nil
+		vm.tableArrayPreallocHints = nil
 		vm.arithmeticIntRegisterCacheProto = nil
 		vm.arithmeticIntRegisterCache = nil
 		vm.arithmeticIntOperandCache = nil
@@ -1536,6 +1553,11 @@ func (vm *VM) BindPrototype(proto *bytecode.Proto) {
 		// VM 池切换到其他 Proto 时丢弃混合算术 superinstruction 表，避免不同 Proto 的 PC 误命中。
 		vm.mixArithmeticForLoopSuperInstructionProto = nil
 		vm.mixArithmeticForLoopSuperInstructions = nil
+	}
+	if vm.tableArrayPreallocHintProto != nil && vm.tableArrayPreallocHintProto != proto {
+		// VM 池切换到其他 Proto 时丢弃 table 预分配 hint，避免相同 PC 误用其他函数的数据流结论。
+		vm.tableArrayPreallocHintProto = nil
+		vm.tableArrayPreallocHints = nil
 	}
 	if vm.arithmeticIntRegisterCacheProto != proto || len(vm.arithmeticIntRegisterCache) < len(proto.Code) || len(vm.arithmeticIntOperandCache) < len(proto.Code) {
 		// VM 池复用到不同 Proto 时必须重建缓存，避免 PC 相同但指令不同导致错误命中。
@@ -1672,6 +1694,140 @@ func decodeRKOperand(proto *bytecode.Proto, rk int) decodedRKOperand {
 		operand.IntegerConstantOK = true
 	}
 	return operand
+}
+
+// ensureTableArrayPreallocHints 返回当前 Proto 的 table 数组区预分配 hint 表。
+//
+// 该表只由 NEWTABLE 创建点读取；hint 仅改变新 table 的数组区预留容量，不跳过任何后续 opcode。
+// nil 表示当前 Proto 没有匹配形态，调用方应创建普通空 table。
+func (vm *VM) ensureTableArrayPreallocHints() []tableArrayPreallocHint {
+	// 按当前 Proto 懒构建 table 预分配 hint，并在 Proto 未变化时复用。
+	if vm == nil || vm.proto == nil {
+		// 缺少 VM 或 Proto 时没有可用 hint。
+		return nil
+	}
+	if len(vm.proto.Code) < 7 {
+		// 少于七条指令不可能包含 `NEWTABLE; LOADK; LOADK; LOADK; FORPREP; SETTABLE; FORLOOP`。
+		vm.tableArrayPreallocHintProto = vm.proto
+		vm.tableArrayPreallocHints = nil
+		return nil
+	}
+	if vm.tableArrayPreallocHintProto == vm.proto {
+		// 当前 Proto 已完成扫描；nil 表示无匹配形态。
+		return vm.tableArrayPreallocHints
+	}
+
+	vm.tableArrayPreallocHintProto = vm.proto
+	vm.tableArrayPreallocHints = buildTableArrayPreallocHints(vm.proto)
+	return vm.tableArrayPreallocHints
+}
+
+// buildTableArrayPreallocHints 构建 NEWTABLE 数组区预分配 hint 表。
+//
+// 当前只识别精确 `local t = {}; for i = 1, N do t[i] = i end` 字节码形态。NEWTABLE 后到
+// SETTABLE 前只能出现三个 LOADK 和 FORPREP，保证 table 没有逃逸、没有元方法可见路径，也没有
+// 其他指令能观察预留容量。没有匹配形态时返回 nil。
+func buildTableArrayPreallocHints(proto *bytecode.Proto) []tableArrayPreallocHint {
+	// 空 Proto 或短函数没有可构建的 table 预分配 hint。
+	if proto == nil || len(proto.Code) < 7 {
+		return nil
+	}
+
+	var hints []tableArrayPreallocHint
+	for pc := 0; pc+6 < len(proto.Code); pc++ {
+		// 只扫描 NEWTABLE 起点；其他指令不可能需要 table 数组预留。
+		newTableInstruction := proto.Code[pc]
+		if newTableInstruction.OpCode() != bytecode.OpNewTable {
+			// 非 NEWTABLE 继续扫描后续 PC。
+			continue
+		}
+
+		firstLoadInstruction := proto.Code[pc+1]
+		limitLoadInstruction := proto.Code[pc+2]
+		stepLoadInstruction := proto.Code[pc+3]
+		forPrepInstruction := proto.Code[pc+4]
+		setTableInstruction := proto.Code[pc+5]
+		forLoopInstruction := proto.Code[pc+6]
+		if firstLoadInstruction.OpCode() != bytecode.OpLoadK || limitLoadInstruction.OpCode() != bytecode.OpLoadK || stepLoadInstruction.OpCode() != bytecode.OpLoadK || forPrepInstruction.OpCode() != bytecode.OpForPrep || setTableInstruction.OpCode() != bytecode.OpSetTable || forLoopInstruction.OpCode() != bytecode.OpForLoop {
+			// NEWTABLE 后不是精确的常量 numeric-for 数组写入初始化，不能证明 table 未逃逸。
+			continue
+		}
+
+		forBase := forPrepInstruction.A()
+		if firstLoadInstruction.A() != forBase || limitLoadInstruction.A() != forBase+1 || stepLoadInstruction.A() != forBase+2 {
+			// numeric-for 的三个控制槽必须由紧邻 LOADK 写入，其他寄存器布局保持普通路径。
+			continue
+		}
+		if forPrepInstruction.SBx() != 1 || forLoopInstruction.A() != forBase || forLoopInstruction.SBx() != -2 {
+			// 只覆盖单条 SETTABLE 循环体；跳转形态不同可能包含其他可见副作用。
+			continue
+		}
+		tableRegister := newTableInstruction.A()
+		if registerInRange(tableRegister, forBase, forBase+3) {
+			// table 寄存器不能覆盖 numeric-for 控制槽或外部循环变量。
+			continue
+		}
+		if setTableInstruction.A() != tableRegister || bytecode.IsK(setTableInstruction.B()) || bytecode.IsK(setTableInstruction.C()) {
+			// SETTABLE 必须写入新建 table，且 key/value 都来自外部循环变量寄存器。
+			continue
+		}
+		keyRegister := bytecode.IndexK(setTableInstruction.B())
+		valueRegister := bytecode.IndexK(setTableInstruction.C())
+		if keyRegister != forBase+3 || valueRegister != forBase+3 {
+			// 当前 hint 只覆盖 t[i] = i；其他值表达式可能需要保留逐指令可见副作用。
+			continue
+		}
+
+		initialValue, initialOK := protoIntegerConstant(proto, firstLoadInstruction.Bx())
+		limitValue, limitOK := protoIntegerConstant(proto, limitLoadInstruction.Bx())
+		stepValue, stepOK := protoIntegerConstant(proto, stepLoadInstruction.Bx())
+		if !initialOK || !limitOK || !stepOK || initialValue != 1 || stepValue != 1 || limitValue <= 0 || limitValue > maxTableArrayIndex {
+			// 只有从 1 开始、步长为 1、正整数上界位于数组区上限内时才能精确预估容量。
+			continue
+		}
+
+		if hints == nil {
+			// 只有真实存在匹配形态时才分配 PC 对齐表，避免普通函数承担额外内存。
+			hints = make([]tableArrayPreallocHint, len(proto.Code))
+		}
+		hints[pc] = tableArrayPreallocHint{Capacity: int(limitValue), Valid: true}
+	}
+	return hints
+}
+
+// protoIntegerConstant 读取 Proto 常量表中的 integer 常量。
+//
+// 返回 ok=false 表示常量越界或不是 integer；调用方应回退普通 VM 路径。
+func protoIntegerConstant(proto *bytecode.Proto, constantIndex int) (int64, bool) {
+	// 常量索引必须落在当前 Proto 常量表内。
+	if proto == nil || constantIndex < 0 || constantIndex >= len(proto.Constants) {
+		// 损坏 chunk 或手写测试引用越界常量时不能使用 fast hint。
+		return 0, false
+	}
+	constant := proto.Constants[constantIndex]
+	if constant.Kind != bytecode.ConstantInteger {
+		// 非 integer 常量不参与当前 numeric-for 容量预估。
+		return 0, false
+	}
+	return constant.Integer, true
+}
+
+// tableArrayPreallocCapacityAt 返回当前 PC 的 table 数组区预留容量。
+//
+// 返回 0 表示没有可用 hint；调用方应创建普通空 table。
+func (vm *VM) tableArrayPreallocCapacityAt(pc int) int {
+	// 先确保当前 Proto 的 hint 表已构建，再按 PC 安全读取。
+	hints := vm.ensureTableArrayPreallocHints()
+	if uint(pc) >= uint(len(hints)) {
+		// PC 越界或当前 Proto 没有 hint 表时不做预分配。
+		return 0
+	}
+	hint := hints[pc]
+	if !hint.Valid {
+		// 当前 PC 不是可预估 NEWTABLE。
+		return 0
+	}
+	return hint.Capacity
 }
 
 // ensureAddForLoopSuperInstructions 返回当前 Proto 的 ADD;FORLOOP 预匹配表。
@@ -3554,8 +3710,8 @@ func (vm *VM) executeSetTabUp(instruction bytecode.Instruction) error {
 
 // executeNewTable 执行 Lua 5.3 OP_NEWTABLE 指令。
 //
-// 指令语义为 R(A) := {}。B/C 在 Lua 5.3 中携带数组区和 hash 区预分配 hint；当前
-// Table 还没有容量 hint 构造函数，因此先创建正确语义的空 table，预分配优化后续补齐。
+// 指令语义为 R(A) := {}。B/C 在 Lua 5.3 中携带数组区和 hash 区预分配 hint；当前额外支持
+// VM 预扫描出的强约束 numeric-for 连续数组写入 hint，其余形态仍创建普通空 table。
 func (vm *VM) executeNewTable(instruction bytecode.Instruction) error {
 	targetIndex := instruction.A()
 	if targetIndex < 0 || targetIndex >= len(vm.registers) {
@@ -3563,8 +3719,14 @@ func (vm *VM) executeNewTable(instruction bytecode.Instruction) error {
 		return ErrRegisterOutOfRange
 	}
 
+	table := NewTable()
+	if arrayCapacity := vm.tableArrayPreallocCapacityAt(vm.currentPC); arrayCapacity > 0 {
+		// 强约束数据流已证明后续会连续写入 1..N，提前预留 cap 但保持 len=0 和空表语义。
+		table = newTableWithArrayCapacity(arrayCapacity)
+	}
+
 	// NEWTABLE 创建新的 table identity，并以引用值写入目标寄存器。
-	vm.registers[targetIndex] = ReferenceValue(KindTable, NewTable())
+	vm.registers[targetIndex] = ReferenceValue(KindTable, table)
 	return nil
 }
 

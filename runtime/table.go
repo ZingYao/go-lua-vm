@@ -116,6 +116,20 @@ func NewTable() *Table {
 	return &Table{}
 }
 
+// newTableWithArrayCapacity 创建带数组区预留容量的空 Lua table。
+//
+// arrayCapacity 只影响数组区底层容量，不改变数组区可见长度、Lua `#`、next、raw get 或 hash 区语义；
+// 非正容量回退普通空 table。该入口只供 VM 在已证明后续会连续写入正整数下标时使用。
+func newTableWithArrayCapacity(arrayCapacity int) *Table {
+	// 非正容量没有预留意义，保持普通空 table 的延迟分配行为。
+	if arrayCapacity <= 0 {
+		return NewTable()
+	}
+
+	// len 保持 0，只预留 cap，避免预留槽位被 RawNext、ArraySize 或长度边界误认为可见数组区。
+	return &Table{arrayValues: make([]Value, 0, arrayCapacity)}
+}
+
 // ensureHashStorage 确保 hash 区 map 已初始化。
 //
 // hashValues 保存实际 table 值；hashKeys 仅在无法从 tableKey 无损还原原始 Lua key 时按需创建。
