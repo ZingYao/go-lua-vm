@@ -329,6 +329,44 @@ benchmark 复核：
 通用调用帧分配，wall-clock 与分配均明显下降。`function_call` 与 `recursion` 保持上一轮水平，未观察到
 该标准库注册改动引入的稳定退化。
 
+27dfcc3 后复核矩阵与 profile：
+
+| 用例 | 结果 |
+| --- | ---: |
+| `BenchmarkDoStringArithMixLoopOfficial` | `17.54 / 17.53 / 17.54 ms/op`，约 `68.9 KB/op`，`239 allocs/op` |
+| `BenchmarkPreparedArithMixLoopOfficial` | `17.43 / 17.43 / 17.43 ms/op`，`0 allocs/op` |
+| `BenchmarkDoStringTableReadWriteOfficial` | `14.11 / 14.07 / 14.23 ms/op`，约 `11.27 MB/op`，`252 allocs/op` |
+| `BenchmarkPreparedTableReadWriteOfficial` | `13.40 / 12.96 / 12.83 ms/op`，约 `11.21 MB/op`，`3 allocs/op` |
+| `BenchmarkDoStringStdlibMathString` | `25.26 / 25.25 / 25.29 ms/op`，约 `476.9 KB/op`，`80148 allocs/op` |
+| `BenchmarkDoStringFunctionCall` | `191.0 / 192.1 / 194.4 us/op`，约 `63.6 KB/op`，`255 allocs/op` |
+| `BenchmarkPreparedFunctionCall` | `160.1 / 160.3 / 160.3 us/op`，`400 B/op`，`2 allocs/op` |
+| `BenchmarkDoStringRecursion` | `40.8 / 42.1 / 39.9 us/op`，约 `64.4 KB/op`，`290 allocs/op` |
+| `BenchmarkPreparedRecursion` | `1.620 / 1.587 / 1.593 us/op`，`224 B/op`，`2 allocs/op` |
+
+alloc profile 显示 `stdlib_math_string` 剩余固定分配主要是 `internal/strconv.FormatInt` 构造的结果字符串；
+`string.format` 自身的参数/结果切片与 debug frame 分配已经被本轮 fastcall 消除。因此继续压缩该项不应再
+从 `formatWithState` 局部下手，而应单独设计 `#string.format("%d", i)` 的表达式级或循环级快路径：
+在证明当前调用仍指向内建 `string.format`、格式串为 exact `%d`、结果只被 `LEN` 消费且无 hook/yield
+可见性需求时，直接计算十进制长度，避免创建短生命周期字符串。
+
+27dfcc3 后默认完整 benchmark 抽样：
+
+| 用例 | 官方工具中位数 | 本项目中位数 | 本项目/官方 |
+| --- | ---: | ---: | ---: |
+| `arith_add_loop` | `0.007407s` | `0.020439s` | `2.76x` |
+| `arith_mix_loop` | `0.011110s` | `0.021301s` | `1.92x` |
+| `arith_chain_temp` | `0.012570s` | `0.031520s` | `2.51x` |
+| `table_rw` | `0.006866s` | `0.017510s` | `2.55x` |
+| `function_call` | `0.006621s` | `0.019440s` | `2.94x` |
+| `string_concat` | `0.004647s` | `0.008159s` | `1.76x` |
+| `closure_upvalue` | `0.007913s` | `0.021501s` | `2.72x` |
+| `stdlib_math_string` | `0.019002s` | `0.029223s` | `1.54x` |
+| `recursion` | `0.003486s` | `0.003608s` | `1.03x` |
+| `compile_3000_functions` | `0.004989s` | `0.011749s` | `2.35x` |
+
+结论：`stdlib_math_string` 已从近期完整口径约 `1.9-2.3x` 进一步降到 `1.54x`；`function_call`
+仍是当前最接近 3x 的路径，但 Go micro 保持上一轮 superinstruction 后的稳定收益，暂未显示退化。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -380,6 +418,13 @@ benchmark 复核：
 覆盖成功窄形态；缺参、类型错误、debug hook、Lua closure 元方法、变长结果和复杂格式必须回退完整
 `GoResultsFunction`，避免为了分配收益改变错误栈和调试可见性。
 
+### 7. 表达式级标准库结果消费消除
+
+当标准库调用结果只被紧邻 opcode 消费且不会逃逸时，可以考虑跨 opcode 消除短生命周期结果对象。例如
+`#string.format("%d", i)` 可在严格证明当前函数仍是内建 `string.format`、格式串为 exact `%d`、返回值
+只被 `LEN` 消费、hook/yield/debug frame 不需要观察中间字符串时，直接计算整数十进制长度。该方向比
+固定结果 fastcall 更激进，必须先用字节码和 profile 证明收益，并且所有 guard 不满足时回退普通 VM。
+
 ## TODO
 
 - [x] 跑激进分支基线：默认完整 benchmark 三轮、official-sized Go micro 矩阵、`BenchmarkPrepared*` 相关项。
@@ -397,6 +442,7 @@ benchmark 复核：
 - [x] 增加 `function_call` prepared 口径，确认编译/OpenLibs 分配不是该项 wall-clock 主因。
 - [x] 实现 `MOVE; MOVE; LOADK; CALL; ADD; FORLOOP` superinstruction 原型，覆盖官方 `function_call`。
 - [x] 实现 `string.format("%d", i)` 固定结果 fastcall，降低 `stdlib_math_string` 通用 GoResultsFunction 成本。
+- [ ] 评估 `#string.format("%d", i)` 表达式级快路径，目标是消除 `stdlib_math_string` 剩余 FormatInt 字符串分配。
 - [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准
