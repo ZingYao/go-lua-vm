@@ -76,25 +76,22 @@ func (lexer *Lexer) ScanNumber() (NumberLiteral, bool, error) {
 //
 // startPosition 是小数点起始位置；调用方已确认当前位置是 `.` 且后一个字符是十进制数字。
 func (lexer *Lexer) scanLeadingDotDecimalNumber(startPosition Position) (NumberLiteral, bool, error) {
-	var builder strings.Builder
 	lexer.source.Next()
-	builder.WriteByte('.')
-	if !lexer.consumeRequiredDecimalDigits(&builder) {
+	if !lexer.consumeRequiredDecimalDigits() {
 		// 理论上调用方已验证数字存在；保留防御分支避免未来调用错误静默成功。
-		return NumberLiteral{Text: builder.String(), Position: startPosition}, true, ErrInvalidNumber
+		return NumberLiteral{Text: lexer.numberTextFrom(startPosition), Position: startPosition}, true, ErrInvalidNumber
 	}
 	if lexer.peekRune('e') || lexer.peekRune('E') {
 		// e/E 指数表示十进制浮点数。
 		lexer.source.Next()
-		builder.WriteByte('e')
-		lexer.consumeOptionalSign(&builder)
-		if !lexer.consumeRequiredDecimalDigits(&builder) {
+		lexer.consumeOptionalSign()
+		if !lexer.consumeRequiredDecimalDigits() {
 			// 指数符号后必须至少有一位十进制数字。
-			return NumberLiteral{Text: builder.String(), Position: startPosition}, true, ErrInvalidNumber
+			return NumberLiteral{Text: lexer.numberTextFrom(startPosition), Position: startPosition}, true, ErrInvalidNumber
 		}
 	}
 
-	text := builder.String()
+	text := lexer.numberTextFrom(startPosition)
 	numberValue, err := strconv.ParseFloat(text, 64)
 	if err != nil {
 		// 点开头数字只可能是十进制浮点，解析失败时返回数字字面量错误。
@@ -107,54 +104,27 @@ func (lexer *Lexer) scanLeadingDotDecimalNumber(startPosition Position) (NumberL
 //
 // startPosition 是数字起始位置；调用方已确认当前位置是十进制数字。
 func (lexer *Lexer) scanDecimalNumber(startPosition Position) (NumberLiteral, bool, error) {
-	var builder strings.Builder
-	for {
-		nextRune, ok := lexer.source.Peek()
-		if !ok {
-			// EOF 结束整数部分。
-			break
-		}
-		if !isDecimalDigit(nextRune) {
-			// 非数字结束整数连续段，后续再判断小数点或指数。
-			break
-		}
-		lexer.source.Next()
-		builder.WriteRune(nextRune)
-	}
+	lexer.consumeDecimalDigits()
 
 	isFloat := false
 	if lexer.peekRune('.') && !lexer.peekRuneOffset(1, '.') {
 		// 单个点表示小数点；两个点是连接操作符，不能被数字吞掉。
 		isFloat = true
 		lexer.source.Next()
-		builder.WriteRune('.')
-		for {
-			nextRune, ok := lexer.source.Peek()
-			if !ok {
-				// EOF 结束小数部分。
-				break
-			}
-			if !isDecimalDigit(nextRune) {
-				// 非数字结束小数部分。
-				break
-			}
-			lexer.source.Next()
-			builder.WriteRune(nextRune)
-		}
+		lexer.consumeDecimalDigits()
 	}
 	if lexer.peekRune('e') || lexer.peekRune('E') {
 		// e/E 指数表示十进制浮点数。
 		isFloat = true
 		lexer.source.Next()
-		builder.WriteByte('e')
-		lexer.consumeOptionalSign(&builder)
-		if !lexer.consumeRequiredDecimalDigits(&builder) {
+		lexer.consumeOptionalSign()
+		if !lexer.consumeRequiredDecimalDigits() {
 			// 指数符号后必须至少有一位十进制数字。
-			return NumberLiteral{Text: builder.String(), Position: startPosition}, true, ErrInvalidNumber
+			return NumberLiteral{Text: lexer.numberTextFrom(startPosition), Position: startPosition}, true, ErrInvalidNumber
 		}
 	}
 
-	text := builder.String()
+	text := lexer.numberTextFrom(startPosition)
 	if isFloat {
 		// 十进制浮点交给 strconv.ParseFloat 解析，保持 Go 与 Lua 都接受的指数形式。
 		numberValue, err := strconv.ParseFloat(text, 64)
@@ -181,38 +151,33 @@ func (lexer *Lexer) scanDecimalNumber(startPosition Position) (NumberLiteral, bo
 //
 // startPosition 是数字起始位置；调用方已确认当前位置是 0x/0X 前缀。
 func (lexer *Lexer) scanHexNumber(startPosition Position) (NumberLiteral, bool, error) {
-	var builder strings.Builder
 	lexer.source.Next()
-	builder.WriteByte('0')
-	prefixRune, _, _ := lexer.source.Next()
-	builder.WriteRune(prefixRune)
+	lexer.source.Next()
 
-	digitCount := lexer.consumeHexDigits(&builder)
+	digitCount := lexer.consumeHexDigits()
 	isFloat := false
 	if lexer.peekRune('.') {
 		// 十六进制小数点进入 hex float 形态。
 		isFloat = true
 		lexer.source.Next()
-		builder.WriteByte('.')
-		digitCount += lexer.consumeHexDigits(&builder)
+		digitCount += lexer.consumeHexDigits()
 	}
 	if digitCount == 0 {
 		// 0x 后必须至少有一个十六进制数字，整数和浮点都一样。
-		return NumberLiteral{Text: builder.String(), Position: startPosition}, true, ErrInvalidNumber
+		return NumberLiteral{Text: lexer.numberTextFrom(startPosition), Position: startPosition}, true, ErrInvalidNumber
 	}
 	if lexer.peekRune('p') || lexer.peekRune('P') {
 		// p/P 指数是 Lua 十六进制浮点标志。
 		isFloat = true
 		lexer.source.Next()
-		builder.WriteByte('p')
-		lexer.consumeOptionalSign(&builder)
-		if !lexer.consumeRequiredDecimalDigits(&builder) {
+		lexer.consumeOptionalSign()
+		if !lexer.consumeRequiredDecimalDigits() {
 			// p/P 后必须至少有一位十进制指数数字。
-			return NumberLiteral{Text: builder.String(), Position: startPosition}, true, ErrInvalidNumber
+			return NumberLiteral{Text: lexer.numberTextFrom(startPosition), Position: startPosition}, true, ErrInvalidNumber
 		}
 	}
 
-	text := builder.String()
+	text := lexer.numberTextFrom(startPosition)
 	if isFloat {
 		// Go ParseFloat 要求十六进制浮点必须带 p/P 指数；Lua 5.3 允许 `0xF0.0`
 		// 省略指数，语义等价于 `0xF0.0p0`。
@@ -353,10 +318,19 @@ func (lexer *Lexer) peekOffsetIsDecimalDigit(runeOffset int) bool {
 	return false
 }
 
-// consumeOptionalSign 消费可选的正负号并写入 builder。
+// numberTextFrom 返回从数字起点到当前源码位置的原始文本。
+//
+// startPosition 必须来自同一个 Source 的数字起始位置；数字扫描只消费 ASCII 字符，
+// 因此可直接按字节偏移切片，避免为临时数字文本逐 rune 写入 builder。
+func (lexer *Lexer) numberTextFrom(startPosition Position) string {
+	// 数字字面量文本必须保留源码大小写和符号，直接切原始输入最接近 Lua 词法语义。
+	return lexer.source.input[startPosition.Offset:lexer.source.offset]
+}
+
+// consumeOptionalSign 消费可选的正负号。
 //
 // 该 helper 用于数字指数部分；非正负号时不推进输入。
-func (lexer *Lexer) consumeOptionalSign(builder *strings.Builder) {
+func (lexer *Lexer) consumeOptionalSign() {
 	nextRune, ok := lexer.source.Peek()
 	if !ok {
 		// EOF 没有可选符号。
@@ -365,14 +339,13 @@ func (lexer *Lexer) consumeOptionalSign(builder *strings.Builder) {
 	if nextRune == '+' || nextRune == '-' {
 		// 指数符号只能是 + 或 -。
 		lexer.source.Next()
-		builder.WriteRune(nextRune)
 	}
 }
 
-// consumeRequiredDecimalDigits 消费至少一个十进制数字。
+// consumeDecimalDigits 消费连续十进制数字。
 //
-// 返回 true 表示成功消费一位或多位数字；返回 false 表示没有数字可消费。
-func (lexer *Lexer) consumeRequiredDecimalDigits(builder *strings.Builder) bool {
+// 返回消费的数字数量；非数字字符会保留给后续扫描。
+func (lexer *Lexer) consumeDecimalDigits() int {
 	count := 0
 	for {
 		nextRune, ok := lexer.source.Peek()
@@ -385,9 +358,16 @@ func (lexer *Lexer) consumeRequiredDecimalDigits(builder *strings.Builder) bool 
 			break
 		}
 		lexer.source.Next()
-		builder.WriteRune(nextRune)
 		count++
 	}
+	return count
+}
+
+// consumeRequiredDecimalDigits 消费至少一个十进制数字。
+//
+// 返回 true 表示成功消费一位或多位数字；返回 false 表示没有数字可消费。
+func (lexer *Lexer) consumeRequiredDecimalDigits() bool {
+	count := lexer.consumeDecimalDigits()
 	if count > 0 {
 		// 至少消费一个数字，满足指数语法。
 		return true
@@ -400,7 +380,7 @@ func (lexer *Lexer) consumeRequiredDecimalDigits(builder *strings.Builder) bool 
 // consumeHexDigits 消费连续十六进制数字。
 //
 // 返回消费的数字数量；非十六进制字符会保留给后续扫描。
-func (lexer *Lexer) consumeHexDigits(builder *strings.Builder) int {
+func (lexer *Lexer) consumeHexDigits() int {
 	count := 0
 	for {
 		nextRune, ok := lexer.source.Peek()
@@ -413,7 +393,6 @@ func (lexer *Lexer) consumeHexDigits(builder *strings.Builder) int {
 			return count
 		}
 		lexer.source.Next()
-		builder.WriteRune(nextRune)
 		count++
 	}
 }

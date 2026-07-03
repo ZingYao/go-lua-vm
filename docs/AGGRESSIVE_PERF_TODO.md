@@ -1587,6 +1587,41 @@ alloc_space 主要来源：
 AST 紧凑表示/arena、semantic scope 生命周期重构、generator/Proto 所有权重构，或先独立证明 lexer
 数字扫描减少 `utf8.AppendRune` 分配的收益。
 
+### 2026-07-04 数字扫描源码切片
+
+实现：`compiler/lexer.ScanNumber` 的十进制、点开头十进制和十六进制数字扫描不再用
+`strings.Builder` 逐 rune 拼接数字文本；扫描仍通过 `Source.Next` 推进和维护行列位置，最终用数字
+起始 `Position.Offset` 到当前 `Source.offset` 直接切原始源码字符串。数字字面量只消费 ASCII 数字、
+符号、`.`、`e/E`、`p/P`、`x/X`，因此按字节偏移切片与原 builder 文本等价。
+
+语义边界：
+
+- `NumberLiteral.Text` 保留源码原文大小写和符号，错误文本、`1..x` 连接操作符边界、十六进制整数
+  64 位回绕、十六进制浮点省略 `p0` 解析规则均保持原语义。
+- `Source.Next` 仍是唯一推进入口，行列和 Offset 维护不变；数字扫描不会跳过换行或注释。
+- `strconv.ParseInt` / `ParseFloat` 仍按原路径解析；十进制整数溢出回退浮点、非法指数返回
+  `ErrInvalidNumber` 的行为不变。
+
+验证：
+
+| 项目 | 结果 |
+| --- | ---: |
+| `gopls check compiler/lexer/number.go compiler/lexer/token.go compiler/lexer/lexer_test.go` | 无诊断 |
+| `CGO_ENABLED=0 go test ./compiler/lexer -run 'TestLexerScanNumber|TestLexerTokenGolden|TestLexerNextTokenRecognizesKeywordOperatorEOFAndIllegal' -count=1` | 通过 |
+
+benchmark 复核：
+
+| 用例 | 结果 |
+| --- | ---: |
+| `BenchmarkCompileSource3000Functions` | `6.533 / 6.569 / 6.528 / 6.550 / 6.572 ms/op`，约 `5.32 MB/op`，`30081 allocs/op` |
+| 同用例 memprofile 单轮 | `6.423 ms/op`，约 `5.32 MB/op`，`30077 allocs/op` |
+
+对比直接函数 block 容量预估后的 `33076-33082 allocs/op`，源码切片数字扫描稳定减少约 `3000 allocs/op`，
+`unicode/utf8.AppendRune` 已从 alloc_objects 热点消失。剩余 alloc_objects 继续集中在
+`parsePrimaryExpression`、semantic `analyzeBlock/analyzeFunctionBody`、`parseFunction*`、
+`parseReturnStatementUntil`、`newGenerator` 和 `NewProto`；下一步若继续编译期，应该转入 AST 紧凑表示、
+semantic scope 生命周期或 Proto/generator 所有权这类大结构方案，不再追加局部容量预估。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -1695,7 +1730,8 @@ AST 紧凑表示/arena、semantic scope 生命周期重构、generator/Proto 所
 - [x] 若继续推进编译期，基于 Proto 单 LocalVars 槽后 profile 重新观察剩余 parser AST、semantic scope、`newGenerator/NewProto` 与最终 Proto 元数据成本；无新低风险结构切口时记录证伪。
 - [x] 若继续推进编译期，基于直接子 Proto 容量预留后 profile 重新观察剩余 parser AST、semantic scope、`newGenerator/NewProto` 与最终 Proto 本体；没有新结构性切口时记录证伪。
 - [x] 若继续推进编译期，基于直接函数 block 容量预估后 profile 重新观察剩余 parser AST、semantic scope、`newGenerator/NewProto` 与最终 Proto 本体；若只剩 AST/semantic/Proto 本体成本则记录证伪，不再追加容量预估。
-- [ ] 若继续推进编译期，先独立评估 lexer 数字扫描或 AST/semantic 大结构方案；没有收益证据前不再追加 codegen/Proto 容量预估。
+- [x] 若继续推进编译期，先独立评估 lexer 数字扫描或 AST/semantic 大结构方案；没有收益证据前不再追加 codegen/Proto 容量预估。
+- [ ] 若继续推进编译期，先设计 AST 紧凑表示、semantic scope 生命周期或 Proto/generator 所有权方案；没有明确语义等价和收益证据前，不再堆局部字段/容量微调。
 - [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准
