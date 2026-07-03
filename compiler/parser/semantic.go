@@ -226,7 +226,8 @@ func (analyzer *semanticAnalyzer) analyzeBlock(block *Block, parent *ScopeInfo, 
 		parentID = parent.ID
 	}
 	endStatement := len(block.Statements)
-	scope := &ScopeInfo{ID: analyzer.nextScopeID, ParentID: parentID, ParentStatementIndex: parentStatementIndex, Depth: depth, StatementCount: endStatement, TrailingCondition: trailingCondition}
+	scope := &block.inlineScope
+	*scope = ScopeInfo{ID: analyzer.nextScopeID, ParentID: parentID, ParentStatementIndex: parentStatementIndex, Depth: depth, StatementCount: endStatement, TrailingCondition: trailingCondition}
 	analyzer.nextScopeID++
 	block.Scope = scope
 	if namespace != nil {

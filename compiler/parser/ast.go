@@ -42,6 +42,8 @@ type Block struct {
 	Return *ReturnStatement
 	// Scope 保存 block 对应的词法作用域信息，供 codegen 和 goto 合法性校验使用。
 	Scope *ScopeInfo
+	// inlineScope 保存 block 自身作用域，避免语义分析为每个 block 单独分配 ScopeInfo。
+	inlineScope ScopeInfo
 	// Position 保存 block 起始位置。
 	Position lexer.Position
 }

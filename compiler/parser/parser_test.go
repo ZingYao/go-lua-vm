@@ -289,6 +289,10 @@ func TestParserFunctionBodyInlineSingleParam(t *testing.T) {
 		// 函数体 block 应指向函数体内嵌 block 槽。
 		t.Fatalf("function body should use inline block")
 	}
+	if oneFunction.Body.Body.Scope != &oneFunction.Body.Body.inlineScope {
+		// 函数体 block 的作用域应指向 block 内嵌 scope 槽。
+		t.Fatalf("function body scope should use inline scope")
+	}
 
 	pairFunction, ok := chunk.Block.Statements[1].(*FunctionStatement)
 	if !ok {
@@ -302,6 +306,10 @@ func TestParserFunctionBodyInlineSingleParam(t *testing.T) {
 	if pairFunction.Body.Body != &pairFunction.Body.inlineBody {
 		// 多参数函数同样应复用函数体内嵌 block。
 		t.Fatalf("pair function body should use inline block")
+	}
+	if pairFunction.Body.Body.Scope != &pairFunction.Body.Body.inlineScope {
+		// 多参数函数体 block 同样应复用内嵌 scope。
+		t.Fatalf("pair function body scope should use inline scope")
 	}
 }
 
@@ -773,6 +781,10 @@ func TestParserScopeLocalLifetimeAndGotoValidation(t *testing.T) {
 	if chunk.Block.Scope == nil {
 		// 顶层 block 必须挂载作用域信息。
 		t.Fatalf("top scope is nil")
+	}
+	if chunk.Block.Scope != &chunk.Block.inlineScope {
+		// 顶层 block 的作用域应复用 block 内嵌 scope 槽。
+		t.Fatalf("top scope should use inline slot")
 	}
 	if chunk.Block.Scope.ID != 0 || chunk.Block.Scope.ParentID != -1 || chunk.Block.Scope.Depth != 0 {
 		// 顶层作用域应使用稳定的根作用域元信息。
