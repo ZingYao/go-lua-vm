@@ -941,6 +941,40 @@ alloc_objects 行级 profile 更有指导意义：
 goto/label 生命周期、`releaseCallArgumentsAfterFixedResult` 和 debug local EndPC 回填，必须先作为单独
 设计小节和测试矩阵推进，不能在本轮直接堆局部字段改动。
 
+### 2026-07-04 codegen `locals` 单局部 inline cache 设计
+
+目标：减少大量单参数子函数编译时为 `generator.locals` 创建 map 和执行 mapassign 的成本。该方向只改变
+codegen 内部名称绑定数据结构，不改变 AST、Proto 字节码、LocalVars、Upvalues 或 debug 可见语义。
+
+设计草案：
+
+- 在 `generator` 上增加一个 inline local 槽：`localInlineName`、`localInlineBinding`、`localInlineValid`。
+- `locals map[string]localBinding` 继续保留，但只作为第二个及之后绑定、或复杂作用域需要 map 时的 overflow。
+- 所有直接访问 `generator.locals[name]` 的路径改为 helper：
+  - `lookupLocal(name)`：先查 inline，后查 overflow map。
+  - `setLocal(name, binding)`：同名 inline 更新；空 inline 写入 inline；否则写入 overflow map。
+  - `forEachLocal(fn)`：统一遍历 inline 和 overflow map，供 close locals、captured 检查、释放寄存器水位使用。
+  - `localCount()` 与 `snapshotLocals()`：统一处理 scope snapshot，避免 `len(generator.locals)` 漏掉 inline。
+- `scopeSnapshot` 必须同时保存 inline 槽和 overflow map；`endScope` 恢复时必须原样恢复二者。
+- `mergeCapturedLocalsIntoSnapshot` 需要能更新 snapshot 中 inline local 的 `captured` 标记，否则内层函数捕获外层
+  单 local 时会漏发 close-only `JMP`。
+- `resolveUpvalue` 访问 parent locals 时必须通过 parent helper，并通过 `setLocal` 写回 captured 标记。
+
+语义验收矩阵：
+
+| 场景 | 必须验证 |
+| --- | --- |
+| 单参数函数 `function f(x) return x + 1 end` | 不创建 overflow map；Proto、LocalVars、Upvalues 与当前一致。 |
+| 同作用域重声明 `local x; local x` | 旧 `LocalVar.EndPC` 仍在新声明处关闭。 |
+| 内层遮蔽 `local x; do local x end; return x` | 退出 block 后外层绑定恢复，寄存器水位恢复。 |
+| upvalue 捕获 `local x; return function() return x end` | parent inline binding 标记 captured，退出作用域时 close-only JMP 保留。 |
+| goto/label 穿越 local | `scopeSnapshot` 与 parser scope 父链仍能判断非法跳入 local 作用域。 |
+| debug local 生命周期 | `luac -l -l` 的 local start/end PC 与当前 golden 一致。 |
+
+实施顺序建议：先新增 helper 并机械替换直接 `generator.locals` 访问，保持 overflow map 行为完全等价；
+再在 `setLocal` 中启用 inline fast path。这样如果语义测试失败，可以单独回滚 inline 启用逻辑，而保留
+helper 抽象不影响行为。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -1028,7 +1062,8 @@ goto/label 生命周期、`releaseCallArgumentsAfterFixedResult` 和 debug local
 - [x] 若继续推进，优先 profile `table_rw` 读取段 `GETTABLE;ADD;FORLOOP` 或 `arith_chain_temp` 的剩余项，确认存在全新语义等价切口后再实现。
 - [x] 若继续推进，优先 profile `arith_chain_temp` 的剩余项；如没有新的结构性切口，记录证伪，不再堆局部字段/分支微调。
 - [x] 若继续推进，优先 profile `compile_3000_functions`；如果没有新的编译期结构性切口，记录证伪，不再堆 parser/codegen 局部字段微调。
-- [ ] 若继续推进编译期，先设计 codegen `locals map` 单局部 inline cache 的语义方案和测试矩阵；确认 name resolution、同作用域重声明、upvalue 捕获、scope snapshot、goto/label 和 debug local 生命周期后再实现。
+- [x] 若继续推进编译期，先设计 codegen `locals map` 单局部 inline cache 的语义方案和测试矩阵；确认 name resolution、同作用域重声明、upvalue 捕获、scope snapshot、goto/label 和 debug local 生命周期后再实现。
+- [ ] 若继续推进编译期，先新增 codegen locals helper 并替换直接访问点，保持 overflow map 行为等价；通过测试后再启用 inline 槽。
 - [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准
