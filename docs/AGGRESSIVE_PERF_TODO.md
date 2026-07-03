@@ -1306,6 +1306,32 @@ benchmark 复核：
 应重新 profile，重点观察剩余 `newGenerator/NewProto`、真实表达式 AST 和常量记录成本是否还有新的
 结构性所有权切口。
 
+### 2026-07-04 codegen 作用域栈后 profile 复核
+
+profile 口径：`CGO_ENABLED=0 go test ./internal/luac -run '^$' -bench '^BenchmarkCompileSource3000Functions$'
+-benchmem -benchtime=8s -count=1 -cpuprofile ... -memprofile ...`。结果为 `6.736 ms/op`、约
+`5.64 MB/op`、`45129 allocs/op`，与 codegen 作用域栈内嵌槽后的分配口径一致。
+
+CPU profile 仍明显受 Go runtime、GC 与系统调用采样扰动影响：`runtime.madvise`、`runtime.kevent`、
+`runtime.pthread_cond_wait`、`runtime.pthread_cond_signal` 等占据主要 flat 样本。业务栈中
+`Lexer.NextToken`、`parseReturnStatementUntil`、`parseSubExpression`、`compileChildProto` 和
+`recordConstantIndex` 样本分散，没有出现新的单点 CPU 热点。
+
+alloc profile 显示剩余对象和空间主要分散在：
+
+| 位置 | 观察 |
+| --- | --- |
+| `codegen.newGenerator` / `bytecode.NewProto` | 每个子函数独立 generator、Proto、常量索引和基础切片仍是编译产物本体成本。 |
+| `parsePrimaryExpression` / `parseSubExpression` | `NameExpression`、`LiteralExpression` 与二元表达式是真实 AST 语义节点。 |
+| `semanticAnalyzer.analyzeBlock` / `analyzeFunctionBody` | block scope 已内嵌，但语义分析仍需维护函数体、父链和生命周期元数据。 |
+| `defineLocal` | locals map 与 codegen scope 栈已压缩，剩余主要是 `LocalVar` 追加和绑定写回；重复做 LocalVars 容量预留属于旧证伪方向。 |
+| `Proto.AddConstant` / `recordConstantIndex` / `Proto.AddInstruction` | 首个 integer 常量 inline 和指令小容量预留已生效，剩余是 Proto 常量、RK 与指令输出本体。 |
+
+本轮结论：没有发现新的低风险小切口。继续压缩 `compile_3000_functions` 需要进入更大的结构设计，例如
+`newGenerator/NewProto` 实体所有权、表达式 AST 布局、常量/指令存储或语义 scope 生命周期重构；这些方向都必须
+先证明字节码、LocalVars/Upvalues、debug local 生命周期、错误语义和官方反汇编保持等价。本轮只记录 profile
+证伪结果，不修改生产代码。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -1406,7 +1432,8 @@ benchmark 复核：
 - [x] 若继续推进编译期，优先 profile 单返回值内嵌槽后的表达式 AST、semantic `ScopeInfo` 与 Proto/generator 实体成本。
 - [x] 若继续推进编译期，优先 profile 函数体 block 内嵌槽后的真实表达式 AST、semantic `ScopeInfo` 与 Proto/generator 实体成本。
 - [x] 若继续推进编译期，优先 profile block 作用域内嵌槽后的 `newGenerator/NewProto`、真实表达式 AST 与常量记录成本。
-- [ ] 若继续推进编译期，优先 profile codegen 作用域栈内嵌槽后的 `newGenerator/NewProto`、真实表达式 AST 与常量记录成本。
+- [x] 若继续推进编译期，优先 profile codegen 作用域栈内嵌槽后的 `newGenerator/NewProto`、真实表达式 AST 与常量记录成本。
+- [ ] 若继续推进编译期，优先设计 `newGenerator/NewProto` 实体所有权、真实表达式 AST 布局或常量/指令存储的更大结构切口；未证明字节码、debug local 和错误语义等价前，不再堆局部字段或分支微调。
 - [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准
