@@ -1169,6 +1169,33 @@ benchmark 复核：
 明确，且仍低于小容量预留前水平。后续若继续推进编译期，应重新 profile，重点观察剩余真实 AST 节点、
 semantic scope 和 Proto/generator 实体成本，而不是继续压缩已处理的 namespace 栈。
 
+### 2026-07-04 函数体单参数内嵌槽
+
+namespace 内嵌栈后的 profile 中，`parseFunctionBody` 仍是 `compile_3000_functions` 的主要 parser 侧对象来源。
+官方规模源码的每个子函数都是 `function fN(x) ... end` 单参数形态；此前 `Params []string` 会在解析首个参数时
+立即为切片底层数组分配。
+
+实现：`FunctionBody` 新增一元素内嵌参数槽。`parseFunctionBody` 先把首个参数暂存在局部字符串，只有第二个
+参数出现时才创建普通参数切片；最终单参数函数让 `Params` 指向 `FunctionBody.inlineParams[:1]`。零参数、
+多参数、vararg、冒号方法注入 `self` 和 codegen/semantic 读取 `Body.Params` 的对外语义不变。
+
+新增测试：
+
+| 用例 | 覆盖点 |
+| --- | --- |
+| `TestParserFunctionBodyInlineSingleParam` | 单参数函数的 `Params` 指向内嵌槽；多参数函数仍保留普通参数顺序。 |
+
+benchmark 复核：
+
+| 用例 | 结果 |
+| --- | ---: |
+| `BenchmarkCompileSource3000Functions` | `6.984 / 6.970 / 6.979 / 6.914 / 6.986 ms/op`，约 `5.66 MB/op`，`57139 allocs/op` |
+
+对比 namespace 内嵌栈后的约 `7.06-7.08 ms/op`、`5.66 MB/op`、`60139 allocs/op`，该优化再减少约
+`3000 allocs/op`，B/op 基本持平，wall-clock 小幅改善。该切口只改变 AST 内部切片底层存储所有权；
+后续若继续压缩 parser 分配，应优先 profile 真实表达式 AST 节点和 semantic `ScopeInfo`，而不是继续围绕
+函数体单参数做局部分支。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -1264,7 +1291,8 @@ semantic scope 和 Proto/generator 实体成本，而不是继续压缩已处理
 - [x] 若继续推进编译期，优先 profile 单 integer 常量 inline 后的 `newGenerator/NewProto`、parser AST/namespace 与 semantic scope；只有出现新的结构性切口时再实现。
 - [x] 若继续推进编译期，优先 profile 小容量预留后的 parser AST、semantic scope 与 namespace；只有出现新的结构性切口时再实现。
 - [x] 若继续推进编译期，优先 profile 简单函数名免 AST 节点后的 parser AST 与 semantic scope；只有出现新的结构性切口时再实现。
-- [ ] 若继续推进编译期，优先 profile 函数命名空间内嵌栈后的剩余 parser AST、semantic scope 与 Proto/generator 实体成本。
+- [x] 若继续推进编译期，优先 profile 函数命名空间内嵌栈后的剩余 parser AST、semantic scope 与 Proto/generator 实体成本。
+- [ ] 若继续推进编译期，优先 profile 函数体单参数内嵌槽后的真实表达式 AST、semantic `ScopeInfo` 与 Proto/generator 实体成本。
 - [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准

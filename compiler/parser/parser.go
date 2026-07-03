@@ -771,6 +771,8 @@ func (parser *Parser) parseFunctionBody() (*FunctionBody, error) {
 		return nil, err
 	}
 	var params []string
+	var singleParam string
+	paramCount := 0
 	var vararg bool
 	if !(parser.current.Kind == lexer.TokenOperator && parser.current.Text == ")") {
 		// 非空参数列表支持普通名称和末尾 vararg。
@@ -786,12 +788,22 @@ func (parser *Parser) parseFunctionBody() (*FunctionBody, error) {
 				// 参数项必须是 identifier 或 `...`。
 				return nil, err
 			}
-			params = append(params, name)
+			if paramCount == 0 {
+				// 单参数函数是最常见路径，先暂存在局部变量，避免立即分配参数切片。
+				singleParam = name
+			} else {
+				if paramCount == 1 {
+					// 第二个参数出现时才创建真实切片，并补入此前暂存的首个参数。
+					params = append(params, singleParam)
+				}
+				params = append(params, name)
+			}
+			paramCount++
 			if !(parser.current.Kind == lexer.TokenOperator && parser.current.Text == ",") {
 				// 没有逗号时参数列表结束。
 				break
 			}
-			if err := parser.checkSyntaxListLimit(len(params) + 1); err != nil {
+			if err := parser.checkSyntaxListLimit(paramCount + 1); err != nil {
 				// 过长参数列表按 Lua 5.3 parser 递归限制返回 too many C levels。
 				return nil, err
 			}
@@ -818,7 +830,16 @@ func (parser *Parser) parseFunctionBody() (*FunctionBody, error) {
 	}
 
 	// 返回函数体节点。
-	return &FunctionBody{Params: params, Vararg: vararg, Body: body, Position: startPosition, LastLineDefined: endPosition.Line}, nil
+	functionBody := &FunctionBody{Vararg: vararg, Body: body, Position: startPosition, LastLineDefined: endPosition.Line}
+	if paramCount == 1 {
+		// 单参数函数让 Params 指向函数体内嵌槽，保持对外切片语义但避免额外底层数组。
+		functionBody.inlineParams[0] = singleParam
+		functionBody.Params = functionBody.inlineParams[:1]
+	} else if paramCount > 1 {
+		// 多参数函数沿用普通切片，保持参数顺序和 append 语义。
+		functionBody.Params = params
+	}
+	return functionBody, nil
 }
 
 // parseReturnStatement 解析 return 语句。

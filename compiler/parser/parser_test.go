@@ -261,6 +261,42 @@ func TestParserFieldAndMethodFunctionStatements(t *testing.T) {
 	}
 }
 
+// TestParserFunctionBodyInlineSingleParam 验证单参数函数复用函数体内嵌参数槽。
+//
+// 对外 Params 仍保持普通切片语义；多参数函数继续使用普通切片保存完整参数顺序。
+func TestParserFunctionBodyInlineSingleParam(t *testing.T) {
+	parser := New("function one(x) return x end function pair(a, b) return a end")
+
+	chunk, err := parser.ParseChunk()
+	if err != nil {
+		// 两个普通函数都应成功解析。
+		t.Fatalf("parse functions failed: %v", err)
+	}
+	oneFunction, ok := chunk.Block.Statements[0].(*FunctionStatement)
+	if !ok {
+		// 第一条语句应为简单函数定义。
+		t.Fatalf("first statement should be function")
+	}
+	if len(oneFunction.Body.Params) != 1 || oneFunction.Body.Params[0] != "x" {
+		// 单参数函数应保留原始参数名。
+		t.Fatalf("unexpected one params=%+v", oneFunction.Body.Params)
+	}
+	if &oneFunction.Body.Params[0] != &oneFunction.Body.inlineParams[0] {
+		// 单参数函数的 Params 应指向函数体内嵌槽。
+		t.Fatalf("single param should use inline slot")
+	}
+
+	pairFunction, ok := chunk.Block.Statements[1].(*FunctionStatement)
+	if !ok {
+		// 第二条语句应为简单函数定义。
+		t.Fatalf("second statement should be function")
+	}
+	if len(pairFunction.Body.Params) != 2 || pairFunction.Body.Params[0] != "a" || pairFunction.Body.Params[1] != "b" {
+		// 多参数函数必须保持源码参数顺序。
+		t.Fatalf("unexpected pair params=%+v", pairFunction.Body.Params)
+	}
+}
+
 // TestParserIfWhileRepeatStatements 验证 if/elseif/else、while 和 repeat-until 语句。
 //
 // 条件表达式当前使用基础表达式，block 内使用已实现赋值语句。

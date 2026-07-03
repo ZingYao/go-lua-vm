@@ -258,6 +258,8 @@ func (statement *LocalAssignmentStatement) statementNode() {
 type FunctionBody struct {
 	// Params 保存函数参数名列表。
 	Params []string
+	// inlineParams 保存最常见的单参数函数，避免为 Params 单独分配底层数组。
+	inlineParams [1]string
 	// Vararg 表示函数是否声明了 `...` 可变参数。
 	Vararg bool
 	// Body 保存函数体 block。
