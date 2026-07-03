@@ -1080,6 +1080,38 @@ benchmark 复核：
 `newGenerator/NewProto`、parser AST/namespace、semantic scope 和 Proto 指令/常量切片，后续若继续推进
 需要更大设计，不应把 number/string 常量 inline 泛化为无证据的局部微调。
 
+### 2026-07-04 codegen 指令与行号表小容量预留
+
+profile 观察：单 integer 常量 inline 后，`compile_3000_functions` 的 alloc profile 中
+`codegen.newGenerator`、`bytecode.NewProto`、`generator.addInstruction`、`Proto.AddInstruction` 和
+`Proto.AddConstant` 仍是主要 codegen 侧分配来源。每个 `function fN(x) return x + N end` 子 Proto 至少会
+生成 `ADD; RETURN` 两条指令，并同步写入两条 `LineInfo`；此前 `Code` 与 `LineInfo` 从 nil 切片开始，
+两次 append 会产生多次小扩容。
+
+实现：只在 `compiler/codegen.newGenerator` 创建的 Proto 上预留 `Code` 与 `LineInfo` 容量 2；不修改
+`bytecode.NewProto`，因此 chunk loader、手写 Proto 测试和外部直接调用 `bytecode.NewProto` 的 nil 切片语义
+保持不变。常量、LocalVars、Upvalues、child Protos 也不预留，避免对非目标场景引入无证据内存增长。
+
+中间证伪：初始容量 4 可把 allocs/op 降到约 `66134`，但 B/op 从约 `5.80 MB` 升到约 `5.85 MB`，
+属于过度预留；已收窄为容量 2 后再保留。
+
+新增测试：
+
+| 用例 | 覆盖点 |
+| --- | --- |
+| `TestNewGeneratorPreallocatesCodeAndLineInfo` | new generator 的 `Code/LineInfo` 长度仍为 0，仅预留容量；`emitABC` 后指令和行号仍一一对应。 |
+
+benchmark 复核：
+
+| 用例 | 结果 |
+| --- | ---: |
+| `BenchmarkCompileSource3000Functions` | `7.318 / 7.303 / 7.325 / 7.336 / 7.286 ms/op`，约 `5.78 MB/op`，`66136 allocs/op` |
+
+对比单 integer 常量 inline 后的约 `7.32-7.48 ms/op`、`5.80 MB/op`、`69137 allocs/op`，小容量预留再减少
+约 `3000 allocs/op`，B/op 小幅下降，wall-clock 维持或略有改善。剩余主要成本继续集中在 parser AST、
+semantic scope、namespace 以及 Proto/常量/指令实体本身；后续应先 profile，再决定是否值得进入更重的
+parser AST 或 Proto 结构设计。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -1172,7 +1204,8 @@ benchmark 复核：
 - [x] 启用 codegen 单 local inline 槽，优先验证单参数函数不创建 overflow map，同时保持同作用域重声明、内层遮蔽、upvalue captured、goto/label 和 debug local 生命周期等价。
 - [x] 若继续推进编译期，基于 inline 槽后 profile 重新观察 `compile_3000_functions`，确认剩余分配是否仍有新的结构性切口。
 - [x] 若继续推进编译期，优先拆分 `recordConstantIndex`、`newGenerator/NewProto` 与 parser AST/namespace 分配；只有能证明字节码、debug local 和错误语义等价时再实现。
-- [ ] 若继续推进编译期，优先 profile 单 integer 常量 inline 后的 `newGenerator/NewProto`、parser AST/namespace 与 semantic scope；只有出现新的结构性切口时再实现。
+- [x] 若继续推进编译期，优先 profile 单 integer 常量 inline 后的 `newGenerator/NewProto`、parser AST/namespace 与 semantic scope；只有出现新的结构性切口时再实现。
+- [ ] 若继续推进编译期，优先 profile 小容量预留后的 parser AST、semantic scope 与 namespace；只有出现新的结构性切口时再实现。
 - [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准

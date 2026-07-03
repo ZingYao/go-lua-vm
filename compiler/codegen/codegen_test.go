@@ -760,6 +760,26 @@ func TestGeneratorIntegerConstantInlineUsesOverflowOnlyAfterSecondValue(t *testi
 	}
 }
 
+// TestNewGeneratorPreallocatesCodeAndLineInfo 验证 codegen Proto 只预留指令和行号容量。
+func TestNewGeneratorPreallocatesCodeAndLineInfo(t *testing.T) {
+	generator := newGenerator("prealloc-code")
+	if len(generator.proto.Code) != 0 || len(generator.proto.LineInfo) != 0 {
+		// 容量预留不能提前写入指令或行号，否则会改变字节码输出。
+		t.Fatalf("new generator should start with empty code/lineinfo: code=%d line=%d", len(generator.proto.Code), len(generator.proto.LineInfo))
+	}
+	if cap(generator.proto.Code) < initialCodeCapacity || cap(generator.proto.LineInfo) < initialCodeCapacity {
+		// 小函数至少应能容纳常见的两到四条指令，减少首次 append 扩容。
+		t.Fatalf("unexpected code/lineinfo capacity: code=%d line=%d", cap(generator.proto.Code), cap(generator.proto.LineInfo))
+	}
+
+	generator.currentLine = 12
+	pc := generator.emitABC(bytecode.OpReturn, 0, 1, 0)
+	if pc != 0 || len(generator.proto.Code) != 1 || len(generator.proto.LineInfo) != 1 || generator.proto.LineInfo[0] != 12 {
+		// addInstruction 仍必须同步追加真实指令和对应源码行号。
+		t.Fatalf("unexpected emitted instruction state: pc=%d code=%+v line=%+v", pc, generator.proto.Code, generator.proto.LineInfo)
+	}
+}
+
 // TestCompileNestedShadowRestoresInlineLocal 验证内层遮蔽退出后恢复外层 inline local。
 func TestCompileNestedShadowRestoresInlineLocal(t *testing.T) {
 	chunk := parseChunkForCodegenTest(t, "local x = 1 do local x = 2 end return x")

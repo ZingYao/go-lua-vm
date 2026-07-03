@@ -16,6 +16,8 @@ const (
 	envUpvalueName = "_ENV"
 	// maxProtoRegisters 是 Proto.MaxStackSize 可表达的最大寄存器数量。
 	maxProtoRegisters = 255
+	// initialCodeCapacity 是 codegen Proto 指令和行号表的最小预留容量。
+	initialCodeCapacity = 2
 )
 
 // CompileChunk 将 parser.Chunk 编译为 Lua 5.3 Proto。
@@ -291,8 +293,11 @@ type scopeSnapshot struct {
 // source 会写入 Proto.Source；返回值已初始化常量表索引和局部变量表。
 func newGenerator(source string) *generator {
 	// 初始化最小状态，寄存器从 0 开始按 Lua VM 约定分配。
+	proto := bytecode.NewProto(source)
+	proto.Code = make([]bytecode.Instruction, 0, initialCodeCapacity)
+	proto.LineInfo = make([]int, 0, initialCodeCapacity)
 	return &generator{
-		proto: bytecode.NewProto(source),
+		proto: proto,
 	}
 }
 
