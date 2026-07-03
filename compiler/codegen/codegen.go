@@ -83,6 +83,8 @@ type generator struct {
 	pendingGotos []pendingGoto
 	// scopes 按 parser scope ID 保存当前函数内 block 作用域，供 goto/label 可见性解析。
 	scopes map[int]*parser.ScopeInfo
+	// inlineScopeStack 保存最常见的函数顶层 block 作用域，避免为 scopeStack 单独分配底层数组。
+	inlineScopeStack [1]*parser.ScopeInfo
 	// scopeStack 保存当前正在生成的 block 作用域栈。
 	scopeStack []*parser.ScopeInfo
 	// returned 表示当前函数已经生成显式 return 或 tail call 终结指令。
@@ -343,16 +345,27 @@ func (generator *generator) compileBlock(block *parser.Block) error {
 //
 // block.Scope 由 parser 语义阶段标注；codegen 使用该作用域解析同名 label 的可见目标。
 func (generator *generator) pushScope(block *parser.Block) {
+	var scope *parser.ScopeInfo
 	if block == nil || block.Scope == nil {
 		// 缺少作用域信息时仍允许生成，但后续 goto 只能走防御错误。
-		generator.scopeStack = append(generator.scopeStack, nil)
+		scope = nil
+	} else {
+		// 记录当前 block 的 parser 作用域，供局部变量和 goto/label 使用。
+		scope = block.Scope
+	}
+	if generator.scopes != nil && scope != nil {
+		// 已经遇到 goto 后才需要维护作用域父链索引。
+		generator.scopes[scope.ID] = scope
+	}
+	if len(generator.scopeStack) == 0 {
+		// 单 block 函数是常见路径，首个作用域复用生成器内嵌槽。
+		generator.inlineScopeStack[0] = scope
+		generator.scopeStack = generator.inlineScopeStack[:1]
 		return
 	}
-	if generator.scopes != nil {
-		// 已经遇到 goto 后才需要维护作用域父链索引。
-		generator.scopes[block.Scope.ID] = block.Scope
-	}
-	generator.scopeStack = append(generator.scopeStack, block.Scope)
+
+	// 嵌套 block 沿用普通切片扩展，保持递归路径顺序。
+	generator.scopeStack = append(generator.scopeStack, scope)
 }
 
 // popScope 离开当前 parser block 作用域。

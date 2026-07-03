@@ -722,6 +722,37 @@ func TestGeneratorLocalInlineUsesOverflowOnlyAfterSecondBinding(t *testing.T) {
 	}
 }
 
+// TestGeneratorUsesInlineScopeStack 验证 codegen 首个 parser 作用域复用内嵌栈槽。
+//
+// 普通函数通常只有一个顶层 block；嵌套 block 仍必须能按普通切片语义扩展和弹出。
+func TestGeneratorUsesInlineScopeStack(t *testing.T) {
+	generator := newGenerator("inline-scope-stack")
+	firstBlock := &parser.Block{Scope: &parser.ScopeInfo{ID: 1}}
+	secondBlock := &parser.Block{Scope: &parser.ScopeInfo{ID: 2}}
+
+	generator.pushScope(firstBlock)
+	if len(generator.scopeStack) != 1 || generator.scopeStack[0] != firstBlock.Scope {
+		// 首个作用域必须进入栈顶。
+		t.Fatalf("unexpected first scope stack=%+v", generator.scopeStack)
+	}
+	if &generator.scopeStack[0] != &generator.inlineScopeStack[0] {
+		// 首个作用域应复用生成器内嵌槽。
+		t.Fatalf("first scope should use inline slot")
+	}
+
+	generator.pushScope(secondBlock)
+	if len(generator.scopeStack) != 2 || generator.scopeStack[1] != secondBlock.Scope {
+		// 第二个作用域必须按普通切片语义扩展。
+		t.Fatalf("unexpected second scope stack=%+v", generator.scopeStack)
+	}
+	generator.popScope()
+	generator.popScope()
+	if len(generator.scopeStack) != 0 {
+		// 两次 pop 后应恢复空栈。
+		t.Fatalf("scope stack should be empty after pop, got %+v", generator.scopeStack)
+	}
+}
+
 // TestGeneratorIntegerConstantInlineUsesOverflowOnlyAfterSecondValue 验证单 integer 常量优先使用 inline 槽。
 func TestGeneratorIntegerConstantInlineUsesOverflowOnlyAfterSecondValue(t *testing.T) {
 	generator := newGenerator("inline-integer-constant")
