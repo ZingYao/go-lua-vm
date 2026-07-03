@@ -87,21 +87,36 @@ func (parser *Parser) ParseBlock() (*Block, error) {
 // extraEnd 为 nil 时只使用标准 block 结束 token；switch case/default 这类上下文边界会通过
 // extraEnd 注入，避免把 case/default 变成全局保留字。
 func (parser *Parser) parseBlockUntil(extraEnd func(lexer.Token) bool) (*Block, error) {
+	block := &Block{}
+	if err := parser.parseBlockUntilInto(block, extraEnd); err != nil {
+		// block 解析失败时向调用方透传兼容错误。
+		return nil, err
+	}
+
+	// 返回按源码顺序收集的语句列表。
+	return block, nil
+}
+
+// parseBlockUntilInto 解析 Lua block 到调用方提供的 block 节点。
+//
+// block 必须是调用方独占的可写节点；该 helper 会重置其中内容，并保留 parseBlockUntil 的
+// block 结束 token、return 终止语义和 syntax level 检查。
+func (parser *Parser) parseBlockUntilInto(block *Block, extraEnd func(lexer.Token) bool) error {
 	if err := parser.enterSyntaxLevel(parser.current); err != nil {
 		// block 嵌套超过 Lua 5.3 parser 限制时直接返回兼容错误。
-		return nil, err
+		return err
 	}
 	defer parser.leaveSyntaxLevel()
 
 	// block 起始位置使用当前 token 位置。
-	block := &Block{Position: parser.current.Position}
+	*block = Block{Position: parser.current.Position}
 	for !parser.isBlockEndToken(parser.current, extraEnd) {
 		if parser.current.Kind == lexer.TokenKeyword && parser.current.Text == "return" {
 			// return 是 block 的终结语句，解析后停止收集普通语句。
 			returnStatement, err := parser.parseReturnStatementUntil(extraEnd)
 			if err != nil {
 				// return 解析失败时终止 block 解析。
-				return nil, err
+				return err
 			}
 			block.Return = returnStatement
 			break
@@ -109,13 +124,13 @@ func (parser *Parser) parseBlockUntil(extraEnd func(lexer.Token) bool) (*Block, 
 		statement, err := parser.parseStatement()
 		if err != nil {
 			// 任一语句解析失败都会终止 block 解析。
-			return nil, err
+			return err
 		}
 		block.Statements = append(block.Statements, statement)
 	}
 
-	// 返回按源码顺序收集的语句列表。
-	return block, nil
+	// block 已写入调用方提供的节点。
+	return nil
 }
 
 // parseStatement 解析当前 token 开始的一条语句。
@@ -818,8 +833,9 @@ func (parser *Parser) parseFunctionBody() (*FunctionBody, error) {
 		// 参数列表必须用右括号关闭。
 		return nil, err
 	}
-	body, err := parser.ParseBlock()
-	if err != nil {
+	functionBody := &FunctionBody{Vararg: vararg, Position: startPosition}
+	functionBody.Body = &functionBody.inlineBody
+	if err := parser.parseBlockUntilInto(functionBody.Body, nil); err != nil {
 		// 函数体 block 内语句解析失败时返回错误。
 		return nil, err
 	}
@@ -830,7 +846,7 @@ func (parser *Parser) parseFunctionBody() (*FunctionBody, error) {
 	}
 
 	// 返回函数体节点。
-	functionBody := &FunctionBody{Vararg: vararg, Body: body, Position: startPosition, LastLineDefined: endPosition.Line}
+	functionBody.LastLineDefined = endPosition.Line
 	if paramCount == 1 {
 		// 单参数函数让 Params 指向函数体内嵌槽，保持对外切片语义但避免额外底层数组。
 		functionBody.inlineParams[0] = singleParam

@@ -264,6 +264,8 @@ type FunctionBody struct {
 	Vararg bool
 	// Body 保存函数体 block。
 	Body *Block
+	// inlineBody 保存函数体自身 block，避免为每个函数体单独分配 Block 对象。
+	inlineBody Block
 	// Position 保存左括号位置。
 	Position lexer.Position
 	// LineDefined 保存 function 关键字所在源码行，供 Proto debug 信息使用。

@@ -1224,6 +1224,33 @@ benchmark 复核：
 B/op 基本持平，wall-clock 在噪声内小幅向好。该切口只改变 AST 内部切片底层存储所有权；后续若继续推进
 编译期，应重新 profile 表达式 AST、semantic `ScopeInfo` 与 Proto/generator 实体成本。
 
+### 2026-07-04 函数体 block 内嵌槽
+
+单返回值内嵌槽后的 profile 中，`parseBlockUntil` 仍有稳定对象成本。官方规模源码的每个子函数都有自己的
+函数体 block；此前 `parseFunctionBody` 会调用 `ParseBlock` 并为该 block 单独分配 `*Block`。函数体
+block 的所有权天然属于 `FunctionBody`，对外只需要继续通过 `Body *Block` 读取。
+
+实现：`FunctionBody` 新增内嵌 `Block` 槽，`parseBlockUntil` 拆出内部 helper `parseBlockUntilInto`。
+普通 block 路径仍分配并返回独立 `*Block`；函数体路径把 block 直接解析到 `FunctionBody.inlineBody`，
+并让 `Body` 指向该内嵌槽。该改动不改变 `Block` 对外字段、function body 的 `Body *Block` 类型、
+syntax level 检查、return 终止语义、switch case/default 额外结束 token 或 codegen/semantic 行为。
+
+测试更新：
+
+| 用例 | 覆盖点 |
+| --- | --- |
+| `TestParserFunctionBodyInlineSingleParam` | 单/多参数函数的 `Body` 均指向函数体内嵌 block；单参数内嵌槽仍生效。 |
+
+benchmark 复核：
+
+| 用例 | 结果 |
+| --- | ---: |
+| `BenchmarkCompileSource3000Functions` | `6.833 / 6.828 / 6.843 / 6.846 / 6.842 ms/op`，约 `5.66 MB/op`，`51133 allocs/op` |
+
+对比单返回值内嵌槽后的约 `6.90-6.93 ms/op`、`54133 allocs/op`，该优化再减少约 `3000 allocs/op`；
+B/op 基本持平，wall-clock 小幅改善。后续若继续推进编译期，应重新 profile，重点判断剩余对象是否主要是
+真实表达式 AST、semantic `ScopeInfo`、`Proto` 与 `generator` 实体；若没有新的结构性所有权切口，应记录证伪。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -1321,7 +1348,8 @@ B/op 基本持平，wall-clock 在噪声内小幅向好。该切口只改变 AST
 - [x] 若继续推进编译期，优先 profile 简单函数名免 AST 节点后的 parser AST 与 semantic scope；只有出现新的结构性切口时再实现。
 - [x] 若继续推进编译期，优先 profile 函数命名空间内嵌栈后的剩余 parser AST、semantic scope 与 Proto/generator 实体成本。
 - [x] 若继续推进编译期，优先 profile 函数体单参数内嵌槽后的真实表达式 AST、semantic `ScopeInfo` 与 Proto/generator 实体成本。
-- [ ] 若继续推进编译期，优先 profile 单返回值内嵌槽后的表达式 AST、semantic `ScopeInfo` 与 Proto/generator 实体成本。
+- [x] 若继续推进编译期，优先 profile 单返回值内嵌槽后的表达式 AST、semantic `ScopeInfo` 与 Proto/generator 实体成本。
+- [ ] 若继续推进编译期，优先 profile 函数体 block 内嵌槽后的真实表达式 AST、semantic `ScopeInfo` 与 Proto/generator 实体成本。
 - [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准

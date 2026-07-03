@@ -285,6 +285,10 @@ func TestParserFunctionBodyInlineSingleParam(t *testing.T) {
 		// 单参数函数的 Params 应指向函数体内嵌槽。
 		t.Fatalf("single param should use inline slot")
 	}
+	if oneFunction.Body.Body != &oneFunction.Body.inlineBody {
+		// 函数体 block 应指向函数体内嵌 block 槽。
+		t.Fatalf("function body should use inline block")
+	}
 
 	pairFunction, ok := chunk.Block.Statements[1].(*FunctionStatement)
 	if !ok {
@@ -294,6 +298,10 @@ func TestParserFunctionBodyInlineSingleParam(t *testing.T) {
 	if len(pairFunction.Body.Params) != 2 || pairFunction.Body.Params[0] != "a" || pairFunction.Body.Params[1] != "b" {
 		// 多参数函数必须保持源码参数顺序。
 		t.Fatalf("unexpected pair params=%+v", pairFunction.Body.Params)
+	}
+	if pairFunction.Body.Body != &pairFunction.Body.inlineBody {
+		// 多参数函数同样应复用函数体内嵌 block。
+		t.Fatalf("pair function body should use inline block")
 	}
 }
 
