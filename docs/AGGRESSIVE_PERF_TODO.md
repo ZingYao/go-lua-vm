@@ -65,6 +65,20 @@ official-sized Go micro 三轮基线：
 
 结论：算术 prepared 与 DoString wall-clock 基本重合，说明编译、OpenLibs 和 State 初始化不是 `arith_*` 的主要耗时；`table_rw` prepared 仍约 33.5MB/op，继续指向运行期 table 数组扩容；`recursion` 默认完整三轮稳定高于 3x，是当前首要边缘项。下一轮按 TODO 生成 `arith_add_loop`、`arith_chain_temp`、`arith_mix_loop` CPU profile，再决定 Proto 预解码和 arithmetic superinstruction 的最小切口。
 
+### 2026-07-03 arithmetic CPU profile
+
+命令：`CGO_ENABLED=0 go test ./lua -run '^$' -bench '^BenchmarkPreparedArith...Official$' -benchmem -benchtime=5s -count=1 -cpuprofile /tmp/go-lua-vm-aggressive-profiles/<case>.pprof`
+
+profile 使用 prepared 口径，避免编译、OpenLibs 和 State 初始化噪声。
+
+| 用例 | benchmark | CPU 主要热点 |
+| --- | ---: | --- |
+| `PreparedArithAddLoopOfficial` | 16.47ms/op, 0 allocs/op | `executePreparedLuaClosureWithDebugNameTailFromArgs` 25.00% flat / 96.60% cum；`tryCachedIntegerAddArithmetic` 22.04%；`VM.Step` 16.42% flat / 60.50% cum；`executeForLoop` 16.12%；`NextPC` 3.85%；`SetCurrentPC` 2.66%；`isLuaHotNoPostProcessOpcode` 1.92% |
+| `PreparedArithChainTempOfficial` | 33.61ms/op, 0 allocs/op | `executePreparedLuaClosureWithDebugNameTailFromArgs` 25.70% flat / 96.08% cum；`VM.Step` 13.22% flat / 56.92% cum；`tryCachedIntegerAddArithmetic` 10.89%；`tryCachedIntegerMulArithmetic` 8.81%；`executeForLoop` 8.69%；`tryCachedIntegerSubArithmetic` 7.59%；`NextPC` 4.28%；`SetCurrentPC` 3.43% |
+| `PreparedArithMixLoopOfficial` | 28.27ms/op, 0 allocs/op | `executePreparedLuaClosureWithDebugNameTailFromArgs` 21.10% flat / 96.55% cum；`VM.Step` 14.07% flat / 65.35% cum；`tryCachedIntegerAddArithmetic` 8.82%；`integerFloorDiv` 7.80%；`tryCachedIntegerModArithmetic` 7.03% cum；`tryCachedIntegerMulArithmetic` 5.12%；`executeForLoop` 4.86%；`tryCachedIntegerIDivArithmetic` 12.53% cum；`SetCurrentPC` 2.69%；`NextPC` 2.05% |
+
+结论：三条 arithmetic prepared 路径均为纯执行 CPU，热点仍集中在执行循环、`VM.Step` 分发、integer arithmetic cache 和 `FORLOOP`。`SetCurrentPC`、`NextPC`、`isLuaHotNoPostProcessOpcode` 在 tight loop 中也有稳定固定成本。该 profile 支持下一步优先做 Proto 预解码和 arithmetic superinstruction 原型；不建议继续重复已证伪的单个 opcode 局部字段/分支微调。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -113,7 +127,7 @@ official-sized Go micro 三轮基线：
 ## TODO
 
 - [x] 跑激进分支基线：默认完整 benchmark 三轮、official-sized Go micro 矩阵、`BenchmarkPrepared*` 相关项。
-- [ ] 生成 `arith_add_loop`、`arith_chain_temp`、`arith_mix_loop` 的 CPU profile，确认当前热点仍集中在 VM.Step、整数算术和 FORLOOP。
+- [x] 生成 `arith_add_loop`、`arith_chain_temp`、`arith_mix_loop` 的 CPU profile，确认当前热点仍集中在 VM.Step、整数算术和 FORLOOP。
 - [ ] 设计 Proto 预解码结构，明确字段、生命周期、VM 池复用安全边界和回退策略。
 - [ ] 实现最小 Proto 预解码，只服务 arithmetic hot path，不改普通解释器语义。
 - [ ] 为预解码补单测，覆盖 Proto 切换、VM 复用、常量 RK、寄存器越界和 stripped chunk。
