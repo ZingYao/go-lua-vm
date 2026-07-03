@@ -1878,6 +1878,38 @@ benchmark 复核：
 但后续不应继续以显著增加 B/op 的方式压缩对象数。剩余主要对象热点是 `codegen.newChildGenerator`
 和 `parser.parseFunctionStatement`。
 
+### 2026-07-04 直接子 generator arena
+
+实现：延续直接子 Proto arena 的所有权策略，为当前函数预分配一段 `[]generator`，直接子函数编译时优先
+借用父 generator 的临时 codegen 状态。该 arena 只在编译期使用，最终 `Proto` 不持有 generator、locals、
+scopeStack、pending goto 或其它临时 codegen 状态；预估之外的复杂嵌套子函数仍回退独立 generator。
+
+语义边界：
+
+- `newChildGenerator` 仍为子函数设置相同 parent 指针，因此 upvalue 捕获、局部生命周期和 goto/label 语义不变。
+- generator arena 与 child Proto arena 按同一顺序借用，保持 `Proto.Protos` 和 CLOSURE Bx 索引顺序不变。
+- 编译完成后只有 `Proto` 图存活；generator arena 不被运行期 closure、debug 或 binary dump 路径引用。
+
+验证：
+
+| 项目 | 结果 |
+| --- | ---: |
+| `gopls check compiler/codegen/codegen.go compiler/codegen/codegen_test.go bytecode/proto.go internal/luac/luac_test.go` | 无诊断 |
+| `CGO_ENABLED=0 go test ./compiler/codegen ./internal/luac -count=1` | 通过 |
+
+benchmark 复核：
+
+| 用例 | 结果 |
+| --- | ---: |
+| `BenchmarkCompileSource3000Functions` | `6.068-6.131 ms/op`，约 `5.22 MB/op`，`3114 allocs/op` |
+| 同用例 memprofile 单轮 | `5.708 ms/op`，约 `5.22 MB/op`，`3110 allocs/op` |
+
+对比直接子 Proto arena 后约 `6113 allocs/op`，本轮再减少约 `3000 allocs/op`；alloc_objects 中
+`codegen.newChildGenerator` 已从顶层热点消失，剩余对象几乎全部集中到 `parser.parseFunctionStatement`。
+代价是 B/op 继续从约 `5.12 MB/op` 上升到约 `5.22 MB/op`。该提交把编译期对象数压到约 `3114 allocs/op`，
+但已经连续两轮通过大 backing array 换对象数；后续不应继续用类似 arena 堆 B/op，应该只评估
+`FunctionStatement` 宿主节点精确布局，或记录编译期短期优化到此为止。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -1995,7 +2027,8 @@ benchmark 复核：
 - [x] 若继续推进编译期，基于 FunctionBody 内嵌宿主节点后重新 profile；优先评估 `ReturnStatement` 精确布局或 `newGenerator/NewProto` 实体所有权，不重试 statement 页式 arena。
 - [x] 若继续推进编译期，基于 ReturnStatement 内嵌 Block 后重新 profile；优先评估 `newGenerator/NewProto` 实体所有权或剩余 `FunctionStatement` 宿主节点布局。
 - [x] 若继续推进编译期，优先评估剩余 `FunctionStatement` 宿主节点布局或 `NewProto` 本体所有权；不要重复栈上 generator 方向，且不得让最终 `Proto` 保留 codegen 临时状态。
-- [ ] 若继续推进编译期，优先 profile 直接子 Proto arena 后的 `codegen.newChildGenerator` 与 `parser.parseFunctionStatement`；B/op 已上升到约 `5.12 MB/op`，后续切口不得继续显著增加 B/op。
+- [x] 若继续推进编译期，优先 profile 直接子 Proto arena 后的 `codegen.newChildGenerator` 与 `parser.parseFunctionStatement`；B/op 已上升到约 `5.12 MB/op`，后续切口不得继续显著增加 B/op。
+- [ ] 若继续推进编译期，只评估 `FunctionStatement` 宿主节点精确布局或记录编译期短期优化收尾；不要继续通过大 backing array 增加 B/op 来换 allocs/op。
 - [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准

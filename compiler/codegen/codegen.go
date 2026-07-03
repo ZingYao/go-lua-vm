@@ -64,6 +64,10 @@ type generator struct {
 	childProtoArena []bytecode.Proto
 	// childProtoNext 保存 childProtoArena 中下一个可借用的子 Proto 下标。
 	childProtoNext int
+	// childGeneratorArena 保存当前函数预估直接子函数的 codegen 状态，仅在编译期使用。
+	childGeneratorArena []generator
+	// childGeneratorNext 保存 childGeneratorArena 中下一个可借用的 generator 下标。
+	childGeneratorNext int
 	// nextRegister 保存下一个可分配寄存器。
 	nextRegister int
 	// maxRegister 保存生成过程中到达过的最大寄存器数量。
@@ -326,9 +330,23 @@ func prepareCodegenProto(proto *bytecode.Proto) {
 // child 使用独立 Proto、寄存器和常量池，但保留 parent 用于 upvalue 捕获。
 func newChildGenerator(parent *generator, source string) *generator {
 	// 子函数状态与顶层一致，只额外记录 parent。
-	child := &generator{proto: parent.borrowChildProto(source)}
-	child.parent = parent
-	return child
+	return parent.borrowChildGenerator(source)
+}
+
+// borrowChildGenerator 返回当前生成器拥有的下一个子函数 codegen 状态。
+//
+// 预估容量命中时返回 childGeneratorArena 中的临时状态；未命中时回退独立 generator，保持复杂嵌套语义。
+func (parent *generator) borrowChildGenerator(source string) *generator {
+	if parent != nil && parent.childGeneratorNext < len(parent.childGeneratorArena) {
+		// 直接子函数的 codegen 状态只在编译期使用，最终 Proto 不会持有该临时对象。
+		child := &parent.childGeneratorArena[parent.childGeneratorNext]
+		parent.childGeneratorNext++
+		*child = generator{proto: parent.borrowChildProto(source), parent: parent}
+		return child
+	}
+
+	// 预估之外的子函数保持原独立 generator 分配路径。
+	return &generator{proto: parent.borrowChildProto(source), parent: parent}
 }
 
 // borrowChildProto 返回当前生成器拥有的下一个子函数 Proto。
@@ -354,27 +372,31 @@ func (generator *generator) borrowChildProto(source string) *bytecode.Proto {
 //
 // block 为 nil 或没有直接函数声明时保持现有短槽；该方法只改变容量，不改变 Proto.p、Code、LineInfo 或
 // Constants 的长度、顺序、CLOSURE Bx 索引或 binary chunk 输出。
-func (generator *generator) prepareDirectFunctionBlockCapacity(block *parser.Block) {
-	if generator == nil || generator.proto == nil || block == nil {
+func (gen *generator) prepareDirectFunctionBlockCapacity(block *parser.Block) {
+	if gen == nil || gen.proto == nil || block == nil {
 		// 缺少生成器或 block 时没有可预留对象，保持调用方状态不变。
 		return
 	}
 	stats := directFunctionBlockStatsFor(block)
-	if stats.instructionCapacity > cap(generator.proto.Code) && len(generator.proto.Code) == 0 && len(generator.proto.LineInfo) == 0 {
+	if stats.instructionCapacity > cap(gen.proto.Code) && len(gen.proto.Code) == 0 && len(gen.proto.LineInfo) == 0 {
 		// 直接函数声明会稳定产生 CLOSURE/SETGLOBAL 指令；只在尚未写入指令前扩大容量。
-		generator.proto.PrepareInlineCodeLineInfo(stats.instructionCapacity)
+		gen.proto.PrepareInlineCodeLineInfo(stats.instructionCapacity)
 	}
-	if stats.nameConstantCapacity > cap(generator.proto.Constants) && len(generator.proto.Constants) == 0 {
+	if stats.nameConstantCapacity > cap(gen.proto.Constants) && len(gen.proto.Constants) == 0 {
 		// 普通 function 名称会进入当前 Proto 常量表；只预留容量，不写入常量。
-		generator.proto.PrepareInlineConstants(stats.nameConstantCapacity)
+		gen.proto.PrepareInlineConstants(stats.nameConstantCapacity)
 	}
-	if stats.childCount > 0 && len(generator.proto.Protos) == 0 && cap(generator.proto.Protos) == 0 {
+	if stats.childCount > 0 && len(gen.proto.Protos) == 0 && cap(gen.proto.Protos) == 0 {
 		// 直接函数声明会在当前 Proto.p 追加子 Proto；无子函数时保持 nil 切片。
-		generator.proto.Protos = make([]*bytecode.Proto, 0, stats.childCount)
+		gen.proto.Protos = make([]*bytecode.Proto, 0, stats.childCount)
 	}
-	if stats.childCount > 0 && generator.childProtoArena == nil {
+	if stats.childCount > 0 && gen.childProtoArena == nil {
 		// 直接子函数 Proto 本体由父 generator 精确持有，避免每个子函数一次 NewProto 对象分配。
-		generator.childProtoArena = make([]bytecode.Proto, stats.childCount)
+		gen.childProtoArena = make([]bytecode.Proto, stats.childCount)
+	}
+	if stats.childCount > 0 && gen.childGeneratorArena == nil {
+		// 直接子函数 generator 由父 generator 精确持有，只在编译期使用，不进入最终 Proto。
+		gen.childGeneratorArena = make([]generator, stats.childCount)
 	}
 }
 

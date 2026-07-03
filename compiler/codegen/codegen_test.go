@@ -925,6 +925,32 @@ func TestCompileChunkPreallocatesDirectFunctionBlock(t *testing.T) {
 		t.Fatalf("fallback child reused arena slot: %p", fallbackChild)
 	}
 
+	generatorArena := newGenerator("child-generator-arena")
+	generatorArena.prepareDirectFunctionBlockCapacity(functionChunk.Block)
+	if len(generatorArena.childGeneratorArena) != stats.childCount {
+		// 直接子函数 generator arena 应按统计数量精确分配。
+		t.Fatalf("unexpected child generator arena length=%d stats=%+v", len(generatorArena.childGeneratorArena), stats)
+	}
+	firstGenerator := generatorArena.borrowChildGenerator("first-generator")
+	secondGenerator := generatorArena.borrowChildGenerator("second-generator")
+	if firstGenerator != &generatorArena.childGeneratorArena[0] || secondGenerator != &generatorArena.childGeneratorArena[1] {
+		// 预估命中时子函数 codegen 状态必须来自父 generator 的连续 arena。
+		t.Fatalf("child generators should use arena: first=%p second=%p arena=%p/%p", firstGenerator, secondGenerator, &generatorArena.childGeneratorArena[0], &generatorArena.childGeneratorArena[1])
+	}
+	if firstGenerator.parent != generatorArena || secondGenerator.parent != generatorArena {
+		// 借用 generator 仍必须指回父 generator，保持 upvalue 捕获语义。
+		t.Fatalf("child generator parent mismatch: first=%p second=%p parent=%p", firstGenerator.parent, secondGenerator.parent, generatorArena)
+	}
+	if firstGenerator.proto != &generatorArena.childProtoArena[0] || secondGenerator.proto != &generatorArena.childProtoArena[1] {
+		// generator arena 和 Proto arena 必须按同一顺序配对，保持 CLOSURE Bx 顺序。
+		t.Fatalf("child generator proto mismatch: first=%p second=%p arena=%p/%p", firstGenerator.proto, secondGenerator.proto, &generatorArena.childProtoArena[0], &generatorArena.childProtoArena[1])
+	}
+	fallbackGenerator := generatorArena.borrowChildGenerator("fallback-generator")
+	if fallbackGenerator == &generatorArena.childGeneratorArena[0] || fallbackGenerator == &generatorArena.childGeneratorArena[1] {
+		// 超出预估时必须回退独立 generator，避免覆盖已借出的编译状态。
+		t.Fatalf("fallback generator reused arena slot: %p", fallbackGenerator)
+	}
+
 	nestedChunk := parseChunkForCodegenTest(t, "do function nested() end end")
 	if nestedStats := directFunctionBlockStatsFor(nestedChunk.Block); nestedStats.childCount != 0 || nestedStats.instructionCapacity != 0 || nestedStats.nameConstantCapacity != 0 {
 		// helper 只统计当前 block 的直接函数声明，不递归进入嵌套 block。
