@@ -141,6 +141,10 @@ type Proto struct {
 	LocalVars []LocalVar
 	// Upvalues 保存 upvalue 调试与捕获信息，对齐 Proto.upvalues。
 	Upvalues []UpvalueDesc
+	// inlineCode 保存 codegen 最常见的短函数指令槽，仅在显式 opt-in 后作为 Code 的底层数组。
+	inlineCode [2]Instruction
+	// inlineLineInfo 保存 codegen 最常见的短函数行号槽，仅在显式 opt-in 后作为 LineInfo 的底层数组。
+	inlineLineInfo [2]int
 }
 
 // NewProto 创建一个空 Lua 函数原型。
@@ -150,6 +154,32 @@ type Proto struct {
 func NewProto(source string) *Proto {
 	// 新原型只绑定源码名称，其他字段由编译器或 chunk loader 后续填充。
 	return &Proto{Source: source}
+}
+
+// PrepareInlineCodeLineInfo 为 codegen 短函数准备指令和行号表容量。
+//
+// capacity 表示调用方预期的最小指令数；该方法必须在写入 Code 或 LineInfo 前调用。容量不超过
+// 内嵌短槽时复用 Proto 自身存储，超过短槽时退回普通切片分配。已有内容时保持原切片不变，避免误调用
+// 丢失 binary chunk loader 或手写 Proto 已经追加的字节码。
+func (proto *Proto) PrepareInlineCodeLineInfo(capacity int) {
+	if proto == nil || capacity <= 0 {
+		// nil 或无效容量没有可准备对象，保持调用方状态不变。
+		return
+	}
+	if len(proto.Code) != 0 || len(proto.LineInfo) != 0 {
+		// 已有指令或行号时不能重绑定底层数组，否则会丢失已经构造的字节码。
+		return
+	}
+	if capacity <= len(proto.inlineCode) {
+		// 短函数使用 Proto 内嵌槽，减少每个子函数两段小切片底层数组分配。
+		proto.Code = proto.inlineCode[:0]
+		proto.LineInfo = proto.inlineLineInfo[:0]
+		return
+	}
+
+	// 超过短槽容量时按调用方请求预留普通切片，保持扩展函数的追加性能。
+	proto.Code = make([]Instruction, 0, capacity)
+	proto.LineInfo = make([]int, 0, capacity)
 }
 
 // StripDebug 深拷贝 Proto 并剥离 Lua 5.3 调试信息。

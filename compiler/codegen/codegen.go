@@ -296,8 +296,7 @@ type scopeSnapshot struct {
 func newGenerator(source string) *generator {
 	// 初始化最小状态，寄存器从 0 开始按 Lua VM 约定分配。
 	proto := bytecode.NewProto(source)
-	proto.Code = make([]bytecode.Instruction, 0, initialCodeCapacity)
-	proto.LineInfo = make([]int, 0, initialCodeCapacity)
+	proto.PrepareInlineCodeLineInfo(initialCodeCapacity)
 	return &generator{
 		proto: proto,
 	}

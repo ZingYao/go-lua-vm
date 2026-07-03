@@ -103,8 +103,8 @@ func TestProtoAppendHelpers(t *testing.T) {
 	proto := NewProto("@main.lua")
 
 	// 新建 Proto 必须记录 source，并保持切片为空。
-	if proto.Source != "@main.lua" || len(proto.Constants) != 0 || len(proto.Code) != 0 || len(proto.Protos) != 0 {
-		t.Fatalf("new proto mismatch: source=%q constants=%d code=%d protos=%d", proto.Source, len(proto.Constants), len(proto.Code), len(proto.Protos))
+	if proto.Source != "@main.lua" || len(proto.Constants) != 0 || proto.Code != nil || len(proto.Protos) != 0 || proto.LineInfo != nil {
+		t.Fatalf("new proto mismatch: source=%q constants=%d code=%v protos=%d line=%v", proto.Source, len(proto.Constants), proto.Code, len(proto.Protos), proto.LineInfo)
 	}
 
 	// 常量追加应返回零基常量表索引。
@@ -122,5 +122,60 @@ func TestProtoAppendHelpers(t *testing.T) {
 	// 子原型追加应返回零基子函数索引。
 	if index := proto.AddChild(child); index != 0 || proto.Protos[0] != child {
 		t.Fatalf("child proto mismatch: index=%d childStored=%v", index, proto.Protos[0] == child)
+	}
+}
+
+// TestProtoPrepareInlineCodeLineInfo 验证短函数指令和行号表 opt-in 内嵌槽。
+//
+// NewProto 默认仍保持 nil 切片；只有 codegen 显式准备容量时，短 Code/LineInfo 才复用 Proto 内嵌槽。
+func TestProtoPrepareInlineCodeLineInfo(t *testing.T) {
+	proto := NewProto("@inline.lua")
+	if proto.Code != nil || proto.LineInfo != nil {
+		// 默认 nil 切片语义是 chunk loader 和手写 Proto 的兼容边界。
+		t.Fatalf("new proto should keep nil slices: code=%v line=%v", proto.Code, proto.LineInfo)
+	}
+
+	proto.PrepareInlineCodeLineInfo(2)
+	if len(proto.Code) != 0 || len(proto.LineInfo) != 0 || cap(proto.Code) != 2 || cap(proto.LineInfo) != 2 {
+		// opt-in 后只预留容量，不能产生可见指令或行号。
+		t.Fatalf("unexpected prepared slices: code len/cap=%d/%d line len/cap=%d/%d", len(proto.Code), cap(proto.Code), len(proto.LineInfo), cap(proto.LineInfo))
+	}
+
+	first := CreateABx(OpLoadK, 0, 0)
+	second := CreateABC(OpReturn, 0, 1, 0)
+	third := CreateABC(OpMove, 1, 0, 0)
+	if pc := proto.AddInstruction(first); pc != 0 {
+		// 第一条指令仍从 pc 0 开始。
+		t.Fatalf("first pc mismatch: %d", pc)
+	}
+	proto.LineInfo = append(proto.LineInfo, 11)
+	if pc := proto.AddInstruction(second); pc != 1 {
+		// 第二条指令仍按顺序追加。
+		t.Fatalf("second pc mismatch: %d", pc)
+	}
+	proto.LineInfo = append(proto.LineInfo, 12)
+	if pc := proto.AddInstruction(third); pc != 2 {
+		// 第三条指令会触发普通 slice 扩容，但 pc 语义不变。
+		t.Fatalf("third pc mismatch: %d", pc)
+	}
+	proto.LineInfo = append(proto.LineInfo, 13)
+	if len(proto.Code) != 3 || proto.Code[0] != first || proto.Code[1] != second || proto.Code[2] != third {
+		// 扩容后必须保留短槽中的前两条指令顺序。
+		t.Fatalf("code order changed: %+v", proto.Code)
+	}
+	if len(proto.LineInfo) != 3 || proto.LineInfo[0] != 11 || proto.LineInfo[1] != 12 || proto.LineInfo[2] != 13 {
+		// 行号表必须与指令扩容保持同序。
+		t.Fatalf("line info order changed: %+v", proto.LineInfo)
+	}
+
+	stripped := StripDebug(proto)
+	if len(stripped.Code) != 3 || len(stripped.LineInfo) != 0 {
+		// StripDebug 必须复制执行字节码并剥离行号表。
+		t.Fatalf("unexpected stripped proto: code=%+v line=%+v", stripped.Code, stripped.LineInfo)
+	}
+	stripped.Code[0] = CreateABC(OpReturn, 0, 1, 0)
+	if proto.Code[0] != first {
+		// StripDebug 返回值不得与原 Proto 共享 Code 底层数组。
+		t.Fatalf("stripped code shares storage with source")
 	}
 }

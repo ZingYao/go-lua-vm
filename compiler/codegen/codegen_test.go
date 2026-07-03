@@ -799,7 +799,7 @@ func TestNewGeneratorPreallocatesCodeAndLineInfo(t *testing.T) {
 		t.Fatalf("new generator should start with empty code/lineinfo: code=%d line=%d", len(generator.proto.Code), len(generator.proto.LineInfo))
 	}
 	if cap(generator.proto.Code) < initialCodeCapacity || cap(generator.proto.LineInfo) < initialCodeCapacity {
-		// 小函数至少应能容纳常见的两到四条指令，减少首次 append 扩容。
+		// 小函数至少应能容纳常见的两条指令，减少首次 append 扩容。
 		t.Fatalf("unexpected code/lineinfo capacity: code=%d line=%d", cap(generator.proto.Code), cap(generator.proto.LineInfo))
 	}
 
@@ -808,6 +808,19 @@ func TestNewGeneratorPreallocatesCodeAndLineInfo(t *testing.T) {
 	if pc != 0 || len(generator.proto.Code) != 1 || len(generator.proto.LineInfo) != 1 || generator.proto.LineInfo[0] != 12 {
 		// addInstruction 仍必须同步追加真实指令和对应源码行号。
 		t.Fatalf("unexpected emitted instruction state: pc=%d code=%+v line=%+v", pc, generator.proto.Code, generator.proto.LineInfo)
+	}
+
+	generator.currentLine = 13
+	secondPC := generator.emitABC(bytecode.OpMove, 1, 0, 0)
+	generator.currentLine = 14
+	thirdPC := generator.emitABC(bytecode.OpReturn, 0, 1, 0)
+	if secondPC != 1 || thirdPC != 2 || len(generator.proto.Code) != 3 || len(generator.proto.LineInfo) != 3 {
+		// 第三条指令可能触发短槽后的普通扩容，但 pc、指令数和行号数必须保持同步。
+		t.Fatalf("unexpected post-growth state: second=%d third=%d code=%+v line=%+v", secondPC, thirdPC, generator.proto.Code, generator.proto.LineInfo)
+	}
+	if generator.proto.LineInfo[0] != 12 || generator.proto.LineInfo[1] != 13 || generator.proto.LineInfo[2] != 14 {
+		// 扩容后行号表顺序仍必须和 emit 顺序一致。
+		t.Fatalf("line info changed after growth: %+v", generator.proto.LineInfo)
 	}
 }
 
