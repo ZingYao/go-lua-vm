@@ -913,6 +913,34 @@ benchmark 复核：
 的 `2.30-2.33x`，其次是 `arith_mix_loop`、`string_concat` 和 `stdlib_math_string` 的约 `1.5-1.9x`。
 后续如果继续推进，优先重新 profile `compile_3000_functions`，确认是否还有编译期结构性切口。
 
+### 2026-07-04 `compile_3000_functions` profile 复核
+
+profile 口径：`CGO_ENABLED=0 go test ./internal/luac -run '^$' -bench '^BenchmarkCompileSource3000Functions$'
+-benchmem -benchtime=8s -count=1 -cpuprofile ... -memprofile ...`。同轮三次 benchmark 复核为
+`8.319 / 8.291 / 8.302 ms/op`，约 `7.58 MB/op`、`81145 allocs/op`。
+
+CPU profile 受 Go runtime GC、调度和采样扰动影响较大：`runtime.madvise`、`pthread_cond_wait`、
+`kevent`、`pthread_cond_signal` 等占据主要 flat 样本；业务栈中 `semanticAnalyzer.analyzeBlock`、
+`Lexer.NextToken`、`compileChildProto`、`compileBlock`、`compileReturn` 等分散，没有出现单个可直接
+替换的 parser/codegen CPU 热点。
+
+alloc_objects 行级 profile 更有指导意义：
+
+| 位置 | 结论 |
+| --- | --- |
+| `codegen.(*generator).defineLocal` | 主要来自每个子函数为参数 `x` 追加 `LocalVar`、创建 `locals` map、写入 `localBinding`。 |
+| `codegen.(*generator).recordConstantIndex` | integer/string 常量索引 map 仍有分配； typed 常量索引已是当前低风险实现。 |
+| `parser.(*Parser).parseFunctionBody` | 每个函数体分配 `FunctionBody`，参数 slice 仅少量贡献。 |
+| `parser.(*Parser).parsePrimaryExpression` | 每个 `x + N` 返回的 `NameExpression` 和 `LiteralExpression` 是 AST 语义节点分配。 |
+| `bytecode.NewProto` / `Proto.AddConstant` / `Proto.AddInstruction` | 每个子函数独立 Proto、常量和指令是编译产物本体。 |
+
+本轮结论：没有找到可以“小改一处”就安全消除的编译期切口。当前最像结构性切口的是 codegen
+`locals map` 的单局部 inline cache：官方 benchmark 的每个子函数只有一个参数 `x`，但当前仍为每个
+子函数创建 map 并 mapassign。这个方向不同于已证伪的 `LocalVars` 容量预留，可能减少
+`defineLocal` 分配；但它会触及 name resolution、同作用域重声明、嵌套作用域快照、upvalue 捕获标记、
+goto/label 生命周期、`releaseCallArgumentsAfterFixedResult` 和 debug local EndPC 回填，必须先作为单独
+设计小节和测试矩阵推进，不能在本轮直接堆局部字段改动。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -999,7 +1027,8 @@ benchmark 复核：
 - [x] 若继续推进，优先 profile `table_rw` 或 `arith_chain_temp` 的剩余 2.6-2.7x 项，确认存在全新语义等价切口后再实现。
 - [x] 若继续推进，优先 profile `table_rw` 读取段 `GETTABLE;ADD;FORLOOP` 或 `arith_chain_temp` 的剩余项，确认存在全新语义等价切口后再实现。
 - [x] 若继续推进，优先 profile `arith_chain_temp` 的剩余项；如没有新的结构性切口，记录证伪，不再堆局部字段/分支微调。
-- [ ] 若继续推进，优先 profile `compile_3000_functions`；如果没有新的编译期结构性切口，记录证伪，不再堆 parser/codegen 局部字段微调。
+- [x] 若继续推进，优先 profile `compile_3000_functions`；如果没有新的编译期结构性切口，记录证伪，不再堆 parser/codegen 局部字段微调。
+- [ ] 若继续推进编译期，先设计 codegen `locals map` 单局部 inline cache 的语义方案和测试矩阵；确认 name resolution、同作用域重声明、upvalue 捕获、scope snapshot、goto/label 和 debug local 生命周期后再实现。
 - [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准
