@@ -2609,6 +2609,106 @@ func TestVMTryExecuteFunctionCallAddForLoopFallback(t *testing.T) {
 	}
 }
 
+// TestVMTryExecuteFormatLenAddForLoop 验证 `#string.format("%d", i)` 长度消费 fast path。
+//
+// 该路径必须在不构造格式化字符串的情况下，产生与 CALL、LEN、ADD、FORLOOP 后一致的寄存器和 PC 状态。
+func TestVMTryExecuteFormatLenAddForLoop(t *testing.T) {
+	proto := testFormatLenAddForLoopProto()
+	globals := testGlobalsWithFormatFixedFunction(true)
+	vm := NewVMWithConstantsAndUpvalues(9, proto.Constants, []Value{ReferenceValue(KindTable, globals)})
+	vm.BindPrototype(proto)
+	if !vm.PrepareFormatLenAddForLoopSuperInstructions() {
+		// 官方 stdlib_math_string 尾部字节码形态应能预构建 superinstruction。
+		t.Fatalf("expected format length superinstruction")
+	}
+	registers := map[int]Value{
+		0: IntegerValue(0),
+		1: IntegerValue(1),
+		2: IntegerValue(3),
+		3: IntegerValue(1),
+		4: IntegerValue(12),
+		5: IntegerValue(100),
+	}
+	for registerIndex, value := range registers {
+		// 初始化 sum、FORLOOP 控制槽、当前格式化参数和前序累加临时值。
+		if err := vm.SetRegister(registerIndex, value); err != nil {
+			t.Fatalf("set register %d failed: %v", registerIndex, err)
+		}
+	}
+
+	nextPC, handled := vm.TryExecuteFormatLenAddForLoop(8)
+	if !handled || nextPC != 0 {
+		// 第一轮循环未结束时必须跳回完整循环体入口。
+		t.Fatalf("format length fast path mismatch: handled=%v nextPC=%d", handled, nextPC)
+	}
+	if value, _ := vm.Register(0); !value.RawEqual(IntegerValue(102)) {
+		// sum = 前序累加临时值 100 + len("12")。
+		t.Fatalf("sum mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(6); !value.RawEqual(IntegerValue(2)) {
+		// CALL/LEN 结果槽最终应保存字符串长度。
+		t.Fatalf("length slot mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(7); !value.RawEqual(StringValue("%d")) {
+		// 格式串实参槽应保持 LOADK 后的 `%d` 常量。
+		t.Fatalf("format argument mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(8); !value.RawEqual(IntegerValue(12)) {
+		// 值实参槽应保持 MOVE 后的当前循环变量旧值。
+		t.Fatalf("value argument mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(1); !value.RawEqual(IntegerValue(2)) {
+		// FORLOOP 继续时更新内部 index。
+		t.Fatalf("for index mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(4); !value.RawEqual(IntegerValue(2)) {
+		// FORLOOP 继续时更新外部可见循环变量。
+		t.Fatalf("visible index mismatch: %#v", value)
+	}
+	if vm.currentPC != 15 || vm.pcOffset != -16 {
+		// fast path 后 VM 状态应等价于刚执行完 FORLOOP。
+		t.Fatalf("pc state mismatch: currentPC=%d pcOffset=%d", vm.currentPC, vm.pcOffset)
+	}
+}
+
+// TestVMTryExecuteFormatLenAddForLoopFallback 验证 format 长度消费 guard 失败无副作用。
+func TestVMTryExecuteFormatLenAddForLoopFallback(t *testing.T) {
+	proto := testFormatLenAddForLoopProto()
+	globals := testGlobalsWithFormatFixedFunction(false)
+	vm := NewVMWithConstantsAndUpvalues(9, proto.Constants, []Value{ReferenceValue(KindTable, globals)})
+	vm.BindPrototype(proto)
+	if !vm.PrepareFormatLenAddForLoopSuperInstructions() {
+		// 字节码形态仍应能预构建，执行期由函数身份 guard 决定是否命中。
+		t.Fatalf("expected format length superinstruction")
+	}
+	if err := vm.SetRegister(0, IntegerValue(10)); err != nil {
+		// sum 初值必须能写入寄存器。
+		t.Fatalf("set sum failed: %v", err)
+	}
+	if err := vm.SetRegister(4, IntegerValue(12)); err != nil {
+		// 外部循环变量必须能写入寄存器。
+		t.Fatalf("set visible index failed: %v", err)
+	}
+	if err := vm.SetRegister(5, IntegerValue(100)); err != nil {
+		// 前序累加临时值必须能写入寄存器。
+		t.Fatalf("set accumulator failed: %v", err)
+	}
+
+	nextPC, handled := vm.TryExecuteFormatLenAddForLoop(8)
+	if handled || nextPC != 0 {
+		// 未带标准库 fast-path 标记的 Go closure 不应被表达式级消费。
+		t.Fatalf("fallback mismatch: handled=%v nextPC=%d", handled, nextPC)
+	}
+	if value, _ := vm.Register(0); !value.RawEqual(IntegerValue(10)) {
+		// guard 失败不能提前修改 sum。
+		t.Fatalf("sum should be unchanged: %#v", value)
+	}
+	if value, _ := vm.Register(6); !value.IsNil() {
+		// guard 失败不能执行 GETTABUP。
+		t.Fatalf("temporary slot should stay nil: %#v", value)
+	}
+}
+
 // testFunctionCallAddForLoopProto 构造官方 function_call benchmark 的循环体 Proto。
 func testFunctionCallAddForLoopProto() *bytecode.Proto {
 	return &bytecode.Proto{
@@ -2624,6 +2724,49 @@ func testFunctionCallAddForLoopProto() *bytecode.Proto {
 			bytecode.CreateAsBx(bytecode.OpForLoop, 2, -6),
 		},
 	}
+}
+
+// testFormatLenAddForLoopProto 构造官方 stdlib_math_string 的 format/LEN 循环尾部 Proto。
+func testFormatLenAddForLoopProto() *bytecode.Proto {
+	return &bytecode.Proto{
+		Constants: []bytecode.Constant{
+			bytecode.StringConstant("string"),
+			bytecode.StringConstant("format"),
+			bytecode.StringConstant("%d"),
+		},
+		Code: []bytecode.Instruction{
+			bytecode.CreateABC(bytecode.OpMove, 0, 0, 0),
+			bytecode.CreateABC(bytecode.OpMove, 0, 0, 0),
+			bytecode.CreateABC(bytecode.OpMove, 0, 0, 0),
+			bytecode.CreateABC(bytecode.OpMove, 0, 0, 0),
+			bytecode.CreateABC(bytecode.OpMove, 0, 0, 0),
+			bytecode.CreateABC(bytecode.OpMove, 0, 0, 0),
+			bytecode.CreateABC(bytecode.OpMove, 0, 0, 0),
+			bytecode.CreateABC(bytecode.OpAdd, 5, 0, 5),
+			bytecode.CreateABC(bytecode.OpGetTabUp, 6, 0, bytecode.RKAsK(0)),
+			bytecode.CreateABC(bytecode.OpGetTable, 6, 6, bytecode.RKAsK(1)),
+			bytecode.CreateABx(bytecode.OpLoadK, 7, 2),
+			bytecode.CreateABC(bytecode.OpMove, 8, 4, 0),
+			bytecode.CreateABC(bytecode.OpCall, 6, 3, 2),
+			bytecode.CreateABC(bytecode.OpLen, 6, 6, 0),
+			bytecode.CreateABC(bytecode.OpAdd, 0, 5, 6),
+			bytecode.CreateAsBx(bytecode.OpForLoop, 1, -16),
+		},
+	}
+}
+
+// testGlobalsWithFormatFixedFunction 构造包含 string.format 的最小全局表。
+func testGlobalsWithFormatFixedFunction(marked bool) *Table {
+	stringTable := NewTable()
+	fastPathID := GoFixedResultsFastPathNone
+	if marked {
+		// 标记为标准库 exact `%d` 固定结果函数，允许表达式级长度消费。
+		fastPathID = GoFixedResultsFastPathStringFormatDecimal
+	}
+	stringTable.RawSetString("format", ReferenceValue(KindGoClosure, &GoFixedResultsFunction{MaxResults: 1, FastPathID: fastPathID}))
+	globals := NewTable()
+	globals.RawSetString("string", ReferenceValue(KindTable, stringTable))
+	return globals
 }
 
 // testLeafAddReturnProto 构造 `return a + b` 叶子函数 Proto。

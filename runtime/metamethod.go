@@ -110,6 +110,18 @@ func (function *GoFastUnaryFunction) Accepts(value Value) bool {
 // `__ipairs` 和后续 Go bridge 多返回值路径，单返回值元方法仍可使用 GoFunction。
 type GoResultsFunction func(args ...Value) ([]Value, error)
 
+// GoFixedResultsFastPathID 标识可被 VM 跨 opcode 消费的固定结果 Go 回调。
+//
+// 默认值表示没有额外表达式级语义承诺；非默认值只能用于标准库内部可证明等价的窄快路径。
+type GoFixedResultsFastPathID uint8
+
+const (
+	// GoFixedResultsFastPathNone 表示普通固定结果 Go 回调，不参与表达式级消费消除。
+	GoFixedResultsFastPathNone GoFixedResultsFastPathID = iota
+	// GoFixedResultsFastPathStringFormatDecimal 表示标准库 string.format exact `%d` 成功路径。
+	GoFixedResultsFastPathStringFormatDecimal
+)
+
 // GoFixedResultsFunction 表示有固定返回值上限的 Go 回调。
 //
 // MaxResults 必须覆盖 Function 快路径可能返回的最大结果数量；Function 将结果写入调用方提供的
@@ -117,6 +129,8 @@ type GoResultsFunction func(args ...Value) ([]Value, error)
 type GoFixedResultsFunction struct {
 	// MaxResults 表示 Function 最多写入的返回值数量。
 	MaxResults int
+	// FastPathID 标记该函数是否允许 VM 在严格 guard 下跨 opcode 直接消费其结果。
+	FastPathID GoFixedResultsFastPathID
 	// Function4Single 将最多四个参数按寄存器原值传入，并返回单返回热点的实际结果数量和值。
 	Function4Single func(arg0 Value, arg1 Value, arg2 Value, arg3 Value, argCount int) (Value, int, bool, error)
 	// Function4 将最多四个参数按寄存器原值传入，避免热点固定结果函数构造参数切片。

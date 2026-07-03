@@ -90,6 +90,10 @@ type VM struct {
 	functionCallAddForLoopSuperInstructionProto *bytecode.Proto
 	// functionCallAddForLoopSuperInstructions 按 PC 保存函数调用加法循环 superinstruction 预匹配结果。
 	functionCallAddForLoopSuperInstructions []functionCallAddForLoopSuperInstruction
+	// formatLenAddForLoopSuperInstructionProto 记录 string.format 长度消费循环 superinstruction 表对应的 Proto。
+	formatLenAddForLoopSuperInstructionProto *bytecode.Proto
+	// formatLenAddForLoopSuperInstructions 按 PC 保存 string.format 长度消费循环 superinstruction 预匹配结果。
+	formatLenAddForLoopSuperInstructions []formatLenAddForLoopSuperInstruction
 	// tableArrayPreallocHintProto 记录 table 数组预分配 hint 表对应的 Proto。
 	tableArrayPreallocHintProto *bytecode.Proto
 	// tableArrayPreallocHints 按 NEWTABLE 所在 PC 保存可证明安全的数组区预留容量。
@@ -397,6 +401,40 @@ type functionCallAddForLoopSuperInstruction struct {
 	// LoopPC 保存循环继续时的跳转 PC。
 	LoopPC int
 	// Valid 表示当前 PC 是否匹配完整函数调用加法循环形态。
+	Valid bool
+}
+
+// formatLenAddForLoopSuperInstruction 保存 `string.format("%d", i)` 被 LEN 消费后的循环尾部形态。
+//
+// 该形态覆盖官方 `stdlib_math_string` 的尾部 `GETTABUP; GETTABLE; LOADK; MOVE; CALL; LEN; ADD; FORLOOP`。
+// 构建期只记录寄存器、upvalue 和常量数据流；执行期仍检查全局 table、string table、format 函数身份、
+// 参数类型、累加器和 numeric-for 控制槽，任一 guard 不满足时必须回退普通 VM。
+type formatLenAddForLoopSuperInstruction struct {
+	// EnvUpvalueIndex 保存 GETTABUP 读取的环境 upvalue 下标。
+	EnvUpvalueIndex int
+	// FunctionSlot 保存 string.format 函数槽，也是 CALL 结果槽和 LEN 目标槽。
+	FunctionSlot int
+	// FormatArgumentSlot 保存 LOADK 写入 `%d` 的实参槽。
+	FormatArgumentSlot int
+	// ValueArgumentSlot 保存 MOVE 写入待格式化值的实参槽。
+	ValueArgumentSlot int
+	// ValueArgumentSource 保存待格式化值来源寄存器，官方形态中为 numeric-for 外部循环变量。
+	ValueArgumentSource int
+	// FormatString 保存 LOADK 的 exact `%d` 常量，用于还原被跳过指令后的寄存器状态。
+	FormatString string
+	// AccumulatorRegister 保存前序 ADD 生成的中间累加值寄存器。
+	AccumulatorRegister int
+	// AddTarget 保存最终 ADD 写回的 sum 寄存器。
+	AddTarget int
+	// ForBase 保存 FORLOOP 的 base 寄存器。
+	ForBase int
+	// ForSBx 保存 FORLOOP 的有符号跳转偏移。
+	ForSBx int
+	// ExitPC 保存循环退出时的下一条 PC。
+	ExitPC int
+	// LoopPC 保存循环继续时的跳转 PC。
+	LoopPC int
+	// Valid 表示当前 PC 是否匹配完整 string.format 长度消费形态。
 	Valid bool
 }
 
@@ -1707,6 +1745,8 @@ func (vm *VM) BindPrototype(proto *bytecode.Proto) {
 		vm.mixArithmeticForLoopSuperInstructions = nil
 		vm.functionCallAddForLoopSuperInstructionProto = nil
 		vm.functionCallAddForLoopSuperInstructions = nil
+		vm.formatLenAddForLoopSuperInstructionProto = nil
+		vm.formatLenAddForLoopSuperInstructions = nil
 		vm.tableArrayPreallocHintProto = nil
 		vm.tableArrayPreallocHints = nil
 		vm.arithmeticIntRegisterCacheProto = nil
@@ -1740,6 +1780,11 @@ func (vm *VM) BindPrototype(proto *bytecode.Proto) {
 		// VM 池切换到其他 Proto 时丢弃函数调用循环 superinstruction 表，避免不同 Proto 的 PC 误命中。
 		vm.functionCallAddForLoopSuperInstructionProto = nil
 		vm.functionCallAddForLoopSuperInstructions = nil
+	}
+	if vm.formatLenAddForLoopSuperInstructionProto != nil && vm.formatLenAddForLoopSuperInstructionProto != proto {
+		// VM 池切换到其他 Proto 时丢弃 string.format 长度消费表，避免不同 Proto 的 PC 误命中。
+		vm.formatLenAddForLoopSuperInstructionProto = nil
+		vm.formatLenAddForLoopSuperInstructions = nil
 	}
 	if vm.tableArrayPreallocHintProto != nil && vm.tableArrayPreallocHintProto != proto {
 		// VM 池切换到其他 Proto 时丢弃 table 预分配 hint，避免相同 PC 误用其他函数的数据流结论。
@@ -1997,6 +2042,23 @@ func protoIntegerConstant(proto *bytecode.Proto, constantIndex int) (int64, bool
 		return 0, false
 	}
 	return constant.Integer, true
+}
+
+// protoStringConstant 读取 Proto 常量表中的 string 常量。
+//
+// 返回 ok=false 表示常量越界或不是 string；调用方应回退普通 VM 路径。
+func protoStringConstant(proto *bytecode.Proto, constantIndex int) (string, bool) {
+	// 常量索引必须落在当前 Proto 常量表内。
+	if proto == nil || constantIndex < 0 || constantIndex >= len(proto.Constants) {
+		// 损坏 chunk 或手写测试引用越界常量时不能使用 fast path。
+		return "", false
+	}
+	constant := proto.Constants[constantIndex]
+	if constant.Kind != bytecode.ConstantString {
+		// 非 string 常量不参与当前 string.format 长度消费匹配。
+		return "", false
+	}
+	return constant.String, true
 }
 
 // tableArrayPreallocCapacityAt 返回当前 PC 的 table 数组区预留容量。
@@ -2751,6 +2813,273 @@ func (vm *VM) TryExecuteFunctionCallAddForLoop(pc int) (int, bool) {
 	return nextPC, true
 }
 
+// ensureFormatLenAddForLoopSuperInstructions 返回当前 Proto 的 string.format 长度消费预匹配表。
+//
+// 该表按 PC 与 Proto.Code 对齐，只记录官方 `#string.format("%d", i)` 循环尾部形态；运行期
+// 函数身份、table 元表、参数类型、sum 和 numeric-for 控制槽仍由 TryExecuteFormatLenAddForLoop 检查。
+func (vm *VM) ensureFormatLenAddForLoopSuperInstructions() []formatLenAddForLoopSuperInstruction {
+	// 按当前 Proto 懒构建 format/LEN superinstruction 表，并在 Proto 未变化时复用。
+	if vm == nil || vm.proto == nil {
+		// 缺少 VM 或 Proto 时没有可用 superinstruction 表。
+		return nil
+	}
+	if len(vm.proto.Code) < 9 {
+		// 少于九条指令不可能包含前序 ADD 加八条尾部模式。
+		vm.formatLenAddForLoopSuperInstructionProto = vm.proto
+		vm.formatLenAddForLoopSuperInstructions = nil
+		return nil
+	}
+	if vm.formatLenAddForLoopSuperInstructionProto == vm.proto {
+		// 当前 Proto 已完成扫描；nil 表示无匹配形态，非 nil 表示可按 PC 读取。
+		return vm.formatLenAddForLoopSuperInstructions
+	}
+
+	vm.formatLenAddForLoopSuperInstructionProto = vm.proto
+	vm.formatLenAddForLoopSuperInstructions = buildFormatLenAddForLoopSuperInstructions(vm.proto)
+	return vm.formatLenAddForLoopSuperInstructions
+}
+
+// buildFormatLenAddForLoopSuperInstructions 构建 `#string.format("%d", i)` 循环尾部预匹配表。
+//
+// 返回表按 PC 对齐；没有匹配形态时返回 nil，表示该 Proto 不需要承担额外表分配。
+func buildFormatLenAddForLoopSuperInstructions(proto *bytecode.Proto) []formatLenAddForLoopSuperInstruction {
+	// 空 Proto 或短函数没有可构建的 string.format 长度消费 superinstruction。
+	if proto == nil || len(proto.Code) < 9 {
+		return nil
+	}
+
+	var superInstructions []formatLenAddForLoopSuperInstruction
+	for pc := 1; pc+7 < len(proto.Code); pc++ {
+		// 只识别官方尾部 `GETTABUP;GETTABLE;LOADK;MOVE;CALL;LEN;ADD;FORLOOP`。
+		previousAddInstruction := proto.Code[pc-1]
+		getStringInstruction := proto.Code[pc]
+		getFormatInstruction := proto.Code[pc+1]
+		loadFormatInstruction := proto.Code[pc+2]
+		moveValueInstruction := proto.Code[pc+3]
+		callInstruction := proto.Code[pc+4]
+		lenInstruction := proto.Code[pc+5]
+		addInstruction := proto.Code[pc+6]
+		forLoopInstruction := proto.Code[pc+7]
+		if previousAddInstruction.OpCode() != bytecode.OpAdd || getStringInstruction.OpCode() != bytecode.OpGetTabUp || getFormatInstruction.OpCode() != bytecode.OpGetTable || loadFormatInstruction.OpCode() != bytecode.OpLoadK || moveValueInstruction.OpCode() != bytecode.OpMove || callInstruction.OpCode() != bytecode.OpCall || lenInstruction.OpCode() != bytecode.OpLen || addInstruction.OpCode() != bytecode.OpAdd || forLoopInstruction.OpCode() != bytecode.OpForLoop {
+			// 当前 PC 不匹配目标模式，继续扫描后续指令。
+			continue
+		}
+
+		functionSlot := callInstruction.A()
+		if getStringInstruction.A() != functionSlot || getFormatInstruction.A() != functionSlot || getFormatInstruction.B() != functionSlot || lenInstruction.A() != functionSlot || lenInstruction.B() != functionSlot {
+			// string 表、format 函数、CALL 结果和 LEN 结果必须复用同一个临时槽。
+			continue
+		}
+		if loadFormatInstruction.A() != functionSlot+1 || moveValueInstruction.A() != functionSlot+2 || callInstruction.B() != 3 || callInstruction.C() != 2 {
+			// 只覆盖固定两个实参、单返回 CALL，实参槽必须紧跟函数槽。
+			continue
+		}
+
+		stringName, ok := protoStringConstant(proto, bytecode.IndexK(getStringInstruction.C()))
+		if !ok || !bytecode.IsK(getStringInstruction.C()) || stringName != "string" {
+			// GETTABUP 必须读取全局 string table；非常量或其他字段回退普通 VM。
+			continue
+		}
+		formatName, ok := protoStringConstant(proto, bytecode.IndexK(getFormatInstruction.C()))
+		if !ok || !bytecode.IsK(getFormatInstruction.C()) || formatName != "format" {
+			// GETTABLE 必须读取 string.format；其他字段回退普通 VM。
+			continue
+		}
+		formatText, ok := protoStringConstant(proto, loadFormatInstruction.Bx())
+		if !ok || formatText != "%d" {
+			// 只覆盖 exact `%d`，带 flag、宽度、精度或其他 verb 都保持完整格式化路径。
+			continue
+		}
+
+		addLeftOperand := decodeRKOperand(proto, addInstruction.B())
+		addRightOperand := decodeRKOperand(proto, addInstruction.C())
+		accumulatorRegister, ok := decodedRegisterPlusTarget(addLeftOperand, addRightOperand, functionSlot)
+		if !ok || addInstruction.A() == functionSlot {
+			// 最终 ADD 必须是 `sum = accumulator + len`，不能覆盖 LEN 临时槽本身。
+			continue
+		}
+		previousLeftOperand := decodeRKOperand(proto, previousAddInstruction.B())
+		previousRightOperand := decodeRKOperand(proto, previousAddInstruction.C())
+		previousAccumulator, ok := decodedRegisterPlusTarget(previousLeftOperand, previousRightOperand, addInstruction.A())
+		if !ok || previousAddInstruction.A() != accumulatorRegister || previousAccumulator != accumulatorRegister {
+			// 前一条 ADD 必须形如 `accumulator = sum + value`，保证当前尾部只消费已形成的中间累加值。
+			continue
+		}
+
+		forBase := forLoopInstruction.A()
+		exitPC := pc + 8
+		loopPC := exitPC + forLoopInstruction.SBx()
+		if loopPC != pc-8 || moveValueInstruction.B() != forBase+3 {
+			// 当前窄路径只覆盖官方热循环体：尾部 PC 前八条开始，格式化值来自外部 numeric-for 变量。
+			continue
+		}
+		if registerInRange(functionSlot, forBase, forBase+3) || registerInRange(functionSlot+1, forBase, forBase+3) || registerInRange(functionSlot+2, forBase, forBase+3) {
+			// CALL 临时槽不能覆盖 numeric-for 控制槽，否则逐指令别名语义会变复杂。
+			continue
+		}
+		if registerInRange(addInstruction.A(), forBase, forBase+3) || registerInRange(accumulatorRegister, forBase, forBase+3) {
+			// sum 和前序累加临时值都不能覆盖 FORLOOP 控制槽。
+			continue
+		}
+		if addInstruction.A() == functionSlot || addInstruction.A() == functionSlot+1 || addInstruction.A() == functionSlot+2 || accumulatorRegister == functionSlot || accumulatorRegister == functionSlot+1 || accumulatorRegister == functionSlot+2 {
+			// sum/accumulator 不能与 CALL 临时槽交叠，避免跳过 CALL 后破坏普通寄存器可见状态。
+			continue
+		}
+
+		if superInstructions == nil {
+			// 只有真实存在匹配形态时才分配 PC 对齐表，避免普通函数执行增加分配。
+			superInstructions = make([]formatLenAddForLoopSuperInstruction, len(proto.Code))
+		}
+		superInstructions[pc] = formatLenAddForLoopSuperInstruction{
+			EnvUpvalueIndex:     getStringInstruction.B(),
+			FunctionSlot:        functionSlot,
+			FormatArgumentSlot:  functionSlot + 1,
+			ValueArgumentSlot:   functionSlot + 2,
+			ValueArgumentSource: moveValueInstruction.B(),
+			FormatString:        formatText,
+			AccumulatorRegister: accumulatorRegister,
+			AddTarget:           addInstruction.A(),
+			ForBase:             forBase,
+			ForSBx:              forLoopInstruction.SBx(),
+			ExitPC:              exitPC,
+			LoopPC:              loopPC,
+			Valid:               true,
+		}
+	}
+	return superInstructions
+}
+
+// PrepareFormatLenAddForLoopSuperInstructions 预构建当前 Proto 的 string.format 长度消费表。
+//
+// 返回 true 表示当前 Proto 至少存在一个可尝试的 `#string.format("%d", i)` superinstruction PC；
+// 返回 false 时调用方不应在热循环中反复调用 TryExecuteFormatLenAddForLoop。
+func (vm *VM) PrepareFormatLenAddForLoopSuperInstructions() bool {
+	// 预构建失败不影响普通 VM；后续 TryExecuteFormatLenAddForLoop 会因为表不匹配而回退。
+	return len(vm.ensureFormatLenAddForLoopSuperInstructions()) > 0
+}
+
+// HasFormatLenAddForLoopAt 判断当前 PC 是否存在 string.format 长度消费 superinstruction。
+func (vm *VM) HasFormatLenAddForLoopAt(pc int) bool {
+	// 该 helper 只读取已准备好的表，供 API 层决定是否需要执行 CALL 边界 context 检查。
+	if vm == nil || vm.formatLenAddForLoopSuperInstructionProto != vm.proto {
+		// 表尚未准备或 Proto 已变化时不能命中。
+		return false
+	}
+	superInstructions := vm.formatLenAddForLoopSuperInstructions
+	if uint(pc) >= uint(len(superInstructions)) {
+		// PC 越界时不能命中。
+		return false
+	}
+	return superInstructions[pc].Valid
+}
+
+// TryExecuteFormatLenAddForLoop 尝试直接消费 `#string.format("%d", i)` 并执行末尾 FORLOOP。
+//
+// pc 必须指向 GETTABUP string；返回 handled=false 表示 guard 不满足，调用方必须回退普通 VM。该
+// fast path 只覆盖无元表全局/string table、标准库 exact `%d` 固定结果函数、integer 参数与
+// integer numeric-for，不触发元方法、不处理 hook、不处理 yield。
+func (vm *VM) TryExecuteFormatLenAddForLoop(pc int) (int, bool) {
+	// 先按 PC 读取已准备好的预匹配表；非目标 PC 必须快速失败。
+	if vm == nil || vm.formatLenAddForLoopSuperInstructionProto != vm.proto {
+		// 调用方尚未为当前 Proto 准备表，回退普通 VM。
+		return 0, false
+	}
+	superInstructions := vm.formatLenAddForLoopSuperInstructions
+	if uint(pc) >= uint(len(superInstructions)) {
+		// 当前 PC 不在表范围内，回退普通 VM。
+		return 0, false
+	}
+	superInstruction := superInstructions[pc]
+	if !superInstruction.Valid {
+		// 当前 PC 没有匹配 string.format 长度消费形态，回退普通 VM。
+		return 0, false
+	}
+
+	registers := vm.registers
+	requiredRegisters := [...]int{
+		superInstruction.FunctionSlot,
+		superInstruction.FormatArgumentSlot,
+		superInstruction.ValueArgumentSlot,
+		superInstruction.ValueArgumentSource,
+		superInstruction.AccumulatorRegister,
+		superInstruction.AddTarget,
+		superInstruction.ForBase,
+		superInstruction.ForBase + 1,
+		superInstruction.ForBase + 2,
+		superInstruction.ForBase + 3,
+	}
+	for _, registerIndex := range requiredRegisters {
+		// 任一参与寄存器越界时交给普通 VM 报原始错误。
+		if uint(registerIndex) >= uint(len(registers)) {
+			return 0, false
+		}
+	}
+
+	envTable, err := tableFromValue(vm.upvalueValue(superInstruction.EnvUpvalueIndex))
+	if err != nil || envTable.GetMetatable() != nil {
+		// GETTABUP 对有元表环境可能触发 __index，必须回退普通 VM。
+		return 0, false
+	}
+	stringValue := envTable.RawGetString("string")
+	stringTable, err := tableFromValue(stringValue)
+	if err != nil || stringTable.GetMetatable() != nil {
+		// string 字段不是无元表 table 时，GETTABLE 可能触发普通错误或元方法。
+		return 0, false
+	}
+	formatValue := stringTable.RawGetString("format")
+	if formatValue.Kind != KindGoClosure {
+		// string.format 被替换为 Lua closure、table __call 或非函数时必须保留普通 CALL 语义。
+		return 0, false
+	}
+	fixedFunction, ok := formatValue.Ref.(*GoFixedResultsFunction)
+	if !ok || fixedFunction == nil || fixedFunction.FastPathID != GoFixedResultsFastPathStringFormatDecimal {
+		// 只有标准库标记过的 exact `%d` 固定结果函数才能被表达式级直接消费。
+		return 0, false
+	}
+
+	valueArgument := registers[superInstruction.ValueArgumentSource]
+	accumulatorValue := registers[superInstruction.AccumulatorRegister]
+	if valueArgument.Kind != KindInteger || accumulatorValue.Kind != KindInteger {
+		// 当前表达式级消费只覆盖 integer 参数和 integer 累加器，其他类型保留完整 format/LEN/ADD 语义。
+		return 0, false
+	}
+	lengthValue := decimalIntegerStringLength(valueArgument.Integer)
+	addResult := accumulatorValue.Integer + lengthValue
+
+	baseIndex := superInstruction.ForBase
+	indexValue := registers[baseIndex]
+	limitValue := registers[baseIndex+1]
+	stepValue := registers[baseIndex+2]
+	if indexValue.Kind != KindInteger || limitValue.Kind != KindInteger || stepValue.Kind != KindInteger {
+		// 只覆盖 integer numeric-for；float 或可转 number 字符串仍走普通 VM。
+		return 0, false
+	}
+
+	// guard 全部通过后，按被跳过指令结束后的可见状态提交寄存器写入。
+	registers[superInstruction.FunctionSlot] = IntegerValue(lengthValue)
+	registers[superInstruction.FormatArgumentSlot] = StringValue(superInstruction.FormatString)
+	registers[superInstruction.ValueArgumentSlot] = valueArgument
+	registers[superInstruction.AddTarget] = IntegerValue(addResult)
+	nextIndex := indexValue.Integer + stepValue.Integer
+	nextPC := superInstruction.ExitPC
+	if forIntegerLoopContinues(nextIndex, limitValue.Integer, stepValue.Integer) {
+		// 循环继续时更新内部 index 和外部可见循环变量，并跳回 FORLOOP 的 sBx 目标。
+		registers[baseIndex] = IntegerValue(nextIndex)
+		registers[baseIndex+3] = IntegerValue(nextIndex)
+		nextPC = superInstruction.LoopPC
+		vm.pcOffset = superInstruction.ForSBx
+	} else {
+		// 循环结束时不更新 index 和外部变量，保持普通 FORLOOP 语义。
+		vm.pcOffset = 0
+	}
+	vm.currentPC = pc + 7
+	vm.skipNext = false
+	vm.closeFrom = -1
+	vm.hasCallRequest = false
+	vm.returned = false
+	return nextPC, true
+}
+
 // TryExecuteMixArithmeticForLoop 尝试执行 `MUL; ADD; SUB; IDIV; MOD; ADD; FORLOOP` superinstruction。
 //
 // pc 必须指向当前 Proto.Code 中的 MUL 指令；返回 handled=false 表示 guard 不满足，调用方必须回退
@@ -2939,6 +3268,30 @@ func decodedRegistersMatchPair(left decodedRKOperand, right decodedRKOperand, fi
 func registerInRange(registerIndex int, start int, end int) bool {
 	// 边界是闭区间，覆盖 R(A)..R(A+3) 四个 numeric-for 控制槽。
 	return registerIndex >= start && registerIndex <= end
+}
+
+// decimalIntegerStringLength 返回 int64 十进制格式化后的字符串长度。
+//
+// 该 helper 等价于 `len(strconv.FormatInt(value, 10))`，但不分配字符串；负数包含符号位，
+// math.MinInt64 使用无符号补码转换避免取反溢出。
+func decimalIntegerStringLength(value int64) int64 {
+	// 先转换为待计数的无符号绝对值，并记录负号长度。
+	var unsignedValue uint64
+	length := int64(0)
+	if value < 0 {
+		// -(MinInt64) 会溢出，使用 -(value+1)+1 的等价转换。
+		unsignedValue = uint64(-(value + 1)) + 1
+		length = 1
+	} else {
+		// 非负整数直接转换成无符号值计数。
+		unsignedValue = uint64(value)
+	}
+	for unsignedValue >= 10 {
+		// 每除以 10 去掉一位十进制数字。
+		unsignedValue /= 10
+		length++
+	}
+	return length + 1
 }
 
 // decodedIntegerOperandValue 读取预解码 RK 操作数的 integer 值。

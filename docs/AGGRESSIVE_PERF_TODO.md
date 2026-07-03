@@ -367,6 +367,60 @@ alloc profile 显示 `stdlib_math_string` 剩余固定分配主要是 `internal/
 结论：`stdlib_math_string` 已从近期完整口径约 `1.9-2.3x` 进一步降到 `1.54x`；`function_call`
 仍是当前最接近 3x 的路径，但 Go micro 保持上一轮 superinstruction 后的稳定收益，暂未显示退化。
 
+### 2026-07-03 `#string.format("%d", i)` 表达式级长度消费
+
+实现：在 `runtime.GoFixedResultsFunction` 中新增内部 `FastPathID` 标记，标准库 `string.format` 的
+exact `%d` 固定结果函数注册为 `GoFixedResultsFastPathStringFormatDecimal`。VM 侧新增
+`GETTABUP string; GETTABLE format; LOADK "%d"; MOVE i; CALL; LEN; ADD; FORLOOP` 循环尾部
+superinstruction，直接计算 `len(strconv.FormatInt(i, 10))` 的十进制长度，不构造中间字符串。
+
+语义 guard：
+
+- 仅在无 hook、无需精确逐 PC 同步的普通执行循环中启用；跳过 CALL 前仍显式执行一次 context 检查。
+- 字节码必须精确匹配官方 `stdlib_math_string` 尾部形态，且前一条 ADD 必须已经形成同一累加临时值，
+  `FORLOOP` 必须回跳官方热循环体入口。
+- `_ENV` 和 `string` table 都必须无元表，`string.format` 必须仍是带标准库 fast-path 标记的
+  `GoFixedResultsFunction`；用户替换函数、加元表、替换 string table 或改格式串都回退普通 VM。
+- 只覆盖 integer 参数、integer 累加器和 integer numeric-for；number、字符串数字、错误格式、缺参、
+  非整数参数、debug frame、Lua closure `__tostring` 等都保留普通 `CALL; LEN; ADD; FORLOOP` 路径。
+
+benchmark 复核：
+
+| 用例 | 结果 |
+| --- | ---: |
+| `BenchmarkDoStringStdlibMathString` | `24.91 / 24.81 / 24.86 / 25.06 / 24.91 ms/op`，约 `89.5 KB/op`，`4585 allocs/op` |
+| `BenchmarkDoStringStdlibMathString` 矩阵复核 | `24.95 / 24.86 / 24.82 ms/op`，约 `89.5 KB/op`，`4585 allocs/op` |
+| `BenchmarkPreparedArithAddLoopOfficial` | `16.97 / 16.97 / 16.98 ms/op`，`0 allocs/op` |
+| `BenchmarkPreparedArithMixLoopOfficial` | `17.59 / 17.80 / 17.67 ms/op`，`0 allocs/op` |
+| `BenchmarkPreparedArithChainTempOfficial` | `28.31 / 28.26 / 28.11 ms/op`，`0 allocs/op` |
+| `BenchmarkPreparedTableReadWriteOfficial` | `13.07 / 13.15 / 13.14 ms/op`，约 `11.21 MB/op`，`3 allocs/op` |
+| `BenchmarkPreparedFunctionCall` | `161.3 / 161.0 / 160.2 us/op`，`400 B/op`，`2 allocs/op` |
+| `BenchmarkPreparedClosureUpvalueOfficial` | `17.58 / 19.11 / 17.98 ms/op`，`511 B/op`，`4 allocs/op` |
+| `BenchmarkPreparedRecursion` | `1.608 / 1.592 / 1.603 us/op`，`224 B/op`，`2 allocs/op` |
+
+对比上一轮固定结果 fastcall 后 `stdlib_math_string` 约 `25.3-25.9 ms/op`、`476.8 KB/op`、
+`80148 allocs/op`，表达式级长度消费把剩余 `FormatInt` 字符串分配基本消除，allocs/op 进一步下降到
+`4585`。非目标 prepared micro 未观察到该提交引入的稳定退化。
+
+抽样完整 benchmark（`BENCH_ITERATIONS=20`、`BENCH_COMPILE_ITERATIONS=15`、`BENCH_WARMUP_ITERATIONS=3`）：
+
+| 用例 | 官方工具中位数 | 本项目中位数 | 本项目/官方 |
+| --- | ---: | ---: | ---: |
+| `arith_add_loop` | `0.007694s` | `0.020734s` | `2.69x` |
+| `arith_mix_loop` | `0.011078s` | `0.021352s` | `1.93x` |
+| `arith_chain_temp` | `0.012467s` | `0.032404s` | `2.60x` |
+| `table_rw` | `0.006925s` | `0.018617s` | `2.69x` |
+| `function_call` | `0.006734s` | `0.020266s` | `3.01x` |
+| `string_concat` | `0.004632s` | `0.008566s` | `1.85x` |
+| `closure_upvalue` | `0.008063s` | `0.022327s` | `2.77x` |
+| `stdlib_math_string` | `0.019366s` | `0.028669s` | `1.48x` |
+| `recursion` | `0.003502s` | `0.003665s` | `1.05x` |
+| `compile_3000_functions` | `0.005306s` | `0.011872s` | `2.24x` |
+
+结论：`stdlib_math_string` 从上一轮抽样 `1.54x` 继续降到 `1.48x`。本轮完整抽样中 `function_call`
+单项为 `3.01x`，但 prepared Go micro 仍维持 `160-161 us/op` 的上一轮稳定收益，暂判断为短样本官方/
+子进程计时波动，后续如继续收敛应复跑默认完整三轮或补更长 function_call 口径。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -442,7 +496,7 @@ alloc profile 显示 `stdlib_math_string` 剩余固定分配主要是 `internal/
 - [x] 增加 `function_call` prepared 口径，确认编译/OpenLibs 分配不是该项 wall-clock 主因。
 - [x] 实现 `MOVE; MOVE; LOADK; CALL; ADD; FORLOOP` superinstruction 原型，覆盖官方 `function_call`。
 - [x] 实现 `string.format("%d", i)` 固定结果 fastcall，降低 `stdlib_math_string` 通用 GoResultsFunction 成本。
-- [ ] 评估 `#string.format("%d", i)` 表达式级快路径，目标是消除 `stdlib_math_string` 剩余 FormatInt 字符串分配。
+- [x] 评估 `#string.format("%d", i)` 表达式级快路径，目标是消除 `stdlib_math_string` 剩余 FormatInt 字符串分配。
 - [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准

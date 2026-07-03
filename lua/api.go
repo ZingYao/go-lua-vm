@@ -2480,12 +2480,14 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 	mulAddSubForLoopSuperInstructionEnabled := false
 	mixArithmeticForLoopSuperInstructionEnabled := false
 	functionCallAddForLoopSuperInstructionEnabled := false
+	formatLenAddForLoopSuperInstructionEnabled := false
 	if !preciseFrameSync && !hooksEnabled {
 		// 普通主线程无 hook 路径可提前准备 superinstruction 表；hook/coroutine 路径必须保留逐 PC 语义。
 		addForLoopSuperInstructionEnabled = vm.PrepareAddForLoopSuperInstructions()
 		mulAddSubForLoopSuperInstructionEnabled = vm.PrepareMulAddSubForLoopSuperInstructions()
 		mixArithmeticForLoopSuperInstructionEnabled = vm.PrepareMixArithmeticForLoopSuperInstructions()
 		functionCallAddForLoopSuperInstructionEnabled = vm.PrepareFunctionCallAddForLoopSuperInstructions()
+		formatLenAddForLoopSuperInstructionEnabled = vm.PrepareFormatLenAddForLoopSuperInstructions()
 	}
 	contextCheckCountdown := 0
 	for pc >= 0 && pc < len(proto.Code) {
@@ -2519,6 +2521,26 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 			if err := triggerLuaLineHook(state, debugEnvironment, proto, pc, previousPC, previousPreviousPC, &lastHookLine); err != nil {
 				// hook 内抛错必须中断当前 VM，交给 protected call 边界包装 traceback。
 				return nil, err
+			}
+		}
+		if formatLenAddForLoopSuperInstructionEnabled && !preciseFrameSync && !hooksEnabled && contextCheckCountdown >= 7 && vm.HasFormatLenAddForLoopAt(pc) {
+			// 八指令 string.format 长度消费尾部会额外跳过 GETTABLE、LOADK、MOVE、CALL、LEN、ADD、FORLOOP 七个入口；
+			// 倒计时至少为 7 才能证明逐指令路径不会在被跳过区间触发 context 检查。
+			if err := state.CheckContext(); err != nil {
+				// 普通 CALL 入口会检查 context，superinstruction 在跳过 CALL 前保留该取消边界。
+				if syncErr := syncCurrentFrame(pc); syncErr != nil {
+					return nil, syncErr
+				}
+				return nil, err
+			}
+			formatPC := pc
+			if nextPC, handled := vm.TryExecuteFormatLenAddForLoop(formatPC); handled {
+				// superinstruction 已完成 GETTABUP、GETTABLE、LOADK、MOVE、CALL、LEN、ADD 与 FORLOOP。
+				contextCheckCountdown -= 7
+				previousPreviousPC = formatPC + 6
+				previousPC = formatPC + 7
+				pc = nextPC
+				continue
 			}
 		}
 		if functionCallAddForLoopSuperInstructionEnabled && !preciseFrameSync && !hooksEnabled && contextCheckCountdown >= 5 && vm.HasFunctionCallAddForLoopAt(pc) {

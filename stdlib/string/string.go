@@ -656,6 +656,7 @@ func newFormatFixedResultsFunction(state *runtime.State) *runtime.GoFixedResults
 	// format 永远最多返回一个字符串，窄快路径只负责无错误 exact `%d` 成功场景。
 	return &runtime.GoFixedResultsFunction{
 		MaxResults:      1,
+		FastPathID:      runtime.GoFixedResultsFastPathStringFormatDecimal,
 		Function4Single: FormatFixed4Single,
 		Function4:       FormatFixed4,
 		Function:        FormatFixed,
