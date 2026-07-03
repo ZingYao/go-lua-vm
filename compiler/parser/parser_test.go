@@ -840,6 +840,50 @@ func TestFunctionNamespaceUsesInlineScopeStack(t *testing.T) {
 	}
 }
 
+// TestSemanticAnalyzerBorrowsInlineFunctionNamespaces 验证语义分析器复用常见函数命名空间槽。
+//
+// 顶层 chunk 和普通子函数应使用 analyzer 内嵌槽；深层嵌套函数仍允许回退普通临时命名空间。
+func TestSemanticAnalyzerBorrowsInlineFunctionNamespaces(t *testing.T) {
+	analyzer := &semanticAnalyzer{}
+
+	topNamespace := analyzer.borrowFunctionNamespace()
+	if topNamespace != &analyzer.inlineFunctionNamespaces[0] {
+		// 顶层 chunk 应复用第一个内嵌命名空间槽。
+		t.Fatalf("top namespace should use first inline slot")
+	}
+	childNamespace := analyzer.borrowFunctionNamespace()
+	if childNamespace != &analyzer.inlineFunctionNamespaces[1] {
+		// 一层子函数应复用第二个内嵌命名空间槽。
+		t.Fatalf("child namespace should use second inline slot")
+	}
+	deepNamespace := analyzer.borrowFunctionNamespace()
+	if deepNamespace == &analyzer.inlineFunctionNamespaces[0] || deepNamespace == &analyzer.inlineFunctionNamespaces[1] {
+		// 更深嵌套必须使用独立命名空间，避免覆盖仍在使用的父函数槽。
+		t.Fatalf("deep namespace should not reuse active inline slots")
+	}
+
+	deepNamespace.gotos = append(deepNamespace.gotos, gotoRecord{})
+	analyzer.releaseFunctionNamespace(deepNamespace)
+	childNamespace.labels = map[string][]labelRecord{"x": nil}
+	analyzer.releaseFunctionNamespace(childNamespace)
+	if analyzer.inlineFunctionNamespaces[1].labels != nil {
+		// 归还时必须清空内部引用，避免下一函数观察到旧 label。
+		t.Fatalf("child namespace should be cleared after release")
+	}
+	analyzer.releaseFunctionNamespace(topNamespace)
+	if analyzer.functionNamespaceDepth != 0 {
+		// 所有命名空间归还后深度必须回到零。
+		t.Fatalf("unexpected namespace depth=%d", analyzer.functionNamespaceDepth)
+	}
+
+	reusedNamespace := analyzer.borrowFunctionNamespace()
+	if reusedNamespace != &analyzer.inlineFunctionNamespaces[0] {
+		// 新一轮分析应从顶层槽重新开始复用。
+		t.Fatalf("reused namespace should use first inline slot")
+	}
+	analyzer.releaseFunctionNamespace(reusedNamespace)
+}
+
 // TestParserAggregatesSemanticErrors 验证 parser 语义错误聚合策略。
 //
 // 当前错误恢复策略针对作用域语义阶段：尽量收集多个 goto/label 错误并一次返回。

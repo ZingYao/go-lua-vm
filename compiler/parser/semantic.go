@@ -92,6 +92,10 @@ type semanticAnalyzer struct {
 	nextScopeID int
 	// loopDepth 保存当前函数内嵌套循环深度，用于校验 continue 只能出现在循环内部。
 	loopDepth int
+	// inlineFunctionNamespaces 保存顶层 chunk 和一层子函数常见命名空间，避免函数体分析时逃逸分配。
+	inlineFunctionNamespaces [2]functionNamespace
+	// functionNamespaceDepth 保存当前语义分析递归中的函数命名空间深度。
+	functionNamespaceDepth int
 	// inlineLocalDeclaration 保存最常见的单预声明 local，避免函数单参数路径分配一元素切片。
 	inlineLocalDeclaration [1]localDeclaration
 	// errors 保存语义阶段聚合到的错误。
@@ -153,9 +157,10 @@ type localDeclaration struct {
 // chunk 必须已经通过语法解析；返回错误表示作用域、局部变量或 goto/label 规则失败。
 func (analyzer *semanticAnalyzer) analyzeChunk(chunk *Chunk) error {
 	// 顶层 chunk 使用一个独立函数命名空间，后续函数体会递归创建新命名空间。
-	namespace := newFunctionNamespace()
-	analyzer.analyzeBlock(chunk.Block, nil, -1, 0, nil, false, &namespace)
-	analyzer.validateGotos(&namespace)
+	namespace := analyzer.borrowFunctionNamespace()
+	defer analyzer.releaseFunctionNamespace(namespace)
+	analyzer.analyzeBlock(chunk.Block, nil, -1, 0, nil, false, namespace)
+	analyzer.validateGotos(namespace)
 	if len(analyzer.errors) > 0 {
 		// 语义错误可能有多个，一次性返回给调用方。
 		return analyzer.errors
@@ -171,6 +176,40 @@ func (analyzer *semanticAnalyzer) analyzeChunk(chunk *Chunk) error {
 func newFunctionNamespace() functionNamespace {
 	// label 和 scope 索引都按需创建；调用方以局部值持有 namespace，避免普通函数额外堆分配。
 	return functionNamespace{}
+}
+
+// borrowFunctionNamespace 借出当前函数体的 label/goto 命名空间。
+//
+// 常见源码只存在顶层 chunk 与一层子函数，因此前两层复用 semanticAnalyzer 内嵌槽；更深嵌套函数仍
+// 使用普通临时值，保持递归语义和 label/goto 隔离不变。
+func (analyzer *semanticAnalyzer) borrowFunctionNamespace() *functionNamespace {
+	depth := analyzer.functionNamespaceDepth
+	analyzer.functionNamespaceDepth++
+	if depth < len(analyzer.inlineFunctionNamespaces) {
+		// 内嵌槽复用前必须清空，避免上一函数的 label/goto 或 scope 栈被后续函数观察到。
+		namespace := &analyzer.inlineFunctionNamespaces[depth]
+		*namespace = functionNamespace{}
+		return namespace
+	}
+
+	// 深层嵌套函数较少见，保持原先按函数体独立分配命名空间的语义。
+	namespace := newFunctionNamespace()
+	return &namespace
+}
+
+// releaseFunctionNamespace 归还当前函数体命名空间并释放内部引用。
+//
+// namespace 必须来自最近一次 borrowFunctionNamespace；清零可避免 analyzer 在解析结束前继续持有 AST
+// 引用，同时保持后续同深度函数复用内嵌槽时从空状态开始。
+func (analyzer *semanticAnalyzer) releaseFunctionNamespace(namespace *functionNamespace) {
+	if namespace != nil {
+		// 清空 map、slice 和内嵌栈，避免跨函数命名空间污染。
+		*namespace = functionNamespace{}
+	}
+	if analyzer.functionNamespaceDepth > 0 {
+		// 正常递归借还按栈顺序回退深度；空深度只作为防御性保护。
+		analyzer.functionNamespaceDepth--
+	}
 }
 
 // pushScope 记录当前语义分析路径上的作用域。
@@ -318,13 +357,14 @@ func (analyzer *semanticAnalyzer) analyzeStatement(block *Block, scope *ScopeInf
 //
 // 函数参数会作为函数 body 作用域起始局部变量。
 func (analyzer *semanticAnalyzer) analyzeFunctionBody(body *FunctionBody) {
-	namespace := newFunctionNamespace()
+	namespace := analyzer.borrowFunctionNamespace()
+	defer analyzer.releaseFunctionNamespace(namespace)
 	declarations := analyzer.declarationsFromNames(body.Params, body.Position)
 	previousLoopDepth := analyzer.loopDepth
 	analyzer.loopDepth = 0
-	analyzer.analyzeBlock(body.Body, nil, -1, 0, declarations, false, &namespace)
+	analyzer.analyzeBlock(body.Body, nil, -1, 0, declarations, false, namespace)
 	analyzer.loopDepth = previousLoopDepth
-	analyzer.validateGotos(&namespace)
+	analyzer.validateGotos(namespace)
 }
 
 // analyzeIfStatement 分析 if/elseif/else 的子 block。
