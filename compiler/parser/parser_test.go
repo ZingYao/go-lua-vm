@@ -715,6 +715,37 @@ func TestParserScopeLocalLifetimeAndGotoValidation(t *testing.T) {
 	}
 }
 
+// TestFunctionNamespaceUsesInlineScopeStack 验证函数命名空间优先复用内嵌作用域栈。
+//
+// 普通函数常见只有一个顶层 block；超过一层时仍必须能按普通切片语义扩展。
+func TestFunctionNamespaceUsesInlineScopeStack(t *testing.T) {
+	namespace := newFunctionNamespace()
+	firstScope := &ScopeInfo{ID: 1}
+	secondScope := &ScopeInfo{ID: 2}
+
+	namespace.pushScope(firstScope)
+	if len(namespace.scopeStack) != 1 || namespace.scopeStack[0] != firstScope {
+		// 首个作用域必须成功压入命名空间栈。
+		t.Fatalf("unexpected first scope stack=%+v", namespace.scopeStack)
+	}
+	if &namespace.scopeStack[0] != &namespace.inlineScopeStack[0] {
+		// 单层作用域应复用结构体内嵌槽，避免普通函数额外分配底层数组。
+		t.Fatalf("first scope should use inline slot")
+	}
+
+	namespace.pushScope(secondScope)
+	if len(namespace.scopeStack) != 2 || namespace.scopeStack[0] != firstScope || namespace.scopeStack[1] != secondScope {
+		// 多层作用域仍必须保持普通栈顺序。
+		t.Fatalf("unexpected expanded scope stack=%+v", namespace.scopeStack)
+	}
+	namespace.popScope()
+	namespace.popScope()
+	if len(namespace.scopeStack) != 0 {
+		// 弹空后栈长度必须回到零，便于后续复用同一命名空间。
+		t.Fatalf("scope stack should be empty, got=%+v", namespace.scopeStack)
+	}
+}
+
 // TestParserAggregatesSemanticErrors 验证 parser 语义错误聚合策略。
 //
 // 当前错误恢复策略针对作用域语义阶段：尽量收集多个 goto/label 错误并一次返回。

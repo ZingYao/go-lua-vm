@@ -106,6 +106,8 @@ type functionNamespace struct {
 	gotos []gotoRecord
 	// scopes 按 ID 保存当前函数内的 block 作用域，用于判断 label 可见性。
 	scopes map[int]*ScopeInfo
+	// inlineScopeStack 保存最常见的函数顶层 block，避免无 goto 普通函数为 scopeStack 另分配底层数组。
+	inlineScopeStack [1]*ScopeInfo
 	// scopeStack 保存当前递归分析路径上的作用域，用于首次 goto 时回填父链索引。
 	scopeStack []*ScopeInfo
 }
@@ -150,8 +152,8 @@ type localDeclaration struct {
 func (analyzer *semanticAnalyzer) analyzeChunk(chunk *Chunk) error {
 	// 顶层 chunk 使用一个独立函数命名空间，后续函数体会递归创建新命名空间。
 	namespace := newFunctionNamespace()
-	analyzer.analyzeBlock(chunk.Block, nil, -1, 0, nil, false, namespace)
-	analyzer.validateGotos(namespace)
+	analyzer.analyzeBlock(chunk.Block, nil, -1, 0, nil, false, &namespace)
+	analyzer.validateGotos(&namespace)
 	if len(analyzer.errors) > 0 {
 		// 语义错误可能有多个，一次性返回给调用方。
 		return analyzer.errors
@@ -164,15 +166,19 @@ func (analyzer *semanticAnalyzer) analyzeChunk(chunk *Chunk) error {
 // newFunctionNamespace 创建新的函数级 label/goto 命名空间。
 //
 // Lua label 和 goto 只在单个函数内互相可见。
-func newFunctionNamespace() *functionNamespace {
-	// label 和 scope 索引都按需创建；无 goto/label 的普通函数不需要这些表。
-	return &functionNamespace{}
+func newFunctionNamespace() functionNamespace {
+	// label 和 scope 索引都按需创建；调用方以局部值持有 namespace，避免普通函数额外堆分配。
+	return functionNamespace{}
 }
 
 // pushScope 记录当前语义分析路径上的作用域。
 //
 // 作用域父链索引只有 goto 校验需要；若已经出现 goto，则进入新 block 时同步写入索引。
 func (namespace *functionNamespace) pushScope(scope *ScopeInfo) {
+	if namespace.scopeStack == nil {
+		// 常见函数只有顶层 body 作用域，优先复用结构体内嵌的一元素栈槽。
+		namespace.scopeStack = namespace.inlineScopeStack[:0]
+	}
 	namespace.scopeStack = append(namespace.scopeStack, scope)
 	if namespace.scopes != nil {
 		// 已经启用 goto 父链索引时，后续作用域需要增量补入。
@@ -313,9 +319,9 @@ func (analyzer *semanticAnalyzer) analyzeFunctionBody(body *FunctionBody) {
 	declarations := analyzer.declarationsFromNames(body.Params, body.Position)
 	previousLoopDepth := analyzer.loopDepth
 	analyzer.loopDepth = 0
-	analyzer.analyzeBlock(body.Body, nil, -1, 0, declarations, false, namespace)
+	analyzer.analyzeBlock(body.Body, nil, -1, 0, declarations, false, &namespace)
 	analyzer.loopDepth = previousLoopDepth
-	analyzer.validateGotos(namespace)
+	analyzer.validateGotos(&namespace)
 }
 
 // analyzeIfStatement 分析 if/elseif/else 的子 block。

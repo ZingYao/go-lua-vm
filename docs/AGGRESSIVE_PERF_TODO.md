@@ -1141,6 +1141,34 @@ benchmark 复核：
 约 `3000 allocs/op` 和约 `0.14 MB/op`，wall-clock 小幅改善。剩余 parser AST 成本主要来自真实表达式和
 函数体节点，继续优化需要更大 AST 布局设计，不应再针对已证伪的参数预声明临时切片做局部改动。
 
+### 2026-07-04 函数命名空间内嵌单层作用域栈
+
+简单函数名优化后的 profile 中，`parser.newFunctionNamespace` 与 `functionNamespace.pushScope` 仍是
+`compile_3000_functions` 的稳定对象来源。每个函数体都会创建独立的 label/goto 命名空间；而官方规模
+源码中的每个子函数只有一个顶层 body block，没有 goto/label，`scopeStack` 只会压入一个作用域。
+
+实现：`newFunctionNamespace` 改为返回局部值，调用方把地址传入语义分析；`functionNamespace` 新增一个
+内嵌的一元素 `inlineScopeStack`，`pushScope` 首次压栈时优先复用该槽。超过一层嵌套 block 时仍按普通
+切片 append 扩容；首次遇到 goto 时，`ensureScopeIndex` 仍从当前 `scopeStack` 回填父链索引。因此 label、
+goto、跳入内层 block、向前跳过 local、switch 扩展语义和错误文本不变。
+
+新增测试：
+
+| 用例 | 覆盖点 |
+| --- | --- |
+| `TestFunctionNamespaceUsesInlineScopeStack` | 首个 scope 复用内嵌槽；第二层 scope 仍可扩展；pop 后栈长度恢复。 |
+
+benchmark 复核：
+
+| 用例 | 结果 |
+| --- | ---: |
+| `BenchmarkCompileSource3000Functions` | `7.074 / 7.061 / 7.078 / 7.066 / 7.070 ms/op`，约 `5.66 MB/op`，`60139 allocs/op` |
+
+对比简单函数名免 AST 节点后的约 `7.15-7.20 ms/op`、`5.64 MB/op`、`63140 allocs/op`，该优化再减少
+约 `3000 allocs/op`，wall-clock 小幅改善。B/op 因 namespace 内嵌槽略升约 `0.02 MB/op`，但对象数下降
+明确，且仍低于小容量预留前水平。后续若继续推进编译期，应重新 profile，重点观察剩余真实 AST 节点、
+semantic scope 和 Proto/generator 实体成本，而不是继续压缩已处理的 namespace 栈。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -1235,7 +1263,8 @@ benchmark 复核：
 - [x] 若继续推进编译期，优先拆分 `recordConstantIndex`、`newGenerator/NewProto` 与 parser AST/namespace 分配；只有能证明字节码、debug local 和错误语义等价时再实现。
 - [x] 若继续推进编译期，优先 profile 单 integer 常量 inline 后的 `newGenerator/NewProto`、parser AST/namespace 与 semantic scope；只有出现新的结构性切口时再实现。
 - [x] 若继续推进编译期，优先 profile 小容量预留后的 parser AST、semantic scope 与 namespace；只有出现新的结构性切口时再实现。
-- [ ] 若继续推进编译期，优先 profile 简单函数名免 AST 节点后的 parser AST 与 semantic scope；只有出现新的结构性切口时再实现。
+- [x] 若继续推进编译期，优先 profile 简单函数名免 AST 节点后的 parser AST 与 semantic scope；只有出现新的结构性切口时再实现。
+- [ ] 若继续推进编译期，优先 profile 函数命名空间内嵌栈后的剩余 parser AST、semantic scope 与 Proto/generator 实体成本。
 - [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准
