@@ -1910,6 +1910,38 @@ benchmark 复核：
 但已经连续两轮通过大 backing array 换对象数；后续不应继续用类似 arena 堆 B/op，应该只评估
 `FunctionStatement` 宿主节点精确布局，或记录编译期短期优化到此为止。
 
+### 2026-07-04 `FunctionStatement` 宿主节点评估与编译期短期收尾
+
+profile 口径：`CGO_ENABLED=0 go test ./internal/luac -run '^$' -bench '^BenchmarkCompileSource3000Functions$'
+-benchmem -benchtime=5s -count=1 -memprofile ...`。结果为 `6.148 ms/op`、约 `5.22 MB/op`、
+`3110 allocs/op`，与直接子 generator arena 后的分配口径一致。
+
+alloc profile 观察：
+
+| 位置 | 观察 |
+| --- | --- |
+| `parser.(*Parser).parseFunctionStatement` | `alloc_objects` 约 `92%`，剩余对象几乎全部来自每个普通 `function fN(x)` 语句节点本体。 |
+| `codegen.(*generator).prepareDirectFunctionBlockCapacity` | `alloc_space` 约 `41%`，来自前两轮 child Proto/generator arena 的精确 backing array。 |
+| `parser.newLiteralExpression` / `newBinaryExpression` / `newNameExpression` | 仍有真实表达式 AST 节点空间成本，但对象数已明显低于 `FunctionStatement`。 |
+| `recordConstantIndex` / `Proto.AddConstant` / `Proto.AddInstruction` | 属于最终 Proto、常量和指令输出本体成本，当前没有新的低风险小切口。 |
+
+源码结构复核：`FunctionStatement` 已经内嵌 `FunctionBody`，函数体 `Block`、单参数、单返回值和 block
+`ScopeInfo` 也都已经内嵌到宿主节点。剩余的 `FunctionStatement` 对象不能像 `ReturnStatement` 那样自然
+挂到已有唯一宿主上，因为 `Block.Statements []Statement` 需要保存按源码顺序排列的语句接口，并让
+semantic/codegen 在整个编译期持有稳定地址。继续消除这批对象只有两类方案：
+
+- 重做 `Block.Statements` 为 typed statement union 或其它非接口语句存储。这会穿透 parser、semantic、
+  codegen、扩展语法和测试断言，属于大结构设计，不是短期小切口。
+- 为 `FunctionStatement` 增加页式或大数组 arena。这会重复已证伪的 statement 页式搬迁方向，且当前
+  B/op 已因 child Proto/generator arena 升至约 `5.22 MB/op`，不符合“不继续通过 backing array 增加
+  B/op 换 allocs/op”的边界。
+
+结论：短期编译期结构优化到此收尾。`compile_3000_functions` 已从激进分支基线约 `8.34 ms/op`、
+`7.58 MB/op`、`81151 allocs/op` 降至约 `6.1 ms/op`、`5.22 MB/op`、`3110-3114 allocs/op`。后续如果
+重新打开编译期专项，应先设计 `Block.Statements` typed storage 或 parser AST/semantic 生命周期的大结构
+方案，并用官方反汇编、debug local 生命周期、错误语义和 B/op 不退化作为进入实现门槛；不要继续追加
+局部字段、容量预估或 statement arena。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -2028,7 +2060,7 @@ benchmark 复核：
 - [x] 若继续推进编译期，基于 ReturnStatement 内嵌 Block 后重新 profile；优先评估 `newGenerator/NewProto` 实体所有权或剩余 `FunctionStatement` 宿主节点布局。
 - [x] 若继续推进编译期，优先评估剩余 `FunctionStatement` 宿主节点布局或 `NewProto` 本体所有权；不要重复栈上 generator 方向，且不得让最终 `Proto` 保留 codegen 临时状态。
 - [x] 若继续推进编译期，优先 profile 直接子 Proto arena 后的 `codegen.newChildGenerator` 与 `parser.parseFunctionStatement`；B/op 已上升到约 `5.12 MB/op`，后续切口不得继续显著增加 B/op。
-- [ ] 若继续推进编译期，只评估 `FunctionStatement` 宿主节点精确布局或记录编译期短期优化收尾；不要继续通过大 backing array 增加 B/op 来换 allocs/op。
+- [x] 若继续推进编译期，只评估 `FunctionStatement` 宿主节点精确布局或记录编译期短期优化收尾；不要继续通过大 backing array 增加 B/op 来换 allocs/op。
 - [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准
