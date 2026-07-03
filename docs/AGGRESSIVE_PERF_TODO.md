@@ -421,6 +421,26 @@ benchmark 复核：
 单项为 `3.01x`，但 prepared Go micro 仍维持 `160-161 us/op` 的上一轮稳定收益，暂判断为短样本官方/
 子进程计时波动，后续如继续收敛应复跑默认完整三轮或补更长 function_call 口径。
 
+48adf99 后默认完整 benchmark 三轮复核：
+
+| 用例 | 本项目/官方 |
+| --- | ---: |
+| `arith_add_loop` | `2.82x / 2.77x / 2.77x` |
+| `arith_mix_loop` | `1.97x / 1.84x / 1.91x` |
+| `arith_chain_temp` | `2.47x / 2.51x / 2.53x` |
+| `table_rw` | `2.43x / 2.61x / 2.53x` |
+| `function_call` | `3.02x / 2.97x / 2.95x` |
+| `string_concat` | `1.79x / 1.79x / 1.80x` |
+| `closure_upvalue` | `2.84x / 2.76x / 2.78x` |
+| `stdlib_math_string` | `1.44x / 1.41x / 1.49x` |
+| `recursion` | `1.05x / 1.02x / 1.13x` |
+| `compile_3000_functions` | `2.23x / 2.38x / 2.32x` |
+
+结论：表达式级长度消费后 `stdlib_math_string` 在默认完整三轮中稳定进入 `1.4x` 区间。`function_call`
+第 1 轮仍有 `3.02x` 边缘项，但本项目绝对时间三轮约 `20.2-20.6 ms`，后两轮低于 `3x`，且
+prepared Go micro 保持 `160-161 us/op`，暂不单独驱动生产改动。后续如果继续冲击该项，应先做更长
+function_call 默认/Go micro 矩阵和 CPU profile，证明它不是官方基线波动，再考虑新的调用边界切口。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -497,6 +517,7 @@ benchmark 复核：
 - [x] 实现 `MOVE; MOVE; LOADK; CALL; ADD; FORLOOP` superinstruction 原型，覆盖官方 `function_call`。
 - [x] 实现 `string.format("%d", i)` 固定结果 fastcall，降低 `stdlib_math_string` 通用 GoResultsFunction 成本。
 - [x] 评估 `#string.format("%d", i)` 表达式级快路径，目标是消除 `stdlib_math_string` 剩余 FormatInt 字符串分配。
+- [ ] 若继续推进，优先复核 `function_call` 默认完整 benchmark 的 3x 边缘波动；只有默认完整和 prepared Go micro 都证明稳定退化时，再设计新的调用边界优化。
 - [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准
