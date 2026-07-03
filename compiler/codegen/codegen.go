@@ -32,7 +32,7 @@ func CompileChunk(chunk *parser.Chunk, source string) (*bytecode.Proto, error) {
 	generator := newGenerator(source)
 	// Lua chunk 本身按 vararg 函数执行，CLI 脚本参数会通过 `...` 暴露。
 	generator.proto.IsVararg = true
-	generator.prepareChildProtoCapacity(chunk.Block)
+	generator.prepareDirectFunctionBlockCapacity(chunk.Block)
 	if err := generator.compileBlock(chunk.Block); err != nil {
 		// 编译失败时返回带上下文的错误，调用方不能使用部分 Proto。
 		return nil, err
@@ -319,47 +319,70 @@ func newChildGenerator(parent *generator, source string) *generator {
 	return child
 }
 
-// prepareChildProtoCapacity 按当前 block 的直接函数声明数量预留子 Proto 容量。
+// prepareDirectFunctionBlockCapacity 按当前 block 的直接函数声明预留 codegen 短表容量。
 //
-// block 为 nil 或没有直接函数声明时保持 Protos nil；该方法只改变容量，不改变 Proto.p 的长度、
-// 子函数顺序、CLOSURE Bx 索引或 binary chunk 输出。
-func (generator *generator) prepareChildProtoCapacity(block *parser.Block) {
+// block 为 nil 或没有直接函数声明时保持现有短槽；该方法只改变容量，不改变 Proto.p、Code、LineInfo 或
+// Constants 的长度、顺序、CLOSURE Bx 索引或 binary chunk 输出。
+func (generator *generator) prepareDirectFunctionBlockCapacity(block *parser.Block) {
 	if generator == nil || generator.proto == nil || block == nil {
 		// 缺少生成器或 block 时没有可预留对象，保持调用方状态不变。
 		return
 	}
-	if len(generator.proto.Protos) != 0 || cap(generator.proto.Protos) != 0 {
-		// 已经存在子 Proto 或容量时不重绑定底层数组，避免丢失调用方已构造的 Proto.p。
-		return
+	stats := directFunctionBlockStatsFor(block)
+	if stats.instructionCapacity > cap(generator.proto.Code) && len(generator.proto.Code) == 0 && len(generator.proto.LineInfo) == 0 {
+		// 直接函数声明会稳定产生 CLOSURE/SETGLOBAL 指令；只在尚未写入指令前扩大容量。
+		generator.proto.PrepareInlineCodeLineInfo(stats.instructionCapacity)
 	}
-	childCount := directChildFunctionStatementCount(block)
-	if childCount == 0 {
-		// 没有直接函数声明时保持 nil 切片，避免给普通函数引入额外分配。
-		return
+	if stats.nameConstantCapacity > cap(generator.proto.Constants) && len(generator.proto.Constants) == 0 {
+		// 普通 function 名称会进入当前 Proto 常量表；只预留容量，不写入常量。
+		generator.proto.PrepareInlineConstants(stats.nameConstantCapacity)
 	}
-	generator.proto.Protos = make([]*bytecode.Proto, 0, childCount)
+	if stats.childCount > 0 && len(generator.proto.Protos) == 0 && cap(generator.proto.Protos) == 0 {
+		// 直接函数声明会在当前 Proto.p 追加子 Proto；无子函数时保持 nil 切片。
+		generator.proto.Protos = make([]*bytecode.Proto, 0, stats.childCount)
+	}
 }
 
-// directChildFunctionStatementCount 统计当前 block 直接语句中的函数声明数量。
+// directFunctionBlockStats 保存当前 block 直接函数声明会触发的保守容量预估。
+type directFunctionBlockStats struct {
+	// childCount 保存当前 Proto.p 会追加的直接子 Proto 数量。
+	childCount int
+	// instructionCapacity 保存当前 block 直接函数声明至少需要的指令容量，包含默认 RETURN 余量。
+	instructionCapacity int
+	// nameConstantCapacity 保存普通 function 名称可能写入当前常量表的容量。
+	nameConstantCapacity int
+}
+
+// directFunctionBlockStatsFor 统计当前 block 直接语句中的函数声明容量需求。
 //
-// 该统计只覆盖 codegen 会直接追加到当前 Proto.p 的 `function` 和 `local function` 语句；嵌套 block
+// 该统计只覆盖 codegen 会直接追加到当前 Proto 的 `function` 和 `local function` 语句；嵌套 block
 // 或函数表达式由各自编译路径自然扩容，避免为了保守预留遍历完整 AST。
-func directChildFunctionStatementCount(block *parser.Block) int {
+func directFunctionBlockStatsFor(block *parser.Block) directFunctionBlockStats {
 	if block == nil {
-		// nil block 没有语句，调用方无需预留。
-		return 0
+		// nil block 没有语句，调用方无需预留任何容量。
+		return directFunctionBlockStats{}
 	}
-	count := 0
+	stats := directFunctionBlockStats{}
 	for _, statement := range block.Statements {
 		switch statement.(type) {
-		case *parser.FunctionStatement, *parser.LocalFunctionStatement:
+		case *parser.FunctionStatement:
+			// 普通 function 会追加一个子 Proto，并在常见全局写入路径产生 CLOSURE 和 SETGLOBAL。
+			stats.childCount++
+			stats.instructionCapacity += 2
+			stats.nameConstantCapacity++
+		case *parser.LocalFunctionStatement:
 			// 直接函数声明会在当前 Proto.p 追加一个子 Proto。
-			count++
+			stats.childCount++
+			stats.instructionCapacity++
 		default:
-			// 其他语句不在当前层直接追加函数声明 Proto，保持保守容量。
+			// 其他语句不在当前层直接追加函数声明 Proto，保持保守容量预估。
 		}
 	}
-	return count
+	if stats.instructionCapacity > 0 {
+		// 多数函数声明 block 最后还会补默认 RETURN；即使已有显式 return，额外容量只影响预留。
+		stats.instructionCapacity++
+	}
+	return stats
 }
 
 // compileBlock 编译一个 block。
@@ -2862,7 +2885,7 @@ func (generator *generator) compileChildProto(body *parser.FunctionBody) (int, e
 	child.proto.IsVararg = body.Vararg
 	child.proto.LineDefined = body.LineDefined
 	child.proto.LastLineDefined = body.LastLineDefined
-	child.prepareChildProtoCapacity(body.Body)
+	child.prepareDirectFunctionBlockCapacity(body.Body)
 	for _, paramName := range body.Params {
 		// 参数寄存器从 R0 开始，既是入参位置也是局部变量位置。
 		register := child.allocateRegister()

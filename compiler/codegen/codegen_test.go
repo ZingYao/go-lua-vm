@@ -856,10 +856,10 @@ func TestNewGeneratorPreallocatesCodeAndLineInfo(t *testing.T) {
 	}
 }
 
-// TestCompileChunkPreallocatesChildProtos 验证当前 block 的直接函数声明会预留 Proto.p 容量。
+// TestCompileChunkPreallocatesDirectFunctionBlock 验证当前 block 的直接函数声明会预留短表容量。
 //
-// 容量预留只能减少 append 扩容成本，不能改变子函数数量、顺序或无子函数 Proto 的 nil 观察语义。
-func TestCompileChunkPreallocatesChildProtos(t *testing.T) {
+// 容量预留只能减少 append 扩容成本，不能改变指令、常量、子函数数量、顺序或无子函数 Proto 的 nil 观察语义。
+func TestCompileChunkPreallocatesDirectFunctionBlock(t *testing.T) {
 	plainChunk := parseChunkForCodegenTest(t, "local x = 1 return x")
 	plainProto, err := CompileChunk(plainChunk, "no-child-proto")
 	if err != nil {
@@ -872,9 +872,10 @@ func TestCompileChunkPreallocatesChildProtos(t *testing.T) {
 	}
 
 	functionChunk := parseChunkForCodegenTest(t, "function f() return 1 end local function g() return 2 end")
-	if count := directChildFunctionStatementCount(functionChunk.Block); count != 2 {
-		// 当前 block 中两个直接函数声明都应被计入容量。
-		t.Fatalf("unexpected direct child function count=%d", count)
+	stats := directFunctionBlockStatsFor(functionChunk.Block)
+	if stats.childCount != 2 || stats.instructionCapacity != 4 || stats.nameConstantCapacity != 1 {
+		// 当前 block 中两个直接函数声明都应被计入容量，普通 function 额外预留名称常量。
+		t.Fatalf("unexpected direct function stats=%+v", stats)
 	}
 	functionProto, err := CompileChunk(functionChunk, "child-protos")
 	if err != nil {
@@ -885,15 +886,23 @@ func TestCompileChunkPreallocatesChildProtos(t *testing.T) {
 		// 子 Proto 长度和容量必须覆盖两个直接函数声明。
 		t.Fatalf("unexpected child protos len/cap=%d/%d", len(functionProto.Protos), cap(functionProto.Protos))
 	}
+	if cap(functionProto.Code) < stats.instructionCapacity || cap(functionProto.LineInfo) < stats.instructionCapacity {
+		// 指令和行号容量必须覆盖直接函数声明的保守预估。
+		t.Fatalf("unexpected code capacity: code=%d line=%d stats=%+v", cap(functionProto.Code), cap(functionProto.LineInfo), stats)
+	}
+	if cap(functionProto.Constants) < stats.nameConstantCapacity {
+		// 普通 function 名称常量容量必须覆盖直接函数声明预估。
+		t.Fatalf("unexpected constants capacity: cap=%d stats=%+v", cap(functionProto.Constants), stats)
+	}
 	if functionProto.Protos[0].Constants[0] != bytecode.IntegerConstant(1) || functionProto.Protos[1].Constants[0] != bytecode.IntegerConstant(2) {
 		// 预留容量不得改变子 Proto 追加顺序。
 		t.Fatalf("child proto order changed: %+v", functionProto.Protos)
 	}
 
 	nestedChunk := parseChunkForCodegenTest(t, "do function nested() end end")
-	if count := directChildFunctionStatementCount(nestedChunk.Block); count != 0 {
+	if nestedStats := directFunctionBlockStatsFor(nestedChunk.Block); nestedStats.childCount != 0 || nestedStats.instructionCapacity != 0 || nestedStats.nameConstantCapacity != 0 {
 		// helper 只统计当前 block 的直接函数声明，不递归进入嵌套 block。
-		t.Fatalf("nested function should not be counted as direct child: %d", count)
+		t.Fatalf("nested function should not be counted as direct child: %+v", nestedStats)
 	}
 }
 
