@@ -1871,6 +1871,149 @@ func TestVMDecodedInstructionHandlesStrippedAndInvalidRK(t *testing.T) {
 	}
 }
 
+// TestVMTryExecuteAddForLoop 验证 `ADD; FORLOOP` superinstruction 的 integer 热路径。
+//
+// 该 fast path 只在 guard 全部命中时提交寄存器写入；循环继续和退出都必须与普通 ADD 后接
+// FORLOOP 的 PC 与寄存器语义一致。
+func TestVMTryExecuteAddForLoop(t *testing.T) {
+	// 构造 `sum = sum + i; FORLOOP` 形态，R1..R4 是 numeric-for 控制槽。
+	proto := bytecode.NewProto("add-forloop")
+	proto.Code = []bytecode.Instruction{
+		bytecode.CreateABC(bytecode.OpAdd, 0, 0, 4),
+		bytecode.CreateAsBx(bytecode.OpForLoop, 1, -2),
+	}
+	vm := NewVMWithPrototypeData(5, nil, nil, nil, nil)
+	vm.BindPrototype(proto)
+	vm.PrepareAddForLoopSuperInstructions()
+	initialRegisters := []Value{IntegerValue(0), IntegerValue(1), IntegerValue(3), IntegerValue(1), IntegerValue(1)}
+	for registerIndex, value := range initialRegisters {
+		// 初始化 sum 与 FORLOOP 控制寄存器，模拟 FORPREP 后进入循环体的状态。
+		if err := vm.SetRegister(registerIndex, value); err != nil {
+			t.Fatalf("set register %d failed: %v", registerIndex, err)
+		}
+	}
+
+	nextPC, handled := vm.TryExecuteAddForLoop(0)
+	if !handled || nextPC != 0 {
+		// 第一次执行后循环仍应跳回 ADD。
+		t.Fatalf("first fast path mismatch: handled=%v nextPC=%d", handled, nextPC)
+	}
+	if value, ok := vm.Register(0); !ok || !value.RawEqual(IntegerValue(1)) {
+		// sum 必须写入 ADD 结果。
+		t.Fatalf("first sum mismatch: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(1); !ok || !value.RawEqual(IntegerValue(2)) {
+		// FORLOOP 继续时内部 index 必须步进。
+		t.Fatalf("first index mismatch: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(4); !ok || !value.RawEqual(IntegerValue(2)) {
+		// FORLOOP 继续时外部可见循环变量必须同步。
+		t.Fatalf("first control variable mismatch: value=%#v ok=%v", value, ok)
+	}
+
+	nextPC, handled = vm.TryExecuteAddForLoop(0)
+	if !handled || nextPC != 0 {
+		// 第二次执行后仍应继续循环。
+		t.Fatalf("second fast path mismatch: handled=%v nextPC=%d", handled, nextPC)
+	}
+	nextPC, handled = vm.TryExecuteAddForLoop(0)
+	if !handled || nextPC != 2 {
+		// 第三次执行后越过 limit，应落到 FORLOOP 后一条指令。
+		t.Fatalf("third fast path mismatch: handled=%v nextPC=%d", handled, nextPC)
+	}
+	if value, ok := vm.Register(0); !ok || !value.RawEqual(IntegerValue(6)) {
+		// 三轮累加结果必须等于 1+2+3。
+		t.Fatalf("final sum mismatch: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(1); !ok || !value.RawEqual(IntegerValue(3)) {
+		// 循环退出时普通 FORLOOP 不写回越界后的内部 index。
+		t.Fatalf("final index mismatch: value=%#v ok=%v", value, ok)
+	}
+	if vm.currentPC != 1 || vm.pcOffset != 0 {
+		// fast path 后 VM 状态应等价于刚执行完 FORLOOP。
+		t.Fatalf("final pc state mismatch: currentPC=%d pcOffset=%d", vm.currentPC, vm.pcOffset)
+	}
+}
+
+// TestVMTryExecuteAddForLoopConstantOperandAndFallback 验证常量操作数和 guard 回退。
+//
+// integer 常量 ADD 可以直接命中；当任一操作数或 FORLOOP 控制槽不是 integer 时，fast path 必须
+// 返回 handled=false 且不修改寄存器，交由普通 VM 保留完整 Lua 转换、元方法和错误语义。
+func TestVMTryExecuteAddForLoopConstantOperandAndFallback(t *testing.T) {
+	// 先验证 `sum = sum + Kint; FORLOOP` 可以使用预解码 integer 常量。
+	proto := bytecode.NewProto("add-forloop-constant")
+	proto.Constants = []bytecode.Constant{bytecode.IntegerConstant(2)}
+	proto.Code = []bytecode.Instruction{
+		bytecode.CreateABC(bytecode.OpAdd, 0, 0, bytecode.RKAsK(0)),
+		bytecode.CreateAsBx(bytecode.OpForLoop, 1, -2),
+	}
+	vm := NewVMWithPrototypeData(5, proto.Constants, nil, nil, nil)
+	vm.BindPrototype(proto)
+	vm.PrepareAddForLoopSuperInstructions()
+	for registerIndex, value := range []Value{IntegerValue(10), IntegerValue(1), IntegerValue(1), IntegerValue(1), IntegerValue(1)} {
+		// 初始化单轮循环，确认常量 ADD 与 FORLOOP 退出同时成立。
+		if err := vm.SetRegister(registerIndex, value); err != nil {
+			t.Fatalf("set constant register %d failed: %v", registerIndex, err)
+		}
+	}
+	nextPC, handled := vm.TryExecuteAddForLoop(0)
+	if !handled || nextPC != 2 {
+		// 单轮循环应执行 ADD 后直接退出。
+		t.Fatalf("constant fast path mismatch: handled=%v nextPC=%d", handled, nextPC)
+	}
+	if value, ok := vm.Register(0); !ok || !value.RawEqual(IntegerValue(12)) {
+		// integer 常量必须参与 ADD 写回。
+		t.Fatalf("constant sum mismatch: value=%#v ok=%v", value, ok)
+	}
+
+	// 再验证非 integer 操作数会无副作用回退。
+	if err := vm.SetRegister(0, StringValue("keep")); err != nil {
+		// 测试准备阶段必须能写入目标寄存器。
+		t.Fatalf("set fallback target failed: %v", err)
+	}
+	if err := vm.SetRegister(1, IntegerValue(1)); err != nil {
+		// 恢复 FORLOOP 控制槽，避免回退原因来自循环控制。
+		t.Fatalf("set fallback index failed: %v", err)
+	}
+	if err := vm.SetRegister(4, StringValue("not integer")); err != nil {
+		// ADD 右操作数变为字符串，fast path 必须拒绝处理。
+		t.Fatalf("set fallback operand failed: %v", err)
+	}
+	nextPC, handled = vm.TryExecuteAddForLoop(0)
+	if handled || nextPC != 0 {
+		// guard 不满足时必须回退普通 VM。
+		t.Fatalf("fallback mismatch: handled=%v nextPC=%d", handled, nextPC)
+	}
+	if value, ok := vm.Register(0); !ok || !value.RawEqual(StringValue("keep")) {
+		// 回退前不能覆盖目标寄存器，确保普通 VM 仍能产生原始错误或元方法语义。
+		t.Fatalf("fallback target mutated: value=%#v ok=%v", value, ok)
+	}
+}
+
+// TestVMTryExecuteAddForLoopRejectsNonEntryAdd 验证混合循环末尾 ADD 不会误命中。
+//
+// `arith_mix_loop` 这类循环中也可能出现相邻 `ADD; FORLOOP`，但 FORLOOP 跳回的是更早的循环体入口。
+// 该形态必须留给后续完整 superinstruction，不能用 arith_add_loop 的窄路径处理。
+func TestVMTryExecuteAddForLoopRejectsNonEntryAdd(t *testing.T) {
+	// 构造 `MUL; ADD; FORLOOP`，其中 FORLOOP 回跳到 MUL 而不是 ADD。
+	proto := bytecode.NewProto("add-forloop-non-entry")
+	proto.Code = []bytecode.Instruction{
+		bytecode.CreateABC(bytecode.OpMul, 5, 4, bytecode.RKAsK(0)),
+		bytecode.CreateABC(bytecode.OpAdd, 0, 0, 5),
+		bytecode.CreateAsBx(bytecode.OpForLoop, 1, -3),
+	}
+	vm := NewVMWithPrototypeData(6, []bytecode.Constant{bytecode.IntegerConstant(3)}, nil, nil, nil)
+	vm.BindPrototype(proto)
+	if vm.PrepareAddForLoopSuperInstructions() {
+		// 只有 FORLOOP 回跳当前 ADD 时才应启用 ADD;FORLOOP fast path。
+		t.Fatalf("non-entry ADD;FORLOOP should not prepare superinstruction")
+	}
+	if nextPC, handled := vm.TryExecuteAddForLoop(1); handled || nextPC != 0 {
+		// 误命中会破坏混合循环前置 MUL/SUB/IDIV/MOD 的执行顺序。
+		t.Fatalf("non-entry fast path mismatch: handled=%v nextPC=%d", handled, nextPC)
+	}
+}
+
 // TestVMBinaryArithmeticErrors 验证二元算术指令的错误边界。
 //
 // 算术错误必须返回明确错误，并保持目标寄存器原值。

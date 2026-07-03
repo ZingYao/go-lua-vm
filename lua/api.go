@@ -2476,6 +2476,11 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 		previousPreviousPC = continuation.previousPreviousPC
 		pc = resumeNextPC
 	}
+	addForLoopSuperInstructionEnabled := false
+	if !preciseFrameSync && !hooksEnabled {
+		// 普通主线程无 hook 路径可提前准备 superinstruction 表；hook/coroutine 路径必须保留逐 PC 语义。
+		addForLoopSuperInstructionEnabled = vm.PrepareAddForLoopSuperInstructions()
+	}
 	contextCheckCountdown := 0
 	for pc >= 0 && pc < len(proto.Code) {
 		// 先同步当前 PC，供 collectgarbage 执行时按 local 生命周期裁剪活动寄存器根。
@@ -2508,6 +2513,19 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 			if err := triggerLuaLineHook(state, debugEnvironment, proto, pc, previousPC, previousPreviousPC, &lastHookLine); err != nil {
 				// hook 内抛错必须中断当前 VM，交给 protected call 边界包装 traceback。
 				return nil, err
+			}
+		}
+		if addForLoopSuperInstructionEnabled && !preciseFrameSync && !hooksEnabled && contextCheckCountdown > 0 {
+			// 普通无 hook、无 coroutine 的热路径可尝试两条指令合并；contextCheckCountdown > 0
+			// 表示被合并的 FORLOOP 也不会越过本轮 context 检查边界。
+			addPC := pc
+			if nextPC, handled := vm.TryExecuteAddForLoop(addPC); handled {
+				// superinstruction 已完成 ADD 与后续 FORLOOP；补偿被跳过 FORLOOP 入口的一次 context 倒计时。
+				contextCheckCountdown--
+				previousPreviousPC = addPC
+				previousPC = addPC + 1
+				pc = nextPC
+				continue
 			}
 		}
 		instruction := proto.Code[pc]

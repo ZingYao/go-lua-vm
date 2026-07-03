@@ -74,6 +74,10 @@ type VM struct {
 	decodedInstructionProto *bytecode.Proto
 	// decodedInstructions 保存当前 Proto 的只读预解码指令元数据，供后续 hot path 按 PC 读取。
 	decodedInstructions []decodedInstruction
+	// addForLoopSuperInstructionProto 记录 ADD;FORLOOP superinstruction 表对应的 Proto。
+	addForLoopSuperInstructionProto *bytecode.Proto
+	// addForLoopSuperInstructions 按 PC 保存 ADD;FORLOOP superinstruction 预匹配结果。
+	addForLoopSuperInstructions []addForLoopSuperInstruction
 	// currentPC 保存当前执行指令位置，用于判断 Proto.LocalVars 中哪些局部变量仍然存活。
 	currentPC int
 	// openTop 保存上一条开放返回/开放 vararg 写入后的寄存器上界，-1 表示当前没有开放栈顶。
@@ -211,6 +215,29 @@ type decodedInstruction struct {
 	BOperand decodedRKOperand
 	// COperand 保存 C 字段按 RK 语义预解码后的形态。
 	COperand decodedRKOperand
+}
+
+// addForLoopSuperInstruction 保存 `ADD; FORLOOP` 的预匹配形态。
+//
+// Valid 为 true 时，当前 PC 是 ADD 且下一条指令是 FORLOOP。操作数仍在运行期检查类型和值；
+// 该结构只避免 hot path 每轮重复识别 opcode、PC 和 RK 形态。
+type addForLoopSuperInstruction struct {
+	// AddTarget 保存 ADD 的目标寄存器。
+	AddTarget int
+	// LeftOperand 保存 ADD 左操作数形态。
+	LeftOperand decodedRKOperand
+	// RightOperand 保存 ADD 右操作数形态。
+	RightOperand decodedRKOperand
+	// ForBase 保存 FORLOOP 的 base 寄存器。
+	ForBase int
+	// ForSBx 保存 FORLOOP 的有符号跳转偏移。
+	ForSBx int
+	// ExitPC 保存循环退出时的下一条 PC。
+	ExitPC int
+	// LoopPC 保存循环继续时的跳转 PC。
+	LoopPC int
+	// Valid 表示当前 PC 是否匹配 ADD;FORLOOP 形态。
+	Valid bool
 }
 
 // LuaClosure 表示最小 VM 阶段的 Lua closure 值。
@@ -1369,6 +1396,8 @@ func (vm *VM) BindPrototype(proto *bytecode.Proto) {
 		// 手工 VM 或测试路径没有 Proto，不启用指令级热路径缓存。
 		vm.decodedInstructionProto = nil
 		vm.decodedInstructions = nil
+		vm.addForLoopSuperInstructionProto = nil
+		vm.addForLoopSuperInstructions = nil
 		vm.arithmeticIntRegisterCacheProto = nil
 		vm.arithmeticIntRegisterCache = nil
 		vm.arithmeticIntOperandCache = nil
@@ -1380,6 +1409,11 @@ func (vm *VM) BindPrototype(proto *bytecode.Proto) {
 		// VM 池切换到其他 Proto 时丢弃预解码缓存，避免 PC 相同但指令不同的后续 fast path 误读。
 		vm.decodedInstructionProto = nil
 		vm.decodedInstructions = nil
+	}
+	if vm.addForLoopSuperInstructionProto != nil && vm.addForLoopSuperInstructionProto != proto {
+		// VM 池切换到其他 Proto 时丢弃 superinstruction 预匹配表，避免相同 PC 误命中。
+		vm.addForLoopSuperInstructionProto = nil
+		vm.addForLoopSuperInstructions = nil
 	}
 	if vm.arithmeticIntRegisterCacheProto != proto || len(vm.arithmeticIntRegisterCache) < len(proto.Code) || len(vm.arithmeticIntOperandCache) < len(proto.Code) {
 		// VM 池复用到不同 Proto 时必须重建缓存，避免 PC 相同但指令不同导致错误命中。
@@ -1516,6 +1550,179 @@ func decodeRKOperand(proto *bytecode.Proto, rk int) decodedRKOperand {
 		operand.IntegerConstantOK = true
 	}
 	return operand
+}
+
+// ensureAddForLoopSuperInstructions 返回当前 Proto 的 ADD;FORLOOP 预匹配表。
+//
+// 该表按 PC 与 Proto.Code 对齐，只记录可由后续 hot path 尝试的 opcode 邻接形态；运行期类型、
+// 寄存器窗口、hook 和 context guard 仍由调用方与 TryExecuteAddForLoop 检查。
+func (vm *VM) ensureAddForLoopSuperInstructions() []addForLoopSuperInstruction {
+	// 按当前 Proto 懒构建 ADD;FORLOOP 预匹配表，并在 Proto 未变化时复用。
+	if vm == nil || vm.proto == nil {
+		// 缺少 VM 或 Proto 时没有可用 superinstruction 表。
+		return nil
+	}
+	if len(vm.proto.Code) == 0 {
+		// 空 Proto 没有热循环形态，清理旧表并返回 nil。
+		vm.addForLoopSuperInstructionProto = vm.proto
+		vm.addForLoopSuperInstructions = nil
+		return nil
+	}
+	if vm.addForLoopSuperInstructionProto == vm.proto {
+		// 当前 Proto 已完成扫描；nil 表示无匹配形态，非 nil 表示可按 PC 读取。
+		return vm.addForLoopSuperInstructions
+	}
+
+	vm.addForLoopSuperInstructionProto = vm.proto
+	vm.addForLoopSuperInstructions = buildAddForLoopSuperInstructions(vm.proto)
+	return vm.addForLoopSuperInstructions
+}
+
+// buildAddForLoopSuperInstructions 构建 `ADD; FORLOOP` 预匹配表。
+//
+// 返回表按 PC 对齐；没有匹配形态时返回 nil，表示该 Proto 不需要承担额外表分配。
+func buildAddForLoopSuperInstructions(proto *bytecode.Proto) []addForLoopSuperInstruction {
+	// 空 Proto 或单条指令没有可构建的 superinstruction。
+	if proto == nil || len(proto.Code) < 2 {
+		return nil
+	}
+
+	var superInstructions []addForLoopSuperInstruction
+	for pc := 0; pc+1 < len(proto.Code); pc++ {
+		// 只识别相邻的 ADD;FORLOOP，其他形态保持零值表示无效。
+		addInstruction := proto.Code[pc]
+		forLoopInstruction := proto.Code[pc+1]
+		if addInstruction.OpCode() != bytecode.OpAdd || forLoopInstruction.OpCode() != bytecode.OpForLoop {
+			// 当前 PC 不匹配目标邻接模式，继续扫描后续指令。
+			continue
+		}
+		exitPC := pc + 2
+		loopPC := exitPC + forLoopInstruction.SBx()
+		if loopPC != pc {
+			// 只覆盖 arith_add_loop 的完整循环体 `ADD; FORLOOP`；混合算术循环的末尾 ADD 会跳回更早 PC。
+			continue
+		}
+		if superInstructions == nil {
+			// 只有真实存在匹配形态时才分配 PC 对齐表，避免普通函数执行增加分配。
+			superInstructions = make([]addForLoopSuperInstruction, len(proto.Code))
+		}
+		superInstructions[pc] = addForLoopSuperInstruction{
+			AddTarget:    addInstruction.A(),
+			LeftOperand:  decodeRKOperand(proto, addInstruction.B()),
+			RightOperand: decodeRKOperand(proto, addInstruction.C()),
+			ForBase:      forLoopInstruction.A(),
+			ForSBx:       forLoopInstruction.SBx(),
+			ExitPC:       exitPC,
+			LoopPC:       loopPC,
+			Valid:        true,
+		}
+	}
+	return superInstructions
+}
+
+// PrepareAddForLoopSuperInstructions 预构建当前 Proto 的 `ADD; FORLOOP` 预匹配表。
+//
+// 调用方可在进入普通无 hook 热循环前调用一次，避免 TryExecuteAddForLoop 在每轮循环里重复触发
+// 懒初始化检查。返回 true 表示当前 Proto 至少存在一个可尝试的 ADD;FORLOOP PC。
+func (vm *VM) PrepareAddForLoopSuperInstructions() bool {
+	// 预构建失败不影响普通 VM；后续 TryExecuteAddForLoop 会因为表不匹配而回退。
+	return len(vm.ensureAddForLoopSuperInstructions()) > 0
+}
+
+// TryExecuteAddForLoop 尝试执行 `ADD; FORLOOP` superinstruction。
+//
+// pc 必须指向当前 Proto.Code 中的 ADD 指令；返回 handled=false 表示 guard 不满足，调用方必须回退
+// 普通 VM。该 fast path 只覆盖 integer ADD 和 integer numeric-for，不触发元方法、不处理 hook、
+// 不处理 yield；调用方必须先确认当前执行环境允许跳过逐 PC 后处理。
+func (vm *VM) TryExecuteAddForLoop(pc int) (int, bool) {
+	// 先按 PC 读取已准备好的预匹配表；非目标 PC 必须快速失败，避免普通指令承担额外识别成本。
+	if vm == nil || vm.addForLoopSuperInstructionProto != vm.proto {
+		// 调用方尚未为当前 Proto 准备表，回退普通 VM。
+		return 0, false
+	}
+	superInstructions := vm.addForLoopSuperInstructions
+	if uint(pc) >= uint(len(superInstructions)) {
+		// 当前 PC 不在表范围内，回退普通 VM。
+		return 0, false
+	}
+	superInstruction := superInstructions[pc]
+	if !superInstruction.Valid {
+		// 当前 PC 没有匹配 ADD;FORLOOP 形态，回退普通 VM。
+		return 0, false
+	}
+
+	// 先完成全部寄存器和类型 guard，再写回任何寄存器，保证 guard 失败可以无副作用回退。
+	registers := vm.registers
+	if uint(superInstruction.AddTarget) >= uint(len(registers)) {
+		// ADD 目标寄存器越界交给普通 VM 报原始错误。
+		return 0, false
+	}
+	leftInteger, leftOK := vm.decodedIntegerOperandValue(superInstruction.LeftOperand)
+	if !leftOK {
+		// 左操作数不是 integer 寄存器或 integer 常量时回退完整算术语义。
+		return 0, false
+	}
+	rightInteger, rightOK := vm.decodedIntegerOperandValue(superInstruction.RightOperand)
+	if !rightOK {
+		// 右操作数不是 integer 寄存器或 integer 常量时回退完整算术语义。
+		return 0, false
+	}
+
+	baseIndex := superInstruction.ForBase
+	if uint(baseIndex+3) >= uint(len(registers)) {
+		// FORLOOP 需要 R(A)..R(A+3) 四个控制槽，越界时回退普通 VM。
+		return 0, false
+	}
+	indexValue := registers[baseIndex]
+	limitValue := registers[baseIndex+1]
+	stepValue := registers[baseIndex+2]
+	if indexValue.Kind != KindInteger || limitValue.Kind != KindInteger || stepValue.Kind != KindInteger {
+		// 只覆盖 integer numeric-for；float 或可转 number 字符串仍走普通 VM。
+		return 0, false
+	}
+
+	// guard 全部通过后，按 ADD 与 FORLOOP 顺序提交寄存器写入。
+	registers[superInstruction.AddTarget] = IntegerValue(leftInteger + rightInteger)
+	nextIndex := indexValue.Integer + stepValue.Integer
+	nextPC := superInstruction.ExitPC
+	if forIntegerLoopContinues(nextIndex, limitValue.Integer, stepValue.Integer) {
+		// 循环继续时更新内部 index 和外部可见循环变量，并跳回 FORLOOP 的 sBx 目标。
+		registers[baseIndex] = IntegerValue(nextIndex)
+		registers[baseIndex+3] = IntegerValue(nextIndex)
+		nextPC = superInstruction.LoopPC
+		vm.pcOffset = superInstruction.ForSBx
+	} else {
+		// 循环结束时不更新 index 和外部变量，保持普通 FORLOOP 语义。
+		vm.pcOffset = 0
+	}
+	vm.currentPC = pc + 1
+	vm.skipNext = false
+	vm.closeFrom = -1
+	vm.hasCallRequest = false
+	vm.returned = false
+	return nextPC, true
+}
+
+// decodedIntegerOperandValue 读取预解码 RK 操作数的 integer 值。
+//
+// 常量操作数必须在预解码阶段已确认为 integer；寄存器操作数仍按当前寄存器窗口和动态类型检查。
+// 返回 ok=false 表示不能走 integer fast path，调用方应回退普通 VM。
+func (vm *VM) decodedIntegerOperandValue(operand decodedRKOperand) (int64, bool) {
+	// 常量 integer 已经在预解码阶段保存值，不需要再访问 Proto.Constants。
+	if operand.Constant {
+		// 非 integer 常量或越界常量不能使用 integer fast path。
+		return operand.IntegerConstant, operand.IntegerConstantOK
+	}
+	if uint(operand.Index) >= uint(len(vm.registers)) {
+		// 寄存器越界必须回退普通 VM，以保留原始错误语义。
+		return 0, false
+	}
+	value := vm.registers[operand.Index]
+	if value.Kind != KindInteger {
+		// 非 integer 寄存器值需要完整算术转换、元方法或错误路径。
+		return 0, false
+	}
+	return value.Integer, true
 }
 
 // BindLuaMetamethodRunner 绑定当前 VM 可用的 Lua closure 元方法执行器。
