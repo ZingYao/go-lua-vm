@@ -1681,6 +1681,40 @@ semantic `analyzeBlock/analyzeFunctionBody`、`codegen.newGenerator` 和 `byteco
 本轮已撤回生产代码，不提交该优化。后续如果继续做 AST 所有权，需要先设计能按实际数量精确 sizing
 或更小字段布局的结构方案，而不是简单页式搬迁重节点。
 
+### 2026-07-04 ScopeInfo 单 local 内嵌槽
+
+实现：`ScopeInfo` 新增单元素 `LocalInfo` 内嵌槽，语义分析追加第一个 local 时直接让 `Locals`
+指向该槽；第二个 local 出现时迁移到普通切片并保持原有追加顺序。`semanticAnalyzer` 同时新增单元素
+`localDeclaration` 内嵌槽，覆盖函数单参数和普通单名称预声明路径，避免每次构造一元素预声明切片。
+
+语义边界：
+
+- `Block` 已经拥有内嵌 `ScopeInfo`；本轮只改变 `ScopeInfo.Locals` 和单预声明 local 的底层存储，
+  不改变 `Scope *ScopeInfo` 对外指针、scope ID、ParentID、Depth 或 block 生命周期。
+- `Locals` 的内容、顺序、生命周期区间和切片读取语义保持不变；出现第二个 local 后会迁移到普通切片，
+  同作用域多 local、遮蔽、goto/label 校验和 codegen debug local 读取仍走原有数据。
+- 单预声明 local 的内嵌槽只在 `analyzeBlock` 入口被消费成 `LocalInfo`，不会跨 block 保存可变切片。
+
+验证：
+
+| 项目 | 结果 |
+| --- | ---: |
+| `gopls check compiler/parser/ast.go compiler/parser/semantic.go compiler/parser/parser.go compiler/parser/parser_test.go compiler/codegen/*.go` | 无诊断 |
+| `CGO_ENABLED=0 go test ./compiler/parser ./compiler/codegen ./internal/luac -count=1` | 通过 |
+
+benchmark 复核：
+
+| 用例 | 结果 |
+| --- | ---: |
+| `BenchmarkCompileSource3000Functions` | `6.217 / 6.221 / 6.234 / 6.227 / 6.236 ms/op`，约 `5.31 MB/op`，`18114-18115 allocs/op` |
+| 同用例 memprofile 单轮 | `6.152 ms/op`，约 `5.31 MB/op`，`18111 allocs/op` |
+
+对比表达式 AST 页式 arena 后的约 `21114 allocs/op`，本轮再减少约 `3000 allocs/op`，B/op 基本持平。
+alloc_objects 中 `semanticAnalyzer.analyzeFunctionBody` 已从主要对象热点下降，剩余对象重新集中到
+`parseReturnStatementUntil`、`bytecode.NewProto`、`parseFunctionBody`、`codegen.newGenerator` 和
+`parseFunctionStatement`。后续若继续编译期优化，应重新 profile 这些剩余项，优先寻找精确 sizing 或
+实体所有权方案，不再重复简单页式搬迁重 AST 节点。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -1792,7 +1826,8 @@ semantic `analyzeBlock/analyzeFunctionBody`、`codegen.newGenerator` 和 `byteco
 - [x] 若继续推进编译期，先独立评估 lexer 数字扫描或 AST/semantic 大结构方案；没有收益证据前不再追加 codegen/Proto 容量预估。
 - [x] 若继续推进编译期，先设计 AST 紧凑表示、semantic scope 生命周期或 Proto/generator 所有权方案；没有明确语义等价和收益证据前，不再堆局部字段/容量微调。
 - [x] 若继续推进编译期，基于表达式 AST 页式 arena 后重新 profile；优先评估 ReturnStatement/FunctionStatement 或 semantic ScopeInfo 页式所有权，未证明 B/op 不退化前不实现。
-- [ ] 若继续推进编译期，优先设计可精确 sizing 的 AST/semantic 所有权方案，或转向 `semantic ScopeInfo` 小对象 profile；简单页式搬迁重 AST 节点已证伪。
+- [x] 若继续推进编译期，优先设计可精确 sizing 的 AST/semantic 所有权方案，或转向 `semantic ScopeInfo` 小对象 profile；简单页式搬迁重 AST 节点已证伪。
+- [ ] 若继续推进编译期，基于 ScopeInfo 单 local 内嵌槽后重新 profile；优先评估 `parseReturnStatementUntil`、`FunctionBody` 精确 sizing 或 `newGenerator/NewProto` 所有权，避免简单页式搬迁重节点。
 - [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准

@@ -74,6 +74,8 @@ type ScopeInfo struct {
 	TrailingCondition bool
 	// Locals 保存当前 block 直接声明的局部变量生命周期。
 	Locals []LocalInfo
+	// inlineLocal 保存最常见的单局部变量作用域，避免 Locals 单元素底层数组分配。
+	inlineLocal [1]LocalInfo
 	// Labels 保存当前 block 直接声明的 label。
 	Labels []LabelInfo
 	// Gotos 保存当前 block 直接出现的 goto。

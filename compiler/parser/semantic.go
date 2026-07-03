@@ -92,6 +92,8 @@ type semanticAnalyzer struct {
 	nextScopeID int
 	// loopDepth 保存当前函数内嵌套循环深度，用于校验 continue 只能出现在循环内部。
 	loopDepth int
+	// inlineLocalDeclaration 保存最常见的单预声明 local，避免函数单参数路径分配一元素切片。
+	inlineLocalDeclaration [1]localDeclaration
 	// errors 保存语义阶段聚合到的错误。
 	errors ParseErrorList
 }
@@ -242,7 +244,7 @@ func (analyzer *semanticAnalyzer) analyzeBlock(block *Block, parent *ScopeInfo, 
 			continue
 		}
 		// 参数和 for 循环变量在 block 开始处可见，生命周期延续到 block 结束。
-		scope.Locals = append(scope.Locals, LocalInfo{Name: declaration.name, StartStatement: 0, EndStatement: endStatement, Position: declaration.position})
+		appendScopeLocal(scope, LocalInfo{Name: declaration.name, StartStatement: 0, EndStatement: endStatement, Position: declaration.position})
 	}
 	for statementIndex, statement := range block.Statements {
 		// 按语句顺序记录当前 block 直接声明的局部变量、label 和 goto。
@@ -350,8 +352,31 @@ func (analyzer *semanticAnalyzer) addLocalNames(scope *ScopeInfo, names []string
 			return
 		}
 		// 同名 local 在 Lua 中允许遮蔽，因此这里不报重复错误。
-		scope.Locals = append(scope.Locals, LocalInfo{Name: name, StartStatement: startStatement, EndStatement: scope.StatementCount, Position: position})
+		appendScopeLocal(scope, LocalInfo{Name: name, StartStatement: startStatement, EndStatement: scope.StatementCount, Position: position})
 	}
+}
+
+// appendScopeLocal 将局部变量生命周期追加到作用域。
+//
+// scope 必须是当前语义分析持有的可写作用域；第一个 local 优先写入 ScopeInfo 内嵌槽，第二个及以后
+// 自动迁移到普通切片，保持 Locals 对外顺序和切片语义不变。
+func appendScopeLocal(scope *ScopeInfo, local LocalInfo) {
+	if len(scope.Locals) == 0 && cap(scope.Locals) == 0 {
+		// 单 local 是函数单参数和简单 local 的常见路径，直接复用 ScopeInfo 内嵌槽。
+		scope.inlineLocal[0] = local
+		scope.Locals = scope.inlineLocal[:1]
+		return
+	}
+	if len(scope.Locals) == 1 && cap(scope.Locals) == 1 && &scope.Locals[0] == &scope.inlineLocal[0] {
+		// 第二个 local 出现时从内嵌槽迁移到普通切片，避免 append 覆盖不可扩容的一元素槽。
+		locals := make([]LocalInfo, 1, 2)
+		locals[0] = scope.inlineLocal[0]
+		scope.Locals = append(locals, local)
+		return
+	}
+
+	// 已经是普通切片或调用方预置 Locals 时，沿用标准 append 语义。
+	scope.Locals = append(scope.Locals, local)
 }
 
 // addLabel 登记 label 并检查同一 block 内重复 label。
@@ -383,8 +408,9 @@ func (analyzer *semanticAnalyzer) declarationsFromNames(names []string, position
 		return nil
 	}
 	if len(names) == 1 {
-		// 单名称是函数形参和普通泛型 for 的常见路径，直接构造一元素切片。
-		return []localDeclaration{{name: names[0], position: position}}
+		// 单名称是函数形参和普通泛型 for 的常见路径，复用 analyzer 内嵌槽。
+		analyzer.inlineLocalDeclaration[0] = localDeclaration{name: names[0], position: position}
+		return analyzer.inlineLocalDeclaration[:1]
 	}
 	declarations := make([]localDeclaration, len(names))
 	for index, name := range names {
