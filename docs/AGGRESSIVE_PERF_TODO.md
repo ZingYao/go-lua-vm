@@ -1749,6 +1749,40 @@ benchmark 复核：
 `parseReturnStatementUntil` 和 `parseFunctionStatement`。下一步若继续编译期，应重新评估这些剩余实体的
 精确所有权或返回语句/函数体布局；不再从语义 namespace 方向继续挤压。
 
+### 2026-07-04 FunctionBody 内嵌宿主节点
+
+实现：`FunctionStatement`、`LocalFunctionStatement` 和 `FunctionExpression` 新增内嵌 `FunctionBody`
+槽，parser 新增 `parseFunctionBodyInto` 将函数体直接写入宿主节点。对外 `Body *FunctionBody` 字段仍
+保留，并指向宿主节点内嵌槽；需要独立函数体对象的旧 `parseFunctionBody` 入口仍保留。
+
+语义边界：
+
+- AST 对外字段、`FunctionBody` 内容、参数列表、函数体 block、line defined 元数据和 codegen 读取路径不变。
+- 普通函数、local function、匿名函数表达式和字段/方法函数降级后的 `FunctionExpression` 都使用宿主
+  节点内嵌函数体。
+- 该方案是按 AST 所有权精确内嵌，不使用页式 arena，因此不会引入页尾浪费或保留多余 backing array。
+- 解析失败时宿主节点不会返回给调用方；成功后 `Body` 指针稳定指向宿主节点内嵌字段。
+
+验证：
+
+| 项目 | 结果 |
+| --- | ---: |
+| `gopls check compiler/parser/ast.go compiler/parser/parser.go compiler/parser/parser_test.go compiler/parser/semantic.go compiler/codegen/*.go` | 无诊断 |
+| `CGO_ENABLED=0 go test ./compiler/parser ./compiler/codegen ./internal/luac -count=1` | 通过 |
+
+benchmark 复核：
+
+| 用例 | 结果 |
+| --- | ---: |
+| `BenchmarkCompileSource3000Functions` | `6.435-6.468 ms/op`，约 `5.02 MB/op`，`12113-12114 allocs/op` |
+| 同用例 memprofile 单轮 | `6.184 ms/op`，约 `5.02 MB/op`，`12109 allocs/op` |
+
+对比 functionNamespace 内嵌栈后的约 `15110 allocs/op`、`5.07 MB/op`，本轮再减少约 `3000 allocs/op`，
+B/op 小幅下降；`parseFunctionBody` 已从 alloc_objects 顶层热点消失。剩余对象主要集中在
+`parseFunctionStatement` 宿主节点、`parseReturnStatementUntil`、`bytecode.NewProto` 和
+`codegen.newGenerator`。下一步若继续编译期优化，应优先评估 `ReturnStatement` 精确布局或
+`newGenerator/NewProto` 实体所有权，而不是重试已证伪的 statement 页式 arena。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -1862,7 +1896,8 @@ benchmark 复核：
 - [x] 若继续推进编译期，基于表达式 AST 页式 arena 后重新 profile；优先评估 ReturnStatement/FunctionStatement 或 semantic ScopeInfo 页式所有权，未证明 B/op 不退化前不实现。
 - [x] 若继续推进编译期，优先设计可精确 sizing 的 AST/semantic 所有权方案，或转向 `semantic ScopeInfo` 小对象 profile；简单页式搬迁重 AST 节点已证伪。
 - [x] 若继续推进编译期，基于 ScopeInfo 单 local 内嵌槽后重新 profile；优先评估 `parseReturnStatementUntil`、`FunctionBody` 精确 sizing 或 `newGenerator/NewProto` 所有权，避免简单页式搬迁重节点。
-- [ ] 若继续推进编译期，基于 functionNamespace 内嵌栈后重新 profile；优先评估 `FunctionBody`/`ReturnStatement` 精确布局或 `newGenerator/NewProto` 所有权，不再从语义 namespace 方向继续挤压。
+- [x] 若继续推进编译期，基于 functionNamespace 内嵌栈后重新 profile；优先评估 `FunctionBody`/`ReturnStatement` 精确布局或 `newGenerator/NewProto` 所有权，不再从语义 namespace 方向继续挤压。
+- [ ] 若继续推进编译期，基于 FunctionBody 内嵌宿主节点后重新 profile；优先评估 `ReturnStatement` 精确布局或 `newGenerator/NewProto` 实体所有权，不重试 statement 页式 arena。
 - [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准

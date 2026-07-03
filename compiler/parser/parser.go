@@ -396,13 +396,14 @@ func (parser *Parser) parseLocalAssignmentStatement() (Statement, error) {
 			// local function 后必须有函数名。
 			return nil, err
 		}
-		body, err := parser.parseFunctionBody()
-		if err != nil {
+		statement := &LocalFunctionStatement{Name: name, Position: startPosition}
+		statement.Body = &statement.inlineBody
+		if err := parser.parseFunctionBodyInto(statement.Body); err != nil {
 			// 函数体解析失败时无法构造 local function。
 			return nil, err
 		}
-		body.LineDefined = startPosition.Line
-		return &LocalFunctionStatement{Name: name, Body: body, Position: startPosition}, nil
+		statement.Body.LineDefined = startPosition.Line
+		return statement, nil
 	}
 	names, err := parser.parseNameList()
 	if err != nil {
@@ -444,25 +445,34 @@ func (parser *Parser) parseFunctionStatement() (Statement, error) {
 		// function 后必须有合法函数名。
 		return nil, err
 	}
-	body, err := parser.parseFunctionBody()
-	if err != nil {
+	if simpleName != "" && !isMethod {
+		// 简单函数名保留原有 AST，函数体直接内嵌在 FunctionStatement 中。
+		statement := &FunctionStatement{Name: simpleName, Position: startPosition}
+		statement.Body = &statement.inlineBody
+		if err := parser.parseFunctionBodyInto(statement.Body); err != nil {
+			// 函数体解析失败时无法构造 function 语句。
+			return nil, err
+		}
+		statement.Body.LineDefined = startPosition.Line
+		return statement, nil
+	}
+
+	expression := &FunctionExpression{Position: startPosition}
+	expression.Body = &expression.inlineBody
+	if err := parser.parseFunctionBodyInto(expression.Body); err != nil {
 		// 函数体解析失败时无法构造 function 语句。
 		return nil, err
 	}
-	body.LineDefined = startPosition.Line
+	expression.Body.LineDefined = startPosition.Line
 	if isMethod {
 		// 冒号定义等价于函数体首个形参为 self。
-		body.Params = append([]string{"self"}, body.Params...)
-	}
-	if simpleName != "" && !isMethod {
-		// 简单函数名保留原有 AST，兼容既有 codegen 路径。
-		return &FunctionStatement{Name: simpleName, Body: body, Position: startPosition}, nil
+		expression.Body.Params = append([]string{"self"}, expression.Body.Params...)
 	}
 
 	// 字段或方法函数定义等价于一次赋值语句。
 	return &AssignmentStatement{
 		Left:     []Expression{targetExpression},
-		Right:    []Expression{&FunctionExpression{Body: body, Position: startPosition}},
+		Right:    []Expression{expression},
 		Position: startPosition,
 	}, nil
 }
@@ -825,10 +835,23 @@ func (parser *Parser) parseLabelStatement() (Statement, error) {
 //
 // 当前阶段支持普通参数名列表和空参数；函数体以 end 结束。
 func (parser *Parser) parseFunctionBody() (*FunctionBody, error) {
+	functionBody := &FunctionBody{}
+	if err := parser.parseFunctionBodyInto(functionBody); err != nil {
+		// 调用方仍需要独立函数体对象时，解析失败直接返回错误。
+		return nil, err
+	}
+	return functionBody, nil
+}
+
+// parseFunctionBodyInto 将函数体解析到调用方提供的 FunctionBody。
+//
+// body 必须是当前 AST 宿主节点独占的可写对象；该函数会重置 body 内容，并保持 Params、Body、
+// inlineBody、行号和位置信息与 parseFunctionBody 的对外语义一致。
+func (parser *Parser) parseFunctionBodyInto(body *FunctionBody) error {
 	startPosition := parser.current.Position
 	if err := parser.expectOperator("("); err != nil {
 		// 函数体必须以左括号开始参数列表。
-		return nil, err
+		return err
 	}
 	var params []string
 	var singleParam string
@@ -846,7 +869,7 @@ func (parser *Parser) parseFunctionBody() (*FunctionBody, error) {
 			name, err := parser.expectIdentifier()
 			if err != nil {
 				// 参数项必须是 identifier 或 `...`。
-				return nil, err
+				return err
 			}
 			if paramCount == 0 {
 				// 单参数函数是最常见路径，先暂存在局部变量，避免立即分配参数切片。
@@ -865,42 +888,42 @@ func (parser *Parser) parseFunctionBody() (*FunctionBody, error) {
 			}
 			if err := parser.checkSyntaxListLimit(paramCount + 1); err != nil {
 				// 过长参数列表按 Lua 5.3 parser 递归限制返回 too many C levels。
-				return nil, err
+				return err
 			}
 			parser.advance()
 			if parser.current.Kind == lexer.TokenOperator && parser.current.Text == ")" {
 				// 逗号后不能直接结束参数列表。
-				return nil, parser.errorf(parser.current, "expected parameter")
+				return parser.errorf(parser.current, "expected parameter")
 			}
 		}
 	}
 	if err := parser.expectOperator(")"); err != nil {
 		// 参数列表必须用右括号关闭。
-		return nil, err
+		return err
 	}
-	functionBody := &FunctionBody{Vararg: vararg, Position: startPosition}
-	functionBody.Body = &functionBody.inlineBody
-	if err := parser.parseBlockUntilInto(functionBody.Body, nil); err != nil {
+	*body = FunctionBody{Vararg: vararg, Position: startPosition}
+	body.Body = &body.inlineBody
+	if err := parser.parseBlockUntilInto(body.Body, nil); err != nil {
 		// 函数体 block 内语句解析失败时返回错误。
-		return nil, err
+		return err
 	}
 	endPosition := parser.current.Position
 	if err := parser.expectKeyword("end"); err != nil {
 		// 函数体必须以 end 结束。
-		return nil, err
+		return err
 	}
 
 	// 返回函数体节点。
-	functionBody.LastLineDefined = endPosition.Line
+	body.LastLineDefined = endPosition.Line
 	if paramCount == 1 {
 		// 单参数函数让 Params 指向函数体内嵌槽，保持对外切片语义但避免额外底层数组。
-		functionBody.inlineParams[0] = singleParam
-		functionBody.Params = functionBody.inlineParams[:1]
+		body.inlineParams[0] = singleParam
+		body.Params = body.inlineParams[:1]
 	} else if paramCount > 1 {
 		// 多参数函数沿用普通切片，保持参数顺序和 append 语义。
-		functionBody.Params = params
+		body.Params = params
 	}
-	return functionBody, nil
+	return nil
 }
 
 // parseReturnStatement 解析 return 语句。
@@ -1261,15 +1284,16 @@ func (parser *Parser) parseFunctionExpression() (Expression, error) {
 		// 调用方已经判断 function，该错误只作为防御。
 		return nil, err
 	}
-	body, err := parser.parseFunctionBody()
-	if err != nil {
+	expression := &FunctionExpression{Position: position}
+	expression.Body = &expression.inlineBody
+	if err := parser.parseFunctionBodyInto(expression.Body); err != nil {
 		// 函数体解析失败时无法构造匿名函数表达式。
 		return nil, err
 	}
-	body.LineDefined = position.Line
+	expression.Body.LineDefined = position.Line
 
 	// 返回匿名函数表达式节点。
-	return &FunctionExpression{Body: body, Position: position}, nil
+	return expression, nil
 }
 
 // parseCallArguments 解析函数或方法调用参数。

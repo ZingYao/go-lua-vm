@@ -292,6 +292,8 @@ func (body *FunctionBody) Pos() lexer.Position {
 type FunctionExpression struct {
 	// Body 保存匿名函数体。
 	Body *FunctionBody
+	// inlineBody 保存匿名函数表达式自身函数体，避免为 FunctionBody 单独分配对象。
+	inlineBody FunctionBody
 	// Position 保存 function 关键字位置。
 	Position lexer.Position
 }
@@ -319,6 +321,8 @@ type LocalFunctionStatement struct {
 	Name string
 	// Body 保存函数体。
 	Body *FunctionBody
+	// inlineBody 保存 local function 自身函数体，避免为 FunctionBody 单独分配对象。
+	inlineBody FunctionBody
 	// Position 保存 local 关键字位置。
 	Position lexer.Position
 }
@@ -346,6 +350,8 @@ type FunctionStatement struct {
 	Name string
 	// Body 保存函数体。
 	Body *FunctionBody
+	// inlineBody 保存普通 function 自身函数体，避免为 FunctionBody 单独分配对象。
+	inlineBody FunctionBody
 	// Position 保存 function 关键字位置。
 	Position lexer.Position
 }

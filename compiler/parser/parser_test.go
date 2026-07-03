@@ -185,6 +185,10 @@ func TestParserFunctionStatements(t *testing.T) {
 		// local function 应保留函数名和两个参数。
 		t.Fatalf("unexpected local function=%+v", localFunction)
 	}
+	if localFunction.Body != &localFunction.inlineBody {
+		// local function 的 Body 应指向语句自身内嵌函数体。
+		t.Fatalf("local function body should use inline function body")
+	}
 
 	functionStatement, ok := chunk.Block.Statements[1].(*FunctionStatement)
 	if !ok {
@@ -194,6 +198,10 @@ func TestParserFunctionStatements(t *testing.T) {
 	if functionStatement.Name != "main" || len(functionStatement.Body.Body.Statements) != 1 {
 		// 普通 function 应保留名称和函数体语句。
 		t.Fatalf("unexpected function statement=%+v", functionStatement)
+	}
+	if functionStatement.Body != &functionStatement.inlineBody {
+		// 普通 function 的 Body 应指向语句自身内嵌函数体。
+		t.Fatalf("function statement body should use inline function body")
 	}
 
 	assignmentStatement, ok := chunk.Block.Statements[2].(*AssignmentStatement)
@@ -209,6 +217,10 @@ func TestParserFunctionStatements(t *testing.T) {
 	if functionExpression.Body == nil || len(functionExpression.Body.Params) != 0 {
 		// 匿名函数体应保留空参数列表。
 		t.Fatalf("unexpected function expression=%+v", functionExpression)
+	}
+	if functionExpression.Body != &functionExpression.inlineBody {
+		// 匿名函数表达式的 Body 应指向表达式自身内嵌函数体。
+		t.Fatalf("function expression body should use inline function body")
 	}
 }
 
@@ -248,6 +260,10 @@ func TestParserFieldAndMethodFunctionStatements(t *testing.T) {
 		// 字段函数右侧应是保留原参数的匿名函数表达式。
 		t.Fatalf("unexpected field function body=%+v", fieldAssignment.Right[0])
 	}
+	if fieldFunction.Body != &fieldFunction.inlineBody {
+		// 字段函数降级后的匿名函数体应复用表达式内嵌槽。
+		t.Fatalf("field function body should use inline function body")
+	}
 
 	methodAssignment, ok := chunk.Block.Statements[1].(*AssignmentStatement)
 	if !ok {
@@ -258,6 +274,10 @@ func TestParserFieldAndMethodFunctionStatements(t *testing.T) {
 	if !ok || len(methodFunction.Body.Params) != 2 || methodFunction.Body.Params[0] != "self" || methodFunction.Body.Params[1] != "y" {
 		// 冒号方法必须在参数列表前注入 self。
 		t.Fatalf("unexpected method function body=%+v", methodAssignment.Right[0])
+	}
+	if methodFunction.Body != &methodFunction.inlineBody {
+		// 方法函数降级后的匿名函数体应复用表达式内嵌槽。
+		t.Fatalf("method function body should use inline function body")
 	}
 }
 
@@ -280,6 +300,10 @@ func TestParserFunctionBodyInlineSingleParam(t *testing.T) {
 	if len(oneFunction.Body.Params) != 1 || oneFunction.Body.Params[0] != "x" {
 		// 单参数函数应保留原始参数名。
 		t.Fatalf("unexpected one params=%+v", oneFunction.Body.Params)
+	}
+	if oneFunction.Body != &oneFunction.inlineBody {
+		// 简单函数语句的 Body 应指向语句自身内嵌函数体。
+		t.Fatalf("one function body should use inline function body")
 	}
 	if &oneFunction.Body.Params[0] != &oneFunction.Body.inlineParams[0] {
 		// 单参数函数的 Params 应指向函数体内嵌槽。
