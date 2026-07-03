@@ -358,6 +358,10 @@ func TestParserReturnStatementInlineSingleValue(t *testing.T) {
 		// 单返回值函数应保留一个返回表达式。
 		t.Fatalf("unexpected one return=%+v", oneReturn)
 	}
+	if oneReturn != &oneFunction.Body.Body.inlineReturn {
+		// block 内唯一 return 应复用 block 内嵌 return 节点。
+		t.Fatalf("single return statement should use block inline slot")
+	}
 	if &oneReturn.Values[0] != &oneReturn.inlineValues[0] {
 		// 单返回值的 Values 应指向 return 节点内嵌槽。
 		t.Fatalf("single return value should use inline slot")
@@ -372,6 +376,10 @@ func TestParserReturnStatementInlineSingleValue(t *testing.T) {
 	if pairReturn == nil || len(pairReturn.Values) != 2 {
 		// 多返回值函数必须保持源码返回值顺序。
 		t.Fatalf("unexpected pair return=%+v", pairReturn)
+	}
+	if pairReturn != &pairFunction.Body.Body.inlineReturn {
+		// 多返回值同样只有一个 return 语句，应复用 block 内嵌节点。
+		t.Fatalf("multi return statement should use block inline slot")
 	}
 }
 

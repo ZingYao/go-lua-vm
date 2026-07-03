@@ -40,6 +40,8 @@ type Block struct {
 	Statements []Statement
 	// Return 保存可选 return 语句；Lua 语义要求 return 是 block 最后一条语句。
 	Return *ReturnStatement
+	// inlineReturn 保存 block 唯一 return 语句，避免为 Return 单独分配节点。
+	inlineReturn ReturnStatement
 	// Scope 保存 block 对应的词法作用域信息，供 codegen 和 goto 合法性校验使用。
 	Scope *ScopeInfo
 	// inlineScope 保存 block 自身作用域，避免语义分析为每个 block 单独分配 ScopeInfo。

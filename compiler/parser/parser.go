@@ -158,8 +158,8 @@ func (parser *Parser) parseBlockUntilInto(block *Block, extraEnd func(lexer.Toke
 	for !parser.isBlockEndToken(parser.current, extraEnd) {
 		if parser.current.Kind == lexer.TokenKeyword && parser.current.Text == "return" {
 			// return 是 block 的终结语句，解析后停止收集普通语句。
-			returnStatement, err := parser.parseReturnStatementUntil(extraEnd)
-			if err != nil {
+			returnStatement := &block.inlineReturn
+			if err := parser.parseReturnStatementInto(returnStatement, extraEnd); err != nil {
 				// return 解析失败时终止 block 解析。
 				return err
 			}
@@ -938,25 +938,40 @@ func (parser *Parser) parseReturnStatement() (*ReturnStatement, error) {
 //
 // extraEnd 用于 switch case/default 这类上下文边界；为 nil 时仅使用标准 Lua block 边界。
 func (parser *Parser) parseReturnStatementUntil(extraEnd func(lexer.Token) bool) (*ReturnStatement, error) {
+	statement := &ReturnStatement{}
+	if err := parser.parseReturnStatementInto(statement, extraEnd); err != nil {
+		// 独立 return 节点解析失败时透传兼容错误。
+		return nil, err
+	}
+
+	// 返回独立分配的 return 语句节点。
+	return statement, nil
+}
+
+// parseReturnStatementInto 解析 return 语句到调用方提供的节点。
+//
+// statement 必须是调用方独占的可写节点；helper 会重置其中内容，并保持 return 表达式、
+// 可选分号和额外结束 token 的 Lua 5.3 兼容语义。
+func (parser *Parser) parseReturnStatementInto(statement *ReturnStatement, extraEnd func(lexer.Token) bool) error {
 	position := parser.current.Position
 	if err := parser.expectKeyword("return"); err != nil {
 		// 调用方已经判断 return，该错误只作为防御。
-		return nil, err
+		return err
 	}
+	*statement = ReturnStatement{Position: position}
 	if parser.isReturnEndToken(parser.current, extraEnd) {
 		// return 后直接结束 block 或语句，表示无返回值。
 		if parser.current.Kind == lexer.TokenOperator && parser.current.Text == ";" {
 			// Lua 允许 `return;`，分号属于 return 语句自身而不是后续空语句。
 			parser.advance()
 		}
-		return &ReturnStatement{Position: position}, nil
+		return nil
 	}
 	firstExpression, err := parser.parseExpression()
 	if err != nil {
 		// return 后首个表达式解析失败时返回错误。
-		return nil, err
+		return err
 	}
-	statement := &ReturnStatement{Position: position}
 	if parser.current.Kind == lexer.TokenOperator && parser.current.Text == "," {
 		// 多返回值才需要独立切片保存完整表达式列表。
 		values := []Expression{firstExpression}
@@ -966,7 +981,7 @@ func (parser *Parser) parseReturnStatementUntil(extraEnd func(lexer.Token) bool)
 			nextExpression, err := parser.parseExpression()
 			if err != nil {
 				// 缺少逗号后的表达式时返回错误。
-				return nil, err
+				return err
 			}
 			values = append(values, nextExpression)
 		}
@@ -981,8 +996,8 @@ func (parser *Parser) parseReturnStatementUntil(extraEnd func(lexer.Token) bool)
 		parser.advance()
 	}
 
-	// 返回 return 语句节点。
-	return statement, nil
+	// return 节点已写入调用方提供的存储。
+	return nil
 }
 
 // parseNameList 解析一个或多个逗号分隔名称。
