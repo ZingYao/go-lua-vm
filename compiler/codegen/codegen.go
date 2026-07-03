@@ -60,6 +60,10 @@ type generator struct {
 	proto *bytecode.Proto
 	// parent 保存外层函数生成器，用于嵌套函数捕获 upvalue。
 	parent *generator
+	// childProtoArena 保存当前函数预估直接子 Proto 的内嵌所有权，减少逐个 NewProto 分配。
+	childProtoArena []bytecode.Proto
+	// childProtoNext 保存 childProtoArena 中下一个可借用的子 Proto 下标。
+	childProtoNext int
 	// nextRegister 保存下一个可分配寄存器。
 	nextRegister int
 	// maxRegister 保存生成过程中到达过的最大寄存器数量。
@@ -301,12 +305,20 @@ type scopeSnapshot struct {
 func newGenerator(source string) *generator {
 	// 初始化最小状态，寄存器从 0 开始按 Lua VM 约定分配。
 	proto := bytecode.NewProto(source)
-	proto.PrepareInlineCodeLineInfo(initialCodeCapacity)
-	proto.PrepareInlineConstants(initialConstantCapacity)
-	proto.PrepareInlineLocalVars(initialLocalVarCapacity)
+	prepareCodegenProto(proto)
 	return &generator{
 		proto: proto,
 	}
+}
+
+// prepareCodegenProto 为 codegen 新建或借用的 Proto 准备短表容量。
+//
+// proto 必须是调用方独占的可写原型；该 helper 不改变已有切片长度，只为 compiler 热路径准备内嵌槽。
+func prepareCodegenProto(proto *bytecode.Proto) {
+	// codegen 创建的 Proto 显式 opt-in 短表内嵌槽，binary chunk loader 和手写 Proto 不受影响。
+	proto.PrepareInlineCodeLineInfo(initialCodeCapacity)
+	proto.PrepareInlineConstants(initialConstantCapacity)
+	proto.PrepareInlineLocalVars(initialLocalVarCapacity)
 }
 
 // newChildGenerator 创建嵌套函数 codegen 状态。
@@ -314,9 +326,28 @@ func newGenerator(source string) *generator {
 // child 使用独立 Proto、寄存器和常量池，但保留 parent 用于 upvalue 捕获。
 func newChildGenerator(parent *generator, source string) *generator {
 	// 子函数状态与顶层一致，只额外记录 parent。
-	child := newGenerator(source)
+	child := &generator{proto: parent.borrowChildProto(source)}
 	child.parent = parent
 	return child
+}
+
+// borrowChildProto 返回当前生成器拥有的下一个子函数 Proto。
+//
+// 预估容量命中时返回 childProtoArena 中的稳定元素指针；未命中时回退 NewProto，保持复杂嵌套 block 的语义。
+func (generator *generator) borrowChildProto(source string) *bytecode.Proto {
+	if generator != nil && generator.childProtoNext < len(generator.childProtoArena) {
+		// 直接子函数使用父 generator 的精确 Proto arena，最终 Protos 仍保存普通 *Proto。
+		proto := &generator.childProtoArena[generator.childProtoNext]
+		generator.childProtoNext++
+		*proto = bytecode.Proto{Source: source}
+		prepareCodegenProto(proto)
+		return proto
+	}
+
+	// 预估之外的嵌套 block 子函数保持原 NewProto 路径，避免复杂作用域下错误复用 arena。
+	proto := bytecode.NewProto(source)
+	prepareCodegenProto(proto)
+	return proto
 }
 
 // prepareDirectFunctionBlockCapacity 按当前 block 的直接函数声明预留 codegen 短表容量。
@@ -340,6 +371,10 @@ func (generator *generator) prepareDirectFunctionBlockCapacity(block *parser.Blo
 	if stats.childCount > 0 && len(generator.proto.Protos) == 0 && cap(generator.proto.Protos) == 0 {
 		// 直接函数声明会在当前 Proto.p 追加子 Proto；无子函数时保持 nil 切片。
 		generator.proto.Protos = make([]*bytecode.Proto, 0, stats.childCount)
+	}
+	if stats.childCount > 0 && generator.childProtoArena == nil {
+		// 直接子函数 Proto 本体由父 generator 精确持有，避免每个子函数一次 NewProto 对象分配。
+		generator.childProtoArena = make([]bytecode.Proto, stats.childCount)
 	}
 }
 

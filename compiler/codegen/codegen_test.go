@@ -899,6 +899,32 @@ func TestCompileChunkPreallocatesDirectFunctionBlock(t *testing.T) {
 		t.Fatalf("child proto order changed: %+v", functionProto.Protos)
 	}
 
+	arenaGenerator := newGenerator("child-arena")
+	arenaGenerator.prepareDirectFunctionBlockCapacity(functionChunk.Block)
+	if len(arenaGenerator.childProtoArena) != stats.childCount {
+		// 直接子函数 Proto arena 应按统计数量精确分配。
+		t.Fatalf("unexpected child proto arena length=%d stats=%+v", len(arenaGenerator.childProtoArena), stats)
+	}
+	firstChild := arenaGenerator.borrowChildProto("first-child")
+	secondChild := arenaGenerator.borrowChildProto("second-child")
+	if firstChild != &arenaGenerator.childProtoArena[0] || secondChild != &arenaGenerator.childProtoArena[1] {
+		// 预估命中时子 Proto 必须来自父 generator 的连续 arena。
+		t.Fatalf("child protos should use arena: first=%p second=%p arena=%p/%p", firstChild, secondChild, &arenaGenerator.childProtoArena[0], &arenaGenerator.childProtoArena[1])
+	}
+	if firstChild.Source != "first-child" || secondChild.Source != "second-child" {
+		// 借用 arena 后仍必须重置并写入各自 source。
+		t.Fatalf("child proto source mismatch: first=%q second=%q", firstChild.Source, secondChild.Source)
+	}
+	if cap(firstChild.Code) < initialCodeCapacity || cap(firstChild.Constants) < initialConstantCapacity || cap(firstChild.LocalVars) < initialLocalVarCapacity {
+		// arena 中的 Proto 也必须具备 codegen 短表容量。
+		t.Fatalf("arena child proto was not prepared: code=%d constants=%d locals=%d", cap(firstChild.Code), cap(firstChild.Constants), cap(firstChild.LocalVars))
+	}
+	fallbackChild := arenaGenerator.borrowChildProto("fallback-child")
+	if fallbackChild == &arenaGenerator.childProtoArena[0] || fallbackChild == &arenaGenerator.childProtoArena[1] {
+		// 超出预估时必须回退独立 Proto，避免覆盖已借出的子 Proto。
+		t.Fatalf("fallback child reused arena slot: %p", fallbackChild)
+	}
+
 	nestedChunk := parseChunkForCodegenTest(t, "do function nested() end end")
 	if nestedStats := directFunctionBlockStatsFor(nestedChunk.Block); nestedStats.childCount != 0 || nestedStats.instructionCapacity != 0 || nestedStats.nameConstantCapacity != 0 {
 		// helper 只统计当前 block 的直接函数声明，不递归进入嵌套 block。
