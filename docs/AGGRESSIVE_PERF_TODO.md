@@ -854,6 +854,65 @@ benchmark 复核：
 `function_call`、`closure_upvalue`、`recursion` 仍接近官方 C Lua，非目标路径没有观察到稳定退化。
 当前最高项回到 `arith_chain_temp` 的 `2.69-2.71x` 和 `compile_3000_functions` 的 `2.29-2.33x`。
 
+### 2026-07-04 `arith_chain_temp` 批量 `MUL;ADD;SUB;FORLOOP`
+
+profile 观察：`BenchmarkPreparedArithChainTempOfficial` 在 table_rw 读取段 batch 后约 `29.67 ms/op`，
+CPU 已集中在现有单轮 `TryExecuteMulAddSubForLoop`：该函数约 `43.89% flat / 74.27% cum`，
+其中 `registerIntegerValueWithOverrides` 与 `decodedIntegerOperandValueWithOverrides` 分别约
+`14.78%` 和 `14.42% cum`。这说明剩余主要成本不是普通 `VM.Step`，而是每轮算术链 superinstruction
+重复做 operand override 解析和 context/PC 调度。
+
+实现：新增 `MulAddSubForLoopBatch` 和 `TryExecuteMulAddSubForLoopBatch`，只覆盖官方
+`sum = sum + i * K1 - K2` 的窄数据流：`MUL` 必须读取 numeric-for 外部可见循环变量与 integer 常量，
+`ADD` 必须把 sum 与 MUL 临时值写回同一临时寄存器，`SUB` 必须从该临时寄存器减 integer 常量并写回
+sum，`FORLOOP` 必须回跳当前 `MUL`。复杂别名、非常量乘数/减数、sum 或临时寄存器覆盖 numeric-for
+控制槽时全部回退旧单轮 superinstruction 或普通 VM。
+
+语义 guard：
+
+- 仍只在无 hook、无 coroutine/continuation、无需精确逐 PC 同步且 context 窗口足够时启用。
+- API 层在进入 batch 前已经消费当前 `MUL` 入口的 context 检查；批量提交 `N` 轮会额外跳过
+  `4*N-1` 个虚拟指令入口，因此最多提交 `(contextCheckCountdown+1)/4` 轮，并按 `4*N-1` 扣减倒计时。
+- 执行期要求 sum、numeric-for 内部 index、limit、step 和外部可见循环变量都是 integer；number、
+  字符串数字、元方法相关类型、寄存器越界、debug/coroutine 路径全部回退。
+- 临时寄存器保留最后一轮普通 ADD 后、SUB 前的中间结果；循环退出时不写入越界后的 FORLOOP
+  内部 index 和外部可见变量。
+
+benchmark 复核：
+
+| 用例 | 结果 |
+| --- | ---: |
+| `BenchmarkDoStringArithChainTempOfficial` | `5.719 / 5.710 / 5.704 ms/op`，约 `62.8 KB/op`，`225 allocs/op` |
+| `BenchmarkPreparedArithChainTempOfficial` | `5.632 / 5.630 / 5.622 ms/op`，`0 allocs/op` |
+| `BenchmarkPreparedArithAddLoopOfficial` | `5.027 / 5.071 / 5.070 ms/op`，`0 allocs/op` |
+| `BenchmarkPreparedArithMixLoopOfficial` | `17.29 / 17.32 / 17.29 ms/op`，`0 allocs/op` |
+| `BenchmarkPreparedTableReadWriteOfficial` | `4.952 / 4.949 / 4.956 ms/op`，约 `11.21 MB/op`，`3 allocs/op` |
+| `BenchmarkPreparedFunctionCallOfficial` | `2.801 / 2.796 / 2.796 ms/op`，`2 allocs/op` |
+| `BenchmarkPreparedClosureUpvalueOfficial` | `2.819 / 2.815 / 2.818 ms/op`，`4 allocs/op` |
+| `BenchmarkPreparedRecursion` | `1.692 / 1.694 / 1.657 us/op`，`2 allocs/op` |
+
+对比上一轮 `BenchmarkPreparedArithChainTempOfficial` 约 `29.6 ms/op`，批量算术链将该项压缩到
+约 `5.62 ms/op`；非目标 prepared 矩阵未显示该提交引入的稳定退化。
+
+默认完整 benchmark 三轮复核，显式使用官方 Lua/Luac 5.3.6：
+
+| 用例 | 本项目/官方 |
+| --- | ---: |
+| `arith_add_loop` | `1.19x / 1.19x / 1.22x` |
+| `arith_mix_loop` | `1.93x / 1.94x / 1.94x` |
+| `arith_chain_temp` | `0.75x / 0.76x / 0.75x` |
+| `table_rw` | `1.49x / 1.46x / 1.45x` |
+| `function_call` | `1.01x / 1.04x / 1.04x` |
+| `string_concat` | `1.81x / 1.82x / 1.85x` |
+| `closure_upvalue` | `0.85x / 0.85x / 0.84x` |
+| `stdlib_math_string` | `1.54x / 1.52x / 1.54x` |
+| `recursion` | `1.04x / 1.03x / 1.02x` |
+| `compile_3000_functions` | `2.31x / 2.30x / 2.33x` |
+
+结论：`arith_chain_temp` 已稳定快于官方 C Lua；当前最高项转为 `compile_3000_functions`
+的 `2.30-2.33x`，其次是 `arith_mix_loop`、`string_concat` 和 `stdlib_math_string` 的约 `1.5-1.9x`。
+后续如果继续推进，优先重新 profile `compile_3000_functions`，确认是否还有编译期结构性切口。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -939,7 +998,8 @@ benchmark 复核：
 - [x] 若继续推进，优先 profile `arith_add_loop` 的剩余 2.8x 边缘项，确认不是机器/官方基线波动后再寻找新的语义等价切口。
 - [x] 若继续推进，优先 profile `table_rw` 或 `arith_chain_temp` 的剩余 2.6-2.7x 项，确认存在全新语义等价切口后再实现。
 - [x] 若继续推进，优先 profile `table_rw` 读取段 `GETTABLE;ADD;FORLOOP` 或 `arith_chain_temp` 的剩余项，确认存在全新语义等价切口后再实现。
-- [ ] 若继续推进，优先 profile `arith_chain_temp` 的剩余项；如没有新的结构性切口，记录证伪，不再堆局部字段/分支微调。
+- [x] 若继续推进，优先 profile `arith_chain_temp` 的剩余项；如没有新的结构性切口，记录证伪，不再堆局部字段/分支微调。
+- [ ] 若继续推进，优先 profile `compile_3000_functions`；如果没有新的编译期结构性切口，记录证伪，不再堆 parser/codegen 局部字段微调。
 - [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准

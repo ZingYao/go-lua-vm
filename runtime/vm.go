@@ -413,6 +413,31 @@ type mulAddSubForLoopSuperInstruction struct {
 	Valid bool
 }
 
+// MulAddSubForLoopBatch 保存已验证的 `MUL; ADD; SUB; FORLOOP` batch 执行上下文。
+//
+// 该结构只覆盖 `sum = sum + i * K1 - K2` 官方算术链形态；复杂别名、非常量乘数/减数或控制槽覆盖
+// 都会回退单轮 superinstruction 或普通 VM，以保留逐指令可见性和错误语义。
+type MulAddSubForLoopBatch struct {
+	// proto 记录 batch 绑定的 Proto，用于防止 VM 复用后误用旧上下文。
+	proto *bytecode.Proto
+	// pc 保存循环体 MUL 的 PC。
+	pc int
+	// superInstruction 保存已匹配的 MUL;ADD;SUB;FORLOOP 寄存器数据流。
+	superInstruction mulAddSubForLoopSuperInstruction
+	// TempRegister 保存 MUL/ADD 复用的临时寄存器。
+	TempRegister int
+	// SumRegister 保存 SUB 写回的累加寄存器。
+	SumRegister int
+	// MulConstant 保存 MUL 右侧或左侧的 integer 常量。
+	MulConstant int64
+	// SubConstant 保存 SUB 右侧 integer 常量。
+	SubConstant int64
+	// maxRegisterIndex 保存参与寄存器最大下标，用一次边界检查替代逐寄存器重复检查。
+	maxRegisterIndex int
+	// valid 表示 batch 是否由 PrepareMulAddSubForLoopBatch 成功构造。
+	valid bool
+}
+
 // mixArithmeticForLoopSuperInstruction 保存 `MUL; ADD; SUB; IDIV; MOD; ADD; FORLOOP` 的预匹配形态。
 //
 // 该形态覆盖官方 `arith_mix_loop` 的完整循环体。所有操作数和除数仍在运行期按 integer guard
@@ -3106,6 +3131,140 @@ func buildMulAddSubForLoopSuperInstructions(proto *bytecode.Proto) []mulAddSubFo
 func (vm *VM) PrepareMulAddSubForLoopSuperInstructions() bool {
 	// 预构建失败不影响普通 VM；后续 TryExecuteMulAddSubForLoop 会因为表不匹配而回退。
 	return len(vm.ensureMulAddSubForLoopSuperInstructions()) > 0
+}
+
+// PrepareMulAddSubForLoopBatch 为 `MUL; ADD; SUB; FORLOOP` 算术链准备 batch 上下文。
+func (vm *VM) PrepareMulAddSubForLoopBatch(pc int) (MulAddSubForLoopBatch, bool) {
+	// 先按 PC 读取已准备好的预匹配表；非目标 PC 必须快速失败且不能产生副作用。
+	if vm == nil || vm.mulAddSubForLoopSuperInstructionProto != vm.proto {
+		return MulAddSubForLoopBatch{}, false
+	}
+	superInstructions := vm.mulAddSubForLoopSuperInstructions
+	if uint(pc) >= uint(len(superInstructions)) {
+		return MulAddSubForLoopBatch{}, false
+	}
+	superInstruction := superInstructions[pc]
+	if !superInstruction.Valid {
+		return MulAddSubForLoopBatch{}, false
+	}
+
+	forBase := superInstruction.ForBase
+	tempRegister := superInstruction.MulTarget
+	if superInstruction.AddTarget != tempRegister {
+		// 当前 batch 只覆盖 MUL 和 ADD 写回同一临时寄存器的官方形态。
+		return MulAddSubForLoopBatch{}, false
+	}
+	loopRegister, mulConstant, ok := decodedRegisterIntegerConstantPair(superInstruction.MulLeftOperand, superInstruction.MulRightOperand)
+	if !ok || loopRegister != forBase+3 {
+		// MUL 必须读取 numeric-for 外部可见变量与 integer 常量。
+		return MulAddSubForLoopBatch{}, false
+	}
+	sumRegister, ok := decodedRegisterPlusTarget(superInstruction.AddLeftOperand, superInstruction.AddRightOperand, tempRegister)
+	if !ok {
+		// ADD 必须把 sum 与 MUL 临时值累加回临时寄存器。
+		return MulAddSubForLoopBatch{}, false
+	}
+	subLeftRegister, ok := decodedRegisterOperand(superInstruction.SubLeftOperand)
+	if !ok || subLeftRegister != tempRegister || superInstruction.SubTarget != sumRegister {
+		// SUB 必须从 ADD 临时值减常量并写回 sum。
+		return MulAddSubForLoopBatch{}, false
+	}
+	subConstant, ok := decodedIntegerConstantOperand(superInstruction.SubRightOperand)
+	if !ok {
+		// SUB 右侧不是 integer 常量时保留普通 VM 的完整算术语义。
+		return MulAddSubForLoopBatch{}, false
+	}
+	if tempRegister == sumRegister || registerInRange(tempRegister, forBase, forBase+3) || registerInRange(sumRegister, forBase, forBase+3) {
+		// 临时寄存器和 sum 不能彼此别名，也不能覆盖 numeric-for 控制槽。
+		return MulAddSubForLoopBatch{}, false
+	}
+
+	maxRegisterIndex := forBase + 3
+	if tempRegister > maxRegisterIndex {
+		// 临时寄存器可能高于控制槽，需要纳入边界检查。
+		maxRegisterIndex = tempRegister
+	}
+	if sumRegister > maxRegisterIndex {
+		// sum 寄存器可能高于控制槽，需要纳入边界检查。
+		maxRegisterIndex = sumRegister
+	}
+	return MulAddSubForLoopBatch{
+		proto:            vm.proto,
+		pc:               pc,
+		superInstruction: superInstruction,
+		TempRegister:     tempRegister,
+		SumRegister:      sumRegister,
+		MulConstant:      mulConstant,
+		SubConstant:      subConstant,
+		maxRegisterIndex: maxRegisterIndex,
+		valid:            true,
+	}, true
+}
+
+// TryExecuteMulAddSubForLoopBatch 批量执行已准备的 `MUL; ADD; SUB; FORLOOP` 算术链。
+//
+// batch 必须来自 PrepareMulAddSubForLoopBatch；maxIterations 由调用方按 context 检查窗口换算。
+// 返回 handled=false 表示当前动态寄存器状态不满足 integer guard，调用方必须回退旧单轮路径或普通 VM。
+func (vm *VM) TryExecuteMulAddSubForLoopBatch(batch MulAddSubForLoopBatch, maxIterations int) (nextPC int, iterations int, handled bool) {
+	// batch 与当前 VM/Proto 不匹配时必须回退，避免 VM 池复用后误写寄存器。
+	if vm == nil || !batch.valid || batch.proto != vm.proto || maxIterations <= 0 {
+		return 0, 0, false
+	}
+	registers := vm.registers
+	if uint(batch.maxRegisterIndex) >= uint(len(registers)) {
+		return 0, 0, false
+	}
+	superInstruction := batch.superInstruction
+	sumValue := registers[batch.SumRegister]
+	indexValue := registers[superInstruction.ForBase]
+	limitValue := registers[superInstruction.ForBase+1]
+	stepValue := registers[superInstruction.ForBase+2]
+	visibleIndexValue := registers[superInstruction.ForBase+3]
+	if sumValue.Kind != KindInteger || indexValue.Kind != KindInteger || limitValue.Kind != KindInteger || stepValue.Kind != KindInteger || visibleIndexValue.Kind != KindInteger {
+		// 只覆盖 integer 算术链和 integer numeric-for；其他类型保留普通转换、元方法和错误语义。
+		return 0, 0, false
+	}
+	sum := sumValue.Integer
+	index := indexValue.Integer
+	limit := limitValue.Integer
+	step := stepValue.Integer
+	visibleIndex := visibleIndexValue.Integer
+	lastTemp := registers[batch.TempRegister]
+	nextPC = batch.pc
+	for iterations < maxIterations {
+		mulResult := visibleIndex * batch.MulConstant
+		addResult := sum + mulResult
+		sum = addResult - batch.SubConstant
+		lastTemp = IntegerValue(addResult)
+		iterations++
+
+		nextIndex := index + step
+		nextPC = superInstruction.ExitPC
+		if forIntegerLoopContinues(nextIndex, limit, step) {
+			// 循环继续时推进内部 index 和外部可见循环变量，并跳回 MUL。
+			index = nextIndex
+			visibleIndex = nextIndex
+			nextPC = superInstruction.LoopPC
+			vm.pcOffset = superInstruction.ForSBx
+		} else {
+			// 循环结束时不写入越界后的 index，保持普通 FORLOOP 语义。
+			vm.pcOffset = 0
+			break
+		}
+	}
+	if iterations == 0 {
+		return 0, 0, false
+	}
+	registers[batch.TempRegister] = lastTemp
+	registers[batch.SumRegister] = IntegerValue(sum)
+	registers[superInstruction.ForBase] = IntegerValue(index)
+	registers[superInstruction.ForBase+3] = IntegerValue(visibleIndex)
+	vm.currentPC = batch.pc + 3
+	vm.skipNext = false
+	vm.closeFrom = -1
+	vm.hasCallRequest = false
+	vm.returned = false
+	return nextPC, iterations, true
 }
 
 // TryExecuteMulAddSubForLoop 尝试执行 `MUL; ADD; SUB; FORLOOP` superinstruction。

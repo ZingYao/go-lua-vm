@@ -2707,6 +2707,19 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 			// 四指令算术链会额外跳过 ADD、SUB、FORLOOP 三个入口；倒计时至少为 3
 			// 才能证明普通逐指令路径也不会在被跳过的 FORLOOP 前触发 context 检查。
 			mulPC := pc
+			if batch, ok := vm.PrepareMulAddSubForLoopBatch(mulPC); ok {
+				// 当前 MUL 入口的 context 已在本轮循环顶部消费；N 轮 batch 额外跳过 4*N-1 个指令入口。
+				maxIterations := (contextCheckCountdown + 1) / 4
+				nextPC, handledIterations, handled := vm.TryExecuteMulAddSubForLoopBatch(batch, maxIterations)
+				if handled {
+					// superinstruction 已完成若干轮 MUL、ADD、SUB 与 FORLOOP；补偿被跳过的入口。
+					contextCheckCountdown -= handledIterations*4 - 1
+					previousPreviousPC = mulPC + 2
+					previousPC = mulPC + 3
+					pc = nextPC
+					continue
+				}
+			}
 			if nextPC, handled := vm.TryExecuteMulAddSubForLoop(mulPC); handled {
 				// superinstruction 已完成 MUL、ADD、SUB 与 FORLOOP；补偿被跳过三条指令的倒计时。
 				contextCheckCountdown -= 3

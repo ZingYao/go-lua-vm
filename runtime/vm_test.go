@@ -2592,6 +2592,80 @@ func TestVMTryExecuteMulAddSubForLoop(t *testing.T) {
 	}
 }
 
+// TestVMTryExecuteMulAddSubForLoopBatch 验证算术链 batch 可连续提交多轮。
+func TestVMTryExecuteMulAddSubForLoopBatch(t *testing.T) {
+	proto := bytecode.NewProto("mul-add-sub-forloop-batch")
+	proto.Constants = []bytecode.Constant{bytecode.IntegerConstant(3), bytecode.IntegerConstant(7)}
+	proto.Code = []bytecode.Instruction{
+		bytecode.CreateABC(bytecode.OpMul, 5, 4, bytecode.RKAsK(0)),
+		bytecode.CreateABC(bytecode.OpAdd, 5, 0, 5),
+		bytecode.CreateABC(bytecode.OpSub, 0, 5, bytecode.RKAsK(1)),
+		bytecode.CreateAsBx(bytecode.OpForLoop, 1, -4),
+	}
+	vm := NewVMWithPrototypeData(6, proto.Constants, nil, nil, nil)
+	vm.BindPrototype(proto)
+	if !vm.PrepareMulAddSubForLoopSuperInstructions() {
+		// 完整循环体回跳到 MUL 时应能准备算术链 superinstruction。
+		t.Fatalf("expected MUL;ADD;SUB;FORLOOP superinstruction")
+	}
+	initialRegisters := []Value{IntegerValue(0), IntegerValue(1), IntegerValue(3), IntegerValue(1), IntegerValue(1), NilValue()}
+	for registerIndex, value := range initialRegisters {
+		// 初始化 sum 与 FORLOOP 控制寄存器，模拟 FORPREP 后进入循环体的状态。
+		if err := vm.SetRegister(registerIndex, value); err != nil {
+			t.Fatalf("set register %d failed: %v", registerIndex, err)
+		}
+	}
+
+	batch, ok := vm.PrepareMulAddSubForLoopBatch(0)
+	if !ok {
+		// 官方算术链形态应能准备 batch。
+		t.Fatalf("expected prepared MUL;ADD;SUB;FORLOOP batch")
+	}
+	nextPC, iterations, handled := vm.TryExecuteMulAddSubForLoopBatch(batch, 2)
+	if !handled || iterations != 2 || nextPC != 0 {
+		// 最多提交两轮时循环仍应跳回 MUL。
+		t.Fatalf("partial batch mismatch: handled=%v iterations=%d nextPC=%d", handled, iterations, nextPC)
+	}
+	if value, ok := vm.Register(0); !ok || !value.RawEqual(IntegerValue(-5)) {
+		// 前两轮结果为 (0+1*3-7)+2*3-7。
+		t.Fatalf("partial sum mismatch: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(5); !ok || !value.RawEqual(IntegerValue(2)) {
+		// 临时寄存器保留第二轮 ADD 后、SUB 前的中间值。
+		t.Fatalf("partial temp mismatch: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(1); !ok || !value.RawEqual(IntegerValue(3)) {
+		// FORLOOP 继续时内部 index 必须推进到第三轮。
+		t.Fatalf("partial index mismatch: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(4); !ok || !value.RawEqual(IntegerValue(3)) {
+		// 外部可见循环变量必须同步到第三轮。
+		t.Fatalf("partial visible index mismatch: value=%#v ok=%v", value, ok)
+	}
+
+	nextPC, iterations, handled = vm.TryExecuteMulAddSubForLoopBatch(batch, 10)
+	if !handled || iterations != 1 || nextPC != 4 {
+		// 剩余一轮后达到 limit 并退出循环。
+		t.Fatalf("final batch mismatch: handled=%v iterations=%d nextPC=%d", handled, iterations, nextPC)
+	}
+	if value, ok := vm.Register(0); !ok || !value.RawEqual(IntegerValue(-3)) {
+		// 三轮链式算术结果必须等于 (((0+3-7)+6-7)+9-7)。
+		t.Fatalf("final sum mismatch: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(5); !ok || !value.RawEqual(IntegerValue(4)) {
+		// 临时寄存器保留第三轮 ADD 后、SUB 前的中间值。
+		t.Fatalf("final temp mismatch: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(1); !ok || !value.RawEqual(IntegerValue(3)) {
+		// 循环退出时普通 FORLOOP 不写回越界后的内部 index。
+		t.Fatalf("final index mismatch: value=%#v ok=%v", value, ok)
+	}
+	if vm.currentPC != 3 || vm.pcOffset != 0 {
+		// batch 后 VM 状态应等价于刚执行完 FORLOOP。
+		t.Fatalf("final pc state mismatch: currentPC=%d pcOffset=%d", vm.currentPC, vm.pcOffset)
+	}
+}
+
 // TestVMTryExecuteMulAddSubForLoopFallback 验证算术链 guard 失败时无副作用回退。
 //
 // 任一操作数不是 integer 时，fast path 必须返回 handled=false，不提前覆盖 sum 或临时寄存器。
@@ -2620,6 +2694,47 @@ func TestVMTryExecuteMulAddSubForLoopFallback(t *testing.T) {
 	if handled || nextPC != 0 {
 		// guard 不满足时必须回退普通 VM。
 		t.Fatalf("fallback mismatch: handled=%v nextPC=%d", handled, nextPC)
+	}
+	if value, ok := vm.Register(0); !ok || !value.RawEqual(IntegerValue(11)) {
+		// 回退前不能覆盖 sum，确保普通 VM 仍能产生原始错误或元方法语义。
+		t.Fatalf("fallback sum mutated: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(5); !ok || !value.RawEqual(IntegerValue(99)) {
+		// 回退前不能覆盖临时寄存器。
+		t.Fatalf("fallback temp mutated: value=%#v ok=%v", value, ok)
+	}
+}
+
+// TestVMTryExecuteMulAddSubForLoopBatchFallback 验证算术链 batch guard 失败时无副作用回退。
+func TestVMTryExecuteMulAddSubForLoopBatchFallback(t *testing.T) {
+	proto := bytecode.NewProto("mul-add-sub-forloop-batch-fallback")
+	proto.Constants = []bytecode.Constant{bytecode.IntegerConstant(3), bytecode.IntegerConstant(7)}
+	proto.Code = []bytecode.Instruction{
+		bytecode.CreateABC(bytecode.OpMul, 5, 4, bytecode.RKAsK(0)),
+		bytecode.CreateABC(bytecode.OpAdd, 5, 0, 5),
+		bytecode.CreateABC(bytecode.OpSub, 0, 5, bytecode.RKAsK(1)),
+		bytecode.CreateAsBx(bytecode.OpForLoop, 1, -4),
+	}
+	vm := NewVMWithPrototypeData(6, proto.Constants, nil, nil, nil)
+	vm.BindPrototype(proto)
+	vm.PrepareMulAddSubForLoopSuperInstructions()
+	initialRegisters := []Value{IntegerValue(11), IntegerValue(1), IntegerValue(1), IntegerValue(1), StringValue("not integer"), IntegerValue(99)}
+	for registerIndex, value := range initialRegisters {
+		// 初始化一个 MUL 左操作数不满足 integer guard 的场景。
+		if err := vm.SetRegister(registerIndex, value); err != nil {
+			t.Fatalf("set fallback register %d failed: %v", registerIndex, err)
+		}
+	}
+
+	batch, ok := vm.PrepareMulAddSubForLoopBatch(0)
+	if !ok {
+		// 静态数据流仍匹配，动态类型 guard 应在执行期失败。
+		t.Fatalf("expected prepared MUL;ADD;SUB;FORLOOP batch")
+	}
+	nextPC, iterations, handled := vm.TryExecuteMulAddSubForLoopBatch(batch, 8)
+	if handled || iterations != 0 || nextPC != 0 {
+		// guard 不满足时必须回退普通 VM。
+		t.Fatalf("fallback mismatch: handled=%v iterations=%d nextPC=%d", handled, iterations, nextPC)
 	}
 	if value, ok := vm.Register(0); !ok || !value.RawEqual(IntegerValue(11)) {
 		// 回退前不能覆盖 sum，确保普通 VM 仍能产生原始错误或元方法语义。
