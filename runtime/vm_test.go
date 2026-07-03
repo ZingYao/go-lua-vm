@@ -1770,6 +1770,107 @@ func TestVMDivNativeNumberCacheFallback(t *testing.T) {
 	}
 }
 
+// TestVMDecodedInstructionCacheFollowsBoundProto 验证预解码缓存跟随当前绑定 Proto。
+//
+// VM 池复用时可能先后执行不同 Proto；预解码数组必须按 Proto 边界重建，避免相同 PC 误读旧
+// 指令字段或 RK 常量形态。nil Proto 绑定必须清理缓存，保持手写 VM 单测兼容。
+func TestVMDecodedInstructionCacheFollowsBoundProto(t *testing.T) {
+	// 构造带 integer 常量和 FORLOOP 的 Proto，覆盖 RK、A/B/C、Bx、sBx 和 Ax 字段预解码。
+	proto := bytecode.NewProto("decoded")
+	proto.Constants = []bytecode.Constant{bytecode.IntegerConstant(3)}
+	proto.Code = []bytecode.Instruction{
+		bytecode.CreateABC(bytecode.OpAdd, 2, 1, bytecode.RKAsK(0)),
+		bytecode.CreateAsBx(bytecode.OpForLoop, 0, -1),
+		bytecode.CreateABC(bytecode.OpAdd, 0, 9, 0),
+	}
+	vm := NewVMWithPrototypeData(4, proto.Constants, nil, nil, nil)
+	vm.BindPrototype(proto)
+
+	decodedAdd, ok := vm.decodedInstructionAt(0)
+	if !ok {
+		// 当前 Proto 的第一条指令必须能完成预解码。
+		t.Fatalf("decoded add missing")
+	}
+	if decodedAdd.Instruction != proto.Code[0] || decodedAdd.OpCode != bytecode.OpAdd || decodedAdd.A != 2 || decodedAdd.B != 1 || decodedAdd.C != bytecode.RKAsK(0) {
+		// 预解码字段必须与原始 Instruction 位字段一致。
+		t.Fatalf("decoded add fields mismatch: %+v", decodedAdd)
+	}
+	if decodedAdd.BOperand.Constant || decodedAdd.BOperand.Index != 1 {
+		// B 字段是寄存器操作数，只应记录寄存器下标。
+		t.Fatalf("decoded B operand mismatch: %+v", decodedAdd.BOperand)
+	}
+	if !decodedAdd.COperand.Constant || decodedAdd.COperand.Index != 0 || !decodedAdd.COperand.IntegerConstantOK || decodedAdd.COperand.IntegerConstant != 3 {
+		// C 字段是 integer 常量，必须缓存常量下标和值。
+		t.Fatalf("decoded C operand mismatch: %+v", decodedAdd.COperand)
+	}
+
+	decodedForLoop, ok := vm.decodedInstructionAt(1)
+	if !ok {
+		// 第二条 FORLOOP 指令也应位于预解码数组中。
+		t.Fatalf("decoded forloop missing")
+	}
+	if decodedForLoop.OpCode != bytecode.OpForLoop || decodedForLoop.SBx != -1 {
+		// sBx 必须保留有符号跳转偏移，供后续 superinstruction guard 使用。
+		t.Fatalf("decoded forloop mismatch: %+v", decodedForLoop)
+	}
+	decodedWideRegister, ok := vm.decodedInstructionAt(2)
+	if !ok {
+		// 第三条宽寄存器指令也应位于预解码数组中。
+		t.Fatalf("decoded wide register add missing")
+	}
+	if decodedWideRegister.BOperand.Constant || decodedWideRegister.BOperand.Index != 9 {
+		// 预解码阶段不能根据当前 VM 寄存器窗口提前拒绝寄存器下标，只记录形态供执行期检查。
+		t.Fatalf("decoded wide register operand mismatch: %+v", decodedWideRegister.BOperand)
+	}
+
+	otherProto := bytecode.NewProto("decoded-other")
+	otherProto.Code = []bytecode.Instruction{bytecode.CreateABC(bytecode.OpMove, 0, 1, 0)}
+	vm.BindPrototype(otherProto)
+	decodedMove, ok := vm.decodedInstructionAt(0)
+	if !ok {
+		// 切换 Proto 后应为新 Proto 重新构建预解码。
+		t.Fatalf("decoded move missing")
+	}
+	if vm.decodedInstructionProto != otherProto || decodedMove.OpCode != bytecode.OpMove || decodedMove.Instruction != otherProto.Code[0] {
+		// 预解码缓存必须绑定新 Proto，不能继续引用旧 Proto 数据。
+		t.Fatalf("decoded proto switch mismatch: proto=%p decoded=%+v", vm.decodedInstructionProto, decodedMove)
+	}
+
+	vm.BindPrototype(nil)
+	if decoded, ok := vm.decodedInstructionAt(0); ok || vm.decodedInstructionProto != nil || vm.decodedInstructions != nil {
+		// nil Proto 绑定必须清空缓存，确保手工 Step 路径没有陈旧预解码状态。
+		t.Fatalf("decoded cache should be cleared: decoded=%+v ok=%v proto=%p len=%d", decoded, ok, vm.decodedInstructionProto, len(vm.decodedInstructions))
+	}
+}
+
+// TestVMDecodedInstructionHandlesStrippedAndInvalidRK 验证 stripped Proto 和异常 RK 的预解码安全性。
+//
+// stripped chunk 仍保留 Code/Constants 但缺少调试信息；预解码不得依赖 LineInfo 或 LocalVars。
+// 越界常量和非 integer 常量只能标记形态，不能伪造 integer fast path 命中。
+func TestVMDecodedInstructionHandlesStrippedAndInvalidRK(t *testing.T) {
+	// 构造 stripped Proto 与异常 RK，确认预解码只缓存可证明安全的 integer 常量值。
+	proto := bytecode.NewProto("@decoded.lua")
+	proto.Constants = []bytecode.Constant{bytecode.StringConstant("not integer")}
+	proto.Code = []bytecode.Instruction{bytecode.CreateABC(bytecode.OpAdd, 0, bytecode.RKAsK(9), bytecode.RKAsK(0))}
+	stripped := bytecode.StripDebug(proto)
+	vm := NewVMWithPrototypeData(1, stripped.Constants, nil, nil, nil)
+	vm.BindPrototype(stripped)
+
+	decodedAdd, ok := vm.decodedInstructionAt(0)
+	if !ok {
+		// stripped Proto 的 code 仍必须支持预解码。
+		t.Fatalf("decoded stripped add missing")
+	}
+	if !decodedAdd.BOperand.Constant || decodedAdd.BOperand.Index != 9 || decodedAdd.BOperand.IntegerConstantOK {
+		// 越界常量只记录常量形态，不能设置 integer 常量命中。
+		t.Fatalf("decoded invalid B operand mismatch: %+v", decodedAdd.BOperand)
+	}
+	if !decodedAdd.COperand.Constant || decodedAdd.COperand.Index != 0 || decodedAdd.COperand.IntegerConstantOK {
+		// 非 integer 常量同样不能设置 integer 常量命中。
+		t.Fatalf("decoded string C operand mismatch: %+v", decodedAdd.COperand)
+	}
+}
+
 // TestVMBinaryArithmeticErrors 验证二元算术指令的错误边界。
 //
 // 算术错误必须返回明确错误，并保持目标寄存器原值。

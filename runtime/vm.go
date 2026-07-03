@@ -70,6 +70,10 @@ type VM struct {
 	luaMetamethodRunner LuaMetamethodRunner
 	// proto 保存当前 VM 正在执行的函数原型，用于按 local 生命周期裁剪活动寄存器根。
 	proto *bytecode.Proto
+	// decodedInstructionProto 记录 decodedInstructions 对应的 Proto，避免 VM 池复用时误读旧预解码。
+	decodedInstructionProto *bytecode.Proto
+	// decodedInstructions 保存当前 Proto 的只读预解码指令元数据，供后续 hot path 按 PC 读取。
+	decodedInstructions []decodedInstruction
 	// currentPC 保存当前执行指令位置，用于判断 Proto.LocalVars 中哪些局部变量仍然存活。
 	currentPC int
 	// openTop 保存上一条开放返回/开放 vararg 写入后的寄存器上界，-1 表示当前没有开放栈顶。
@@ -165,6 +169,48 @@ type stringTableReadCacheEntry struct {
 	value Value
 	// valid 表示当前缓存项是否已经初始化。
 	valid bool
+}
+
+// decodedRKOperand 表示一侧 RK 操作数的预解码形态。
+//
+// Constant 为 true 时 Index 是 Proto.Constants 的下标；IntegerConstantOK 只在常量存在且类型为
+// integer 时为 true。寄存器操作数只保存寄存器下标，运行期仍必须检查寄存器窗口和动态类型。
+type decodedRKOperand struct {
+	// Index 保存寄存器下标或常量表下标。
+	Index int
+	// Constant 表示该 RK 操作数来自常量表。
+	Constant bool
+	// IntegerConstant 保存 integer 常量值。
+	IntegerConstant int64
+	// IntegerConstantOK 表示 IntegerConstant 可直接用于 integer arithmetic fast path。
+	IntegerConstantOK bool
+}
+
+// decodedInstruction 保存单条 Proto 指令的不可变预解码字段。
+//
+// 该结构只缓存从原始 Instruction 和 Proto.Constants 派生出的只读信息；debug、traceback、
+// 反汇编和普通 VM 仍以 Proto.Code 为准，后续 fast path 必须在 guard 失败时回退 Step。
+type decodedInstruction struct {
+	// Instruction 保存原始 32 位指令，便于回退普通 VM 或错误路径复用。
+	Instruction bytecode.Instruction
+	// OpCode 保存指令 opcode，避免 hot path 每步重复提取低 6 位。
+	OpCode bytecode.OpCode
+	// A 保存 A 操作数字段。
+	A int
+	// B 保存 B 操作数字段。
+	B int
+	// C 保存 C 操作数字段。
+	C int
+	// Bx 保存 Bx 操作数字段。
+	Bx int
+	// SBx 保存 sBx 跳转偏移字段。
+	SBx int
+	// Ax 保存 Ax 扩展参数字段。
+	Ax int
+	// BOperand 保存 B 字段按 RK 语义预解码后的形态。
+	BOperand decodedRKOperand
+	// COperand 保存 C 字段按 RK 语义预解码后的形态。
+	COperand decodedRKOperand
 }
 
 // LuaClosure 表示最小 VM 阶段的 Lua closure 值。
@@ -1321,12 +1367,19 @@ func (vm *VM) BindPrototype(proto *bytecode.Proto) {
 	vm.proto = proto
 	if proto == nil {
 		// 手工 VM 或测试路径没有 Proto，不启用指令级热路径缓存。
+		vm.decodedInstructionProto = nil
+		vm.decodedInstructions = nil
 		vm.arithmeticIntRegisterCacheProto = nil
 		vm.arithmeticIntRegisterCache = nil
 		vm.arithmeticIntOperandCache = nil
 		vm.stringTableReadCacheProto = nil
 		vm.stringTableReadCache = nil
 		return
+	}
+	if vm.decodedInstructionProto != nil && vm.decodedInstructionProto != proto {
+		// VM 池切换到其他 Proto 时丢弃预解码缓存，避免 PC 相同但指令不同的后续 fast path 误读。
+		vm.decodedInstructionProto = nil
+		vm.decodedInstructions = nil
 	}
 	if vm.arithmeticIntRegisterCacheProto != proto || len(vm.arithmeticIntRegisterCache) < len(proto.Code) || len(vm.arithmeticIntOperandCache) < len(proto.Code) {
 		// VM 池复用到不同 Proto 时必须重建缓存，避免 PC 相同但指令不同导致错误命中。
@@ -1350,6 +1403,119 @@ func (vm *VM) BindPrototype(proto *bytecode.Proto) {
 			vm.stringTableReadCache[pc] = stringTableReadCacheEntry{}
 		}
 	}
+}
+
+// ensureDecodedInstructions 返回当前 Proto 的预解码指令数组。
+//
+// 该缓存绑定 VM 当前 Proto，不写入 bytecode.Proto，避免多个 State 并发执行同一 Proto 时共享可变
+// 状态。返回切片只供 VM hot path 只读使用；nil VM、nil Proto 或空 Code 返回 nil。
+func (vm *VM) ensureDecodedInstructions() []decodedInstruction {
+	// 按当前 VM 绑定的 Proto 懒构建预解码数组，并在 Proto 未变化时复用。
+	if vm == nil || vm.proto == nil {
+		// 没有 VM 或 Proto 时不能构建预解码信息。
+		return nil
+	}
+	if len(vm.proto.Code) == 0 {
+		// 空 Proto 没有可执行指令，同时清理旧缓存保持绑定关系明确。
+		vm.decodedInstructionProto = vm.proto
+		vm.decodedInstructions = nil
+		return nil
+	}
+	if vm.decodedInstructionProto == vm.proto && len(vm.decodedInstructions) == len(vm.proto.Code) {
+		// 当前缓存仍匹配同一个 Proto 和 Code 长度，可以直接复用。
+		return vm.decodedInstructions
+	}
+
+	// 重新构建当前 Proto 的只读预解码数组；Proto.Code 在执行期按不可变处理。
+	vm.decodedInstructionProto = vm.proto
+	vm.decodedInstructions = decodeProtoInstructions(vm.proto)
+	return vm.decodedInstructions
+}
+
+// decodedInstructionAt 返回指定 PC 的预解码指令。
+//
+// pc 必须位于当前 Proto.Code 范围内；越界返回 ok=false，调用方应回退普通 VM 或报原始边界错误。
+func (vm *VM) decodedInstructionAt(pc int) (decodedInstruction, bool) {
+	// 先确保当前 Proto 已经完成预解码，再按 PC 安全读取。
+	decodedInstructions := vm.ensureDecodedInstructions()
+	if uint(pc) >= uint(len(decodedInstructions)) {
+		// 越界 PC 不能读取预解码缓存，保持 future fast path 可安全回退。
+		return decodedInstruction{}, false
+	}
+
+	// 返回值拷贝只包含标量和不可变常量值，不暴露内部切片可变性。
+	return decodedInstructions[pc], true
+}
+
+// decodeProtoInstructions 构建 Proto.Code 的预解码数组。
+//
+// proto 必须是执行期不可变 Proto；返回数组与 Code 等长，每项只保存从 Instruction 字段和
+// Constants 派生的只读信息。常量越界不会报错，只会让对应 IntegerConstantOK=false。
+func decodeProtoInstructions(proto *bytecode.Proto) []decodedInstruction {
+	// 按 Proto.Code 的 PC 顺序批量构建预解码数组。
+	if proto == nil || len(proto.Code) == 0 {
+		// 缺少 Proto 或 Code 时没有预解码内容。
+		return nil
+	}
+
+	// 按 Code 长度一次性分配，后续按 PC 直接索引。
+	decodedInstructions := make([]decodedInstruction, len(proto.Code))
+	for pc, instruction := range proto.Code {
+		// 每条指令独立预解码，保持 PC 与数组下标一一对应。
+		decodedInstructions[pc] = decodeProtoInstruction(proto, instruction)
+	}
+	return decodedInstructions
+}
+
+// decodeProtoInstruction 解码单条 Instruction 的字段和 RK 操作数。
+//
+// 该函数只做无副作用字段提取；B/C 是否真正按 RK 使用由 opcode 语义决定，后续 fast path
+// 必须结合 opcode guard 读取 BOperand 或 COperand。
+func decodeProtoInstruction(proto *bytecode.Proto, instruction bytecode.Instruction) decodedInstruction {
+	// 先提取所有 Lua 5.3 指令字段，避免 hot path 重复位运算。
+	bOperand := instruction.B()
+	cOperand := instruction.C()
+	return decodedInstruction{
+		Instruction: instruction,
+		OpCode:      instruction.OpCode(),
+		A:           instruction.A(),
+		B:           bOperand,
+		C:           cOperand,
+		Bx:          instruction.Bx(),
+		SBx:         instruction.SBx(),
+		Ax:          instruction.Ax(),
+		BOperand:    decodeRKOperand(proto, bOperand),
+		COperand:    decodeRKOperand(proto, cOperand),
+	}
+}
+
+// decodeRKOperand 解码 Lua 5.3 RK 操作数的寄存器或常量形态。
+//
+// rk 来自 B/C 字段；常量下标越界或非 integer 常量时仍保留 Index/Constant 形态，但不设置
+// IntegerConstantOK，确保后续 arithmetic fast path 能安全回退。
+func decodeRKOperand(proto *bytecode.Proto, rk int) decodedRKOperand {
+	// 先保留 RK 的寄存器或常量下标形态，再按常量类型补充窄路径值。
+	operand := decodedRKOperand{
+		Index:    bytecode.IndexK(rk),
+		Constant: bytecode.IsK(rk),
+	}
+	if !operand.Constant {
+		// 寄存器操作数没有可提前读取的常量值。
+		return operand
+	}
+	if proto == nil || operand.Index < 0 || operand.Index >= len(proto.Constants) {
+		// 损坏 chunk 或手写测试可能引用越界常量，预解码只记录形态并交给执行期报错。
+		return operand
+	}
+
+	// 只有 integer 常量可服务当前 arithmetic superinstruction 计划。
+	constant := proto.Constants[operand.Index]
+	if constant.Kind == bytecode.ConstantInteger {
+		// integer 常量值可直接保存，后续 hot path 不再读取 Proto.Constants。
+		operand.IntegerConstant = constant.Integer
+		operand.IntegerConstantOK = true
+	}
+	return operand
 }
 
 // BindLuaMetamethodRunner 绑定当前 VM 可用的 Lua closure 元方法执行器。
