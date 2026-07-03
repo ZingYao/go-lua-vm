@@ -22,6 +22,49 @@
 
 最近默认完整 benchmark 已达到主要路径三轮低于 3x 的短期目标，但 glua 与官方 C Lua 仍有明显差距。继续优化不应再堆局部字段和分支微调，应优先减少解释器循环、opcode 解码、CALL 边界和 table 扩容等结构性成本。
 
+### 2026-07-03 激进分支基线
+
+分支：`quanquan/feature/glua-aggressive-perf`
+
+版本门禁：重建 `bin/glua` / `bin/gluac` 后，官方 `lua` / `luac` 与本项目 `glua` / `gluac` 均确认为 Lua 5.3.6。
+
+official-sized Go micro 三轮基线：
+
+| 用例 | 时间 | 分配 |
+| --- | ---: | ---: |
+| `BenchmarkDoStringArithAddLoopOfficial` | 16.53 / 16.57 / 16.62ms/op | 58.4KB/op, 216 allocs/op |
+| `BenchmarkPreparedArithAddLoopOfficial` | 16.44 / 16.47 / 16.61ms/op | 9-10B/op, 0 allocs/op |
+| `BenchmarkDoStringArithMixLoopOfficial` | 28.59 / 28.48 / 28.46ms/op | 60.4KB/op, 237 allocs/op |
+| `BenchmarkPreparedArithMixLoopOfficial` | 28.33 / 28.30 / 28.40ms/op | 20B/op, 0 allocs/op |
+| `BenchmarkDoStringArithChainTempOfficial` | 33.83 / 33.79 / 33.78ms/op | 59.3KB/op, 223 allocs/op |
+| `BenchmarkPreparedArithChainTempOfficial` | 33.71 / 33.79 / 33.73ms/op | 22B/op, 0 allocs/op |
+| `BenchmarkDoStringTableReadWriteOfficial` | 15.21 / 16.17 / 15.08ms/op | 33.56MB/op, 265 allocs/op |
+| `BenchmarkPreparedTableReadWriteOfficial` | 14.15 / 13.63 / 14.00ms/op | 33.50MB/op, 18 allocs/op |
+| `BenchmarkDoStringStdlibMathString` | 36.21 / 39.69 / 38.95ms/op | 38.88MB/op, 400148 allocs/op |
+| `BenchmarkDoStringFunctionCall` | 413 / 416 / 416us/op | 61.8KB/op, 253 allocs/op |
+| `BenchmarkDoStringClosureUpvalueOfficial` | 16.77 / 16.73 / 16.76ms/op | 62.7KB/op, 269 allocs/op |
+| `BenchmarkPreparedClosureUpvalueOfficial` | 16.31 / 16.30 / 16.41ms/op | 492B/op, 4 allocs/op |
+| `BenchmarkDoStringRecursion` | 7.95 / 7.59 / 7.66ms/op | 89.6KB/op, 362 allocs/op |
+| `BenchmarkPreparedRecursion` | 7.40 / 7.39 / 7.39ms/op | 292B/op, 2 allocs/op |
+| `BenchmarkCompileSource3000Functions` | 8.34 / 8.41 / 8.41ms/op | 7.58MB/op, 81151-81152 allocs/op |
+
+默认完整 benchmark 三轮：
+
+| 用例 | 本项目/官方 |
+| --- | ---: |
+| `arith_add_loop` | 2.80x / 2.70x / 2.77x |
+| `arith_mix_loop` | 2.89x / 2.89x / 2.90x |
+| `arith_chain_temp` | 3.02x / 2.95x / 2.96x |
+| `table_rw` | 2.97x / 2.96x / 2.95x |
+| `function_call` | 2.71x / 2.68x / 2.76x |
+| `string_concat` | 1.79x / 1.81x / 1.78x |
+| `closure_upvalue` | 2.62x / 2.61x / 2.64x |
+| `stdlib_math_string` | 2.17x / 2.20x / 2.17x |
+| `recursion` | 3.16x / 3.16x / 3.17x |
+| `compile_3000_functions` | 2.29x / 2.25x / 2.31x |
+
+结论：算术 prepared 与 DoString wall-clock 基本重合，说明编译、OpenLibs 和 State 初始化不是 `arith_*` 的主要耗时；`table_rw` prepared 仍约 33.5MB/op，继续指向运行期 table 数组扩容；`recursion` 默认完整三轮稳定高于 3x，是当前首要边缘项。下一轮按 TODO 生成 `arith_add_loop`、`arith_chain_temp`、`arith_mix_loop` CPU profile，再决定 Proto 预解码和 arithmetic superinstruction 的最小切口。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -69,7 +112,7 @@
 
 ## TODO
 
-- [ ] 跑激进分支基线：默认完整 benchmark 三轮、official-sized Go micro 矩阵、`BenchmarkPrepared*` 相关项。
+- [x] 跑激进分支基线：默认完整 benchmark 三轮、official-sized Go micro 矩阵、`BenchmarkPrepared*` 相关项。
 - [ ] 生成 `arith_add_loop`、`arith_chain_temp`、`arith_mix_loop` 的 CPU profile，确认当前热点仍集中在 VM.Step、整数算术和 FORLOOP。
 - [ ] 设计 Proto 预解码结构，明确字段、生命周期、VM 池复用安全边界和回退策略。
 - [ ] 实现最小 Proto 预解码，只服务 arithmetic hot path，不改普通解释器语义。
