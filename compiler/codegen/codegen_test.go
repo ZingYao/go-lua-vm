@@ -856,6 +856,47 @@ func TestNewGeneratorPreallocatesCodeAndLineInfo(t *testing.T) {
 	}
 }
 
+// TestCompileChunkPreallocatesChildProtos 验证当前 block 的直接函数声明会预留 Proto.p 容量。
+//
+// 容量预留只能减少 append 扩容成本，不能改变子函数数量、顺序或无子函数 Proto 的 nil 观察语义。
+func TestCompileChunkPreallocatesChildProtos(t *testing.T) {
+	plainChunk := parseChunkForCodegenTest(t, "local x = 1 return x")
+	plainProto, err := CompileChunk(plainChunk, "no-child-proto")
+	if err != nil {
+		// 普通无子函数 chunk 不应编译失败。
+		t.Fatalf("compile plain chunk failed: %v", err)
+	}
+	if plainProto.Protos != nil {
+		// 没有子函数时必须保持 nil，避免给普通 Proto 引入额外分配。
+		t.Fatalf("plain proto should keep nil children: %+v", plainProto.Protos)
+	}
+
+	functionChunk := parseChunkForCodegenTest(t, "function f() return 1 end local function g() return 2 end")
+	if count := directChildFunctionStatementCount(functionChunk.Block); count != 2 {
+		// 当前 block 中两个直接函数声明都应被计入容量。
+		t.Fatalf("unexpected direct child function count=%d", count)
+	}
+	functionProto, err := CompileChunk(functionChunk, "child-protos")
+	if err != nil {
+		// 合法函数声明不应编译失败。
+		t.Fatalf("compile function chunk failed: %v", err)
+	}
+	if len(functionProto.Protos) != 2 || cap(functionProto.Protos) < 2 {
+		// 子 Proto 长度和容量必须覆盖两个直接函数声明。
+		t.Fatalf("unexpected child protos len/cap=%d/%d", len(functionProto.Protos), cap(functionProto.Protos))
+	}
+	if functionProto.Protos[0].Constants[0] != bytecode.IntegerConstant(1) || functionProto.Protos[1].Constants[0] != bytecode.IntegerConstant(2) {
+		// 预留容量不得改变子 Proto 追加顺序。
+		t.Fatalf("child proto order changed: %+v", functionProto.Protos)
+	}
+
+	nestedChunk := parseChunkForCodegenTest(t, "do function nested() end end")
+	if count := directChildFunctionStatementCount(nestedChunk.Block); count != 0 {
+		// helper 只统计当前 block 的直接函数声明，不递归进入嵌套 block。
+		t.Fatalf("nested function should not be counted as direct child: %d", count)
+	}
+}
+
 // TestCompileNestedShadowRestoresInlineLocal 验证内层遮蔽退出后恢复外层 inline local。
 func TestCompileNestedShadowRestoresInlineLocal(t *testing.T) {
 	chunk := parseChunkForCodegenTest(t, "local x = 1 do local x = 2 end return x")

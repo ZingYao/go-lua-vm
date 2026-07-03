@@ -32,6 +32,7 @@ func CompileChunk(chunk *parser.Chunk, source string) (*bytecode.Proto, error) {
 	generator := newGenerator(source)
 	// Lua chunk 本身按 vararg 函数执行，CLI 脚本参数会通过 `...` 暴露。
 	generator.proto.IsVararg = true
+	generator.prepareChildProtoCapacity(chunk.Block)
 	if err := generator.compileBlock(chunk.Block); err != nil {
 		// 编译失败时返回带上下文的错误，调用方不能使用部分 Proto。
 		return nil, err
@@ -316,6 +317,49 @@ func newChildGenerator(parent *generator, source string) *generator {
 	child := newGenerator(source)
 	child.parent = parent
 	return child
+}
+
+// prepareChildProtoCapacity 按当前 block 的直接函数声明数量预留子 Proto 容量。
+//
+// block 为 nil 或没有直接函数声明时保持 Protos nil；该方法只改变容量，不改变 Proto.p 的长度、
+// 子函数顺序、CLOSURE Bx 索引或 binary chunk 输出。
+func (generator *generator) prepareChildProtoCapacity(block *parser.Block) {
+	if generator == nil || generator.proto == nil || block == nil {
+		// 缺少生成器或 block 时没有可预留对象，保持调用方状态不变。
+		return
+	}
+	if len(generator.proto.Protos) != 0 || cap(generator.proto.Protos) != 0 {
+		// 已经存在子 Proto 或容量时不重绑定底层数组，避免丢失调用方已构造的 Proto.p。
+		return
+	}
+	childCount := directChildFunctionStatementCount(block)
+	if childCount == 0 {
+		// 没有直接函数声明时保持 nil 切片，避免给普通函数引入额外分配。
+		return
+	}
+	generator.proto.Protos = make([]*bytecode.Proto, 0, childCount)
+}
+
+// directChildFunctionStatementCount 统计当前 block 直接语句中的函数声明数量。
+//
+// 该统计只覆盖 codegen 会直接追加到当前 Proto.p 的 `function` 和 `local function` 语句；嵌套 block
+// 或函数表达式由各自编译路径自然扩容，避免为了保守预留遍历完整 AST。
+func directChildFunctionStatementCount(block *parser.Block) int {
+	if block == nil {
+		// nil block 没有语句，调用方无需预留。
+		return 0
+	}
+	count := 0
+	for _, statement := range block.Statements {
+		switch statement.(type) {
+		case *parser.FunctionStatement, *parser.LocalFunctionStatement:
+			// 直接函数声明会在当前 Proto.p 追加一个子 Proto。
+			count++
+		default:
+			// 其他语句不在当前层直接追加函数声明 Proto，保持保守容量。
+		}
+	}
+	return count
 }
 
 // compileBlock 编译一个 block。
@@ -2818,6 +2862,7 @@ func (generator *generator) compileChildProto(body *parser.FunctionBody) (int, e
 	child.proto.IsVararg = body.Vararg
 	child.proto.LineDefined = body.LineDefined
 	child.proto.LastLineDefined = body.LastLineDefined
+	child.prepareChildProtoCapacity(body.Body)
 	for _, paramName := range body.Params {
 		// 参数寄存器从 R0 开始，既是入参位置也是局部变量位置。
 		register := child.allocateRegister()

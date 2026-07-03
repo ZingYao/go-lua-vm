@@ -1478,6 +1478,41 @@ benchmark 复核：
 B/op 小幅下降，wall-clock 基本持平。剩余成本继续集中在 parser AST、semantic scope、
 `newGenerator/NewProto` 实体和最终 Proto 元数据；下一轮应重新 profile，再判断是否还有低风险结构切口。
 
+### 2026-07-04 直接子 Proto 容量预留
+
+profile 复核：基于 Proto 单 LocalVars 槽后，`BenchmarkCompileSource3000Functions` 约 `6.49 ms/op`、
+`5.56 MB/op`、`33126 allocs/op`。alloc_space 中 `bytecode.(*Proto).AddChild` 仍约 `106 MB`，
+说明顶层 3000 个直接函数声明在追加 `Proto.p` 时仍有可见扩容成本；alloc_objects 则主要集中在
+parser AST、semantic scope、`NewProto/newGenerator` 实体，已经不再显示 LocalVars 短切片。
+
+实现：`compiler/codegen` 在编译当前 block 前统计直接 `function` 与 `local function` 语句数量，
+仅当数量大于 0 且当前 Proto 尚无 `Protos` 内容/容量时，预留 `Proto.Protos` 容量。没有直接函数声明的
+Proto 仍保持 `Protos == nil`；嵌套 block 与函数表达式不递归预估，保持保守回退到普通 append。
+
+语义边界：
+
+- 只改变 `Proto.Protos` 切片容量，不改变 `len(Protos)`、child 追加顺序、`CLOSURE Bx` 索引、
+  binary chunk、反汇编或 debug 输出。
+- 已经存在子 Proto 或容量时不重绑定底层数组，避免丢失手写或后续构造的 Proto.p。
+- 统计只覆盖当前 block 的直接函数声明；不能证明的函数表达式、嵌套 block 形态继续普通扩容。
+
+新增/更新测试：
+
+| 用例 | 覆盖点 |
+| --- | --- |
+| `TestCompileChunkPreallocatesChildProtos` | 无子函数时 Protos 保持 nil；两个直接函数声明预留容量且 child 顺序不变；嵌套 block 不计入直接统计。 |
+
+benchmark 复核：
+
+| 用例 | 结果 |
+| --- | ---: |
+| `BenchmarkCompileSource3000Functions` | `6.573 / 6.602 / 6.595 / 6.572 / 6.602 ms/op`，约 `5.52 MB/op`，`33119 allocs/op` |
+
+对比 Proto 单 LocalVars 槽后的 `33126-33132 allocs/op`、约 `5.56 MB/op`，直接子 Proto 容量预留
+主要减少大块 slice 扩容分配，allocs/op 仅小幅下降。剩余主要对象仍是 parser 表达式节点、
+semantic scope、`NewProto/newGenerator` 和最终 Proto 本体；下一轮如果继续编译期，应重新 profile，
+没有新的结构性切口时记录证伪，不再堆局部容量调参。
+
 ## 优化路线
 
 ### 1. Proto 预解码
@@ -1583,7 +1618,8 @@ B/op 小幅下降，wall-clock 基本持平。剩余成本继续集中在 parser
 - [x] 若继续推进编译期，优先实现 `Proto` 短 `Code/LineInfo` 内嵌槽原型；保持 `NewProto` 默认 nil 切片语义，只允许 codegen opt-in，并用官方 CLI/golden 门禁验证 bytecode/debug 输出不变。
 - [x] 若继续推进编译期，基于 Proto 短槽后 profile 重新观察剩余 parser AST、semantic scope、Proto 常量/指令实体和 `newGenerator` 成本；无新结构性切口时记录证伪。
 - [x] 若继续推进编译期，基于 Proto 单常量槽后 profile 重新观察剩余 parser AST、semantic scope、`newGenerator/NewProto` 和 LocalVar 成本；无新低风险结构切口时记录证伪。
-- [ ] 若继续推进编译期，基于 Proto 单 LocalVars 槽后 profile 重新观察剩余 parser AST、semantic scope、`newGenerator/NewProto` 与最终 Proto 元数据成本；无新低风险结构切口时记录证伪。
+- [x] 若继续推进编译期，基于 Proto 单 LocalVars 槽后 profile 重新观察剩余 parser AST、semantic scope、`newGenerator/NewProto` 与最终 Proto 元数据成本；无新低风险结构切口时记录证伪。
+- [ ] 若继续推进编译期，基于直接子 Proto 容量预留后 profile 重新观察剩余 parser AST、semantic scope、`newGenerator/NewProto` 与最终 Proto 本体；没有新结构性切口时记录证伪。
 - [x] 每个生产优化 commit 后更新 `docs/BENCHMARK.md` 或本文件的结果摘要。
 
 ## 预期验收标准
