@@ -103,8 +103,8 @@ func TestProtoAppendHelpers(t *testing.T) {
 	proto := NewProto("@main.lua")
 
 	// 新建 Proto 必须记录 source，并保持切片为空。
-	if proto.Source != "@main.lua" || proto.Constants != nil || proto.Code != nil || len(proto.Protos) != 0 || proto.LineInfo != nil {
-		t.Fatalf("new proto mismatch: source=%q constants=%d code=%v protos=%d line=%v", proto.Source, len(proto.Constants), proto.Code, len(proto.Protos), proto.LineInfo)
+	if proto.Source != "@main.lua" || proto.Constants != nil || proto.Code != nil || len(proto.Protos) != 0 || proto.LineInfo != nil || proto.LocalVars != nil {
+		t.Fatalf("new proto mismatch: source=%q constants=%d code=%v protos=%d line=%v locals=%v", proto.Source, len(proto.Constants), proto.Code, len(proto.Protos), proto.LineInfo, proto.LocalVars)
 	}
 
 	// 常量追加应返回零基常量表索引。
@@ -220,5 +220,42 @@ func TestProtoPrepareInlineConstants(t *testing.T) {
 	if proto.Constants[0] != first {
 		// StripDebug 返回值不得与原 Proto 共享 Constants 底层数组。
 		t.Fatalf("stripped constants share storage with source")
+	}
+}
+
+// TestProtoPrepareInlineLocalVars 验证短函数局部变量调试表 opt-in 内嵌槽。
+//
+// NewProto 默认仍保持 nil LocalVars；只有 codegen 显式准备容量时，单局部变量函数才复用 Proto 内嵌槽。
+func TestProtoPrepareInlineLocalVars(t *testing.T) {
+	proto := NewProto("@inline-local.lua")
+	if proto.LocalVars != nil {
+		// 默认 nil 局部变量表是 chunk loader 和手写 Proto 的兼容边界。
+		t.Fatalf("new proto should keep nil local vars: locals=%v", proto.LocalVars)
+	}
+
+	proto.PrepareInlineLocalVars(1)
+	if len(proto.LocalVars) != 0 || cap(proto.LocalVars) != 1 {
+		// opt-in 后只预留容量，不能产生可见局部变量。
+		t.Fatalf("unexpected prepared local vars: len/cap=%d/%d", len(proto.LocalVars), cap(proto.LocalVars))
+	}
+
+	first := LocalVar{Name: "arg", Register: 0, StartPC: 0, EndPC: 2}
+	second := LocalVar{Name: "shadow", Register: 1, StartPC: 1, EndPC: 2}
+	proto.LocalVars = append(proto.LocalVars, first)
+	proto.LocalVars = append(proto.LocalVars, second)
+	if len(proto.LocalVars) != 2 || proto.LocalVars[0] != first || proto.LocalVars[1] != second {
+		// 第二项局部变量会触发普通 slice 扩容，但必须保留短槽中的首个 LocalVar。
+		t.Fatalf("local var order changed: %+v", proto.LocalVars)
+	}
+
+	stripped := StripDebug(proto)
+	if len(stripped.LocalVars) != 2 || stripped.LocalVars[0].Name != "" || stripped.LocalVars[1].Name != "" {
+		// StripDebug 必须保留局部变量生命周期并剥离名称。
+		t.Fatalf("unexpected stripped locals: %+v", stripped.LocalVars)
+	}
+	stripped.LocalVars[0].Register = 9
+	if proto.LocalVars[0].Register != first.Register {
+		// StripDebug 返回值不得与原 Proto 共享 LocalVars 底层数组。
+		t.Fatalf("stripped local vars share storage with source")
 	}
 }

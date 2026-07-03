@@ -791,7 +791,7 @@ func TestGeneratorIntegerConstantInlineUsesOverflowOnlyAfterSecondValue(t *testi
 	}
 }
 
-// TestNewGeneratorPreallocatesCodeAndLineInfo 验证 codegen Proto 只预留指令和行号容量。
+// TestNewGeneratorPreallocatesCodeAndLineInfo 验证 codegen Proto 只预留短表容量。
 func TestNewGeneratorPreallocatesCodeAndLineInfo(t *testing.T) {
 	generator := newGenerator("prealloc-code")
 	if len(generator.proto.Code) != 0 || len(generator.proto.LineInfo) != 0 {
@@ -805,6 +805,10 @@ func TestNewGeneratorPreallocatesCodeAndLineInfo(t *testing.T) {
 	if len(generator.proto.Constants) != 0 || cap(generator.proto.Constants) < initialConstantCapacity {
 		// codegen 的单常量热路径应具备 opt-in 容量，但不能提前写入可见常量。
 		t.Fatalf("unexpected constants capacity: len=%d cap=%d", len(generator.proto.Constants), cap(generator.proto.Constants))
+	}
+	if len(generator.proto.LocalVars) != 0 || cap(generator.proto.LocalVars) < initialLocalVarCapacity {
+		// codegen 的单局部变量热路径应具备 opt-in 容量，但不能提前写入可见 LocalVar。
+		t.Fatalf("unexpected local vars capacity: len=%d cap=%d", len(generator.proto.LocalVars), cap(generator.proto.LocalVars))
 	}
 
 	generator.currentLine = 12
@@ -840,6 +844,15 @@ func TestNewGeneratorPreallocatesCodeAndLineInfo(t *testing.T) {
 	if generator.proto.Constants[0] != firstConstant || generator.proto.Constants[1] != secondConstant {
 		// 常量表扩容后顺序必须保持。
 		t.Fatalf("constant order changed after growth: %+v", generator.proto.Constants)
+	}
+
+	firstLocal := bytecode.LocalVar{Name: "a", Register: 0, StartPC: 0, EndPC: 1}
+	secondLocal := bytecode.LocalVar{Name: "b", Register: 1, StartPC: 1, EndPC: 2}
+	generator.proto.LocalVars = append(generator.proto.LocalVars, firstLocal)
+	generator.proto.LocalVars = append(generator.proto.LocalVars, secondLocal)
+	if generator.proto.LocalVars[0] != firstLocal || generator.proto.LocalVars[1] != secondLocal {
+		// LocalVars 扩容后顺序必须保持，debug local 生命周期才能稳定输出。
+		t.Fatalf("local var order changed after growth: %+v", generator.proto.LocalVars)
 	}
 }
 

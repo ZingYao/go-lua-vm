@@ -147,6 +147,8 @@ type Proto struct {
 	inlineLineInfo [2]int
 	// inlineConstants 保存 codegen 最常见的单常量槽，仅在显式 opt-in 后作为 Constants 的底层数组。
 	inlineConstants [1]Constant
+	// inlineLocalVars 保存 codegen 最常见的单局部变量槽，仅在显式 opt-in 后作为 LocalVars 的底层数组。
+	inlineLocalVars [1]LocalVar
 }
 
 // NewProto 创建一个空 Lua 函数原型。
@@ -206,6 +208,30 @@ func (proto *Proto) PrepareInlineConstants(capacity int) {
 
 	// 超过短槽容量时按调用方请求预留普通切片，保持多常量函数的追加性能。
 	proto.Constants = make([]Constant, 0, capacity)
+}
+
+// PrepareInlineLocalVars 为 codegen 单局部变量函数准备调试局部变量表容量。
+//
+// capacity 表示调用方预期的最小局部变量数；该方法必须在写入 LocalVars 前调用。容量不超过内嵌短槽时
+// 复用 Proto 自身存储，超过短槽时退回普通切片分配。已有内容时保持原切片不变，避免误调用丢失
+// binary chunk loader 或手写 Proto 已经追加的局部变量调试表。
+func (proto *Proto) PrepareInlineLocalVars(capacity int) {
+	if proto == nil || capacity <= 0 {
+		// nil 或无效容量没有可准备对象，保持调用方状态不变。
+		return
+	}
+	if len(proto.LocalVars) != 0 {
+		// 已有局部变量调试信息时不能重绑定底层数组，否则会丢失已经构造的 LocalVars。
+		return
+	}
+	if capacity <= len(proto.inlineLocalVars) {
+		// 单局部变量函数使用 Proto 内嵌槽，减少每个子函数一段小切片底层数组分配。
+		proto.LocalVars = proto.inlineLocalVars[:0]
+		return
+	}
+
+	// 超过短槽容量时按调用方请求预留普通切片，保持多局部变量函数的追加性能。
+	proto.LocalVars = make([]LocalVar, 0, capacity)
 }
 
 // StripDebug 深拷贝 Proto 并剥离 Lua 5.3 调试信息。

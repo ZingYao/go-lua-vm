@@ -20,6 +20,8 @@ const (
 	initialCodeCapacity = 2
 	// initialConstantCapacity 是 codegen Proto 常量表的最小预留容量。
 	initialConstantCapacity = 1
+	// initialLocalVarCapacity 是 codegen Proto 局部变量调试表的最小预留容量。
+	initialLocalVarCapacity = 1
 )
 
 // CompileChunk 将 parser.Chunk 编译为 Lua 5.3 Proto。
@@ -300,6 +302,7 @@ func newGenerator(source string) *generator {
 	proto := bytecode.NewProto(source)
 	proto.PrepareInlineCodeLineInfo(initialCodeCapacity)
 	proto.PrepareInlineConstants(initialConstantCapacity)
+	proto.PrepareInlineLocalVars(initialLocalVarCapacity)
 	return &generator{
 		proto: proto,
 	}
