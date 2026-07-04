@@ -677,6 +677,45 @@ CGO_ENABLED=0 go test ./internal/luac -run '^$' \
 后续若继续压缩编译期，重点应转向函数体 AST 紧凑表达式或 Source/token 读取结构，不再恢复大段
 child generator arena。
 
+2026-07-04 在 `41c03e7` 后重新 profile：
+
+```bash
+CGO_ENABLED=0 go test ./internal/luac -run '^$' \
+  -bench '^BenchmarkCompileSource3000Functions$' \
+  -benchmem -benchtime=5s -count=1 \
+  -cpuprofile /tmp/go-lua-vm-next-profiles/compile_3000_after_41c03e7_cpu.pprof \
+  -memprofile /tmp/go-lua-vm-next-profiles/compile_3000_after_41c03e7_mem.pprof
+```
+
+- `BenchmarkCompileSource3000Functions`：约 `4.327 ms/op`、`3.78 MB/op`、`87 allocs/op`。
+- CPU profile 中 `Lexer.NextToken` 仍约 `18%` cum，`Source.Peek` 与 `Source.PeekOffset` 仍可见；
+  alloc_space 已从上一轮大段 child generator arena 转向 `FunctionStatement`、直接函数容量预留和表达式 AST。
+
+实现 `Source.Peek` / `PeekOffset` ASCII 快路径：ASCII 源码直接按单字节返回 rune，非 ASCII 与非法
+UTF-8 仍交给 `utf8.DecodeRuneInString`，因此不改变 UTF-8 字节 Offset、rune 列号、BOM、CR/LF 归一、
+非法字符 token 或 Mark/Reset 语义。新增测试固定 ASCII 预读、跨 ASCII 到 UTF-8 的 `PeekOffset` 和
+预读不推进位置。
+
+目标 Go micro 结果：
+
+```bash
+CGO_ENABLED=0 go test ./internal/luac -run '^$' \
+  -bench '^BenchmarkCompileSource3000Functions$' \
+  -benchmem -benchtime=3s -count=5
+```
+
+- `BenchmarkCompileSource3000Functions`：约
+  `4.18 / 4.16 / 4.23 / 4.12 / 4.12 ms/op`。
+- B/op 约 `3.78 MB/op`，`89 allocs/op`。
+
+结论：该切口只压缩 Source 预读的 ASCII 热路径，收益小但与 profile 方向一致，B/op 基本不变；
+后续不要继续围绕 `Peek` 做局部分支堆叠，除非新的 profile 指向 `Source.Next` 或字符串/数字扫描中的
+更具体读取成本。
+
+重建 `bin/glua` / `bin/gluac` 后，显式使用官方 Lua/Luac 5.3.6 的完整 benchmark 抽样中，
+`compile_3000_functions` 为官方 `0.005389s`、本项目 `0.008717s`、倍率 `1.62x`；该结果与上一轮
+`41c03e7` 后 `1.57x` 抽样处于同一量级，仍低于 `dd2c206` 后约 `1.77x` 的端到端口径。
+
 ### 3. `arith_mix_loop`：批量 mix arithmetic superinstruction
 
 `arith_mix_loop` 当前约 `1.9x`，运行期仍高于官方。上一阶段已有完整
@@ -756,6 +795,7 @@ child generator arena。
 - [x] 证伪纯十进制 int64 byte 快路径，未保留生产改动。
 - [x] 证伪 `skipWhitespace` byte 直扫，未保留生产改动。
 - [x] 证伪已知 keyword 直接 advance，未保留生产改动。
+- [x] 优化 `Source.Peek` / `PeekOffset` ASCII 预读，复核 `compile_3000_functions` Go micro 收益。
 - [ ] 每个生产优化 commit 后更新本文或 `docs/BENCHMARK.md`。
 
 ## 正确性门禁

@@ -72,6 +72,11 @@ func (source *Source) Peek() (rune, bool) {
 		return eofRune, false
 	}
 
+	if source.input[source.offset] < utf8.RuneSelf {
+		// ASCII 是 lexer 热路径，直接按单字节返回；非 ASCII 与非法 UTF-8 仍交给标准解码。
+		return rune(source.input[source.offset]), true
+	}
+
 	// 使用 utf8.DecodeRuneInString 保留 Go 标准 UTF-8 解码语义。
 	nextRune, _ := utf8.DecodeRuneInString(source.input[source.offset:])
 	return nextRune, true
@@ -92,12 +97,21 @@ func (source *Source) PeekOffset(runeOffset int) (rune, bool) {
 		if byteOffset >= len(source.input) {
 			return eofRune, false
 		}
-		_, width := utf8.DecodeRuneInString(source.input[byteOffset:])
+		width := 1
+		if source.input[byteOffset] >= utf8.RuneSelf {
+			// 非 ASCII 与非法 UTF-8 继续使用标准解码宽度，保持原有 runeOffset 语义。
+			_, width = utf8.DecodeRuneInString(source.input[byteOffset:])
+		}
 		byteOffset += width
 	}
 	if byteOffset >= len(source.input) {
 		// 目标位置正好落在 EOF，也视为不可读取。
 		return eofRune, false
+	}
+
+	if source.input[byteOffset] < utf8.RuneSelf {
+		// 目标 rune 是 ASCII 时避免重复 UTF-8 解码。
+		return rune(source.input[byteOffset]), true
 	}
 
 	// 解码目标位置 rune，调用方不获得新的位置状态。

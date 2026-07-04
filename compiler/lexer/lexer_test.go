@@ -51,6 +51,31 @@ func TestSourceReadRuneTracksUTF8ByteOffsets(t *testing.T) {
 	}
 }
 
+// TestSourcePeekKeepsASCIIAndUTF8Positions 验证预读 ASCII 快路径不改变 UTF-8 位置语义。
+func TestSourcePeekKeepsASCIIAndUTF8Positions(t *testing.T) {
+	source := NewSource("ab界")
+
+	firstRune, ok := source.Peek()
+	if !ok || firstRune != 'a' {
+		// 初始 ASCII 预读必须返回首字符且不能到达 EOF。
+		t.Fatalf("unexpected first peek rune=%q ok=%v", firstRune, ok)
+	}
+	secondRune, ok := source.PeekOffset(1)
+	if !ok || secondRune != 'b' {
+		// runeOffset=1 仍在 ASCII 快路径内，必须按单字符偏移。
+		t.Fatalf("unexpected second peek rune=%q ok=%v", secondRune, ok)
+	}
+	thirdRune, ok := source.PeekOffset(2)
+	if !ok || thirdRune != '界' {
+		// ASCII 后的 UTF-8 rune 必须按 rune 偏移返回，而不是按字节误切。
+		t.Fatalf("unexpected third peek rune=%q ok=%v", thirdRune, ok)
+	}
+	if position := source.Position(); position.Line != 1 || position.Column != 1 || position.Offset != 0 {
+		// 所有 Peek 路径都不能推进 Source 位置。
+		t.Fatalf("peek should not advance position, got %+v", position)
+	}
+}
+
 // TestSourceSkipsInitialUTF8BOM 验证源码开头 UTF-8 BOM 会被 Lua 5.3 兼容路径忽略。
 func TestSourceSkipsInitialUTF8BOM(t *testing.T) {
 	source := NewSource("\xef\xbb\xbfreturn")
