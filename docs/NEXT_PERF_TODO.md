@@ -535,6 +535,29 @@ CGO_ENABLED=0 go test ./internal/luac -run '^$' \
 编译期，必须找到能同时降低 CPU 或显著降低 B/op 的结构性切口，例如 lexer token 解码成本、函数体 AST
 专用紧凑表示，或 codegen arena 空间策略。
 
+2026-07-04 实现 lexer 操作符扫描的 ASCII 首字节最长匹配：将原先每个操作符 token 遍历完整操作符
+列表并多次 `PeekOffset` 的路径，改为按首字节 `switch` 直接识别 `...`、`//`、`<<`、`<=`、`::`
+等 Lua 5.3 操作符。所有消费仍通过 `Source.Next` 维护行列、Offset、CR/LF 语义；非 ASCII 和非法字符仍回到
+非法 token 路径。该切口不改变 token 文本、token 顺序或错误语义，并新增测试覆盖全部操作符最长匹配。
+
+目标 Go micro 结果：
+
+```bash
+CGO_ENABLED=0 go test ./internal/luac -run '^$' \
+  -bench '^BenchmarkCompileSource3000Functions$' \
+  -benchmem -benchtime=3s -count=5
+```
+
+- 首轮五轮：约 `4.64 / 4.64 / 4.61 / 4.64 / 4.63 ms/op`，约 `5.03 MB/op`，`90 allocs/op`。
+- 清理旧列表匹配实现后三轮：约 `4.71 / 4.71 / 4.69 ms/op`，约 `5.03 MB/op`，`90 allocs/op`。
+
+结论：相比 `94852d7` 后约 `5.22-5.25 ms/op`，该 lexer 切口稳定降低 `compile_3000_functions`
+wall-clock，且 B/op 基本不变；这是当前编译期剩余差距中比容量预留更明确的结构性收益。
+
+重建 `bin/glua` / `bin/gluac` 后，显式使用官方 Lua/Luac 5.3.6 的完整 benchmark 单轮复核中，
+`compile_3000_functions` 为官方 `0.004812s`、本项目 `0.008535s`、倍率 `1.77x`；相比上一轮单轮
+约 `1.94x`，CLI 端到端也有明确收益。
+
 ### 3. `arith_mix_loop`：批量 mix arithmetic superinstruction
 
 `arith_mix_loop` 当前约 `1.9x`，运行期仍高于官方。上一阶段已有完整

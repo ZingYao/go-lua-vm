@@ -550,6 +550,29 @@ func TestLexerNextTokenRecognizesKeywordOperatorEOFAndIllegal(t *testing.T) {
 	}
 }
 
+// TestLexerOperatorLongestMatch 验证 Lua 5.3 操作符按最长匹配输出。
+//
+// 该用例覆盖多字符操作符与同前缀单字符操作符，防止快速扫描路径把 `...`、`//`、`::` 等拆错。
+func TestLexerOperatorLongestMatch(t *testing.T) {
+	lexer := New("... .. . // / << <= < >> >= > == = ~= ~ :: : + - * % ^ # & | ( ) { } [ ] ; ,")
+
+	expectedOperators := []string{
+		"...", "..", ".", "//", "/", "<<", "<=", "<", ">>", ">=", ">", "==", "=", "~=", "~", "::", ":",
+		"+", "-", "*", "%", "^", "#", "&", "|", "(", ")", "{", "}", "[", "]", ";", ",",
+	}
+	for operatorIndex, expectedOperator := range expectedOperators {
+		// 每个 token 都必须保持 operator 类型和最长匹配文本。
+		token := lexer.NextToken()
+		if token.Kind != TokenOperator || token.Text != expectedOperator {
+			t.Fatalf("operator %d got kind=%s text=%q want %q", operatorIndex, token.Kind, token.Text, expectedOperator)
+		}
+	}
+	if token := lexer.NextToken(); token.Kind != TokenEOF {
+		// 操作符序列消费完后必须到达 EOF。
+		t.Fatalf("expected EOF after operators, got %#v", token)
+	}
+}
+
 // TestLexerTokenGolden 验证一段 Lua 代码的 token 序列稳定输出。
 //
 // golden 覆盖关键字、标识符、十六进制浮点、比较、return、字符串和连接操作符。

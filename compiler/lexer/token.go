@@ -188,40 +188,108 @@ func (lexer *Lexer) scanIdentifierOrKeywordToken() (Token, bool) {
 //
 // startPosition 是操作符起始位置；返回 ok=false 表示当前位置没有合法操作符。
 func (lexer *Lexer) scanOperatorToken(startPosition Position) (Token, bool) {
-	for _, operatorText := range luaOperatorsByLength {
-		// 按最长匹配检查操作符，避免 `...` 被切成 `..` 和 `.`。
-		if lexer.matchOperator(operatorText) {
-			return Token{Kind: TokenOperator, Text: operatorText, Position: startPosition}, true
-		}
+	operatorText, ok := lexer.scanOperatorText()
+	if !ok {
+		// 没有匹配到任何 Lua 5.3 操作符。
+		return Token{Position: startPosition}, false
 	}
 
-	// 没有匹配到任何 Lua 5.3 操作符。
-	return Token{Position: startPosition}, false
+	// 操作符按最长匹配结果返回，Position 使用调用方已保存的起始位置。
+	return Token{Kind: TokenOperator, Text: operatorText, Position: startPosition}, true
 }
 
-// matchOperator 判断当前位置是否匹配 operatorText 并在匹配时消费。
+// scanOperatorText 按首字节扫描 Lua 5.3 操作符文本。
 //
-// operatorText 必须是非空 ASCII 操作符字符串。
-func (lexer *Lexer) matchOperator(operatorText string) bool {
-	for runeIndex, operatorRune := range operatorText {
-		// 逐 rune 比较操作符文本，当前所有 Lua 操作符都是 ASCII。
-		nextRune, ok := lexer.source.PeekOffset(runeIndex)
-		if !ok {
-			// EOF 前操作符不完整，不能匹配。
-			return false
-		}
-		if nextRune != operatorRune {
-			// 任一位置不一致都不是该操作符。
-			return false
-		}
-	}
-	for range operatorText {
-		// 匹配成功后消费同等数量的 ASCII rune。
-		lexer.source.Next()
+// 所有 Lua 5.3 操作符都是 ASCII 且不跨行；这里直接按源码字节做最长匹配，避免每个操作符 token 都遍历
+// 完整操作符列表。消费仍通过 Source.Next 维护行列和 Offset 语义。
+func (lexer *Lexer) scanOperatorText() (string, bool) {
+	offset := lexer.source.offset
+	if offset >= len(lexer.source.input) {
+		// EOF 不能形成操作符。
+		return "", false
 	}
 
-	// 操作符已完整消费。
-	return true
+	switch lexer.source.input[offset] {
+	case '.':
+		if lexer.hasOperatorPrefix(offset, "...") {
+			// vararg 操作符必须优先于连接和点号。
+			return lexer.consumeOperator("..."), true
+		}
+		if lexer.hasOperatorPrefix(offset, "..") {
+			// 连接操作符优先于单点。
+			return lexer.consumeOperator(".."), true
+		}
+		return lexer.consumeOperator("."), true
+	case '/':
+		if lexer.hasOperatorPrefix(offset, "//") {
+			// 整除操作符优先于除法。
+			return lexer.consumeOperator("//"), true
+		}
+		return lexer.consumeOperator("/"), true
+	case '<':
+		if lexer.hasOperatorPrefix(offset, "<<") {
+			// 左移操作符优先于小于号。
+			return lexer.consumeOperator("<<"), true
+		}
+		if lexer.hasOperatorPrefix(offset, "<=") {
+			// 小于等于优先于小于号。
+			return lexer.consumeOperator("<="), true
+		}
+		return lexer.consumeOperator("<"), true
+	case '>':
+		if lexer.hasOperatorPrefix(offset, ">>") {
+			// 右移操作符优先于大于号。
+			return lexer.consumeOperator(">>"), true
+		}
+		if lexer.hasOperatorPrefix(offset, ">=") {
+			// 大于等于优先于大于号。
+			return lexer.consumeOperator(">="), true
+		}
+		return lexer.consumeOperator(">"), true
+	case '=':
+		if lexer.hasOperatorPrefix(offset, "==") {
+			// 相等比较优先于赋值等号。
+			return lexer.consumeOperator("=="), true
+		}
+		return lexer.consumeOperator("="), true
+	case '~':
+		if lexer.hasOperatorPrefix(offset, "~=") {
+			// 不等比较优先于按位非。
+			return lexer.consumeOperator("~="), true
+		}
+		return lexer.consumeOperator("~"), true
+	case ':':
+		if lexer.hasOperatorPrefix(offset, "::") {
+			// label 分隔符优先于单冒号。
+			return lexer.consumeOperator("::"), true
+		}
+		return lexer.consumeOperator(":"), true
+	case '+', '-', '*', '%', '^', '#', '&', '|', '(', ')', '{', '}', '[', ']', ';', ',':
+		// 这些都是单字节操作符或分隔符。
+		return lexer.consumeOperator(lexer.source.input[offset : offset+1]), true
+	default:
+		// 非 ASCII 操作符起始字符交给非法 token 路径消费。
+		return "", false
+	}
+}
+
+// hasOperatorPrefix 判断当前 offset 是否具有指定 ASCII 操作符前缀。
+//
+// 调用方保证 operatorText 是 Lua 5.3 ASCII 操作符；本 helper 不修改 Source 状态。
+func (lexer *Lexer) hasOperatorPrefix(offset int, operatorText string) bool {
+	// 使用 HasPrefix 直接比较源码字节，避免多次 UTF-8 解码。
+	return strings.HasPrefix(lexer.source.input[offset:], operatorText)
+}
+
+// consumeOperator 消费已经匹配成功的 ASCII 操作符文本。
+//
+// 操作符不包含换行，但仍通过 Source.Next 推进，确保列号、Offset 和后续 Mark/Reset 语义一致。
+func (lexer *Lexer) consumeOperator(operatorText string) string {
+	for consumed := 0; consumed < len(operatorText); consumed++ {
+		// 已经按源码字节确认操作符存在，Next 必须成功；失败时也不额外构造错误路径。
+		lexer.source.Next()
+	}
+	return operatorText
 }
 
 // isLuaKeyword 判断文本是否是 Lua 5.3 保留关键字。
@@ -236,13 +304,4 @@ func isLuaKeyword(text string) bool {
 		// 其他标识符文本不是关键字。
 		return false
 	}
-}
-
-// luaOperatorsByLength 按最长优先保存 Lua 5.3 操作符和分隔符。
-//
-// 三字符、二字符、一字符分组可避免前缀操作符提前匹配。
-var luaOperatorsByLength = []string{
-	"...",
-	"//", "<<", ">>", "..", "<=", ">=", "==", "~=", "::",
-	"+", "-", "*", "/", "%", "^", "#", "&", "~", "|", "<", ">", "=", "(", ")", "{", "}", "[", "]", ";", ":", ",", ".",
 }
