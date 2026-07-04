@@ -54,24 +54,29 @@ func (lexer *Lexer) NextToken() Token {
 	// 每次取 token 前先跳过 Lua 可忽略内容。
 	lexer.SkipIgnored()
 	startPosition := lexer.source.Position()
-	if _, ok := lexer.source.Peek(); !ok {
+	if lexer.source.offset >= len(lexer.source.input) {
 		// EOF 是合法 token，供 parser 判断输入结束。
 		return Token{Kind: TokenEOF, Text: "<eof>", Position: startPosition}
 	}
-	if lexer.canStartStringToken() {
+	firstByte := lexer.source.input[lexer.source.offset]
+	if lexer.canStartStringToken(firstByte) {
 		// 只有长括号或短字符串引号才可能进入字符串扫描，普通 identifier/number/operator 直接跳过试探。
 		if token, ok := lexer.scanStringToken(startPosition); ok {
 			// 字符串扫描成功或出错都已经形成完整 token。
 			return token
 		}
 	}
-	if token, ok := lexer.scanNumberToken(); ok {
+	if lexer.canStartNumberToken(firstByte) {
 		// 数字扫描成功或出错都已经形成完整 token。
-		return token
+		if token, ok := lexer.scanNumberToken(); ok {
+			return token
+		}
 	}
-	if token, ok := lexer.scanIdentifierOrKeywordToken(); ok {
+	if isIdentifierStartByte(firstByte) {
 		// 标识符和关键字共用标识符扫描路径。
-		return token
+		if token, ok := lexer.scanIdentifierOrKeywordToken(); ok {
+			return token
+		}
 	}
 	if token, ok := lexer.scanOperatorToken(startPosition); ok {
 		// 操作符按最长匹配优先返回。
@@ -92,13 +97,8 @@ func (lexer *Lexer) NextToken() Token {
 //
 // 长字符串只能以 `[` 开始，短字符串只能以单引号或双引号开始；该 guard 只跳过不可能命中的试探，
 // 真正的长括号层级、短字符串转义和错误语义仍由 scanStringToken 内部完成。
-func (lexer *Lexer) canStartStringToken() bool {
-	offset := lexer.source.offset
-	if offset >= len(lexer.source.input) {
-		// EOF 不能开启字符串 token。
-		return false
-	}
-	switch lexer.source.input[offset] {
+func (lexer *Lexer) canStartStringToken(firstByte byte) bool {
+	switch firstByte {
 	case '[', '\'', '"':
 		// 三类 ASCII 起始字符覆盖 Lua 5.3 的长字符串和短字符串。
 		return true
@@ -106,6 +106,34 @@ func (lexer *Lexer) canStartStringToken() bool {
 		// 其他字符不可能被字符串扫描消费。
 		return false
 	}
+}
+
+// canStartNumberToken 判断当前位置是否可能开启 Lua 数字 token。
+//
+// Lua 5.3 数字可以从 ASCII 数字开始，也可以是 `.` 后接数字的十进制浮点；单独 `.`、`..` 和 `...`
+// 必须继续交给 operator 扫描，不能被数字路径吞掉。
+func (lexer *Lexer) canStartNumberToken(firstByte byte) bool {
+	if firstByte >= '0' && firstByte <= '9' {
+		// 普通十进制和 0x/0X 十六进制数字都以 ASCII 数字开头。
+		return true
+	}
+	if firstByte != '.' {
+		// 其他字符不能开启数字 token。
+		return false
+	}
+	nextOffset := lexer.source.offset + 1
+	if nextOffset >= len(lexer.source.input) {
+		// 单独点号必须保留给 operator。
+		return false
+	}
+	nextByte := lexer.source.input[nextOffset]
+	if nextByte >= '0' && nextByte <= '9' {
+		// `.5` 这类前导点十进制浮点必须保留数字语义。
+		return true
+	}
+
+	// 点号后不是数字时交给最长 operator 匹配。
+	return false
 }
 
 // scanStringToken 尝试扫描字符串 token。

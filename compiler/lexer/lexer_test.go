@@ -642,6 +642,31 @@ func TestLexerNextTokenGuardsKeepStringsCommentsAndBrackets(t *testing.T) {
 	}
 }
 
+// TestLexerNextTokenByteDispatchKeepsNumbersIdentifiersAndDots 验证首字节分派保留数字、标识符和点号操作符边界。
+func TestLexerNextTokenByteDispatchKeepsNumbersIdentifiersAndDots(t *testing.T) {
+	lexer := New(".5 .. . name 12")
+
+	expectedTokens := []struct {
+		kind TokenKind
+		text string
+	}{
+		{kind: TokenNumber, text: ".5"},
+		{kind: TokenOperator, text: ".."},
+		{kind: TokenOperator, text: "."},
+		{kind: TokenIdentifier, text: "name"},
+		{kind: TokenNumber, text: "12"},
+		{kind: TokenEOF, text: "<eof>"},
+	}
+	for tokenIndex, expectedToken := range expectedTokens {
+		// 前导点数字必须走 number，普通点号仍必须走 operator，identifier 不应受数字路径影响。
+		token := lexer.NextToken()
+		if token.Kind != expectedToken.kind || token.Text != expectedToken.text {
+			// token 种类或文本不一致时立即失败，避免后续 token 偏移掩盖首个边界错误。
+			t.Fatalf("token %d got kind=%s text=%q want kind=%s text=%q", tokenIndex, token.Kind, token.Text, expectedToken.kind, expectedToken.text)
+		}
+	}
+}
+
 // TestLexerOperatorLongestMatch 验证 Lua 5.3 操作符按最长匹配输出。
 //
 // 该用例覆盖多字符操作符与同前缀单字符操作符，防止快速扫描路径把 `...`、`//`、`::` 等拆错。

@@ -765,6 +765,48 @@ CGO_ENABLED=0 go test ./internal/luac -run '^$' \
 `compile_3000_functions` 为官方 `0.005229s`、本项目 `0.007505s`、倍率 `1.44x`；相比上一轮
 `Source.Peek` 优化后约 `1.57-1.62x` 的端到端口径继续下降。
 
+2026-07-04 在 `4bafcbc` 后重新 profile：
+
+```bash
+CGO_ENABLED=0 go test ./internal/luac -run '^$' \
+  -bench '^BenchmarkCompileSource3000Functions$' \
+  -benchmem -benchtime=5s -count=1 \
+  -cpuprofile /tmp/go-lua-vm-next-profiles/compile_3000_after_4bafcbc_cpu.pprof \
+  -memprofile /tmp/go-lua-vm-next-profiles/compile_3000_after_4bafcbc_mem.pprof
+```
+
+- `BenchmarkCompileSource3000Functions`：约 `3.35 ms/op`、`3.78 MB/op`、`86 allocs/op`。
+- CPU profile 中 `NextToken` 仍约 `19.53%` cum；`scanNumberToken` / `ScanNumber` 仍可见，说明
+  普通 identifier/keyword 仍会先进入数字扫描试探。
+- alloc_space 仍主要来自 AST 和 codegen 容量，未出现新的分配型小切口。
+
+已实现 `NextToken` 首字节分派：跳过空白和注释后直接按当前 byte 判断字符串、数字、标识符或操作符。
+数字边界保留 Lua 5.3 的 `.5` / `.2e2` 前导点浮点，单独 `.`、`..` 和 `...` 仍交给 operator
+最长匹配；identifier 仍调用现有 ASCII 扫描与 keyword 判定；字符串、注释和非法非 ASCII token
+仍沿用原 scanner。新增测试固定 `.5 .. . name 12` 的 token 流，避免把点号操作符误吞进数字路径。
+
+目标 Go micro 结果：
+
+```bash
+CGO_ENABLED=0 go test ./internal/luac -run '^$' \
+  -bench '^BenchmarkCompileSource3000Functions$' \
+  -benchmem -benchtime=3s -count=5
+```
+
+- `BenchmarkCompileSource3000Functions`：约
+  `2.79 / 2.77 / 2.78 / 2.79 / 2.79 ms/op`。
+- B/op 约 `3.78 MB/op`，`87 allocs/op`。
+
+结论：相比 token 起始 guard 后约 `3.28-3.35 ms/op` 的口径，首字节分派继续稳定降低
+`compile_3000_functions` wall-clock，且 B/op/allocs 不增加。后续不要再围绕 token 大类分派做重复微调；
+若继续推进编译期，必须重新 profile，确认剩余是否进入 parser 表达式、语义分析或 codegen 小结构。
+
+重建 `bin/glua` / `bin/gluac` 后，显式使用官方 Lua/Luac 5.3.6 的完整 benchmark 抽样中，
+`compile_3000_functions` 为官方 `0.005228s`、本项目 `0.006875s`、倍率 `1.31x`；相比 token
+起始 guard 后约 `1.44x` 的端到端口径继续下降。该轮排序中剩余最高项转为 `table_rw` 约 `1.27x`，
+其次 `arith_add_loop` 约 `1.21x`、`arith_mix_loop` 约 `1.19x`，`function_call`、`string_concat`
+和 `recursion` 已接近 `1.0x`。
+
 ### 3. `arith_mix_loop`：批量 mix arithmetic superinstruction
 
 `arith_mix_loop` 当前约 `1.9x`，运行期仍高于官方。上一阶段已有完整
@@ -847,6 +889,7 @@ CGO_ENABLED=0 go test ./internal/luac -run '^$' \
 - [x] 优化 `Source.Peek` / `PeekOffset` ASCII 预读，复核 `compile_3000_functions` Go micro 收益。
 - [x] 证伪 `Source.Next` ASCII 直推，未保留生产改动。
 - [x] 优化 lexer 字符串与注释起始 guard，复核 `compile_3000_functions` Go micro 收益。
+- [x] 优化 lexer token 首字节分派，复核 `compile_3000_functions` Go micro 收益。
 - [ ] 每个生产优化 commit 后更新本文或 `docs/BENCHMARK.md`。
 
 ## 正确性门禁
