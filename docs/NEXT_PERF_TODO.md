@@ -807,6 +807,42 @@ CGO_ENABLED=0 go test ./internal/luac -run '^$' \
 其次 `arith_add_loop` 约 `1.21x`、`arith_mix_loop` 约 `1.19x`，`function_call`、`string_concat`
 和 `recursion` 已接近 `1.0x`。
 
+2026-07-04 在 `b002cc8` 后重新 profile：
+
+```bash
+CGO_ENABLED=0 go test ./internal/luac -run '^$' \
+  -bench '^BenchmarkCompileSource3000Functions$' \
+  -benchmem -benchtime=5s -count=1 \
+  -cpuprofile /tmp/go-lua-vm-next-profiles/compile_3000_after_b002cc8_cpu.pprof \
+  -memprofile /tmp/go-lua-vm-next-profiles/compile_3000_after_b002cc8_mem.pprof
+```
+
+- `BenchmarkCompileSource3000Functions`：约 `2.69 ms/op`、`3.78 MB/op`、`85 allocs/op`。
+- CPU profile 中 `Lexer.NextToken` 已降到约 `9.70%` cum；剩余可见成本分散在
+  `Parser.advance`、`parseBlockUntilInto`、`parseSubExpression`、`parseFunctionBodyInto` 和 codegen。
+- alloc profile 已没有新的低风险单对象删除空间，主要是 parser/codegen arena 大块所有权。
+
+已实现 `parseStatement` 分层 dispatch：先按 token kind 区分 illegal/operator/keyword，再在 keyword
+内用 `switch currentToken.Text` 分派 `do/local/break/goto/for/function/if/while/repeat`。扩展语法仍在
+普通 identifier/call 语句之前尝试，`(` 开头 call statement、label、空语句和非法 token 错误语义保持不变。
+
+目标 Go micro 结果：
+
+```bash
+CGO_ENABLED=0 go test ./internal/luac -run '^$' \
+  -bench '^BenchmarkCompileSource3000Functions$' \
+  -benchmem -benchtime=3s -count=5
+```
+
+- `BenchmarkCompileSource3000Functions`：约
+  `2.67 / 2.67 / 2.67 / 2.68 / 2.94 ms/op`；其中最后一轮为慢轮。
+- 单独 5s 复核为约 `2.63 ms/op`、`3.78 MB/op`、`85 allocs/op`。
+
+结论：相比首字节分派后约 `2.77-2.79 ms/op` 的 Go micro 口径，parser 语句分派压缩能稳定降低
+编译入口 wall-clock；但两次完整 benchmark 抽样的 `compile_3000_functions` 仍约 `1.33x`，与上一轮
+`1.31x` 同属端到端噪声带，不能宣称 CLI 口径突破。继续推进编译期必须重新 profile；若没有新的
+结构性 parser/codegen 切口，应转向当前同样接近最高项的 `table_rw`。
+
 ### 3. `arith_mix_loop`：批量 mix arithmetic superinstruction
 
 `arith_mix_loop` 当前约 `1.9x`，运行期仍高于官方。上一阶段已有完整
@@ -890,6 +926,7 @@ CGO_ENABLED=0 go test ./internal/luac -run '^$' \
 - [x] 证伪 `Source.Next` ASCII 直推，未保留生产改动。
 - [x] 优化 lexer 字符串与注释起始 guard，复核 `compile_3000_functions` Go micro 收益。
 - [x] 优化 lexer token 首字节分派，复核 `compile_3000_functions` Go micro 收益。
+- [x] 优化 parser 语句分派，复核 `compile_3000_functions` Go micro 与 CLI 抽样口径。
 - [ ] 每个生产优化 commit 后更新本文或 `docs/BENCHMARK.md`。
 
 ## 正确性门禁

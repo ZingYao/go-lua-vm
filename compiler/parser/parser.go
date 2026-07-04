@@ -301,63 +301,66 @@ func (parser *Parser) hasKeywordSeparator(offset int) bool {
 //
 // 当前阶段支持空语句、函数语句、控制流、local 赋值和普通名称赋值。
 func (parser *Parser) parseStatement() (Statement, error) {
-	if parser.current.Kind == lexer.TokenIllegal {
+	currentToken := parser.current
+	switch currentToken.Kind {
+	case lexer.TokenIllegal:
 		// 非法 token 不能进入语法树，直接返回词法错误。
-		return nil, parser.illegalTokenError(parser.current)
-	}
-	if parser.current.Kind == lexer.TokenOperator && parser.current.Text == ";" {
-		// 分号表示空语句。
-		return parser.parseEmptyStatement()
-	}
-	if parser.current.Kind == lexer.TokenOperator && parser.current.Text == "::" {
-		// 双冒号开启 Lua label 语句。
-		return parser.parseLabelStatement()
-	}
-	if parser.current.Kind == lexer.TokenKeyword && parser.current.Text == "do" {
-		// do 关键字开启显式词法 block。
-		return parser.parseDoStatement()
-	}
-	if parser.current.Kind == lexer.TokenKeyword && parser.current.Text == "local" {
-		// local 关键字可能开启 local function 或局部变量声明赋值。
-		return parser.parseLocalAssignmentStatement()
-	}
-	if parser.current.Kind == lexer.TokenKeyword && parser.current.Text == "break" {
-		// break 关键字开启循环跳出语句。
-		return parser.parseBreakStatement()
-	}
-	if parser.current.Kind == lexer.TokenKeyword && parser.current.Text == "goto" {
-		// goto 关键字开启标签跳转语句。
-		return parser.parseGotoStatement()
-	}
-	if parser.current.Kind == lexer.TokenKeyword && parser.current.Text == "for" {
-		// for 关键字可能开启 numeric for 或 generic for。
-		return parser.parseForStatement()
-	}
-	if parser.current.Kind == lexer.TokenKeyword && parser.current.Text == "function" {
-		// function 关键字开启全局/普通函数定义语句。
-		return parser.parseFunctionStatement()
-	}
-	if parser.current.Kind == lexer.TokenKeyword && parser.current.Text == "if" {
-		// if 关键字开启条件分支语句。
-		return parser.parseIfStatement()
-	}
-	if parser.current.Kind == lexer.TokenKeyword && parser.current.Text == "while" {
-		// while 关键字开启前置条件循环语句。
-		return parser.parseWhileStatement()
-	}
-	if parser.current.Kind == lexer.TokenKeyword && parser.current.Text == "repeat" {
-		// repeat 关键字开启后置条件循环语句。
-		return parser.parseRepeatUntilStatement()
+		return nil, parser.illegalTokenError(currentToken)
+	case lexer.TokenOperator:
+		switch currentToken.Text {
+		case ";":
+			// 分号表示空语句。
+			return parser.parseEmptyStatement()
+		case "::":
+			// 双冒号开启 Lua label 语句。
+			return parser.parseLabelStatement()
+		default:
+			// 其他操作符先保留给扩展语句和 prefix call 入口判断。
+		}
+	case lexer.TokenKeyword:
+		switch currentToken.Text {
+		case "do":
+			// do 关键字开启显式词法 block。
+			return parser.parseDoStatement()
+		case "local":
+			// local 关键字可能开启 local function 或局部变量声明赋值。
+			return parser.parseLocalAssignmentStatement()
+		case "break":
+			// break 关键字开启循环跳出语句。
+			return parser.parseBreakStatement()
+		case "goto":
+			// goto 关键字开启标签跳转语句。
+			return parser.parseGotoStatement()
+		case "for":
+			// for 关键字可能开启 numeric for 或 generic for。
+			return parser.parseForStatement()
+		case "function":
+			// function 关键字开启全局/普通函数定义语句。
+			return parser.parseFunctionStatement()
+		case "if":
+			// if 关键字开启条件分支语句。
+			return parser.parseIfStatement()
+		case "while":
+			// while 关键字开启前置条件循环语句。
+			return parser.parseWhileStatement()
+		case "repeat":
+			// repeat 关键字开启后置条件循环语句。
+			return parser.parseRepeatUntilStatement()
+		default:
+			// 其他关键字可能是当前位置不合法的 block 边界，交给统一错误或扩展解析处理。
+		}
+	default:
+		// 非关键字和非已知操作符继续走扩展、赋值或调用语句入口。
 	}
 	if statement, matched, err := parser.parseExtensionStatement(); matched || err != nil {
 		// 已编译进当前产物的扩展语句在普通标识符语句前解析。
 		return statement, err
 	}
-	if parser.current.Kind == lexer.TokenIdentifier {
+	if currentToken.Kind == lexer.TokenIdentifier {
 		// 普通标识符开头可能是赋值语句，也可能是函数调用语句。
 		return parser.parseAssignmentOrCallStatement()
 	}
-	if parser.current.Kind == lexer.TokenOperator && parser.current.Text == "(" {
+	if currentToken.Kind == lexer.TokenOperator && currentToken.Text == "(" {
 		// 括号开头的 prefix expression 只能作为函数调用语句，例如 `(f or g)(...)`。
 		return parser.parsePrefixCallStatement()
 	}
