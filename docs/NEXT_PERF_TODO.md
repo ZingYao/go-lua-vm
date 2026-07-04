@@ -1144,7 +1144,34 @@ CGO_ENABLED=0 go test ./lua -run '^$' \
 需要更大的紧凑 AST / codegen arena 生命周期设计；其他 `recursion`、`string_concat`、`function_call`
 也接近噪声带，继续优化前必须先 profile。
 
-### 4. `string_concat`：窄形态字符串构建
+### 4. `recursion`：固定签名自递归剩余 profile
+
+2026-07-04 在 `5310335` 后复核 `recursion` prepared 运行期边界：
+
+```bash
+CGO_ENABLED=0 go test ./lua -run '^$' \
+  -bench '^BenchmarkPreparedRecursion$' \
+  -benchmem -benchtime=5s -count=1 \
+  -cpuprofile /tmp/go-lua-vm-next-profiles/recursion_after_5310335_cpu.pprof \
+  -memprofile /tmp/go-lua-vm-next-profiles/recursion_after_5310335_mem.pprof
+go tool pprof -top /tmp/go-lua-vm-next-profiles/recursion_after_5310335_cpu.pprof
+go tool pprof -top -alloc_objects /tmp/go-lua-vm-next-profiles/recursion_after_5310335_mem.pprof
+go tool pprof -top -alloc_space /tmp/go-lua-vm-next-profiles/recursion_after_5310335_mem.pprof
+```
+
+- `BenchmarkPreparedRecursion`：约 `1.727 us/op`、`224 B/op`、`2 allocs/op`。
+- CPU profile 中 `executePreparedLuaClosureWithDebugNameTailFromArgs` 约 `25.38%` flat /
+  `62.60%` cum；`fastSelfRecursiveIntegerFib` 仅约 `2.67%` flat，现有固定签名 fast path 本体已经很小。
+- `alloc_objects` 中 `runtime.NewLuaClosure` 约 `50.28%`，`runtime.NewOpenUpvalueCell` 约 `49.59%`。
+- `alloc_space` 中 `runtime.NewLuaClosure` 约 `71.27%`，`runtime.NewOpenUpvalueCell` 约 `28.12%`。
+
+结论：当前 `recursion` 剩余分配来自每次执行顶层 chunk 时创建局部 `fib` closure 以及自递归 upvalue
+cell；继续降低 `2 allocs/op` 必须证明 closure/upvalue 在重复调用 prepared 顶层闭包时可复用。但
+Lua 5.3 语义下 local function 每次执行都会创建新闭包，`debug.getupvalue`、返回/传参逃逸、闭包身份、
+错误 traceback 和 hook 可见性都可能观察该生命周期。除非先补“闭包不逃逸 + 无 hook/debug 可见性 +
+单一 prepared 调用上下文”的完整设计和 guard 测试，不应直接实现 closure/upvalue 复用生产路径。
+
+### 5. `string_concat`：窄形态字符串构建
 
 `string_concat` 当前约 `1.8x`。官方 fixture 是循环内 `s = s .. 'x'`，可考虑把连续追加同一短字符串的
 窄形态转为受 guard 保护的 builder 路径。
@@ -1165,7 +1192,7 @@ CGO_ENABLED=0 go test ./lua -run '^$' \
 - 默认完整 `string_concat` 稳定低于 `1.4x`。
 - metatable `__concat`、错误路径、debug hook 场景有定向测试覆盖。
 
-### 5. `stdlib_math_string`：表达式级 math/string folding 扩展
+### 6. `stdlib_math_string`：表达式级 math/string folding 扩展
 
 该项当前约 `1.5x`。上一阶段已经覆盖 `string.format("%d", i)` 固定结果和
 `#string.format("%d", i)` 长度消费；剩余可能来自 `math.sqrt`、`math.floor` 与浮点边界。
@@ -1222,6 +1249,7 @@ CGO_ENABLED=0 go test ./lua -run '^$' \
 - [x] 为 `compile_3000_functions` 简单函数体紧凑编译计划补设计门禁，限定目标形态和回退验收。
 - [x] 为简单函数体紧凑编译计划补 bytecode/debug 定向测试，固定目标形态和非目标回退形态。
 - [x] 证伪简单函数体 parser 摘要 + codegen 直发，未保留生产改动。
+- [x] profile `recursion` prepared，确认剩余分配来自 closure/upvalue 生命周期而非递归 fast path 本体。
 - [ ] 每个生产优化 commit 后更新本文或 `docs/BENCHMARK.md`。
 
 ## 正确性门禁
