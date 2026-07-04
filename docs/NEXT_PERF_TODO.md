@@ -1171,7 +1171,35 @@ Lua 5.3 语义下 local function 每次执行都会创建新闭包，`debug.getu
 错误 traceback 和 hook 可见性都可能观察该生命周期。除非先补“闭包不逃逸 + 无 hook/debug 可见性 +
 单一 prepared 调用上下文”的完整设计和 guard 测试，不应直接实现 closure/upvalue 复用生产路径。
 
-### 5. `string_concat`：窄形态字符串构建
+### 5. `function_call`：调用循环 batch 剩余 profile
+
+2026-07-04 在 `2ec3ce5` 后复核官方规模 `function_call` prepared 运行期边界：
+
+```bash
+CGO_ENABLED=0 go test ./lua -run '^$' \
+  -bench '^BenchmarkPreparedFunctionCallOfficial$' \
+  -benchmem -benchtime=5s -count=1 \
+  -cpuprofile /tmp/go-lua-vm-next-profiles/function_call_after_2ec3ce5_cpu.pprof \
+  -memprofile /tmp/go-lua-vm-next-profiles/function_call_after_2ec3ce5_mem.pprof
+go tool pprof -top /tmp/go-lua-vm-next-profiles/function_call_after_2ec3ce5_cpu.pprof
+go tool pprof -top -alloc_objects /tmp/go-lua-vm-next-profiles/function_call_after_2ec3ce5_mem.pprof
+go tool pprof -top -alloc_space /tmp/go-lua-vm-next-profiles/function_call_after_2ec3ce5_mem.pprof
+```
+
+- `BenchmarkPreparedFunctionCallOfficial`：约 `2.865 ms/op`、`413 B/op`、`2 allocs/op`。
+- CPU profile 中 `TryExecuteFunctionCallAssignForLoopBatch` 约 `63.38%` flat / `75.94%` cum；
+  `State.CheckContext` 约 `8.62%` flat，`PrepareFunctionCallAssignForLoopBatch` 约 `3.05%` flat。
+- 普通 `VM.Step` 约 `3.23%` cum，`executeCall` 约 `0.90%` cum，说明热路径已经主要命中现有 batch。
+- alloc profile 受 CPU/mem profile 自身和 benchmark setup 噪声影响明显；运行期基准只有 `2 allocs/op`，
+  不显示新的高收益分配切口。
+
+结论：`function_call` 剩余成本已经在现有 `sum = add(sum, i)` batch 本体内，主要是每个 context 窗口
+的函数等价性、参数/结果寄存器 guard、context 取消检查和 leaf add-return 执行。继续推进若要减少
+batch 内动态 guard，必须先证明闭包寄存器、函数 Proto、upvalue、环境表、debug hook、yield/continuation
+和错误 PC 在整个 batch 窗口内不可被观察或修改；盲目扩大 context 窗口或跳过 guard 会改变取消延迟和
+错误/debug 可见性。当前倍率接近 `1.0x` 噪声带，暂不直接扩张生产 fast path。
+
+### 6. `string_concat`：窄形态字符串构建
 
 `string_concat` 当前约 `1.8x`。官方 fixture 是循环内 `s = s .. 'x'`，可考虑把连续追加同一短字符串的
 窄形态转为受 guard 保护的 builder 路径。
@@ -1192,7 +1220,7 @@ Lua 5.3 语义下 local function 每次执行都会创建新闭包，`debug.getu
 - 默认完整 `string_concat` 稳定低于 `1.4x`。
 - metatable `__concat`、错误路径、debug hook 场景有定向测试覆盖。
 
-### 6. `stdlib_math_string`：表达式级 math/string folding 扩展
+### 7. `stdlib_math_string`：表达式级 math/string folding 扩展
 
 该项当前约 `1.5x`。上一阶段已经覆盖 `string.format("%d", i)` 固定结果和
 `#string.format("%d", i)` 长度消费；剩余可能来自 `math.sqrt`、`math.floor` 与浮点边界。
@@ -1250,6 +1278,7 @@ Lua 5.3 语义下 local function 每次执行都会创建新闭包，`debug.getu
 - [x] 为简单函数体紧凑编译计划补 bytecode/debug 定向测试，固定目标形态和非目标回退形态。
 - [x] 证伪简单函数体 parser 摘要 + codegen 直发，未保留生产改动。
 - [x] profile `recursion` prepared，确认剩余分配来自 closure/upvalue 生命周期而非递归 fast path 本体。
+- [x] profile `function_call` prepared，确认剩余成本集中在现有 batch 本体且接近噪声带。
 - [ ] 每个生产优化 commit 后更新本文或 `docs/BENCHMARK.md`。
 
 ## 正确性门禁
