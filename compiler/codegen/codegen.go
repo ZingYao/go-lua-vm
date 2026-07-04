@@ -64,10 +64,8 @@ type generator struct {
 	childProtoArena []bytecode.Proto
 	// childProtoNext 保存 childProtoArena 中下一个可借用的子 Proto 下标。
 	childProtoNext int
-	// childGeneratorArena 保存当前函数预估直接子函数的 codegen 状态，仅在编译期使用。
-	childGeneratorArena []generator
-	// childGeneratorNext 保存 childGeneratorArena 中下一个可借用的 generator 下标。
-	childGeneratorNext int
+	// childGeneratorScratch 保存当前函数正在编译的直接子函数 codegen 状态，仅在编译期顺序复用。
+	childGeneratorScratch *generator
 	// nextRegister 保存下一个可分配寄存器。
 	nextRegister int
 	// maxRegister 保存生成过程中到达过的最大寄存器数量。
@@ -335,12 +333,16 @@ func newChildGenerator(parent *generator, source string) *generator {
 
 // borrowChildGenerator 返回当前生成器拥有的下一个子函数 codegen 状态。
 //
-// 预估容量命中时返回 childGeneratorArena 中的临时状态；未命中时回退独立 generator，保持复杂嵌套语义。
+// 子函数按源码顺序同步编译，调用方不会在一个子函数编译未完成时再借用同一父函数的下一个 generator；
+// 因此可复用父 generator 内嵌 scratch，避免为大量直接函数声明预留一整段 generator 数组。
 func (parent *generator) borrowChildGenerator(source string) *generator {
-	if parent != nil && parent.childGeneratorNext < len(parent.childGeneratorArena) {
-		// 直接子函数的 codegen 状态只在编译期使用，最终 Proto 不会持有该临时对象。
-		child := &parent.childGeneratorArena[parent.childGeneratorNext]
-		parent.childGeneratorNext++
+	if parent != nil {
+		// 直接子函数的 codegen 状态只在当前调用栈内使用，最终 Proto 只保存 child.proto。
+		if parent.childGeneratorScratch == nil {
+			// 首次借用时只分配一个 scratch；后续直接子函数顺序复用同一对象。
+			parent.childGeneratorScratch = &generator{}
+		}
+		child := parent.childGeneratorScratch
 		*child = generator{proto: parent.borrowChildProto(source), parent: parent}
 		return child
 	}
@@ -397,10 +399,6 @@ func (gen *generator) prepareDirectFunctionBlockCapacity(block *parser.Block) {
 	if stats.childCount > 0 && gen.childProtoArena == nil {
 		// 直接子函数 Proto 本体由父 generator 精确持有，避免每个子函数一次 NewProto 对象分配。
 		gen.childProtoArena = make([]bytecode.Proto, stats.childCount)
-	}
-	if stats.childCount > 0 && gen.childGeneratorArena == nil {
-		// 直接子函数 generator 由父 generator 精确持有，只在编译期使用，不进入最终 Proto。
-		gen.childGeneratorArena = make([]generator, stats.childCount)
 	}
 }
 

@@ -931,28 +931,30 @@ func TestCompileChunkPreallocatesDirectFunctionBlock(t *testing.T) {
 
 	generatorArena := newGenerator("child-generator-arena")
 	generatorArena.prepareDirectFunctionBlockCapacity(functionChunk.Block)
-	if len(generatorArena.childGeneratorArena) != stats.childCount {
-		// 直接子函数 generator arena 应按统计数量精确分配。
-		t.Fatalf("unexpected child generator arena length=%d stats=%+v", len(generatorArena.childGeneratorArena), stats)
-	}
 	firstGenerator := generatorArena.borrowChildGenerator("first-generator")
+	firstGeneratorProto := firstGenerator.proto
 	secondGenerator := generatorArena.borrowChildGenerator("second-generator")
-	if firstGenerator != &generatorArena.childGeneratorArena[0] || secondGenerator != &generatorArena.childGeneratorArena[1] {
-		// 预估命中时子函数 codegen 状态必须来自父 generator 的连续 arena。
-		t.Fatalf("child generators should use arena: first=%p second=%p arena=%p/%p", firstGenerator, secondGenerator, &generatorArena.childGeneratorArena[0], &generatorArena.childGeneratorArena[1])
+	secondGeneratorProto := secondGenerator.proto
+	if firstGenerator != generatorArena.childGeneratorScratch || secondGenerator != firstGenerator {
+		// 直接子函数 generator 只在编译期顺序使用，应复用父 generator 的 scratch 槽。
+		t.Fatalf("child generators should reuse scratch: first=%p second=%p scratch=%p", firstGenerator, secondGenerator, generatorArena.childGeneratorScratch)
 	}
-	if firstGenerator.parent != generatorArena || secondGenerator.parent != generatorArena {
+	if secondGenerator.parent != generatorArena {
 		// 借用 generator 仍必须指回父 generator，保持 upvalue 捕获语义。
-		t.Fatalf("child generator parent mismatch: first=%p second=%p parent=%p", firstGenerator.parent, secondGenerator.parent, generatorArena)
+		t.Fatalf("child generator parent mismatch: second=%p parent=%p", secondGenerator.parent, generatorArena)
 	}
-	if firstGenerator.proto != &generatorArena.childProtoArena[0] || secondGenerator.proto != &generatorArena.childProtoArena[1] {
+	if firstGeneratorProto != &generatorArena.childProtoArena[0] || secondGeneratorProto != &generatorArena.childProtoArena[1] {
 		// generator arena 和 Proto arena 必须按同一顺序配对，保持 CLOSURE Bx 顺序。
-		t.Fatalf("child generator proto mismatch: first=%p second=%p arena=%p/%p", firstGenerator.proto, secondGenerator.proto, &generatorArena.childProtoArena[0], &generatorArena.childProtoArena[1])
+		t.Fatalf("child generator proto mismatch: first=%p second=%p arena=%p/%p", firstGeneratorProto, secondGeneratorProto, &generatorArena.childProtoArena[0], &generatorArena.childProtoArena[1])
 	}
 	fallbackGenerator := generatorArena.borrowChildGenerator("fallback-generator")
-	if fallbackGenerator == &generatorArena.childGeneratorArena[0] || fallbackGenerator == &generatorArena.childGeneratorArena[1] {
-		// 超出预估时必须回退独立 generator，避免覆盖已借出的编译状态。
-		t.Fatalf("fallback generator reused arena slot: %p", fallbackGenerator)
+	if fallbackGenerator != generatorArena.childGeneratorScratch {
+		// 超出 Proto 预估时仍可复用 generator scratch，因为 generator 不进入最终 Proto。
+		t.Fatalf("fallback generator should reuse scratch: %p", fallbackGenerator)
+	}
+	if fallbackGenerator.proto == &generatorArena.childProtoArena[0] || fallbackGenerator.proto == &generatorArena.childProtoArena[1] {
+		// 超出 Proto 预估时必须回退独立 Proto，避免覆盖已借出的子 Proto。
+		t.Fatalf("fallback generator reused proto arena slot: %p", fallbackGenerator.proto)
 	}
 
 	nestedChunk := parseChunkForCodegenTest(t, "do function nested() end end")

@@ -652,6 +652,31 @@ identifier 在确认不是函数调用、字段访问或复杂右结合表达式
 - parser 错误文本、goto/label 语义、debug local 生命周期和官方反汇编不变。
 - Go micro 需要证明 wall-clock 稳定下降或 B/op 明显下降；只减少 1-2 个 alloc/op 不足以保留生产改动。
 
+2026-07-04 实现 codegen 子 generator scratch 复用：保留直接子 Proto arena 和 `Proto.p` 指针顺序，
+但不再按直接函数数量预分配 `[]generator`。`generator` 只在当前子函数编译调用栈内使用，最终 Proto
+只保存 `child.proto`；直接子函数按源码顺序同步编译，因此父 generator 只需惰性分配一个
+`childGeneratorScratch` 并顺序复用。该改动不改变 `CLOSURE Bx` 顺序、子 Proto identity、upvalue
+捕获、debug local 生命周期或 binary chunk 输出；超出直接子 Proto 预估时仍回退独立 Proto，避免覆盖
+已追加到父 Proto 的子原型。
+
+目标 Go micro 结果：
+
+```bash
+CGO_ENABLED=0 go test ./internal/luac -run '^$' \
+  -bench '^BenchmarkCompileSource3000Functions$' \
+  -benchmem -benchtime=3s -count=5
+```
+
+- `BenchmarkCompileSource3000Functions`：约
+  `4.19 / 4.19 / 4.19 / 4.19 / 4.30 ms/op`。
+- B/op 约 `3.78 MB/op`，`89-90 allocs/op`。
+
+结论：相比 `2f9dfda` 后 profile 记录的约 `4.416 ms/op`、`5.03 MB/op`、`87 allocs/op`，
+该切口显著降低 codegen arena 空间成本，wall-clock 小幅下降，allocs/op 小幅回升但仍处于低对象数口径；
+收益来自把“每个直接子函数一个 generator arena slot”改为“每个父 generator 一个顺序 scratch”。
+后续若继续压缩编译期，重点应转向函数体 AST 紧凑表达式或 Source/token 读取结构，不再恢复大段
+child generator arena。
+
 ### 3. `arith_mix_loop`：批量 mix arithmetic superinstruction
 
 `arith_mix_loop` 当前约 `1.9x`，运行期仍高于官方。上一阶段已有完整
