@@ -511,6 +511,30 @@ lexer/parser CPU、函数体 AST 与 codegen arena 空间，不应扩大为 `Blo
 Go micro 层面的分配与小幅 CPU 改善，端到端剩余差距仍需要新的 profile 证据指向 lexer/parser 或
 codegen arena，不能继续围绕简单容量预留做局部调参。
 
+2026-07-04 在 `94852d7` 后重新 profile：
+
+```bash
+CGO_ENABLED=0 go test ./internal/luac -run '^$' \
+  -bench '^BenchmarkCompileSource3000Functions$' \
+  -benchmem -benchtime=5s -count=1 \
+  -cpuprofile /tmp/go-lua-vm-next-profiles/compile_3000_after_94852d7_cpu.pprof \
+  -memprofile /tmp/go-lua-vm-next-profiles/compile_3000_after_94852d7_mem.pprof
+```
+
+- `BenchmarkCompileSource3000Functions`：约 `5.33 ms/op`、`5.03 MB/op`、`87 allocs/op`。
+- CPU 采样中可归因部分仍集中在 lexer/parser：`Lexer.NextToken`、`parseBlockUntilInto`、
+  `parseFunctionBodyInto`、`parseFunctionStatement` 和 `parseReturnStatementInto`。
+- alloc_space 中 `prepareDirectFunctionBlockCapacity`、`newFunctionStatement`、`newLiteralExpression`、
+  `newBinaryExpression`、`newNameExpression` 仍可见；alloc_objects 中表达式 arena 页分配仍占一定比例。
+
+试验过把大量顶层函数数量作为 name/literal/binary expression arena 首屏容量 hint：首版因为尾部
+`return f2999(1)` 在大页已满后再次分配大页，导致 B/op 升至约 `5.52 MB/op`，已修正为只对首屏页生效。
+修正后五轮约 `5.25-5.35 ms/op`、`5.05 MB/op`、`60 allocs/op`；同机 detached `94852d7` 基线五轮约
+`5.27-5.30 ms/op`、`5.03 MB/op`、`91 allocs/op`。该试验只稳定降低 allocs/op，没有证明 wall-clock
+收益，且 B/op 略升，因此已回退生产改动。后续不要重复做 expression arena 大页容量 hint；若继续推进
+编译期，必须找到能同时降低 CPU 或显著降低 B/op 的结构性切口，例如 lexer token 解码成本、函数体 AST
+专用紧凑表示，或 codegen arena 空间策略。
+
 ### 3. `arith_mix_loop`：批量 mix arithmetic superinstruction
 
 `arith_mix_loop` 当前约 `1.9x`，运行期仍高于官方。上一阶段已有完整
