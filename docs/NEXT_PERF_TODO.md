@@ -1,0 +1,148 @@
+# glua 下一阶段性能优化 TODO
+
+## 目标与边界
+
+本文记录 `quanquan/feature/glua-next-perf` 分支的下一阶段性能优化计划。基线来自
+`quanquan/feature/glua-aggressive-perf` 合入 `master` 前的收尾完整 benchmark：当前默认完整 benchmark
+已经没有 `3x` 边缘项，下一阶段只关注仍高于官方 Lua 5.3.6 的路径。
+
+允许采用更激进的方案，但必须满足以下边界：
+
+- 不引入 CGO、不接 Lua C API、不新增外部依赖。
+- 不实现 JIT；JIT 仍保留在 `docs/JIT_TODO.md`。
+- debug hook、coroutine/yield、traceback、error、`debug.getinfo`、upvalue、metatable、弱表和 finalizer
+  语义必须能回退普通路径。
+- 每轮只推进一个可验证小切口；涉及大结构重构时先提交设计与 baseline，不直接改生产代码。
+- 任一 fast path 不能证明语义等价时必须回退普通 VM。
+
+## 当前基线
+
+当前基线为重建 `bin/glua` / `bin/gluac` 后，显式使用官方 Lua/Luac 5.3.6，
+按 `scripts/benchmark-official.sh` 默认参数三轮复核的结果。
+
+| 排名 | 用例 | 三轮倍率 | 平均 |
+| ---: | --- | ---: | ---: |
+| 1 | `arith_chain_temp` | `0.77x / 0.76x / 0.78x` | `0.77x` |
+| 2 | `closure_upvalue` | `0.86x / 0.86x / 0.86x` | `0.86x` |
+| 3 | `function_call` | `0.98x / 1.01x / 1.02x` | `1.00x` |
+| 4 | `recursion` | `1.06x / 1.03x / 1.03x` | `1.04x` |
+| 5 | `arith_add_loop` | `1.20x / 1.20x / 1.21x` | `1.20x` |
+| 6 | `table_rw` | `1.45x / 1.44x / 1.46x` | `1.45x` |
+| 7 | `stdlib_math_string` | `1.55x / 1.53x / 1.54x` | `1.54x` |
+| 8 | `string_concat` | `1.82x / 1.84x / 1.82x` | `1.83x` |
+| 9 | `arith_mix_loop` | `1.97x / 1.92x / 1.91x` | `1.93x` |
+| 10 | `compile_3000_functions` | `2.01x / 1.91x / 1.90x` | `1.94x` |
+
+低于 `1.00x` 表示本项目快于官方 Lua 5.3.6。下一阶段优先级按平均倍率、语义风险和泛化价值排序，
+不再围绕已经快于官方或接近官方的 benchmark 定向路径继续扩张。
+
+## 优化路线
+
+### 1. `compile_3000_functions`：typed statement / AST 生命周期结构
+
+当前最高项仍是编译期。上一阶段已经把 `compile_3000_functions` 从约 `8.34 ms/op`、`7.58 MB/op`、
+`81151 allocs/op` 降到约 `6.1 ms/op`、`5.22 MB/op`、`3110-3114 allocs/op`。剩余对象主要来自
+`FunctionStatement` 本体和真实表达式 AST；继续局部内嵌或 arena 已经不合适。
+
+激进方案：
+
+- 设计 `Block.Statements` 的 typed storage 或 compact statement representation，减少 interface 语句节点对象。
+- 保持 AST 对外语义可被 semantic/codegen 稳定读取，避免最终 Proto 保留 parser/codegen 临时状态。
+- 先做设计文档和 prototype profile，不直接替换全 parser。
+
+验收：
+
+- `compile_3000_functions` 平均倍率低于 `1.7x`，或 Go micro 至少稳定下降 `10%` wall-clock。
+- B/op 不高于当前 `5.22 MB/op` 的噪声范围；不能再用大 backing array 换 allocs/op。
+- 官方反汇编、debug local 生命周期、goto/label 错误、parser 错误文本保持一致。
+
+### 2. `arith_mix_loop`：批量 mix arithmetic superinstruction
+
+`arith_mix_loop` 当前约 `1.9x`，运行期仍高于官方。上一阶段已有完整
+`MUL; ADD; SUB; IDIV; MOD; ADD; FORLOOP` 窄形态 fast path，但尚未像 `arith_add_loop` /
+`arith_chain_temp` 一样做批量 guard hoisting。
+
+激进方案：
+
+- 新增 batch 版 mix arithmetic superinstruction，复用已识别的数据流。
+- 把静态寄存器、常量、目标寄存器和 FORLOOP 回跳 guard 提前到 batch 准备阶段。
+- 每个虚拟入口仍必须保持 context 取消边界，不放宽 debug/coroutine 回退条件。
+
+验收：
+
+- `BenchmarkPreparedArithMixLoopOfficial` 稳定低于当前约 `17-18 ms/op`。
+- 默认完整 `arith_mix_loop` 稳定低于 `1.5x`。
+- 非目标 arithmetic/table/function/recursion prepared 矩阵不出现稳定退化。
+
+### 3. `string_concat`：窄形态字符串构建
+
+`string_concat` 当前约 `1.8x`。官方 fixture 是循环内 `s = s .. 'x'`，可考虑把连续追加同一短字符串的
+窄形态转为受 guard 保护的 builder 路径。
+
+激进方案：
+
+- 只覆盖无 metatable、无 hook、无 coroutine/continuation、固定右侧字符串常量的循环形态。
+- 保留字符串不可变对外语义；中间字符串不能被 debug/hook 或外部函数观察时才允许合并构建。
+- 任一 guard 失败回退普通 `CONCAT`。
+
+风险：
+
+- 该方向语义风险高于 arithmetic batch，因为 Lua 字符串不可变和 `__concat` 元方法必须严格保留。
+- 首轮必须先 profile 和字节码复核，不直接实现生产 fast path。
+
+验收：
+
+- 默认完整 `string_concat` 稳定低于 `1.4x`。
+- metatable `__concat`、错误路径、debug hook 场景有定向测试覆盖。
+
+### 4. `stdlib_math_string`：表达式级 math/string folding 扩展
+
+该项当前约 `1.5x`。上一阶段已经覆盖 `string.format("%d", i)` 固定结果和
+`#string.format("%d", i)` 长度消费；剩余可能来自 `math.sqrt`、`math.floor` 与浮点边界。
+
+激进方案：
+
+- 只在 profile 证明收益时，评估 `math.floor(math.sqrt(i))` 的表达式级窄形态。
+- 必须对齐 Lua 5.3 的 number、NaN、-0、整数/浮点转换和错误文本。
+
+验收：
+
+- 默认完整 `stdlib_math_string` 稳定低于 `1.25x`。
+- math/string 标准库官方测试继续通过。
+
+## TODO
+
+- [ ] 跑下一阶段基线：默认完整 benchmark 三轮、剩余高于 `1.0x` 项的 Go micro 矩阵。
+- [ ] profile `compile_3000_functions`，确认 `FunctionStatement` / typed statement storage 是否仍是主切口。
+- [ ] 为 typed statement / compact AST 方案补设计小节，列出 parser、semantic、codegen、debug 和错误语义影响面。
+- [ ] 只有设计通过后，才实现最小 typed statement prototype；若收益不足或 B/op 升高，记录证伪并回退。
+- [ ] profile `arith_mix_loop` prepared 与 DoString，确认当前主要成本是否在现有 mix fast path 内。
+- [ ] 设计 batch mix arithmetic superinstruction，并证明 context、PC、debug hook、coroutine 和错误路径等价。
+- [ ] profile `string_concat`，复核官方 fixture 字节码与元方法可见性，再决定是否进入窄形态 builder。
+- [ ] profile `stdlib_math_string` 剩余热点，确认是否仍有表达式级消费消除空间。
+- [ ] 每个生产优化 commit 后更新本文或 `docs/BENCHMARK.md`。
+
+## 正确性门禁
+
+每个生产优化提交前必须通过：
+
+- `gopls check <changed-go-files>`
+- `gofmt`
+- `CGO_ENABLED=0 go test ./...`
+- `./scripts/check-go-gates.sh`
+- `git ls-files --others --exclude-standard | rg '\.go$|_test\.go$'` 为空
+
+涉及 CLI、bytecode、VM、stdlib 或官方兼容行为时，还必须通过：
+
+- 重建 `bin/glua` / `bin/gluac`
+- 官方 `lua` / `luac` 均确认为 Lua 5.3.6
+- `./scripts/compare-cli-golden.sh`
+- `./scripts/compare-official-executables.sh`
+- `./scripts/run-official-tests.sh`
+
+## 回滚标准
+
+- 任一官方兼容脚本失败，立即停止并回滚或修复。
+- benchmark 只减少 allocs/op 但明显增加 B/op，且不能证明实际 wall-clock 收益时回滚。
+- fast path 改变 debug hook、yield、traceback、error path、metatable 或标准库边界时回滚。
+- 无法用定向测试覆盖语义风险时，不保留生产改动。
