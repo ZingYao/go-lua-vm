@@ -503,6 +503,29 @@ type mixArithmeticForLoopSuperInstruction struct {
 	Valid bool
 }
 
+// MixArithmeticForLoopBatch 保存已验证的 `MUL; ADD; SUB; IDIV; MOD; ADD; FORLOOP` batch 上下文。
+//
+// 该结构只覆盖官方 `arith_mix_loop` 的窄形态：sum、IDIV 临时寄存器、MOD 临时寄存器和 numeric-for
+// 控制槽互不别名；其他寄存器别名形态回退单轮 superinstruction 或普通 VM，以保留逐指令可见性。
+type MixArithmeticForLoopBatch struct {
+	// proto 记录 batch 绑定的 Proto，用于防止 VM 复用后误用旧上下文。
+	proto *bytecode.Proto
+	// pc 保存循环体 MUL 的 PC。
+	pc int
+	// superInstruction 保存已匹配的混合算术循环寄存器数据流。
+	superInstruction mixArithmeticForLoopSuperInstruction
+	// TempRegister 保存 MUL/ADD/IDIV 复用的临时寄存器。
+	TempRegister int
+	// SumRegister 保存 SUB 与末尾 ADD 写回的累加寄存器。
+	SumRegister int
+	// ModRegister 保存 MOD 写回的临时寄存器。
+	ModRegister int
+	// maxRegisterIndex 保存参与寄存器最大下标，用一次边界检查替代逐寄存器重复检查。
+	maxRegisterIndex int
+	// valid 表示 batch 是否由 PrepareMixArithmeticForLoopBatch 成功构造。
+	valid bool
+}
+
 // functionCallAddForLoopSuperInstruction 保存 `MOVE; MOVE; LOADK; CALL; ADD; FORLOOP` 的预匹配形态。
 //
 // 该形态覆盖官方 `function_call` 的完整循环体。构建期只记录寄存器和常量数据流；执行期仍检查
@@ -3530,6 +3553,150 @@ func buildMixArithmeticForLoopSuperInstructions(proto *bytecode.Proto) []mixArit
 func (vm *VM) PrepareMixArithmeticForLoopSuperInstructions() bool {
 	// 预构建失败不影响普通 VM；后续 TryExecuteMixArithmeticForLoop 会因为表不匹配而回退。
 	return len(vm.ensureMixArithmeticForLoopSuperInstructions()) > 0
+}
+
+// PrepareMixArithmeticForLoopBatch 为 `MUL; ADD; SUB; IDIV; MOD; ADD; FORLOOP` 混合算术循环准备 batch 上下文。
+func (vm *VM) PrepareMixArithmeticForLoopBatch(pc int) (MixArithmeticForLoopBatch, bool) {
+	// 先按 PC 读取已准备好的预匹配表；非目标 PC 必须快速失败且不能产生副作用。
+	if vm == nil || vm.mixArithmeticForLoopSuperInstructionProto != vm.proto {
+		return MixArithmeticForLoopBatch{}, false
+	}
+	superInstructions := vm.mixArithmeticForLoopSuperInstructions
+	if uint(pc) >= uint(len(superInstructions)) {
+		return MixArithmeticForLoopBatch{}, false
+	}
+	superInstruction := superInstructions[pc]
+	if !superInstruction.Valid {
+		return MixArithmeticForLoopBatch{}, false
+	}
+
+	forBase := superInstruction.ForBase
+	tempRegister := superInstruction.MulTarget
+	sumRegister := superInstruction.SumRegister
+	modRegister := superInstruction.ModTarget
+	if superInstruction.FirstAddTarget != tempRegister || superInstruction.IDivTarget != tempRegister {
+		// 当前 batch 只覆盖 MUL、第一条 ADD、IDIV 复用同一临时寄存器的官方形态。
+		return MixArithmeticForLoopBatch{}, false
+	}
+	if superInstruction.SubTarget != sumRegister || superInstruction.FinalAddTarget != sumRegister {
+		// SUB 和末尾 ADD 必须写回同一个 sum 寄存器。
+		return MixArithmeticForLoopBatch{}, false
+	}
+	if superInstruction.LoopRegister != forBase+3 {
+		// 混合算术必须读取 numeric-for 的外部可见循环变量。
+		return MixArithmeticForLoopBatch{}, false
+	}
+	if tempRegister == sumRegister || tempRegister == modRegister || sumRegister == modRegister {
+		// batch 最终只写回最后一轮可见状态；别名形态需要单轮路径保留逐指令覆盖顺序。
+		return MixArithmeticForLoopBatch{}, false
+	}
+	if registerInRange(tempRegister, forBase, forBase+3) || registerInRange(sumRegister, forBase, forBase+3) || registerInRange(modRegister, forBase, forBase+3) {
+		// 算术目标不能覆盖 numeric-for 控制槽，否则需要逐指令别名语义。
+		return MixArithmeticForLoopBatch{}, false
+	}
+
+	maxRegisterIndex := forBase + 3
+	if tempRegister > maxRegisterIndex {
+		// IDIV 临时寄存器可能高于控制槽，需要纳入边界检查。
+		maxRegisterIndex = tempRegister
+	}
+	if sumRegister > maxRegisterIndex {
+		// sum 寄存器可能高于控制槽，需要纳入边界检查。
+		maxRegisterIndex = sumRegister
+	}
+	if modRegister > maxRegisterIndex {
+		// MOD 临时寄存器可能高于控制槽，需要纳入边界检查。
+		maxRegisterIndex = modRegister
+	}
+	return MixArithmeticForLoopBatch{
+		proto:            vm.proto,
+		pc:               pc,
+		superInstruction: superInstruction,
+		TempRegister:     tempRegister,
+		SumRegister:      sumRegister,
+		ModRegister:      modRegister,
+		maxRegisterIndex: maxRegisterIndex,
+		valid:            true,
+	}, true
+}
+
+// TryExecuteMixArithmeticForLoopBatch 批量执行已准备的混合算术循环体。
+//
+// batch 必须来自 PrepareMixArithmeticForLoopBatch；maxIterations 由调用方按 context 检查窗口换算。
+// 返回 handled=false 表示当前动态寄存器状态不满足 integer guard，调用方必须回退旧单轮路径或普通 VM。
+func (vm *VM) TryExecuteMixArithmeticForLoopBatch(batch MixArithmeticForLoopBatch, maxIterations int) (nextPC int, iterations int, handled bool) {
+	// batch 与当前 VM/Proto 不匹配时必须回退，避免 VM 池复用后误写寄存器。
+	if vm == nil || !batch.valid || batch.proto != vm.proto || maxIterations <= 0 {
+		return 0, 0, false
+	}
+	registers := vm.registers
+	if uint(batch.maxRegisterIndex) >= uint(len(registers)) {
+		return 0, 0, false
+	}
+	superInstruction := batch.superInstruction
+	if superInstruction.IDivConstant == 0 || superInstruction.ModConstant == 0 {
+		// 构建期已排除零除常量；这里保留防御性回退以维持普通错误路径。
+		return 0, 0, false
+	}
+
+	sumValue := registers[batch.SumRegister]
+	indexValue := registers[superInstruction.ForBase]
+	limitValue := registers[superInstruction.ForBase+1]
+	stepValue := registers[superInstruction.ForBase+2]
+	visibleIndexValue := registers[superInstruction.ForBase+3]
+	if sumValue.Kind != KindInteger || indexValue.Kind != KindInteger || limitValue.Kind != KindInteger || stepValue.Kind != KindInteger || visibleIndexValue.Kind != KindInteger {
+		// 只覆盖 integer 混合算术和 integer numeric-for；其他类型保留普通转换、元方法和错误语义。
+		return 0, 0, false
+	}
+
+	sum := sumValue.Integer
+	index := indexValue.Integer
+	limit := limitValue.Integer
+	step := stepValue.Integer
+	visibleIndex := visibleIndexValue.Integer
+	lastTemp := registers[batch.TempRegister]
+	lastMod := registers[batch.ModRegister]
+	nextPC = batch.pc
+	for iterations < maxIterations {
+		// 每轮严格按普通指令数据流计算，但只在 batch 完成后写回最后一轮可见寄存器状态。
+		mulResult := visibleIndex * superInstruction.MulConstant
+		firstAddResult := sum + mulResult
+		subResult := firstAddResult - superInstruction.SubConstant
+		iDivResult := integerFloorDiv(subResult, superInstruction.IDivConstant)
+		modResult := integerModulo(visibleIndex, superInstruction.ModConstant)
+		sum = iDivResult + modResult
+		lastTemp = IntegerValue(iDivResult)
+		lastMod = IntegerValue(modResult)
+		iterations++
+
+		nextIndex := index + step
+		nextPC = superInstruction.ExitPC
+		if forIntegerLoopContinues(nextIndex, limit, step) {
+			// 循环继续时推进内部 index 和外部可见循环变量，并跳回 MUL。
+			index = nextIndex
+			visibleIndex = nextIndex
+			nextPC = superInstruction.LoopPC
+			vm.pcOffset = superInstruction.ForSBx
+		} else {
+			// 循环结束时不写入越界后的 index，保持普通 FORLOOP 语义。
+			vm.pcOffset = 0
+			break
+		}
+	}
+	if iterations == 0 {
+		return 0, 0, false
+	}
+	registers[batch.TempRegister] = lastTemp
+	registers[batch.ModRegister] = lastMod
+	registers[batch.SumRegister] = IntegerValue(sum)
+	registers[superInstruction.ForBase] = IntegerValue(index)
+	registers[superInstruction.ForBase+3] = IntegerValue(visibleIndex)
+	vm.currentPC = batch.pc + 6
+	vm.skipNext = false
+	vm.closeFrom = -1
+	vm.hasCallRequest = false
+	vm.returned = false
+	return nextPC, iterations, true
 }
 
 // ensureFunctionCallAddForLoopSuperInstructions 返回当前 Proto 的函数调用加法循环预匹配表。

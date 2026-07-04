@@ -63,6 +63,11 @@ go tool pprof -top /tmp/go-lua-vm-next-profiles/arith_mix_prepared_cpu.pprof
 微调收益有限。下一轮更合适的生产切口是 batch 版 mix arithmetic superinstruction：把固定寄存器、
 常量、FORLOOP 回跳和整数操作 guard 前置，并在安全窗口内连续执行多轮。
 
+2026-07-04 已实现最小 batch 版 mix arithmetic superinstruction：只覆盖官方 `arith_mix_loop`
+中 sum、IDIV 临时寄存器、MOD 临时寄存器和 numeric-for 控制槽互不别名的窄形态；guard 不满足时
+回退原单轮 superinstruction 或普通 VM。目标 benchmark 从 prepared 约 `17.19 ms/op` 降到
+约 `8.94-8.96 ms/op`，DoString 约 `9.03 ms/op`，仍为 `0 allocs/op` 的纯运行期收益。
+
 ### `string_concat`
 
 命令：
@@ -170,8 +175,8 @@ go tool pprof -top -alloc_space /tmp/go-lua-vm-next-profiles/string_concat_mem.p
 - [ ] 为 typed statement / compact AST 方案补设计小节，列出 parser、semantic、codegen、debug 和错误语义影响面。
 - [ ] 只有设计通过后，才实现最小 typed statement prototype；若收益不足或 B/op 升高，记录证伪并回退。
 - [x] profile `arith_mix_loop` prepared，确认当前主要成本在现有 mix fast path 内。
-- [ ] 必要时补跑 `arith_mix_loop` DoString profile，确认端到端没有新的编译期噪声。
-- [ ] 设计 batch mix arithmetic superinstruction，并证明 context、PC、debug hook、coroutine 和错误路径等价。
+- [x] 补跑 `arith_mix_loop` DoString benchmark，确认端到端同步受益且没有新的编译期噪声。
+- [x] 设计并实现 batch mix arithmetic superinstruction，证明 context、PC、debug hook、coroutine 和错误路径等价。
 - [x] profile `string_concat` CPU/alloc，确认主因是 `executeConcat` 短命字符串分配和 GC 压力。
 - [ ] 复核 `string_concat` 官方 fixture 字节码与元方法可见性，再决定是否进入窄形态 builder。
 - [ ] profile `stdlib_math_string` 剩余热点，确认是否仍有表达式级消费消除空间。

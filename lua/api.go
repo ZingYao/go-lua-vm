@@ -2694,6 +2694,19 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 			// 七指令混合算术链会额外跳过 ADD、SUB、IDIV、MOD、ADD、FORLOOP 六个入口；
 			// 倒计时至少为 6 才能证明普通逐指令路径不会在被跳过区间触发 context 检查。
 			mixPC := pc
+			if batch, ok := vm.PrepareMixArithmeticForLoopBatch(mixPC); ok {
+				// 当前 MUL 入口的 context 已在本轮循环顶部消费；N 轮 batch 额外跳过 7*N-1 个指令入口。
+				maxIterations := (contextCheckCountdown + 1) / 7
+				nextPC, handledIterations, handled := vm.TryExecuteMixArithmeticForLoopBatch(batch, maxIterations)
+				if handled {
+					// superinstruction 已完成若干轮混合算术链与 FORLOOP；补偿被跳过的入口。
+					contextCheckCountdown -= handledIterations*7 - 1
+					previousPreviousPC = mixPC + 5
+					previousPC = mixPC + 6
+					pc = nextPC
+					continue
+				}
+			}
 			if nextPC, handled := vm.TryExecuteMixArithmeticForLoop(mixPC); handled {
 				// superinstruction 已完成完整混合算术循环体；补偿被跳过六条指令的倒计时。
 				contextCheckCountdown -= 6

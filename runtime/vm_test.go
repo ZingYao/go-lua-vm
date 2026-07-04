@@ -2845,6 +2845,97 @@ func TestVMTryExecuteMixArithmeticForLoop(t *testing.T) {
 	}
 }
 
+// TestVMTryExecuteMixArithmeticForLoopBatch 验证混合算术 batch 可连续提交多轮。
+func TestVMTryExecuteMixArithmeticForLoopBatch(t *testing.T) {
+	// 构造官方 arith_mix_loop 的完整循环体。
+	proto := bytecode.NewProto("mix-arithmetic-forloop-batch")
+	proto.Constants = []bytecode.Constant{
+		bytecode.IntegerConstant(3),
+		bytecode.IntegerConstant(7),
+		bytecode.IntegerConstant(2),
+		bytecode.IntegerConstant(5),
+	}
+	proto.Code = []bytecode.Instruction{
+		bytecode.CreateABC(bytecode.OpMul, 5, 4, bytecode.RKAsK(0)),
+		bytecode.CreateABC(bytecode.OpAdd, 5, 0, 5),
+		bytecode.CreateABC(bytecode.OpSub, 0, 5, bytecode.RKAsK(1)),
+		bytecode.CreateABC(bytecode.OpIDiv, 5, 0, bytecode.RKAsK(2)),
+		bytecode.CreateABC(bytecode.OpMod, 6, 4, bytecode.RKAsK(3)),
+		bytecode.CreateABC(bytecode.OpAdd, 0, 5, 6),
+		bytecode.CreateAsBx(bytecode.OpForLoop, 1, -7),
+	}
+	vm := NewVMWithPrototypeData(7, proto.Constants, nil, nil, nil)
+	vm.BindPrototype(proto)
+	if !vm.PrepareMixArithmeticForLoopSuperInstructions() {
+		// 完整循环体回跳到 MUL 时应能准备混合算术 superinstruction。
+		t.Fatalf("expected mix arithmetic superinstruction")
+	}
+	initialRegisters := []Value{IntegerValue(0), IntegerValue(1), IntegerValue(3), IntegerValue(1), IntegerValue(1), NilValue(), NilValue()}
+	for registerIndex, value := range initialRegisters {
+		// 初始化 sum 与 FORLOOP 控制寄存器，模拟 FORPREP 后进入循环体的状态。
+		if err := vm.SetRegister(registerIndex, value); err != nil {
+			t.Fatalf("set register %d failed: %v", registerIndex, err)
+		}
+	}
+
+	batch, ok := vm.PrepareMixArithmeticForLoopBatch(0)
+	if !ok {
+		// 官方混合算术形态应能准备 batch。
+		t.Fatalf("expected prepared mix arithmetic batch")
+	}
+	nextPC, iterations, handled := vm.TryExecuteMixArithmeticForLoopBatch(batch, 2)
+	if !handled || iterations != 2 || nextPC != 0 {
+		// 最多提交两轮时循环仍应跳回 MUL。
+		t.Fatalf("partial batch mismatch: handled=%v iterations=%d nextPC=%d", handled, iterations, nextPC)
+	}
+	if value, ok := vm.Register(0); !ok || !value.RawEqual(IntegerValue(1)) {
+		// 前两轮结果为 -1 后继续套用第二轮公式得到 1。
+		t.Fatalf("partial sum mismatch: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(5); !ok || !value.RawEqual(IntegerValue(-1)) {
+		// 临时寄存器保留第二轮 IDIV 后的值。
+		t.Fatalf("partial idiv temp mismatch: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(6); !ok || !value.RawEqual(IntegerValue(2)) {
+		// MOD 临时寄存器保留第二轮取模结果。
+		t.Fatalf("partial mod temp mismatch: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(1); !ok || !value.RawEqual(IntegerValue(3)) {
+		// FORLOOP 继续时内部 index 必须推进到第三轮。
+		t.Fatalf("partial index mismatch: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(4); !ok || !value.RawEqual(IntegerValue(3)) {
+		// 外部可见循环变量必须同步到第三轮。
+		t.Fatalf("partial visible index mismatch: value=%#v ok=%v", value, ok)
+	}
+
+	nextPC, iterations, handled = vm.TryExecuteMixArithmeticForLoopBatch(batch, 10)
+	if !handled || iterations != 1 || nextPC != 7 {
+		// 剩余一轮后达到 limit 并退出循环。
+		t.Fatalf("final batch mismatch: handled=%v iterations=%d nextPC=%d", handled, iterations, nextPC)
+	}
+	if value, ok := vm.Register(0); !ok || !value.RawEqual(IntegerValue(4)) {
+		// 三轮混合算术结果必须与普通 VM 一致。
+		t.Fatalf("final sum mismatch: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(5); !ok || !value.RawEqual(IntegerValue(1)) {
+		// 临时寄存器保留第三轮 IDIV 后的值。
+		t.Fatalf("final idiv temp mismatch: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(6); !ok || !value.RawEqual(IntegerValue(3)) {
+		// MOD 临时寄存器保留第三轮取模结果。
+		t.Fatalf("final mod temp mismatch: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(1); !ok || !value.RawEqual(IntegerValue(3)) {
+		// 循环退出时普通 FORLOOP 不写回越界后的内部 index。
+		t.Fatalf("final index mismatch: value=%#v ok=%v", value, ok)
+	}
+	if vm.currentPC != 6 || vm.pcOffset != 0 {
+		// batch 后 VM 状态应等价于刚执行完 FORLOOP。
+		t.Fatalf("final pc state mismatch: currentPC=%d pcOffset=%d", vm.currentPC, vm.pcOffset)
+	}
+}
+
 // TestVMTryExecuteMixArithmeticForLoopFallback 验证混合算术 guard 失败时无副作用回退。
 //
 // 除数为 0 或操作数类型不满足 integer guard 时，fast path 必须回退普通 VM，让普通路径保留
@@ -2890,6 +2981,60 @@ func TestVMTryExecuteMixArithmeticForLoopFallback(t *testing.T) {
 	if value, ok := vm.Register(5); !ok || !value.RawEqual(IntegerValue(99)) {
 		// 回退前不能提前覆盖临时寄存器。
 		t.Fatalf("fallback temp mutated: value=%#v ok=%v", value, ok)
+	}
+}
+
+// TestVMTryExecuteMixArithmeticForLoopBatchFallback 验证混合算术 batch guard 失败时无副作用回退。
+func TestVMTryExecuteMixArithmeticForLoopBatchFallback(t *testing.T) {
+	// 构造官方 arith_mix_loop 的完整循环体，动态类型 guard 在执行期失败。
+	proto := bytecode.NewProto("mix-arithmetic-forloop-batch-fallback")
+	proto.Constants = []bytecode.Constant{
+		bytecode.IntegerConstant(3),
+		bytecode.IntegerConstant(7),
+		bytecode.IntegerConstant(2),
+		bytecode.IntegerConstant(5),
+	}
+	proto.Code = []bytecode.Instruction{
+		bytecode.CreateABC(bytecode.OpMul, 5, 4, bytecode.RKAsK(0)),
+		bytecode.CreateABC(bytecode.OpAdd, 5, 0, 5),
+		bytecode.CreateABC(bytecode.OpSub, 0, 5, bytecode.RKAsK(1)),
+		bytecode.CreateABC(bytecode.OpIDiv, 5, 0, bytecode.RKAsK(2)),
+		bytecode.CreateABC(bytecode.OpMod, 6, 4, bytecode.RKAsK(3)),
+		bytecode.CreateABC(bytecode.OpAdd, 0, 5, 6),
+		bytecode.CreateAsBx(bytecode.OpForLoop, 1, -7),
+	}
+	vm := NewVMWithPrototypeData(7, proto.Constants, nil, nil, nil)
+	vm.BindPrototype(proto)
+	vm.PrepareMixArithmeticForLoopSuperInstructions()
+	initialRegisters := []Value{IntegerValue(11), IntegerValue(1), IntegerValue(1), IntegerValue(1), StringValue("not integer"), IntegerValue(99), IntegerValue(88)}
+	for registerIndex, value := range initialRegisters {
+		// 初始化一个外部循环变量不满足 integer guard 的场景。
+		if err := vm.SetRegister(registerIndex, value); err != nil {
+			t.Fatalf("set fallback register %d failed: %v", registerIndex, err)
+		}
+	}
+
+	batch, ok := vm.PrepareMixArithmeticForLoopBatch(0)
+	if !ok {
+		// 静态数据流仍匹配，动态类型 guard 应在执行期失败。
+		t.Fatalf("expected prepared mix arithmetic batch")
+	}
+	nextPC, iterations, handled := vm.TryExecuteMixArithmeticForLoopBatch(batch, 8)
+	if handled || iterations != 0 || nextPC != 0 {
+		// guard 不满足时必须回退普通 VM。
+		t.Fatalf("fallback mismatch: handled=%v iterations=%d nextPC=%d", handled, iterations, nextPC)
+	}
+	if value, ok := vm.Register(0); !ok || !value.RawEqual(IntegerValue(11)) {
+		// 回退前不能覆盖 sum，确保普通 VM 仍能产生原始错误或元方法语义。
+		t.Fatalf("fallback sum mutated: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(5); !ok || !value.RawEqual(IntegerValue(99)) {
+		// 回退前不能覆盖 IDIV 临时寄存器。
+		t.Fatalf("fallback idiv temp mutated: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(6); !ok || !value.RawEqual(IntegerValue(88)) {
+		// 回退前不能覆盖 MOD 临时寄存器。
+		t.Fatalf("fallback mod temp mutated: value=%#v ok=%v", value, ok)
 	}
 }
 
