@@ -1216,9 +1216,10 @@ func TestVMNewTable(t *testing.T) {
 	}
 }
 
-// TestVMNewTablePreallocatesNumericForArray 验证强约束 numeric-for 数组写入会预留 table 数组容量。
+// TestVMNewTablePreallocatesNumericForArray 验证强约束 numeric-for 数组写入会预留紧凑整数数组容量。
 //
-// 该优化只改变 table 数组区底层 cap，不改变 NEWTABLE 后的空表可见语义；后续 SETTABLE 仍逐条执行。
+// 该优化只改变 VM 已证明 table 的底层 backing store，不改变 NEWTABLE 后的空表可见语义；
+// 后续 SETTABLE 或 batch 写入仍负责逐步扩展可见前缀。
 func TestVMNewTablePreallocatesNumericForArray(t *testing.T) {
 	proto := &bytecode.Proto{
 		Constants: []bytecode.Constant{
@@ -1257,9 +1258,9 @@ func TestVMNewTablePreallocatesNumericForArray(t *testing.T) {
 		// 预留容量不能暴露为可见数组元素或 hash 元素。
 		t.Fatalf("preallocated table should still be empty: array=%d hash=%d", table.ArraySize(), table.HashSize())
 	}
-	if cap(table.arrayValues) != 200000 {
-		// 精确 t[i]=i 形态应按循环上界预留数组区容量。
-		t.Fatalf("array capacity mismatch: got %d", cap(table.arrayValues))
+	if table.denseIntegerValues == nil || cap(table.denseIntegerValues) != 200000 {
+		// 精确 t[i]=i 形态应按循环上界预留无指针 compact integer backing store。
+		t.Fatalf("dense integer capacity mismatch: values=%#v cap=%d", table.denseIntegerValues, cap(table.denseIntegerValues))
 	}
 	if got := table.RawGetInteger(1); !got.IsNil() {
 		// 预留槽位在写入前必须仍按 nil 读取。

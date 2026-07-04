@@ -52,6 +52,11 @@ const (
 type Table struct {
 	// arrayValues 保存正整数 key 的数组区，Lua key 从 1 开始映射到 index 0。
 	arrayValues []Value
+	// denseIntegerValues 保存 VM 已证明的连续正整数 key 到 integer value 的紧凑数组区。
+	//
+	// 该表示只由 VM table write batch 创建；普通 NewTable 不使用。任一复杂观察或非 integer 写入
+	// 都会 materialize 回 arrayValues，避免 next/pairs、弱表和元表路径理解两套存储。
+	denseIntegerValues []int64
 	// hashValues 保存非数组区 key 到 Lua 值的映射。
 	hashValues map[tableKey]Value
 	// hashKeys 保存 hash 区 tableKey 对应的原始 Lua key，用于 next 返回引用 identity key。
@@ -127,7 +132,77 @@ func newTableWithArrayCapacity(arrayCapacity int) *Table {
 	}
 
 	// len 保持 0，只预留 cap，避免预留槽位被 RawNext、ArraySize 或长度边界误认为可见数组区。
-	return &Table{arrayValues: make([]Value, 0, arrayCapacity)}
+	// 使用无指针 integer backing store，只有 VM 证明后续是连续 integer 写入时才会逐步填充。
+	return &Table{denseIntegerValues: make([]int64, 0, arrayCapacity)}
+}
+
+// hasDenseIntegerArray 判断当前 table 是否仍处于 VM 专用紧凑整数数组表示。
+//
+// 该状态只说明数组区可由 denseIntegerValues 表达；hash 区和元表仍按普通字段保存。
+func (table *Table) hasDenseIntegerArray() bool {
+	// nil slice 表示普通 table；非 nil slice 即使 len 为 0 也表示 compact 表示已启用。
+	return table != nil && table.denseIntegerValues != nil
+}
+
+// materializeDenseIntegerArray 将紧凑整数数组转换为普通 Value 数组区。
+//
+// 该转换不改变 Lua 可见内容，也不递增 mutationVersion；调用方若继续执行真实写入，会由写入路径
+// 自己调用 noteMutation。转换后 next/pairs、弱表清理、复杂写入和测试诊断均复用既有 arrayValues 逻辑。
+func (table *Table) materializeDenseIntegerArray() {
+	if !table.hasDenseIntegerArray() {
+		// 普通 table 无需转换。
+		return
+	}
+
+	denseValues := table.denseIntegerValues
+	table.denseIntegerValues = nil
+	if len(denseValues) == 0 {
+		// 只保留预留容量，不暴露任何可见数组槽位。
+		table.arrayValues = make([]Value, 0, cap(denseValues))
+		return
+	}
+
+	arrayValues := make([]Value, len(denseValues), cap(denseValues))
+	for index, integerValue := range denseValues {
+		// 每个紧凑槽位都是已证明的非 nil integer value，转换为普通 Lua Value。
+		arrayValues[index] = IntegerValue(integerValue)
+	}
+	table.arrayValues = arrayValues
+}
+
+// tryRawSetDenseInteger 尝试在紧凑整数数组上完成一次 raw integer 写入。
+//
+// 只接受正整数 key、非 nil integer value、连续追加或覆盖既有前缀。返回 false 表示调用方必须
+// materialize 后走普通 RawSetInteger，以保留 nil 删除、稀疏写入、hash 写入和错误路径。
+func (table *Table) tryRawSetDenseInteger(key int64, value Value) bool {
+	if !table.hasDenseIntegerArray() || key <= 0 || key > maxTableArrayIndex || value.Kind != KindInteger {
+		// 不属于 compact 表示覆盖范围，交给普通 table 语义处理。
+		return false
+	}
+	arrayIndex := int(key)
+	if arrayIndex > len(table.denseIntegerValues)+1 {
+		// 稀疏正整数写入会形成洞，必须 materialize 后复用普通边界搜索。
+		return false
+	}
+	if table.lengthCacheValid {
+		// 与普通正整数非 nil 写入保持相同长度缓存维护策略。
+		if key == table.lengthCache+1 {
+			table.lengthCache = key
+		} else if key > table.lengthCache {
+			table.invalidateLengthCache()
+		}
+	}
+	if arrayIndex == len(table.denseIntegerValues)+1 {
+		// 连续追加扩展可见前缀，底层 backing store 仍无指针。
+		table.denseIntegerValues = append(table.denseIntegerValues, value.Integer)
+		table.noteMutation()
+		return true
+	}
+
+	// 覆盖既有前缀槽位不改变可见长度。
+	table.denseIntegerValues[arrayIndex-1] = value.Integer
+	table.noteMutation()
+	return true
 }
 
 // ensureHashStorage 确保 hash 区 map 已初始化。
@@ -174,6 +249,11 @@ func (table *Table) RawSet(key Value, value Value) error {
 		// 正整数 key 进入数组区，符合 Lua table 的数组区基础语义。
 		table.RawSetInteger(integerKey, value)
 		return nil
+	}
+
+	if table.hasDenseIntegerArray() {
+		// 非数组 key 写入或删除需要普通 hash/array 结构承载，先回退到标准表示。
+		table.materializeDenseIntegerArray()
 	}
 
 	hashKey, err := makeTableKey(key)
@@ -234,6 +314,11 @@ func (table *Table) RawGet(key Value) (Value, error) {
 //
 // value 为 nil 时删除 key，模拟 Lua table 中赋 nil 删除字段的基础行为。
 func (table *Table) RawSetString(key string, value Value) {
+	if table.hasDenseIntegerArray() {
+		// string key 属于 hash 区；无论写入或删除都先 materialize，保留 mutation/cache 语义。
+		table.materializeDenseIntegerArray()
+	}
+
 	// nil 值表示删除字段，不在 table 中保留 nil 负载。
 	if value.IsNil() {
 		delete(table.hashValues, tableKey{kind: KindString, stringValue: key})
@@ -265,6 +350,14 @@ func (table *Table) RawGetString(key string) Value {
 //
 // value 为 nil 时删除 key，模拟 Lua table 中赋 nil 删除字段的基础行为。
 func (table *Table) RawSetInteger(key int64, value Value) {
+	if table.hasDenseIntegerArray() {
+		// 紧凑数组只覆盖连续正整数 key 写入 integer value；其他形态必须回退普通 table。
+		if table.tryRawSetDenseInteger(key, value) {
+			return
+		}
+		table.materializeDenseIntegerArray()
+	}
+
 	if key > 0 {
 		// 正整数写入可能影响 Lua 长度边界，需要先维护或失效长度缓存。
 		table.updateLengthCacheForIntegerSet(key, value)
@@ -305,6 +398,14 @@ func (table *Table) RawSetInteger(key int64, value Value) {
 // key 必须大于 0，value 必须不是 nil；不满足时回退 RawSetInteger 保持语义。该入口服务
 // VM 中数值 for 数组写入热路径，避免重复执行 nil/delete 分支。
 func (table *Table) RawSetPositiveIntegerNonNil(key int64, value Value) {
+	if table.hasDenseIntegerArray() {
+		// VM table write batch 的目标快路径；guard 失败时 materialize 后复用普通整数写入。
+		if table.tryRawSetDenseInteger(key, value) {
+			return
+		}
+		table.materializeDenseIntegerArray()
+	}
+
 	if key <= 0 || value.IsNil() {
 		// 调用方条件不满足时回退完整整数写入语义。
 		table.RawSetInteger(key, value)
@@ -347,6 +448,11 @@ func (table *Table) RawSetPositiveIntegerNonNil(key int64, value Value) {
 //
 // key 不存在时返回 Lua nil。
 func (table *Table) RawGetInteger(key int64) Value {
+	if table.hasDenseIntegerArray() && key > 0 && key <= int64(len(table.denseIntegerValues)) {
+		// 紧凑数组保存连续正整数 integer value，读取时即时构造 Lua integer。
+		return IntegerValue(table.denseIntegerValues[key-1])
+	}
+
 	if key > 0 && key <= int64(len(table.arrayValues)) {
 		// 正整数 key 优先读取数组区。
 		value := table.arrayValues[key-1]
@@ -429,6 +535,11 @@ func (table *Table) SetWithRunner(key Value, value Value, runner LuaMetamethodRu
 // key 为 nil 时返回第一个非 nil 项；返回 ok=false 表示迭代结束。当前实现按数组区正整数
 // 升序、hash 区稳定排序输出，顺序不承诺等同 Lua C 实现内部 hash 顺序。
 func (table *Table) RawNext(key Value) (Value, Value, bool, error) {
+	if table.hasDenseIntegerArray() {
+		// next/pairs 需要稳定快照、删除当前 key 后继续等完整语义，先 materialize 到普通数组区。
+		table.materializeDenseIntegerArray()
+	}
+
 	// 先构建稳定迭代快照，避免 Go map 遍历顺序影响测试与 VM 行为复现。
 	entries := table.rawIterationEntries()
 	if len(entries) == 0 {
@@ -572,6 +683,11 @@ func (table *Table) RawIPairsNext(index int64) (int64, Value, bool) {
 // 当前方法只处理 table/function/userdata/thread 这类引用值；字符串按当前运行时值语义保留。
 // 返回值表示是否删除过条目，供 GC 兼容层测试和诊断使用。
 func (table *Table) SweepWeakEntries(strongRefs map[tableKey]bool) bool {
+	if table.hasDenseIntegerArray() {
+		// 弱表清理和 finalizer 顺序只理解普通数组/hash 存储，观察前先 materialize。
+		table.materializeDenseIntegerArray()
+	}
+
 	// 读取弱模式；非弱表没有清理动作。
 	weakKeys, weakValues := table.weakMode()
 	if !weakKeys && !weakValues {
@@ -623,6 +739,10 @@ func (table *Table) SweepWeakValueEntries(strongRefs map[tableKey]bool) bool {
 		// nil table 没有可清理内容。
 		return false
 	}
+	if table.hasDenseIntegerArray() {
+		// weak value-only 清理需要逐个 Lua Value 判断可收集性，先回到普通数组区。
+		table.materializeDenseIntegerArray()
+	}
 	weakKeys, weakValues := table.weakMode()
 	if weakKeys || !weakValues {
 		// 只处理 weak value-only 表，其他弱模式留给完整 sweep。
@@ -667,6 +787,10 @@ func (table *Table) SweepWeakKVEntriesBeforeFinalizers(strongRefs map[tableKey]b
 	if table == nil {
 		// nil table 没有可清理内容。
 		return false
+	}
+	if table.hasDenseIntegerArray() {
+		// finalizer 前弱表清理必须复用普通 value 存储和迭代失效语义。
+		table.materializeDenseIntegerArray()
 	}
 	weakKeys, weakValues := table.weakMode()
 	if !weakKeys || !weakValues {
@@ -797,6 +921,11 @@ func isWeakCollectableValue(value Value) bool {
 //
 // 该方法用于测试与后续 resize 策略验证，不代表 Lua 长度运算结果。
 func (table *Table) ArraySize() int {
+	if table.hasDenseIntegerArray() {
+		// 测试/诊断读取数组区大小时只暴露可见连续前缀，不暴露预留容量。
+		return len(table.denseIntegerValues)
+	}
+
 	// 直接返回数组区底层长度。
 	return len(table.arrayValues)
 }
@@ -817,6 +946,13 @@ func (table *Table) Len() int64 {
 	if table.lengthCacheValid {
 		// 连续数组追加场景可直接复用缓存，避免每次 #t 都做边界搜索。
 		return table.lengthCache
+	}
+
+	if table.hasDenseIntegerArray() {
+		// 紧凑表示只保存连续非 nil integer 前缀，长度边界就是可见槽位数。
+		length := int64(len(table.denseIntegerValues))
+		table.setLengthCache(length)
+		return length
 	}
 
 	// 数组区为空时，直接从 0 开始在 hash 区查找边界。
@@ -1114,6 +1250,11 @@ func (table *Table) setThroughNewIndexChainWithRunner(key Value, value Value, ru
 //
 // 数组区按正整数 key 升序输出，hash 区按类型和值排序输出；nil 值会被跳过。
 func (table *Table) rawIterationEntries() []tableEntry {
+	if table.hasDenseIntegerArray() {
+		// raw 迭代需要完整 Value 快照和继续 key 索引，先 materialize 以复用既有实现。
+		table.materializeDenseIntegerArray()
+	}
+
 	if table.iterationCacheValid && table.iterationCacheVersion == table.mutationVersion {
 		// 当前 table 未发生 raw 写入时复用上一轮快照，避免 pairs/next 每步重复排序 hash 区。
 		return table.iterationCache
@@ -1228,6 +1369,11 @@ func tableKeyLess(left tableKey, right tableKey) bool {
 //
 // size 使用 Lua 正整数 key，对应 Go slice 长度。
 func (table *Table) ensureArraySize(size int) {
+	if table.hasDenseIntegerArray() {
+		// 调用完整数组扩容前先回退普通 Value 数组，避免同一 table 同时维护两套数组区。
+		table.materializeDenseIntegerArray()
+	}
+
 	if len(table.arrayValues) >= size {
 		// 当前数组区已经足够大，无需扩展。
 		return

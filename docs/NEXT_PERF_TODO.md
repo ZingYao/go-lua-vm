@@ -369,6 +369,43 @@ prepared profile 显示剩余分配主要是一次 `[]Value` 大数组 backing s
 - 官方兼容脚本必须全绿；任何 `#t`、`rawget/rawset`、`next/pairs` 顺序、弱表/finalizer、metatable、
   debug hook 或错误路径差异都回退。
 
+2026-07-04 已实现 dense integer array prototype：`newTableWithArrayCapacity` 只在 VM 已证明的预分配入口
+创建 compact table，普通 `NewTable` 和外部 Go API 仍保持原数组区；compact 表只接受连续正整数 key 和
+integer value，复杂写入、raw 迭代、弱表清理和完整数组扩容都会 materialize 回普通 `[]Value` 数组区。
+`d674551` 中补齐的 guard 测试保持全绿。
+
+目标 Go micro 结果：
+
+```bash
+CGO_ENABLED=0 go test ./lua -run '^$' -bench '^Benchmark(DoString|Prepared)TableReadWriteOfficial$' \
+  -benchmem -benchtime=2s -count=3
+```
+
+- `BenchmarkDoStringTableReadWriteOfficial`：约 `4.88-4.89 ms/op`、`1.73 MB/op`、`222 allocs/op`。
+- `BenchmarkPreparedTableReadWriteOfficial`：约 `4.77-4.84 ms/op`、`1.61 MB/op`、`3 allocs/op`。
+
+对比 `5956414` profile 记录的 prepared 约 `4.98 ms/op`、`11.21 MB/op`、`3 allocs/op`，B/op 降幅约
+`86%`，满足首轮内存验收；wall-clock 只小幅下降，说明当前剩余时间主要不再由 Go 指针数组 GC 扫描主导。
+
+重建 `bin/glua` / `bin/gluac` 后，显式使用官方 Lua/Luac 5.3.6 的完整 benchmark 复核结果：
+
+| 用例 | 官方工具中位数 | 本项目中位数 | 本项目/官方 |
+| --- | ---: | ---: | ---: |
+| `arith_add_loop` | `0.007259s` | `0.008775s` | `1.21x` |
+| `arith_mix_loop` | `0.010733s` | `0.012462s` | `1.16x` |
+| `arith_chain_temp` | `0.012182s` | `0.009348s` | `0.77x` |
+| `table_rw` | `0.006678s` | `0.008521s` | `1.28x` |
+| `function_call` | `0.006258s` | `0.006602s` | `1.05x` |
+| `string_concat` | `0.004339s` | `0.004583s` | `1.06x` |
+| `closure_upvalue` | `0.007639s` | `0.006533s` | `0.86x` |
+| `stdlib_math_string` | `0.018605s` | `0.010701s` | `0.58x` |
+| `recursion` | `0.003240s` | `0.003513s` | `1.08x` |
+| `compile_3000_functions` | `0.004890s` | `0.009239s` | `1.89x` |
+
+结论：`table_rw` 从前一轮完整 benchmark 的约 `1.48x` 降到 `1.28x`，端到端收益明确但仍略高于
+首轮 `1.25x` 稳定目标；Go micro 已证明主内存分配大幅下降，后续若继续压缩 table 路径，应先 profile
+剩余执行成本，避免直接进入更接近 benchmark 专项的整段 table 逃逸消除。
+
 更激进的后备方案是整段 table 逃逸消除：
 
 - 只匹配 `NEWTABLE; numeric-for t[i]=i; numeric-for sum=sum+t[i]; RETURN` 这一类 table 完全不逃逸的固定形态。
@@ -497,7 +534,8 @@ prepared profile 显示剩余分配主要是一次 `[]Value` 大数组 backing s
 - [x] profile `table_rw`，确认当前主要成本已从连续扩容和 dispatch 转为大数组分配与 GC 扫描。
 - [x] 为 `table_rw` dense integer array 或逃逸消除方案补设计小节，先列出 materialize、迭代、元表、弱表和 debug 可见性边界。
 - [x] 为 `table_rw` compact table 补最小 guard 测试，再决定是否实现 dense integer array prototype。
-- [ ] 实现 `table_rw` dense integer array prototype，若 B/op 或官方兼容语义不满足验收则回退。
+- [x] 实现 `table_rw` dense integer array prototype，若 B/op 或官方兼容语义不满足验收则回退。
+- [x] 重建 CLI 后复核官方完整 benchmark，确认 `table_rw` 端到端倍率变化。
 - [ ] 每个生产优化 commit 后更新本文或 `docs/BENCHMARK.md`。
 
 ## 正确性门禁
