@@ -408,6 +408,38 @@ CGO_ENABLED=0 go test ./lua -run '^$' -bench '^Benchmark(DoString|Prepared)Table
 首轮 `1.25x` 稳定目标；Go micro 已证明主内存分配大幅下降，后续若继续压缩 table 路径，应先 profile
 剩余执行成本，避免直接进入更接近 benchmark 专项的整段 table 逃逸消除。
 
+2026-07-04 在 `9b8eb2d` 后复核 `table_rw` prepared profile：
+
+```bash
+CGO_ENABLED=0 go test ./lua -run '^$' \
+  -bench '^BenchmarkPreparedTableReadWriteOfficial$' \
+  -benchmem -benchtime=5s -count=1 \
+  -cpuprofile /tmp/go-lua-vm-next-profiles/table_rw_after_9b8eb2d_cpu.pprof \
+  -memprofile /tmp/go-lua-vm-next-profiles/table_rw_after_9b8eb2d_mem.pprof
+```
+
+- `BenchmarkPreparedTableReadWriteOfficial`：约 `4.78 ms/op`、`1.61 MB/op`、`3 allocs/op`。
+- 五轮复跑稳定在约 `4.79-4.81 ms/op`、`1.61 MB/op`、`3 allocs/op`。
+- CPU profile 中可归因热点主要是 `TryExecuteTableWriteForLoopBatch`、`TryExecuteTableReadAddForLoopBatch`、
+  `RawSetPositiveIntegerNonNil`、`tryRawSetDenseInteger` 和 `RawGetInteger`；`alloc_space` 仍约 `99.75%`
+  落在 `newTableWithArrayCapacity` 的 dense backing array。
+
+结论：dense integer array 原型已经把 B/op 从约 `11.21 MB/op` 压到 `1.61 MB/op`，剩余主要是每次执行
+仍必须创建一份可观察 table 内容，以及写/读 batch 内部每轮都走 raw helper、mutation/cache 维护和
+`IntegerValue` 构造。继续推进 table 路径不应直接做整段逃逸消除；更小的候选是先为 batch 内 dense-only
+直写/直读补 guard 测试和设计，再决定是否实现：
+
+- 写入 batch 只有在目标 table 为无元表 dense 表、key/value 都等于 for 循环当前 integer、连续正整数前缀、
+  且执行期无 hook/continuation 时，才允许直接追加或覆盖 `denseIntegerValues`，并在 batch 末尾统一维护
+  mutation/length cache；guard 失败必须回退现有 `RawSetPositiveIntegerNonNil`。
+- 读取 batch 只有在 table 为无元表 dense 表、读取 key 位于连续前缀内、读出值仍是 integer、累加寄存器为
+  integer 时，才允许直接从 `denseIntegerValues` 累加；guard 失败必须回退现有 `RawGetInteger` + ADD。
+- 定向测试必须覆盖 partial batch、最终退出 batch、元表回退、稀疏/非 integer materialize 后回退、
+  `RawNext`/`pairs` 观察前 materialize、length cache 和 mutationVersion 只在语义可见处变化。
+- 如果该方向只能降低 CPU 小分支而不能降低 `1.61 MB/op` 主分配，则不应继续扩大；下一阶段再评估整段 table
+  逃逸消除的 hook、metatable、rawget/rawset、next/pairs、`#t`、upvalue/closure、返回/传参、错误 traceback
+  和 debug 可见性边界。
+
 更激进的后备方案是整段 table 逃逸消除：
 
 - 只匹配 `NEWTABLE; numeric-for t[i]=i; numeric-for sum=sum+t[i]; RETURN` 这一类 table 完全不逃逸的固定形态。
@@ -918,6 +950,7 @@ CGO_ENABLED=0 go test ./internal/luac -run '^$' \
 - [x] 为 `table_rw` compact table 补最小 guard 测试，再决定是否实现 dense integer array prototype。
 - [x] 实现 `table_rw` dense integer array prototype，若 B/op 或官方兼容语义不满足验收则回退。
 - [x] 重建 CLI 后复核官方完整 benchmark，确认 `table_rw` 端到端倍率变化。
+- [x] 复核 dense integer array 后 `table_rw` 剩余 CPU/alloc profile，记录 batch 内 dense-only 候选边界。
 - [x] 优化 lexer 标识符 ASCII 扫描，复核 `compile_3000_functions` Go micro 与 CLI 端到端收益。
 - [x] 证伪纯十进制 int64 byte 快路径，未保留生产改动。
 - [x] 证伪 `skipWhitespace` byte 直扫，未保留生产改动。
