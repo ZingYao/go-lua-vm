@@ -519,6 +519,49 @@ func TestLexerScanIdentifier(t *testing.T) {
 	}
 }
 
+// TestLexerScanIdentifierStopsBeforeNonASCII 验证标识符扫描不会吞掉后续非 ASCII 字符。
+//
+// 当前标识符限定 ASCII；非 ASCII 字符必须留给普通非法 token 路径按完整 UTF-8 rune 消费。
+func TestLexerScanIdentifierStopsBeforeNonASCII(t *testing.T) {
+	lexer := New("abc界")
+
+	identifier, position, ok := lexer.ScanIdentifier()
+	if !ok {
+		// 输入以 ASCII 字母开头，必须先识别前缀标识符。
+		t.Fatalf("expected identifier")
+	}
+	if identifier != "abc" {
+		// 标识符扫描必须停在第一个非 ASCII 字节之前。
+		t.Fatalf("unexpected identifier=%q", identifier)
+	}
+	if position.Line != 1 || position.Column != 1 || position.Offset != 0 {
+		// 起始位置应指向标识符第一个字符。
+		t.Fatalf("unexpected identifier position=%+v", position)
+	}
+
+	currentPosition := lexer.source.Position()
+	if currentPosition.Line != 1 || currentPosition.Column != 4 || currentPosition.Offset != 3 {
+		// 三个 ASCII 字符消费后，列号推进 3，字节偏移也推进 3。
+		t.Fatalf("unexpected current position=%+v", currentPosition)
+	}
+
+	nextRune, ok := lexer.PeekRune()
+	if !ok {
+		// 非 ASCII 字符仍在输入中，不能被标识符扫描消费。
+		t.Fatalf("expected remaining non-ascii rune")
+	}
+	if nextRune != '界' {
+		// 后续读取必须仍能看到完整 UTF-8 rune，而不是单个残留字节。
+		t.Fatalf("unexpected next rune=%q", nextRune)
+	}
+
+	token := lexer.NextToken()
+	if token.Kind != TokenIllegal || token.Text != "界" {
+		// 非 ASCII 标识符后缀继续走普通非法 token 路径，保持错误语义。
+		t.Fatalf("unexpected token after identifier: kind=%s text=%q err=%v", token.Kind, token.Text, token.Err)
+	}
+}
+
 // TestLexerNextTokenRecognizesKeywordOperatorEOFAndIllegal 验证完整 token 流的关键分类。
 //
 // 该用例覆盖关键字、标识符、操作符、EOF 和非法字符，确保 lexer 可以被 parser 基础接入。
