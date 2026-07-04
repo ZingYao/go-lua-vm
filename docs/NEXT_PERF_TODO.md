@@ -94,6 +94,47 @@ go tool pprof -top -alloc_space /tmp/go-lua-vm-next-profiles/string_concat_mem.p
 但必须处理字符串不可变、`__concat` 元方法、debug hook 和中间值可见性，语义风险高于
 `arith_mix_loop` batch。除非先补充字节码和元方法可见性设计，本分支优先不直接实现该 fast path。
 
+2026-07-04 复核官方规模 fixture：
+
+```lua
+local s = ''
+for i = 1, 8000 do
+  s = s .. 'x'
+end
+return #s
+```
+
+官方 Lua 5.3.6 `luac -l -l` 热循环为：
+
+```text
+FORPREP; MOVE; LOADK; CONCAT; FORLOOP
+```
+
+本项目 `gluac -l -l` 热循环同样为 `FORPREP; MOVE; LOADK; CONCAT; FORLOOP`；项目在循环退出后额外
+保留一个零距离 `JMP`，不在热路径内。当前热体每轮会把 `s` 复制到临时寄存器、加载常量 `"x"`，
+再执行 `CONCAT A=0 B=5 C=6` 写回 `s`，因此可见语义上的中间值是每轮循环结束后的新字符串。
+
+元方法可见性复核：
+
+- 官方 Lua 5.3.6 和 glua 均不会在 `"a" .. "b"` 两侧都可直接转字符串时调用 string 类型
+  `__concat`。
+- 官方 Lua 5.3.6 和 glua 均会在 `{} .. "b"` 这类存在不可直接转字符串操作数时查找并调用
+  `__concat`。
+- 现有测试已经覆盖 `__concat` 的 `debug.getinfo(1)` tagmethod 名称，以及连续 `CONCAT`
+  元方法 yield 后继续折叠的 coroutine 语义。
+
+因此，后续若实现 builder fast path，只能作为更窄的运行期 guard：
+
+- 只匹配 `s = s .. Kstring` 这一类 `MOVE; LOADK; CONCAT; FORLOOP`，且目标寄存器、源寄存器、
+  临时寄存器和 numeric-for 控制寄存器互不破坏。
+- 运行期必须确认参与拼接的当前值与右侧常量都是 raw string；任一 operand 不是 string 时立即回退
+  普通 `CONCAT`，保留 number 转换、错误文本和 `__concat` 元方法机会。
+- debug hook、精确帧同步、coroutine continuation、yield 恢复或需要逐条 PC 可见性的场景必须回退普通 VM；
+  builder 批量执行会跳过每轮 `s` 的寄存器写回和行事件，不能让 debug hook 观察到压缩后的中间状态。
+- 批量窗口仍需要保留 context 取消检查边界，不能把 8000 次循环压成一次不可中断的大块。
+- 实现前必须先补定向测试：string metatable `__concat` 不拦截 string/string、非 string operand 仍触发
+  `__concat`、yielding `__concat` 继续折叠、debug hook 下不命中 builder、错误路径和 `#s` 结果一致。
+
 ### `compile_3000_functions`
 
 命令：
@@ -236,7 +277,8 @@ typed statement / compact function statement prototype：在不破坏 parser、s
 - [x] 补跑 `arith_mix_loop` DoString benchmark，确认端到端同步受益且没有新的编译期噪声。
 - [x] 设计并实现 batch mix arithmetic superinstruction，证明 context、PC、debug hook、coroutine 和错误路径等价。
 - [x] profile `string_concat` CPU/alloc，确认主因是 `executeConcat` 短命字符串分配和 GC 压力。
-- [ ] 复核 `string_concat` 官方 fixture 字节码与元方法可见性，再决定是否进入窄形态 builder。
+- [x] 复核 `string_concat` 官方 fixture 字节码与元方法可见性，再决定是否进入窄形态 builder。
+- [ ] 设计并补齐 `string_concat` builder guard 定向测试后，再决定是否实现窄形态 builder。
 - [ ] profile `stdlib_math_string` 剩余热点，确认是否仍有表达式级消费消除空间。
 - [ ] 每个生产优化 commit 后更新本文或 `docs/BENCHMARK.md`。
 
