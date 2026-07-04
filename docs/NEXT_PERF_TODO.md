@@ -22,21 +22,21 @@
 
 | 排名 | 用例 | 三轮倍率 | 平均 |
 | ---: | --- | ---: | ---: |
-| 1 | `stdlib_math_string` | `0.57x / 0.57x / 0.57x` | `0.57x` |
-| 2 | `arith_chain_temp` | `0.76x / 0.77x / 0.78x` | `0.77x` |
-| 3 | `closure_upvalue` | `0.86x / 0.87x / 0.86x` | `0.86x` |
-| 4 | `function_call` | `1.05x / 1.04x / 1.05x` | `1.05x` |
-| 5 | `string_concat` | `1.05x / 1.08x / 1.06x` | `1.06x` |
-| 6 | `recursion` | `1.09x / 1.11x / 1.07x` | `1.09x` |
-| 7 | `arith_mix_loop` | `1.17x / 1.18x / 1.17x` | `1.17x` |
-| 8 | `arith_add_loop` | `1.20x / 1.19x / 1.21x` | `1.20x` |
-| 9 | `table_rw` | `1.29x / 1.34x / 1.28x` | `1.30x` |
-| 10 | `compile_3000_functions` | `1.91x / 1.95x / 1.96x` | `1.94x` |
+| 1 | `stdlib_math_string` | `0.59x / 0.59x / 0.59x` | `0.59x` |
+| 2 | `arith_chain_temp` | `0.76x / 0.77x / 0.76x` | `0.76x` |
+| 3 | `closure_upvalue` | `0.87x / 0.87x / 0.87x` | `0.87x` |
+| 4 | `table_rw` | `0.87x / 0.88x / 0.90x` | `0.88x` |
+| 5 | `string_concat` | `1.05x / 1.03x / 1.03x` | `1.04x` |
+| 6 | `function_call` | `1.06x / 1.06x / 1.02x` | `1.05x` |
+| 7 | `recursion` | `1.09x / 1.05x / 1.11x` | `1.08x` |
+| 8 | `arith_mix_loop` | `1.17x / 1.17x / 1.17x` | `1.17x` |
+| 9 | `arith_add_loop` | `1.23x / 1.21x / 1.24x` | `1.23x` |
+| 10 | `compile_3000_functions` | `1.28x / 1.29x / 1.30x` | `1.29x` |
 
-低于 `1.00x` 表示本项目快于官方 Lua 5.3.6。2026-07-04 在 `e366448` 后重建
-`bin/glua` / `bin/gluac` 并显式使用官方 Lua/Luac 5.3.6 复跑三轮后，`compile_3000_functions`
-仍是最高剩余差距，`table_rw` 次之；后续优先级按平均倍率、语义风险和泛化价值排序，不再围绕已经快于
-官方或接近官方的 benchmark 定向路径继续扩张。
+低于 `1.00x` 表示本项目快于官方 Lua 5.3.6。2026-07-04 在 `77611b9` 后重建
+`bin/glua` / `bin/gluac` 并显式使用官方 Lua/Luac 5.3.6 复跑三轮后，`table_rw` 已稳定低于
+`1.00x`，剩余最高项为 `compile_3000_functions`，其次是 `arith_add_loop` 和 `arith_mix_loop`；
+后续优先级按平均倍率、语义风险和泛化价值排序，不再围绕已经快于官方或接近官方的 benchmark 定向路径继续扩张。
 
 ## 首轮 profile 基线
 
@@ -1002,6 +1002,7 @@ CGO_ENABLED=0 go test ./internal/luac -run '^$' \
 - [x] 复核 dense integer array 后 `table_rw` 剩余 CPU/alloc profile，记录 batch 内 dense-only 候选边界。
 - [x] 为 `table_rw` batch 内 dense-only 直写/直读补 guard 测试，固定 materialize、元表和 mutation 可见性边界。
 - [x] 实现 `table_rw` batch 内 dense-only 直写/直读，并复核 Go micro 与官方完整 benchmark。
+- [x] 在 `77611b9` 后重建 CLI 并复跑默认完整 benchmark 三轮，重新排序剩余高于 `1.0x` 的路径。
 - [x] 优化 lexer 标识符 ASCII 扫描，复核 `compile_3000_functions` Go micro 与 CLI 端到端收益。
 - [x] 证伪纯十进制 int64 byte 快路径，未保留生产改动。
 - [x] 证伪 `skipWhitespace` byte 直扫，未保留生产改动。
