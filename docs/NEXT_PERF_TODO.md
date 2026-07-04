@@ -22,19 +22,21 @@
 
 | 排名 | 用例 | 三轮倍率 | 平均 |
 | ---: | --- | ---: | ---: |
-| 1 | `arith_chain_temp` | `0.77x / 0.76x / 0.78x` | `0.77x` |
-| 2 | `closure_upvalue` | `0.86x / 0.86x / 0.86x` | `0.86x` |
-| 3 | `function_call` | `0.98x / 1.01x / 1.02x` | `1.00x` |
-| 4 | `recursion` | `1.06x / 1.03x / 1.03x` | `1.04x` |
-| 5 | `arith_add_loop` | `1.20x / 1.20x / 1.21x` | `1.20x` |
-| 6 | `table_rw` | `1.45x / 1.44x / 1.46x` | `1.45x` |
-| 7 | `stdlib_math_string` | `1.55x / 1.53x / 1.54x` | `1.54x` |
-| 8 | `string_concat` | `1.82x / 1.84x / 1.82x` | `1.83x` |
-| 9 | `arith_mix_loop` | `1.97x / 1.92x / 1.91x` | `1.93x` |
-| 10 | `compile_3000_functions` | `2.01x / 1.91x / 1.90x` | `1.94x` |
+| 1 | `stdlib_math_string` | `0.57x / 0.57x / 0.57x` | `0.57x` |
+| 2 | `arith_chain_temp` | `0.76x / 0.77x / 0.78x` | `0.77x` |
+| 3 | `closure_upvalue` | `0.86x / 0.87x / 0.86x` | `0.86x` |
+| 4 | `function_call` | `1.05x / 1.04x / 1.05x` | `1.05x` |
+| 5 | `string_concat` | `1.05x / 1.08x / 1.06x` | `1.06x` |
+| 6 | `recursion` | `1.09x / 1.11x / 1.07x` | `1.09x` |
+| 7 | `arith_mix_loop` | `1.17x / 1.18x / 1.17x` | `1.17x` |
+| 8 | `arith_add_loop` | `1.20x / 1.19x / 1.21x` | `1.20x` |
+| 9 | `table_rw` | `1.29x / 1.34x / 1.28x` | `1.30x` |
+| 10 | `compile_3000_functions` | `1.91x / 1.95x / 1.96x` | `1.94x` |
 
-低于 `1.00x` 表示本项目快于官方 Lua 5.3.6。下一阶段优先级按平均倍率、语义风险和泛化价值排序，
-不再围绕已经快于官方或接近官方的 benchmark 定向路径继续扩张。
+低于 `1.00x` 表示本项目快于官方 Lua 5.3.6。2026-07-04 在 `e366448` 后重建
+`bin/glua` / `bin/gluac` 并显式使用官方 Lua/Luac 5.3.6 复跑三轮后，`compile_3000_functions`
+仍是最高剩余差距，`table_rw` 次之；后续优先级按平均倍率、语义风险和泛化价值排序，不再围绕已经快于
+官方或接近官方的 benchmark 定向路径继续扩张。
 
 ## 首轮 profile 基线
 
@@ -517,7 +519,7 @@ CGO_ENABLED=0 go test ./lua -run '^$' -bench '^Benchmark(DoString|Prepared)Table
 
 ## TODO
 
-- [ ] 跑下一阶段基线：默认完整 benchmark 三轮、剩余高于 `1.0x` 项的 Go micro 矩阵。
+- [x] 跑下一阶段基线：默认完整 benchmark 三轮、剩余高于 `1.0x` 项的 Go micro 矩阵。
 - [x] profile `compile_3000_functions`，确认 `FunctionStatement` / typed statement storage 仍是主切口，同时记录 codegen arena 空间成本。
 - [x] 为 typed statement / compact AST 方案补设计小节，列出 parser、semantic、codegen、debug 和错误语义影响面。
 - [x] 实现最小 typed statement prototype；若收益不足或 B/op 升高，记录证伪并回退。
