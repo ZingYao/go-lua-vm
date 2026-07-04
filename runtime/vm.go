@@ -2635,6 +2635,10 @@ func (vm *VM) TryExecuteTableWriteForLoopBatch(batch TableWriteForLoopBatch, max
 	limit := limitValue.Integer
 	step := stepValue.Integer
 	visibleIndex := visibleIndexValue.Integer
+	if directNextPC, directIterations, directHandled := vm.tryExecuteDenseTableWriteForLoopBatch(table, superInstruction, batch.pc, maxIterations, index, limit, step, visibleIndex); directHandled {
+		// dense table 的连续整数写入可以绕过 raw helper；guard 已失败时会保守落回普通 batch。
+		return directNextPC, directIterations, true
+	}
 	nextPC = batch.pc
 	for iterations < maxIterations {
 		table.RawSetPositiveIntegerNonNil(visibleIndex, IntegerValue(visibleIndex))
@@ -2660,6 +2664,69 @@ func (vm *VM) TryExecuteTableWriteForLoopBatch(batch TableWriteForLoopBatch, max
 		return 0, 0, false
 	}
 	vm.currentPC = batch.pc + 1
+	vm.skipNext = false
+	vm.closeFrom = -1
+	vm.hasCallRequest = false
+	vm.returned = false
+	return nextPC, iterations, true
+}
+
+// tryExecuteDenseTableWriteForLoopBatch 直接批量写入 dense integer table。
+//
+// 该路径只服务已证明的 `t[i] = i; FORLOOP` 形态；table 必须保持无元表 dense 表示，循环步长必须为 1，
+// 且内部 index 与外部可见 index 对齐。任一 guard 不满足时返回 handled=false，让调用方继续使用现有
+// RawSetPositiveIntegerNonNil 路径保留 materialize、元表、错误和稀疏写入语义。
+func (vm *VM) tryExecuteDenseTableWriteForLoopBatch(table *Table, superInstruction tableWriteForLoopSuperInstruction, pc int, maxIterations int, index int64, limit int64, step int64, visibleIndex int64) (nextPC int, iterations int, handled bool) {
+	// 只有 dense table、单位正步长和 index 对齐时，才能把 key/value 视为连续整数序列。
+	if table == nil || !table.hasDenseIntegerArray() || step != 1 || index != visibleIndex {
+		return 0, 0, false
+	}
+
+	registers := vm.registers
+	nextPC = pc
+	for iterations < maxIterations {
+		if visibleIndex <= 0 || visibleIndex > maxTableArrayIndex {
+			// 非正 key 或超过数组区上限时，需要回到普通 RawSet 以保留 hash/错误边界。
+			break
+		}
+		arrayIndex := int(visibleIndex)
+		if arrayIndex > len(table.denseIntegerValues)+1 {
+			// 稀疏写入会形成洞，必须回到普通 RawSet 触发 materialize。
+			break
+		}
+		if arrayIndex == len(table.denseIntegerValues)+1 {
+			// 连续追加直接扩展无指针 dense backing store。
+			table.denseIntegerValues = append(table.denseIntegerValues, visibleIndex)
+		} else {
+			// 覆盖既有连续前缀槽位，保持 Lua raw set 的覆盖语义。
+			table.denseIntegerValues[arrayIndex-1] = visibleIndex
+		}
+		iterations++
+
+		nextIndex := index + step
+		nextPC = superInstruction.ExitPC
+		if forIntegerLoopContinues(nextIndex, limit, step) {
+			// 循环继续时更新内部 index 和外部可见循环变量，并跳回 SETTABLE。
+			index = nextIndex
+			visibleIndex = nextIndex
+			registers[superInstruction.ForBase] = IntegerValue(index)
+			registers[superInstruction.ForBase+3] = IntegerValue(visibleIndex)
+			nextPC = superInstruction.LoopPC
+			vm.pcOffset = superInstruction.ForSBx
+		} else {
+			// 循环结束时不写入越界后的 index，保持普通 FORLOOP 语义。
+			vm.pcOffset = 0
+			break
+		}
+	}
+	if iterations == 0 {
+		// 首轮 guard 即失败时不能产生任何副作用，交给普通 batch 路径处理。
+		return 0, 0, false
+	}
+
+	table.setLengthCache(int64(len(table.denseIntegerValues)))
+	table.noteMutation()
+	vm.currentPC = pc + 1
 	vm.skipNext = false
 	vm.closeFrom = -1
 	vm.hasCallRequest = false
@@ -2861,6 +2928,10 @@ func (vm *VM) TryExecuteTableReadAddForLoopBatch(batch TableReadAddForLoopBatch,
 	limit := limitValue.Integer
 	step := stepValue.Integer
 	visibleIndex := visibleIndexValue.Integer
+	if directNextPC, directIterations, directHandled := vm.tryExecuteDenseTableReadAddForLoopBatch(table, superInstruction, batch.pc, maxIterations, sum, index, limit, step, visibleIndex); directHandled {
+		// dense table 的连续整数读取可以绕过 RawGetInteger 和临时 Value 构造；guard 失败时保留普通 batch。
+		return directNextPC, directIterations, true
+	}
 	nextPC = batch.pc
 	for iterations < maxIterations {
 		tableEntryValue := table.RawGetInteger(visibleIndex)
@@ -2893,6 +2964,64 @@ func (vm *VM) TryExecuteTableReadAddForLoopBatch(batch TableReadAddForLoopBatch,
 		return 0, 0, false
 	}
 	vm.currentPC = batch.pc + 2
+	vm.skipNext = false
+	vm.closeFrom = -1
+	vm.hasCallRequest = false
+	vm.returned = false
+	return nextPC, iterations, true
+}
+
+// tryExecuteDenseTableReadAddForLoopBatch 直接批量读取 dense integer table 并累加。
+//
+// 该路径只服务已证明的 `sum = sum + t[i]; FORLOOP` 形态；table 必须保持无元表 dense 表示，循环步长必须为 1，
+// 且读取 key 位于连续 dense 前缀内。读不到 integer 时，若已有提交轮次则返回当前 GETTABLE PC 让普通 VM
+// 重放失败轮次；若首轮失败则完全回退普通 batch。
+func (vm *VM) tryExecuteDenseTableReadAddForLoopBatch(table *Table, superInstruction tableReadAddForLoopSuperInstruction, pc int, maxIterations int, sum int64, index int64, limit int64, step int64, visibleIndex int64) (nextPC int, iterations int, handled bool) {
+	// 只有 dense table、单位正步长和 index 对齐时，才能直接从 dense backing store 读取。
+	if table == nil || !table.hasDenseIntegerArray() || step != 1 || index != visibleIndex {
+		return 0, 0, false
+	}
+
+	registers := vm.registers
+	nextPC = pc
+	lastValue := int64(0)
+	for iterations < maxIterations {
+		if visibleIndex <= 0 || visibleIndex > int64(len(table.denseIntegerValues)) {
+			// 当前轮次缺少 dense integer；已有提交时让调用方从当前 GETTABLE 重放，否则完全回退。
+			if iterations > 0 {
+				registers[superInstruction.GetTarget] = IntegerValue(lastValue)
+				registers[superInstruction.SumRegister] = IntegerValue(sum)
+			}
+			return nextPC, iterations, iterations > 0
+		}
+		lastValue = table.denseIntegerValues[visibleIndex-1]
+		sum += lastValue
+		iterations++
+
+		nextIndex := index + step
+		nextPC = superInstruction.ExitPC
+		if forIntegerLoopContinues(nextIndex, limit, step) {
+			// 循环继续时更新内部 index 和外部可见循环变量，并跳回 GETTABLE。
+			index = nextIndex
+			visibleIndex = nextIndex
+			registers[superInstruction.ForBase] = IntegerValue(index)
+			registers[superInstruction.ForBase+3] = IntegerValue(visibleIndex)
+			nextPC = superInstruction.LoopPC
+			vm.pcOffset = superInstruction.ForSBx
+		} else {
+			// 循环结束时不写入越界后的 index，保持普通 FORLOOP 语义。
+			vm.pcOffset = 0
+			break
+		}
+	}
+	if iterations == 0 {
+		// 首轮 guard 即失败时不能产生任何副作用，交给普通 batch 路径处理。
+		return 0, 0, false
+	}
+
+	registers[superInstruction.GetTarget] = IntegerValue(lastValue)
+	registers[superInstruction.SumRegister] = IntegerValue(sum)
+	vm.currentPC = pc + 2
 	vm.skipNext = false
 	vm.closeFrom = -1
 	vm.hasCallRequest = false

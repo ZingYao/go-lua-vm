@@ -440,6 +440,55 @@ CGO_ENABLED=0 go test ./lua -run '^$' \
   逃逸消除的 hook、metatable、rawget/rawset、next/pairs、`#t`、upvalue/closure、返回/传参、错误 traceback
   和 debug 可见性边界。
 
+2026-07-04 已先补齐 batch 内 dense-only guard 测试，覆盖写入 batch 保持 dense 表示、`RawNext`
+观察前 materialize、读取 batch 不 materialize、不改变 `mutationVersion`，以及读取路径带元表 table
+必须无副作用回退普通 `GETTABLE`。随后实现 batch 内 dense-only 直写/直读：写路径只在无元表 dense table、
+`step == 1`、内部 index 与外部可见 index 对齐、key 连续且仍在数组区上限内时，直接更新
+`denseIntegerValues`，并在 batch 末尾统一维护长度缓存和 mutation 版本；读路径只在无元表 dense table、
+`step == 1`、key 位于连续 dense 前缀内时，直接读取 int64 并累加，缺失或 guard 失败时回退现有
+`RawGetInteger` + `ADD` 路径。该实现不改变普通 `NewTable`、外部 Go API、materialize、元表、弱表、
+迭代、debug hook 或错误路径。
+
+目标 Go micro 结果：
+
+```bash
+CGO_ENABLED=0 go test ./lua -run '^$' -bench '^BenchmarkPreparedTableReadWriteOfficial$' \
+  -benchmem -benchtime=2s -count=5
+CGO_ENABLED=0 go test ./lua -run '^$' -bench '^Benchmark(DoString|Prepared)TableReadWriteOfficial$' \
+  -benchmem -benchtime=2s -count=3
+```
+
+- `BenchmarkPreparedTableReadWriteOfficial` 五轮约
+  `2.11 / 2.09 / 2.09 / 2.09 / 2.10 ms/op`、约 `1.61 MB/op`、`3 allocs/op`。
+- `BenchmarkDoStringTableReadWriteOfficial` 三轮约
+  `2.20 / 2.20 / 2.19 ms/op`、约 `1.73 MB/op`、`222 allocs/op`。
+- `BenchmarkPreparedTableReadWriteOfficial` 复跑三轮约
+  `2.16 / 2.13 / 2.07 ms/op`、约 `1.61 MB/op`、`3 allocs/op`。
+
+对比 `aeb2109` 记录的 prepared 约 `4.79-4.81 ms/op`，wall-clock 降幅约 `55%`，说明剩余 CPU
+确实主要来自 batch 内每轮 raw helper、mutation/cache 维护和 `IntegerValue` 构造；B/op 不变，符合该
+切口只压缩执行 CPU 而不做整段 table 逃逸消除的预期。
+
+重建 `bin/glua` / `bin/gluac` 后，显式使用官方 Lua/Luac 5.3.6 的完整 benchmark 抽样结果：
+
+| 用例 | 官方工具中位数 | 本项目中位数 | 本项目/官方 |
+| --- | ---: | ---: | ---: |
+| `arith_add_loop` | `0.007720s` | `0.009673s` | `1.25x` |
+| `arith_mix_loop` | `0.011703s` | `0.013463s` | `1.15x` |
+| `arith_chain_temp` | `0.013018s` | `0.010131s` | `0.78x` |
+| `table_rw` | `0.007197s` | `0.006396s` | `0.89x` |
+| `function_call` | `0.006793s` | `0.007428s` | `1.09x` |
+| `string_concat` | `0.004956s` | `0.005076s` | `1.02x` |
+| `closure_upvalue` | `0.008312s` | `0.007183s` | `0.86x` |
+| `stdlib_math_string` | `0.019470s` | `0.011597s` | `0.60x` |
+| `recursion` | `0.003707s` | `0.003962s` | `1.07x` |
+| `compile_3000_functions` | `0.005335s` | `0.007114s` | `1.33x` |
+
+结论：`table_rw` 从 dense integer array 原型后的约 `1.28x` 进一步降到 `0.89x`，已经快于官方 Lua
+5.3.6；后续不要继续扩大 table 路径，除非新的完整三轮基线显示稳定回退并有 profile 证据。剩余高于
+`1.0x` 的项目应重新排序，优先看 `compile_3000_functions`、`arith_add_loop`、`arith_mix_loop` 或
+`function_call` 是否仍有结构性小切口。
+
 更激进的后备方案是整段 table 逃逸消除：
 
 - 只匹配 `NEWTABLE; numeric-for t[i]=i; numeric-for sum=sum+t[i]; RETURN` 这一类 table 完全不逃逸的固定形态。
@@ -951,6 +1000,8 @@ CGO_ENABLED=0 go test ./internal/luac -run '^$' \
 - [x] 实现 `table_rw` dense integer array prototype，若 B/op 或官方兼容语义不满足验收则回退。
 - [x] 重建 CLI 后复核官方完整 benchmark，确认 `table_rw` 端到端倍率变化。
 - [x] 复核 dense integer array 后 `table_rw` 剩余 CPU/alloc profile，记录 batch 内 dense-only 候选边界。
+- [x] 为 `table_rw` batch 内 dense-only 直写/直读补 guard 测试，固定 materialize、元表和 mutation 可见性边界。
+- [x] 实现 `table_rw` batch 内 dense-only 直写/直读，并复核 Go micro 与官方完整 benchmark。
 - [x] 优化 lexer 标识符 ASCII 扫描，复核 `compile_3000_functions` Go micro 与 CLI 端到端收益。
 - [x] 证伪纯十进制 int64 byte 快路径，未保留生产改动。
 - [x] 证伪 `skipWhitespace` byte 直扫，未保留生产改动。
