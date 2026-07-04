@@ -17,26 +17,28 @@
 
 ## 当前基线
 
-当前基线为重建 `bin/glua` / `bin/gluac` 后，显式使用官方 Lua/Luac 5.3.6，
+当前基线为 `f5f9028` 后重建 `bin/glua` / `bin/gluac`，显式使用官方 Lua/Luac 5.3.6，
 按 `scripts/benchmark-official.sh` 默认参数三轮复核的结果。
 
 | 排名 | 用例 | 三轮倍率 | 平均 |
 | ---: | --- | ---: | ---: |
-| 1 | `stdlib_math_string` | `0.59x / 0.59x / 0.59x` | `0.59x` |
-| 2 | `arith_chain_temp` | `0.76x / 0.77x / 0.76x` | `0.76x` |
-| 3 | `closure_upvalue` | `0.87x / 0.87x / 0.87x` | `0.87x` |
-| 4 | `table_rw` | `0.87x / 0.88x / 0.90x` | `0.88x` |
-| 5 | `string_concat` | `1.05x / 1.03x / 1.03x` | `1.04x` |
-| 6 | `function_call` | `1.06x / 1.06x / 1.02x` | `1.05x` |
-| 7 | `recursion` | `1.09x / 1.05x / 1.11x` | `1.08x` |
-| 8 | `arith_mix_loop` | `1.17x / 1.17x / 1.17x` | `1.17x` |
-| 9 | `arith_add_loop` | `1.23x / 1.21x / 1.24x` | `1.23x` |
-| 10 | `compile_3000_functions` | `1.28x / 1.29x / 1.30x` | `1.29x` |
+| 1 | `stdlib_math_string` | `0.58x / 0.58x / 0.58x` | `0.58x` |
+| 2 | `arith_add_loop` | `0.66x / 0.66x / 0.67x` | `0.66x` |
+| 3 | `arith_chain_temp` | `0.76x / 0.77x / 0.78x` | `0.77x` |
+| 4 | `table_rw` | `0.89x / 0.88x / 0.87x` | `0.88x` |
+| 5 | `closure_upvalue` | `0.89x / 0.89x / 0.88x` | `0.89x` |
+| 6 | `arith_mix_loop` | `1.03x / 1.02x / 1.03x` | `1.03x` |
+| 7 | `string_concat` | `1.03x / 1.03x / 1.05x` | `1.04x` |
+| 8 | `function_call` | `1.04x / 1.05x / 1.06x` | `1.05x` |
+| 9 | `recursion` | `1.09x / 1.07x / 1.08x` | `1.08x` |
+| 10 | `compile_3000_functions` | `1.33x / 1.33x / 1.32x` | `1.33x` |
 
-低于 `1.00x` 表示本项目快于官方 Lua 5.3.6。2026-07-04 在 `77611b9` 后重建
-`bin/glua` / `bin/gluac` 并显式使用官方 Lua/Luac 5.3.6 复跑三轮后，`table_rw` 已稳定低于
-`1.00x`，剩余最高项为 `compile_3000_functions`，其次是 `arith_add_loop` 和 `arith_mix_loop`；
-后续优先级按平均倍率、语义风险和泛化价值排序，不再围绕已经快于官方或接近官方的 benchmark 定向路径继续扩张。
+低于 `1.00x` 表示本项目快于官方 Lua 5.3.6。2026-07-04 在 `f5f9028` 后重建
+`bin/glua` / `bin/gluac` 并显式使用官方 Lua/Luac 5.3.6 复跑三轮后，`stdlib_math_string`、
+`arith_add_loop`、`arith_chain_temp`、`table_rw` 和 `closure_upvalue` 已稳定快于官方；`arith_mix_loop`、
+`string_concat`、`function_call` 和 `recursion` 均接近 `1.0x` 噪声带。剩余唯一清晰主项为
+`compile_3000_functions`，但最近 profile 已判定没有新的低风险编译期小切口，继续推进必须先进入
+函数体紧凑 AST / codegen arena 生命周期设计。
 
 ## 首轮 profile 基线
 
@@ -1185,6 +1187,7 @@ CGO_ENABLED=0 go test ./lua -run '^$' \
 - [x] 优化 `arith_add_loop` step=1 batch 等差求和，复核 Go micro 与 CLI 抽样收益。
 - [x] 优化 `arith_mix_loop` batch 静态 guard 前移，复核 Go micro 与 CLI 抽样收益。
 - [x] 在 `976728e` 后重新 profile `compile_3000_functions`，记录仍无低风险编译期小切口。
+- [x] 在 `f5f9028` 后重建 CLI 并复跑默认完整 benchmark 三轮，确认剩余唯一清晰主项是编译期。
 - [ ] 每个生产优化 commit 后更新本文或 `docs/BENCHMARK.md`。
 
 ## 正确性门禁
