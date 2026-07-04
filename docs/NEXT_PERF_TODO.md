@@ -619,6 +619,39 @@ CRLF 与 LFCR 仍按 Lua 5.3 归一为单个换行，普通空白只推进列号
 已知 keyword 直接 advance 这类 parser 防御检查微调，除非 profile 显示 `expectKeyword` 自身成为
 独立 flat 热点。
 
+2026-07-04 在 `2f9dfda` 后再次复核 `compile_3000_functions`：
+
+```bash
+CGO_ENABLED=0 go test ./internal/luac -run '^$' \
+  -bench '^BenchmarkCompileSource3000Functions$' \
+  -benchmem -benchtime=5s -count=1 \
+  -cpuprofile /tmp/go-lua-vm-next-profiles/compile_3000_after_2f9dfda_cpu.pprof \
+  -memprofile /tmp/go-lua-vm-next-profiles/compile_3000_after_2f9dfda_mem.pprof
+```
+
+- `BenchmarkCompileSource3000Functions`：约 `4.416 ms/op`、`5.03 MB/op`、`87 allocs/op`。
+- CPU 采样中 `Lexer.NextToken` 约 `19.78%` cum，`Parser.advance` 约 `22.27%` cum，
+  `parseFunctionStatement` 约 `25.55%` cum；运行时调度和 GC 噪声占比较高。
+- `alloc_objects` 中 `parseExpressionList`、`newNameExpression`、`newFunctionStatement`、
+  `newBinaryExpression`、`newLiteralExpression` 仍可见；`parseExpressionList` 主要对应尾部
+  `return f2999(1)` 的单参数列表，单独消除只能减少约 1 alloc/op，不满足明显收益验收。
+- `alloc_space` 仍由 `prepareDirectFunctionBlockCapacity`、`newFunctionStatement`、表达式 arena
+  和 Proto/codegen 结构主导；其中 codegen arena 是前序优化用空间换低对象数的结果，不能直接删除。
+
+评估过一个新的但更大的结构切口：为 `return x + 123` 这类 `name <op> literal` 表达式建立紧凑
+operand storage，最终 AST 仍尽量暴露为 `*BinaryExpression`，左右操作数仍保持
+`*NameExpression` / `*LiteralExpression` 可见，从而减少函数体 AST 的三节点页分配。该方向要真正省掉
+`NameExpression` / `LiteralExpression` 分配，需要重构 parser 的 primary/postfix/binary 入口，让
+identifier 在确认不是函数调用、字段访问或复杂右结合表达式后再进入紧凑路径；否则只能在已经分配节点后
+做无效搬运。这个改动会影响表达式优先级、AST 指针稳定性、parser 对外类型断言、codegen RK 快路径和错误
+位置，因此不能作为本轮小切口直接实现。若后续推进，必须先补设计与定向测试，至少覆盖：
+
+- `return x + 1` 仍对外表现为 `*BinaryExpression`，且左右类型、位置、源码行号和 codegen 字节码不变。
+- `x + 1 * y`、`x + 1 + y`、`x ^ 1 ^ y`、`x .. "a" .. y` 的优先级和结合性不变。
+- `x(1) + 2`、`x.y + 2`、`x[1] + 2` 不进入简单 name fast path。
+- parser 错误文本、goto/label 语义、debug local 生命周期和官方反汇编不变。
+- Go micro 需要证明 wall-clock 稳定下降或 B/op 明显下降；只减少 1-2 个 alloc/op 不足以保留生产改动。
+
 ### 3. `arith_mix_loop`：批量 mix arithmetic superinstruction
 
 `arith_mix_loop` 当前约 `1.9x`，运行期仍高于官方。上一阶段已有完整
