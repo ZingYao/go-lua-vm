@@ -605,6 +605,12 @@ CGO_ENABLED=0 go test ./internal/luac -run '^$' \
 后续不要重复做纯十进制 int64 byte fast path，除非 profile 指向更具体的 number 解析子路径并能证明
 B/op 或 wall-clock 稳定下降。
 
+同轮试验过把 `skipWhitespace` 改为 ASCII byte 直扫并手工维护 `Source` 的 offset、line 和 column：
+CRLF 与 LFCR 仍按 Lua 5.3 归一为单个换行，普通空白只推进列号，定向测试覆盖混合换行行列。五轮结果约
+`4.52 / 4.38 / 4.38 / 4.39 / 4.40 ms/op`、约 `5.03 MB/op`、`89-90 allocs/op`，相比现有
+`51bf3e6` 后基线没有收益且略慢；生产改动已回退。后续不要重复做 `skipWhitespace` byte 直扫，
+除非 profile 证明空白跳过重新成为独立主热点并能在同机基线中稳定降低 wall-clock。
+
 ### 3. `arith_mix_loop`：批量 mix arithmetic superinstruction
 
 `arith_mix_loop` 当前约 `1.9x`，运行期仍高于官方。上一阶段已有完整
@@ -682,6 +688,7 @@ B/op 或 wall-clock 稳定下降。
 - [x] 重建 CLI 后复核官方完整 benchmark，确认 `table_rw` 端到端倍率变化。
 - [x] 优化 lexer 标识符 ASCII 扫描，复核 `compile_3000_functions` Go micro 与 CLI 端到端收益。
 - [x] 证伪纯十进制 int64 byte 快路径，未保留生产改动。
+- [x] 证伪 `skipWhitespace` byte 直扫，未保留生产改动。
 - [ ] 每个生产优化 commit 后更新本文或 `docs/BENCHMARK.md`。
 
 ## 正确性门禁
