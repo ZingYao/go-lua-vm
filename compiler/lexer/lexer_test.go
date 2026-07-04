@@ -618,6 +618,30 @@ func TestLexerNextTokenRecognizesKeywordOperatorEOFAndIllegal(t *testing.T) {
 	}
 }
 
+// TestLexerNextTokenGuardsKeepStringsCommentsAndBrackets 验证 token 起始 guard 不改变字符串、注释和括号语义。
+func TestLexerNextTokenGuardsKeepStringsCommentsAndBrackets(t *testing.T) {
+	lexer := New("-- short comment\n[=[long]=] --[[hidden]] \"short\" [ ]")
+
+	expectedTokens := []struct {
+		kind    TokenKind
+		text    string
+		literal string
+	}{
+		{kind: TokenString, text: "long", literal: "long"},
+		{kind: TokenString, text: "short", literal: "short"},
+		{kind: TokenOperator, text: "["},
+		{kind: TokenOperator, text: "]"},
+		{kind: TokenEOF, text: "<eof>"},
+	}
+	for tokenIndex, expectedToken := range expectedTokens {
+		// 逐个读取 token，确保短注释和长注释被跳过，长/短字符串和普通方括号仍按原类型输出。
+		token := lexer.NextToken()
+		if token.Kind != expectedToken.kind || token.Text != expectedToken.text || token.Literal != expectedToken.literal {
+			t.Fatalf("token %d got kind=%s text=%q literal=%q want kind=%s text=%q literal=%q", tokenIndex, token.Kind, token.Text, token.Literal, expectedToken.kind, expectedToken.text, expectedToken.literal)
+		}
+	}
+}
+
 // TestLexerOperatorLongestMatch 验证 Lua 5.3 操作符按最长匹配输出。
 //
 // 该用例覆盖多字符操作符与同前缀单字符操作符，防止快速扫描路径把 `...`、`//`、`::` 等拆错。

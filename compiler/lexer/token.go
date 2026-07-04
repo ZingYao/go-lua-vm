@@ -58,9 +58,12 @@ func (lexer *Lexer) NextToken() Token {
 		// EOF 是合法 token，供 parser 判断输入结束。
 		return Token{Kind: TokenEOF, Text: "<eof>", Position: startPosition}
 	}
-	if token, ok := lexer.scanStringToken(startPosition); ok {
-		// 字符串扫描成功或出错都已经形成完整 token。
-		return token
+	if lexer.canStartStringToken() {
+		// 只有长括号或短字符串引号才可能进入字符串扫描，普通 identifier/number/operator 直接跳过试探。
+		if token, ok := lexer.scanStringToken(startPosition); ok {
+			// 字符串扫描成功或出错都已经形成完整 token。
+			return token
+		}
 	}
 	if token, ok := lexer.scanNumberToken(); ok {
 		// 数字扫描成功或出错都已经形成完整 token。
@@ -82,6 +85,26 @@ func (lexer *Lexer) NextToken() Token {
 		Text:     string(illegalRune),
 		Position: position,
 		Err:      fmt.Errorf("illegal character %q", illegalRune),
+	}
+}
+
+// canStartStringToken 判断当前位置是否可能开启 Lua 字符串 token。
+//
+// 长字符串只能以 `[` 开始，短字符串只能以单引号或双引号开始；该 guard 只跳过不可能命中的试探，
+// 真正的长括号层级、短字符串转义和错误语义仍由 scanStringToken 内部完成。
+func (lexer *Lexer) canStartStringToken() bool {
+	offset := lexer.source.offset
+	if offset >= len(lexer.source.input) {
+		// EOF 不能开启字符串 token。
+		return false
+	}
+	switch lexer.source.input[offset] {
+	case '[', '\'', '"':
+		// 三类 ASCII 起始字符覆盖 Lua 5.3 的长字符串和短字符串。
+		return true
+	default:
+		// 其他字符不可能被字符串扫描消费。
+		return false
 	}
 }
 

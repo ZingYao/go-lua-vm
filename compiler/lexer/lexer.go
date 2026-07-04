@@ -82,6 +82,10 @@ func (lexer *Lexer) SkipIgnored() {
 		if lexer.skipWhitespace() {
 			continue
 		}
+		if !lexer.hasCommentPrefix() {
+			// 非注释前缀无需再试探长注释和短注释，交还给 token 扫描。
+			return
+		}
 		if lexer.skipLongComment() {
 			// 长注释可能跨越多行，结束后继续跳过后续空白。
 			continue
@@ -94,6 +98,24 @@ func (lexer *Lexer) SkipIgnored() {
 		// 当前字符不再属于可忽略内容，交还给后续 token 扫描。
 		return
 	}
+}
+
+// hasCommentPrefix 判断当前位置是否可能开启 Lua 注释。
+//
+// Lua 5.3 注释只以 `--` 开始；该 guard 避免普通 token 前反复进入长注释和短注释试探。
+func (lexer *Lexer) hasCommentPrefix() bool {
+	offset := lexer.source.offset
+	if offset+1 >= len(lexer.source.input) {
+		// EOF 或单字符剩余都不可能构成注释前缀。
+		return false
+	}
+	if lexer.source.input[offset] == '-' && lexer.source.input[offset+1] == '-' {
+		// 两个连续减号才交给注释扫描区分长注释与短注释。
+		return true
+	}
+
+	// 其他字符不可能开启注释。
+	return false
 }
 
 // skipWhitespace 跳过连续空白字符。
