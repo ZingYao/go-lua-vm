@@ -96,6 +96,36 @@ func TestParserParseChunkAndBlock(t *testing.T) {
 	}
 }
 
+// TestParserPreallocatesLargeTopLevelFunctionBlock 验证大量顶层函数声明会预留 block 语句容量。
+//
+// 该优化只影响 Statement slice 的底层容量，不改变 AST 语句数量、顺序或函数体解析结果。
+func TestParserPreallocatesLargeTopLevelFunctionBlock(t *testing.T) {
+	// 构造超过容量 hint 阈值的顶层函数声明，覆盖 compile_3000_functions 的源码形态。
+	var builder strings.Builder
+	for functionIndex := 0; functionIndex < 20; functionIndex++ {
+		// 每行以 function 开头，容量预估可以在不消费 token 的情况下计入语句下界。
+		builder.WriteString("function f")
+		builder.WriteString(strconv.Itoa(functionIndex))
+		builder.WriteString("(x) return x end\n")
+	}
+	builder.WriteString("return f19(1)\n")
+
+	parser := New(builder.String())
+	chunk, err := parser.ParseChunk()
+	if err != nil {
+		// 合法的大量函数声明样例必须能正常解析。
+		t.Fatalf("ParseChunk failed: %v", err)
+	}
+	if len(chunk.Block.Statements) != 20 {
+		// 容量预估不能改变实际语句数量。
+		t.Fatalf("unexpected statement count: %d", len(chunk.Block.Statements))
+	}
+	if cap(chunk.Block.Statements) < 20 {
+		// 顶层函数声明容量应按行首声明数量预留。
+		t.Fatalf("expected preallocated top-level statement capacity, cap=%d", cap(chunk.Block.Statements))
+	}
+}
+
 // TestParserLocalAssignmentWithoutValues 验证 local 声明可以没有初始化表达式。
 //
 // Lua 允许 `local a, b`，未初始化变量后续 codegen 会按 nil 处理。

@@ -486,6 +486,31 @@ CGO_ENABLED=0 go test ./internal/luac -run '^$' \
 `bin/glua` / `bin/gluac` 后单轮完整 benchmark 中 `compile_3000_functions` 为官方 `0.004795s`、
 本项目 `0.009207s`、倍率 `1.92x`，端到端只有小幅变化。
 
+2026-07-04 继续实现顶层 block 语句容量 hint：只在顶层标准 block 中扫描源码行首
+`function` / `local function` 声明数量，超过阈值时预留 `Block.Statements` 容量。该 hint 只改变
+slice cap，不跳过 lexer/parser，不改变语句数量、顺序、AST 类型、错误文本或函数体语义；误判只会带来
+有上限的容量预留。
+
+目标 Go micro 结果：
+
+```bash
+CGO_ENABLED=0 go test ./internal/luac -run '^$' \
+  -bench '^BenchmarkCompileSource3000Functions$' \
+  -benchmem -benchtime=3s -count=5
+```
+
+- `BenchmarkCompileSource3000Functions`：约 `5.22 / 5.25 / 5.23 / 5.22 / 5.25 ms/op`。
+- B/op 约 `5.03 MB/op`，`91 allocs/op`。
+
+结论：该切口继续小幅压低顶层大量函数声明的 `Block.Statements` 扩容成本；剩余差距仍主要来自真实
+lexer/parser CPU、函数体 AST 与 codegen arena 空间，不应扩大为 `Block.Statements` union 或全 parser
+替换。
+
+重建 `bin/glua` / `bin/gluac` 后，显式使用官方 Lua/Luac 5.3.6 的完整 benchmark 单轮复核中，
+`compile_3000_functions` 为官方 `0.004755s`、本项目 `0.009248s`、倍率 `1.94x`。因此该切口主要是
+Go micro 层面的分配与小幅 CPU 改善，端到端剩余差距仍需要新的 profile 证据指向 lexer/parser 或
+codegen arena，不能继续围绕简单容量预留做局部调参。
+
 ### 3. `arith_mix_loop`：批量 mix arithmetic superinstruction
 
 `arith_mix_loop` 当前约 `1.9x`，运行期仍高于官方。上一阶段已有完整

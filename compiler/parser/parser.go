@@ -187,6 +187,10 @@ func (parser *Parser) parseBlockUntilInto(block *Block, extraEnd func(lexer.Toke
 
 	// block 起始位置使用当前 token 位置。
 	*block = Block{Position: parser.current.Position}
+	if capacityHint := parser.topLevelBlockStatementCapacityHint(extraEnd); capacityHint > 0 {
+		// 顶层大量函数声明场景提前预留语句切片容量；只改变 cap，不改变语句数量、顺序或 AST 类型。
+		block.Statements = make([]Statement, 0, capacityHint)
+	}
 	for !parser.isBlockEndToken(parser.current, extraEnd) {
 		if parser.current.Kind == lexer.TokenKeyword && parser.current.Text == "return" {
 			// return 是 block 的终结语句，解析后停止收集普通语句。
@@ -208,6 +212,89 @@ func (parser *Parser) parseBlockUntilInto(block *Block, extraEnd func(lexer.Toke
 
 	// block 已写入调用方提供的节点。
 	return nil
+}
+
+// topLevelBlockStatementCapacityHint 估算顶层 block 的语句切片容量。
+//
+// 该估算只服务大量顶层 function/local function 声明的编译期热点；它不会跳过 lexer/parser，也不会改变
+// AST 可见语句。非顶层 block、switch case/default 等自定义边界和小文件直接返回 0，避免普通源码多余预留。
+func (parser *Parser) topLevelBlockStatementCapacityHint(extraEnd func(lexer.Token) bool) int {
+	if parser.syntaxDepth != 1 || extraEnd != nil {
+		// 只有 enterSyntaxLevel 后的顶层标准 block 允许根据完整源码做容量预估。
+		return 0
+	}
+
+	const minUsefulStatementHint = 16
+	const maxStatementCapacityHint = 4096
+	count := 0
+	for lineStart := 0; lineStart < len(parser.input); {
+		offset := lineStart
+		for offset < len(parser.input) && (parser.input[offset] == ' ' || parser.input[offset] == '\t') {
+			// 只跳过行首空白；命中后仍由正常 lexer/parser 决定该行是否真是合法语句。
+			offset++
+		}
+		if parser.isFunctionDeclarationLine(offset) {
+			// 行首函数声明会在顶层 block 追加一条语句，计入容量下界。
+			count++
+			if count >= maxStatementCapacityHint {
+				// 容量 hint 设置上限，避免注释或长字符串中的伪匹配导致异常大预留。
+				return maxStatementCapacityHint
+			}
+		}
+		nextLine := strings.IndexByte(parser.input[lineStart:], '\n')
+		if nextLine < 0 {
+			// 没有下一行时结束扫描。
+			break
+		}
+		lineStart += nextLine + 1
+	}
+	if count < minUsefulStatementHint {
+		// 小 block 继续依赖 append 自然增长，避免为普通源码引入额外容量。
+		return 0
+	}
+
+	// 返回顶层函数声明数量作为语句切片容量下界。
+	return count
+}
+
+// isFunctionDeclarationLine 判断源码指定偏移是否看起来像顶层函数声明。
+//
+// 这里只做容量 hint 的词面判断，真正语法仍由 lexer/parser 决定；误判只会影响切片 cap，不影响 Lua 语义。
+func (parser *Parser) isFunctionDeclarationLine(offset int) bool {
+	if strings.HasPrefix(parser.input[offset:], "function") && parser.hasKeywordSeparator(offset+len("function")) {
+		// 行首 `function name` 会生成普通函数语句。
+		return true
+	}
+	if strings.HasPrefix(parser.input[offset:], "local") && parser.hasKeywordSeparator(offset+len("local")) {
+		// `local function name` 也会生成一条顶层语句。
+		nextOffset := offset + len("local")
+		for nextOffset < len(parser.input) && (parser.input[nextOffset] == ' ' || parser.input[nextOffset] == '\t') {
+			// 跳过 local 与 function 之间的空白。
+			nextOffset++
+		}
+		return strings.HasPrefix(parser.input[nextOffset:], "function") && parser.hasKeywordSeparator(nextOffset+len("function"))
+	}
+
+	// 其他行首内容不参与顶层函数语句容量预估。
+	return false
+}
+
+// hasKeywordSeparator 判断 keyword 之后是否是源码边界或空白分隔符。
+//
+// 容量 hint 不需要完整 token 识别，只需避免把 `functionName` 误判为 `function` 声明。
+func (parser *Parser) hasKeywordSeparator(offset int) bool {
+	if offset >= len(parser.input) {
+		// 到达源码末尾时视为边界。
+		return true
+	}
+	switch parser.input[offset] {
+	case ' ', '\t', '\r', '\n':
+		// Lua 关键字后常见空白都可作为容量 hint 分隔符。
+		return true
+	default:
+		// 非空白字符说明更可能是普通标识符前缀。
+		return false
+	}
 }
 
 // parseStatement 解析当前 token 开始的一条语句。
