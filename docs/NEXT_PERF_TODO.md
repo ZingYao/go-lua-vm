@@ -149,6 +149,46 @@ FORPREP; MOVE; LOADK; CONCAT; FORLOOP
 runtime 侧构建只覆盖无 hook、无 continuation、raw string operand、固定右侧 string 常量的预匹配表；
 任一 guard 失败必须保持上述测试覆盖的普通路径。
 
+2026-07-04 已实现最小窄形态 builder 原型：在无 hook、无 precise frame sync 的普通执行路径中，
+预匹配 `MOVE; LOADK; CONCAT; FORLOOP`，只覆盖 `s = s .. Kstring` 且目标、临时槽、numeric-for
+控制槽互不别名的形态。执行期仍要求当前累加值为 raw string、右侧为构建期固定 string 常量、
+numeric-for 控制槽为 integer；任一 guard 失败即回退普通 VM，保留 number 转换、`__concat`、错误和
+yield/continuation 语义。批量窗口按 context 倒计时限制，每轮等价跳过 `MOVE; LOADK; CONCAT; FORLOOP`
+四个入口，提交后补齐最后一轮的 `MOVE`/`LOADK` 临时槽和 FORLOOP 最后有效 index。
+
+目标 Go micro 结果：
+
+```bash
+CGO_ENABLED=0 go test ./lua -run '^$' -bench '^BenchmarkDoStringStringConcat$' \
+  -benchmem -benchtime=3s -count=5
+```
+
+- `BenchmarkDoStringStringConcat`：约 `84.29 / 87.42 / 90.03 / 91.61 / 92.77 us/op`。
+- B/op 约 `310.8 KB/op`，`370 allocs/op`。
+
+对比前一轮 profile 记录的约 `435.49 us/op`、`2.25 MB/op`、`2196 allocs/op`，短命字符串分配和
+端到端耗时均显著下降。该 benchmark 规模为 Go micro 中的 2000 次追加；官方完整 benchmark 的
+8000 次追加仍需在重建 `bin/glua` / `bin/gluac` 后用 Lua 5.3.6 版本门禁脚本复核。
+
+重建 `bin/glua` / `bin/gluac` 后，显式使用官方 Lua/Luac 5.3.6 的完整 benchmark 复核结果：
+
+| 用例 | 官方工具中位数 | 本项目中位数 | 本项目/官方 |
+| --- | ---: | ---: | ---: |
+| `arith_add_loop` | `0.007777s` | `0.009493s` | `1.22x` |
+| `arith_mix_loop` | `0.011546s` | `0.013304s` | `1.15x` |
+| `arith_chain_temp` | `0.012929s` | `0.009896s` | `0.77x` |
+| `table_rw` | `0.007038s` | `0.010420s` | `1.48x` |
+| `function_call` | `0.006842s` | `0.006951s` | `1.02x` |
+| `string_concat` | `0.004748s` | `0.004906s` | `1.03x` |
+| `closure_upvalue` | `0.008107s` | `0.007019s` | `0.87x` |
+| `stdlib_math_string` | `0.019468s` | `0.030226s` | `1.55x` |
+| `recursion` | `0.003745s` | `0.003910s` | `1.04x` |
+| `compile_3000_functions` | `0.005270s` | `0.009731s` | `1.85x` |
+
+结论：`string_concat` 已从当前基线约 `1.83x` 降到 `1.03x`，说明 builder 原型在官方 8000 次追加
+口径下也有效；该项暂不应继续扩张，后续优先级回到 `stdlib_math_string`、`table_rw` 和
+`compile_3000_functions`。
+
 ### `compile_3000_functions`
 
 命令：
@@ -293,7 +333,8 @@ typed statement / compact function statement prototype：在不破坏 parser、s
 - [x] profile `string_concat` CPU/alloc，确认主因是 `executeConcat` 短命字符串分配和 GC 压力。
 - [x] 复核 `string_concat` 官方 fixture 字节码与元方法可见性，再决定是否进入窄形态 builder。
 - [x] 设计并补齐 `string_concat` builder guard 定向测试后，再决定是否实现窄形态 builder。
-- [ ] 实现 `string_concat` 窄形态 builder 原型，或先 profile `stdlib_math_string` 作为下一小切口。
+- [x] 实现 `string_concat` 窄形态 builder 原型，或先 profile `stdlib_math_string` 作为下一小切口。
+- [x] 重建 CLI 后复核官方完整 benchmark，确认 `string_concat` 8000 次追加端到端收益。
 - [ ] profile `stdlib_math_string` 剩余热点，确认是否仍有表达式级消费消除空间。
 - [ ] 每个生产优化 commit 后更新本文或 `docs/BENCHMARK.md`。
 

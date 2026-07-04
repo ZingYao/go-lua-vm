@@ -3594,6 +3594,158 @@ func TestVMTryExecuteFormatLenAddForLoopFallback(t *testing.T) {
 	}
 }
 
+// TestVMTryExecuteStringAppendForLoopBatch 验证字符串自追加 batch fast path。
+//
+// 该路径必须批量执行 `MOVE; LOADK; CONCAT; FORLOOP`，并在停留于循环内时留下与最后一轮
+// 逐指令执行后等价的目标、临时槽和 numeric-for 控制槽。
+func TestVMTryExecuteStringAppendForLoopBatch(t *testing.T) {
+	proto := testStringAppendForLoopProto()
+	vm := NewVMWithConstants(7, proto.Constants)
+	vm.BindPrototype(proto)
+	if !vm.PrepareStringAppendForLoopSuperInstructions() {
+		// 官方 string_concat 热体应能预构建 superinstruction。
+		t.Fatalf("expected string append superinstruction")
+	}
+	registers := map[int]Value{
+		0: StringValue("a"),
+		1: IntegerValue(1),
+		2: IntegerValue(5),
+		3: IntegerValue(1),
+		4: IntegerValue(1),
+	}
+	for registerIndex, value := range registers {
+		// 初始化累加字符串和 numeric-for 控制槽。
+		if err := vm.SetRegister(registerIndex, value); err != nil {
+			t.Fatalf("set register %d failed: %v", registerIndex, err)
+		}
+	}
+
+	nextPC, iterations, handled := vm.TryExecuteStringAppendForLoopBatch(0, 3)
+	if !handled || iterations != 3 || nextPC != 0 {
+		// 三轮后循环仍应回到 MOVE 入口。
+		t.Fatalf("string append batch mismatch: handled=%v iterations=%d nextPC=%d", handled, iterations, nextPC)
+	}
+	if value, _ := vm.Register(0); !value.RawEqual(StringValue("axxx")) {
+		// 目标寄存器保存三轮追加后的最终字符串。
+		t.Fatalf("target mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(5); !value.RawEqual(StringValue("axx")) {
+		// MOVE 临时槽保存最后一轮 CONCAT 前的旧字符串。
+		t.Fatalf("move temporary mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(6); !value.RawEqual(StringValue("x")) {
+		// LOADK 临时槽保存右侧固定常量。
+		t.Fatalf("append temporary mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(1); !value.RawEqual(IntegerValue(4)) {
+		// 循环继续时内部 index 已推进到下一轮。
+		t.Fatalf("for index mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(4); !value.RawEqual(IntegerValue(4)) {
+		// 循环继续时外部可见 i 与内部 index 一致。
+		t.Fatalf("visible index mismatch: %#v", value)
+	}
+	if vm.currentPC != 3 || vm.pcOffset != -4 {
+		// batch 后 VM 状态应等价于刚执行完 FORLOOP。
+		t.Fatalf("pc state mismatch: currentPC=%d pcOffset=%d", vm.currentPC, vm.pcOffset)
+	}
+}
+
+// TestVMTryExecuteStringAppendForLoopBatchExit 验证字符串自追加 batch 可停在循环退出。
+func TestVMTryExecuteStringAppendForLoopBatchExit(t *testing.T) {
+	proto := testStringAppendForLoopProto()
+	vm := NewVMWithConstants(7, proto.Constants)
+	vm.BindPrototype(proto)
+	if !vm.PrepareStringAppendForLoopSuperInstructions() {
+		// 官方 string_concat 热体应能预构建 superinstruction。
+		t.Fatalf("expected string append superinstruction")
+	}
+	registers := map[int]Value{
+		0: StringValue(""),
+		1: IntegerValue(1),
+		2: IntegerValue(3),
+		3: IntegerValue(1),
+		4: IntegerValue(1),
+	}
+	for registerIndex, value := range registers {
+		// 初始化累加字符串和 numeric-for 控制槽。
+		if err := vm.SetRegister(registerIndex, value); err != nil {
+			t.Fatalf("set register %d failed: %v", registerIndex, err)
+		}
+	}
+
+	nextPC, iterations, handled := vm.TryExecuteStringAppendForLoopBatch(0, 10)
+	if !handled || iterations != 3 || nextPC != 4 {
+		// 第三轮 FORLOOP 越界时应停在循环退出 PC。
+		t.Fatalf("string append exit mismatch: handled=%v iterations=%d nextPC=%d", handled, iterations, nextPC)
+	}
+	if value, _ := vm.Register(0); !value.RawEqual(StringValue("xxx")) {
+		// 目标寄存器保存完整三轮追加结果。
+		t.Fatalf("target mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(5); !value.RawEqual(StringValue("xx")) {
+		// 退出时临时槽仍保存最后一轮 CONCAT 前的旧字符串。
+		t.Fatalf("move temporary mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(1); !value.RawEqual(IntegerValue(3)) {
+		// 循环退出时 FORLOOP 不写入越界后的 index。
+		t.Fatalf("for index mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(4); !value.RawEqual(IntegerValue(3)) {
+		// 外部可见 i 也保持最后一次有效迭代值。
+		t.Fatalf("visible index mismatch: %#v", value)
+	}
+	if vm.pcOffset != 0 {
+		// 退出时不应请求 PC 回跳。
+		t.Fatalf("pcOffset = %d, want 0", vm.pcOffset)
+	}
+}
+
+// TestVMTryExecuteStringAppendForLoopBatchFallback 验证字符串自追加 guard 失败无副作用。
+func TestVMTryExecuteStringAppendForLoopBatchFallback(t *testing.T) {
+	proto := testStringAppendForLoopProto()
+	vm := NewVMWithConstants(7, proto.Constants)
+	vm.BindPrototype(proto)
+	if !vm.PrepareStringAppendForLoopSuperInstructions() {
+		// 字节码形态仍应能预构建，执行期由目标寄存器类型 guard 决定是否命中。
+		t.Fatalf("expected string append superinstruction")
+	}
+	if err := vm.SetRegister(0, IntegerValue(10)); err != nil {
+		// 非 string 累加器用于触发 guard 失败。
+		t.Fatalf("set target failed: %v", err)
+	}
+	if err := vm.SetRegister(1, IntegerValue(1)); err != nil {
+		// 设置 FORLOOP 内部 index。
+		t.Fatalf("set for index failed: %v", err)
+	}
+	if err := vm.SetRegister(2, IntegerValue(3)); err != nil {
+		// 设置 FORLOOP limit。
+		t.Fatalf("set for limit failed: %v", err)
+	}
+	if err := vm.SetRegister(3, IntegerValue(1)); err != nil {
+		// 设置 FORLOOP step。
+		t.Fatalf("set for step failed: %v", err)
+	}
+
+	nextPC, iterations, handled := vm.TryExecuteStringAppendForLoopBatch(0, 3)
+	if handled || iterations != 0 || nextPC != 0 {
+		// 非 string 累加器必须回退普通 CONCAT，以保留 number 转换和元方法机会。
+		t.Fatalf("fallback mismatch: handled=%v iterations=%d nextPC=%d", handled, iterations, nextPC)
+	}
+	if value, _ := vm.Register(0); !value.RawEqual(IntegerValue(10)) {
+		// guard 失败不能修改目标寄存器。
+		t.Fatalf("target should be unchanged: %#v", value)
+	}
+	if value, _ := vm.Register(5); !value.IsNil() {
+		// guard 失败不能执行 MOVE。
+		t.Fatalf("move temporary should stay nil: %#v", value)
+	}
+	if value, _ := vm.Register(6); !value.IsNil() {
+		// guard 失败不能执行 LOADK。
+		t.Fatalf("append temporary should stay nil: %#v", value)
+	}
+}
+
 // testFunctionCallAddForLoopProto 构造官方 function_call benchmark 的循环体 Proto。
 func testFunctionCallAddForLoopProto() *bytecode.Proto {
 	return &bytecode.Proto{
@@ -3700,6 +3852,21 @@ func testFormatLenAddForLoopProto() *bytecode.Proto {
 			bytecode.CreateABC(bytecode.OpLen, 6, 6, 0),
 			bytecode.CreateABC(bytecode.OpAdd, 0, 5, 6),
 			bytecode.CreateAsBx(bytecode.OpForLoop, 1, -16),
+		},
+	}
+}
+
+// testStringAppendForLoopProto 构造官方 string_concat 的 `s = s .. "x"` 循环体 Proto。
+func testStringAppendForLoopProto() *bytecode.Proto {
+	return &bytecode.Proto{
+		Constants: []bytecode.Constant{
+			bytecode.StringConstant("x"),
+		},
+		Code: []bytecode.Instruction{
+			bytecode.CreateABC(bytecode.OpMove, 5, 0, 0),
+			bytecode.CreateABx(bytecode.OpLoadK, 6, 0),
+			bytecode.CreateABC(bytecode.OpConcat, 0, 5, 6),
+			bytecode.CreateAsBx(bytecode.OpForLoop, 1, -4),
 		},
 	}
 }

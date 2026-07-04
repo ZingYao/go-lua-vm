@@ -102,6 +102,10 @@ type VM struct {
 	formatLenAddForLoopSuperInstructionProto *bytecode.Proto
 	// formatLenAddForLoopSuperInstructions 按 PC 保存 string.format 长度消费循环 superinstruction 预匹配结果。
 	formatLenAddForLoopSuperInstructions []formatLenAddForLoopSuperInstruction
+	// stringAppendForLoopSuperInstructionProto 记录字符串自追加循环 superinstruction 表对应的 Proto。
+	stringAppendForLoopSuperInstructionProto *bytecode.Proto
+	// stringAppendForLoopSuperInstructions 按 PC 保存字符串自追加循环 superinstruction 预匹配结果。
+	stringAppendForLoopSuperInstructions []stringAppendForLoopSuperInstruction
 	// tableWriteForLoopSuperInstructionProto 记录连续 table 数组写入循环 superinstruction 表对应的 Proto。
 	tableWriteForLoopSuperInstructionProto *bytecode.Proto
 	// tableWriteForLoopSuperInstructions 按 PC 保存连续 table 数组写入循环 superinstruction 预匹配结果。
@@ -707,6 +711,32 @@ type formatLenAddForLoopSuperInstruction struct {
 	// LoopPC 保存循环继续时的跳转 PC。
 	LoopPC int
 	// Valid 表示当前 PC 是否匹配完整 string.format 长度消费形态。
+	Valid bool
+}
+
+// stringAppendForLoopSuperInstruction 保存 `s = s .. Kstring` 循环体形态。
+//
+// 该形态覆盖官方 string_concat 的 `MOVE; LOADK; CONCAT; FORLOOP` 热体。构建期只记录寄存器、
+// 常量和 FORLOOP 数据流；执行期仍检查目标寄存器与 numeric-for 控制槽类型。任一 guard 不满足
+// 时必须回退普通 VM，以保留 number 转换、`__concat`、debug hook 和错误路径语义。
+type stringAppendForLoopSuperInstruction struct {
+	// TargetRegister 保存 CONCAT 写回的字符串累加寄存器。
+	TargetRegister int
+	// MoveRegister 保存 MOVE 写入旧累加字符串的临时槽。
+	MoveRegister int
+	// AppendRegister 保存 LOADK 写入右侧常量字符串的临时槽。
+	AppendRegister int
+	// AppendText 保存右侧固定 string 常量。
+	AppendText string
+	// ForBase 保存 FORLOOP 的 base 寄存器。
+	ForBase int
+	// ForSBx 保存 FORLOOP 的有符号跳转偏移。
+	ForSBx int
+	// ExitPC 保存循环退出时的下一条 PC。
+	ExitPC int
+	// LoopPC 保存循环继续时的跳转 PC。
+	LoopPC int
+	// Valid 表示当前 PC 是否匹配完整字符串自追加循环形态。
 	Valid bool
 }
 
@@ -2023,6 +2053,8 @@ func (vm *VM) BindPrototype(proto *bytecode.Proto) {
 		vm.closureUpvalueForLoopSuperInstructions = nil
 		vm.formatLenAddForLoopSuperInstructionProto = nil
 		vm.formatLenAddForLoopSuperInstructions = nil
+		vm.stringAppendForLoopSuperInstructionProto = nil
+		vm.stringAppendForLoopSuperInstructions = nil
 		vm.tableWriteForLoopSuperInstructionProto = nil
 		vm.tableWriteForLoopSuperInstructions = nil
 		vm.tableReadAddForLoopSuperInstructionProto = nil
@@ -2075,6 +2107,11 @@ func (vm *VM) BindPrototype(proto *bytecode.Proto) {
 		// VM 池切换到其他 Proto 时丢弃 string.format 长度消费表，避免不同 Proto 的 PC 误命中。
 		vm.formatLenAddForLoopSuperInstructionProto = nil
 		vm.formatLenAddForLoopSuperInstructions = nil
+	}
+	if vm.stringAppendForLoopSuperInstructionProto != nil && vm.stringAppendForLoopSuperInstructionProto != proto {
+		// VM 池切换到其他 Proto 时丢弃字符串自追加循环表，避免不同 Proto 的 PC 误命中。
+		vm.stringAppendForLoopSuperInstructionProto = nil
+		vm.stringAppendForLoopSuperInstructions = nil
 	}
 	if vm.tableWriteForLoopSuperInstructionProto != nil && vm.tableWriteForLoopSuperInstructionProto != proto {
 		// VM 池切换到其他 Proto 时丢弃 table 写入循环表，避免不同 Proto 的 PC 误命中。
@@ -4844,6 +4881,233 @@ func (vm *VM) TryExecuteFormatLenAddForLoop(pc int) (int, bool) {
 	vm.hasCallRequest = false
 	vm.returned = false
 	return nextPC, true
+}
+
+// ensureStringAppendForLoopSuperInstructions 返回当前 Proto 的字符串自追加循环预匹配表。
+//
+// 该表按 PC 与 Proto.Code 对齐，只记录官方 `s = s .. "x"` 循环热体形态；运行期目标寄存器、
+// 临时槽和 numeric-for 控制槽仍由 TryExecuteStringAppendForLoopBatch 检查。
+func (vm *VM) ensureStringAppendForLoopSuperInstructions() []stringAppendForLoopSuperInstruction {
+	// 按当前 Proto 懒构建字符串自追加 superinstruction 表，并在 Proto 未变化时复用。
+	if vm == nil || vm.proto == nil {
+		// 缺少 VM 或 Proto 时没有可用 superinstruction 表。
+		return nil
+	}
+	if len(vm.proto.Code) < 4 {
+		// 少于四条指令不可能包含 `MOVE;LOADK;CONCAT;FORLOOP`。
+		vm.stringAppendForLoopSuperInstructionProto = vm.proto
+		vm.stringAppendForLoopSuperInstructions = nil
+		return nil
+	}
+	if vm.stringAppendForLoopSuperInstructionProto == vm.proto {
+		// 当前 Proto 已完成扫描；nil 表示无匹配形态，非 nil 表示可按 PC 读取。
+		return vm.stringAppendForLoopSuperInstructions
+	}
+
+	vm.stringAppendForLoopSuperInstructionProto = vm.proto
+	vm.stringAppendForLoopSuperInstructions = buildStringAppendForLoopSuperInstructions(vm.proto)
+	return vm.stringAppendForLoopSuperInstructions
+}
+
+// buildStringAppendForLoopSuperInstructions 构建 `s = s .. Kstring` 循环体预匹配表。
+//
+// 返回表按 PC 对齐；没有匹配形态时返回 nil，表示该 Proto 不需要承担额外表分配。
+func buildStringAppendForLoopSuperInstructions(proto *bytecode.Proto) []stringAppendForLoopSuperInstruction {
+	// 空 Proto 或短函数没有可构建的字符串自追加 superinstruction。
+	if proto == nil || len(proto.Code) < 4 {
+		return nil
+	}
+
+	var superInstructions []stringAppendForLoopSuperInstruction
+	for pc := 0; pc+3 < len(proto.Code); pc++ {
+		// 只识别官方 string_concat 热体 `MOVE;LOADK;CONCAT;FORLOOP`。
+		moveInstruction := proto.Code[pc]
+		loadInstruction := proto.Code[pc+1]
+		concatInstruction := proto.Code[pc+2]
+		forLoopInstruction := proto.Code[pc+3]
+		if moveInstruction.OpCode() != bytecode.OpMove || loadInstruction.OpCode() != bytecode.OpLoadK || concatInstruction.OpCode() != bytecode.OpConcat || forLoopInstruction.OpCode() != bytecode.OpForLoop {
+			// 当前 PC 不匹配目标模式，继续扫描后续指令。
+			continue
+		}
+
+		targetRegister := concatInstruction.A()
+		moveRegister := moveInstruction.A()
+		appendRegister := loadInstruction.A()
+		if moveInstruction.B() != targetRegister || concatInstruction.B() != moveRegister || concatInstruction.C() != appendRegister {
+			// 必须是 `tmp = s; rhs = K; s = tmp .. rhs`，其他 CONCAT 形态保持普通 VM。
+			continue
+		}
+		if targetRegister == moveRegister || targetRegister == appendRegister || moveRegister == appendRegister {
+			// 三个槽位需要互不别名，否则跳过 MOVE/LOADK 后难以保持逐指令可见状态。
+			continue
+		}
+		appendText, ok := protoStringConstant(proto, loadInstruction.Bx())
+		if !ok || appendText == "" {
+			// 只覆盖非空固定 string 常量；空串追加已有普通 CONCAT 空串快路径。
+			continue
+		}
+
+		forBase := forLoopInstruction.A()
+		exitPC := pc + 4
+		loopPC := exitPC + forLoopInstruction.SBx()
+		if loopPC != pc {
+			// FORLOOP 必须精确跳回当前 MOVE，确保批量窗口覆盖完整循环体。
+			continue
+		}
+		if registerInRange(targetRegister, forBase, forBase+3) || registerInRange(moveRegister, forBase, forBase+3) || registerInRange(appendRegister, forBase, forBase+3) {
+			// 拼接目标和临时槽不能覆盖 numeric-for 控制槽，避免破坏 FORLOOP 状态。
+			continue
+		}
+
+		if superInstructions == nil {
+			// 只有真实存在匹配形态时才分配 PC 对齐表，避免普通函数执行增加分配。
+			superInstructions = make([]stringAppendForLoopSuperInstruction, len(proto.Code))
+		}
+		superInstructions[pc] = stringAppendForLoopSuperInstruction{
+			TargetRegister: targetRegister,
+			MoveRegister:   moveRegister,
+			AppendRegister: appendRegister,
+			AppendText:     appendText,
+			ForBase:        forBase,
+			ForSBx:         forLoopInstruction.SBx(),
+			ExitPC:         exitPC,
+			LoopPC:         loopPC,
+			Valid:          true,
+		}
+	}
+	return superInstructions
+}
+
+// PrepareStringAppendForLoopSuperInstructions 预构建当前 Proto 的字符串自追加循环表。
+//
+// 返回 true 表示当前 Proto 至少存在一个可尝试的 `s = s .. Kstring` superinstruction PC；返回
+// false 时调用方不应在热循环中反复调用 TryExecuteStringAppendForLoopBatch。
+func (vm *VM) PrepareStringAppendForLoopSuperInstructions() bool {
+	// 预构建失败不影响普通 VM；后续 TryExecuteStringAppendForLoopBatch 会因为表不匹配而回退。
+	return len(vm.ensureStringAppendForLoopSuperInstructions()) > 0
+}
+
+// HasStringAppendForLoopAt 判断当前 PC 是否存在字符串自追加 superinstruction。
+func (vm *VM) HasStringAppendForLoopAt(pc int) bool {
+	// 该 helper 只读取已准备好的表，供 API 层按 context 窗口尝试批量执行。
+	if vm == nil || vm.stringAppendForLoopSuperInstructionProto != vm.proto {
+		// 表尚未准备或 Proto 已变化时不能命中。
+		return false
+	}
+	superInstructions := vm.stringAppendForLoopSuperInstructions
+	if uint(pc) >= uint(len(superInstructions)) {
+		// PC 越界时不能命中。
+		return false
+	}
+	return superInstructions[pc].Valid
+}
+
+// TryExecuteStringAppendForLoopBatch 尝试批量执行 `s = s .. Kstring` 与末尾 FORLOOP。
+//
+// pc 必须指向 MOVE；maxIterations 是调用方按 context 检查窗口给出的最多批量轮数。返回
+// handled=false 表示 guard 不满足且寄存器无副作用；handledIterations 表示实际提交的循环轮数。
+// 该 fast path 只覆盖 raw string 累加器和 integer numeric-for，不触发元方法、不处理 hook、不处理 yield。
+func (vm *VM) TryExecuteStringAppendForLoopBatch(pc int, maxIterations int) (int, int, bool) {
+	// 先按 PC 读取已准备好的预匹配表；非目标 PC 或没有可执行窗口必须快速失败。
+	if vm == nil || maxIterations <= 0 || vm.stringAppendForLoopSuperInstructionProto != vm.proto {
+		// 调用方尚未为当前 Proto 准备表，或没有可安全批量的 context 窗口。
+		return 0, 0, false
+	}
+	superInstructions := vm.stringAppendForLoopSuperInstructions
+	if uint(pc) >= uint(len(superInstructions)) {
+		// 当前 PC 不在表范围内，回退普通 VM。
+		return 0, 0, false
+	}
+	superInstruction := superInstructions[pc]
+	if !superInstruction.Valid {
+		// 当前 PC 没有匹配字符串自追加形态，回退普通 VM。
+		return 0, 0, false
+	}
+
+	registers := vm.registers
+	requiredRegisters := [...]int{
+		superInstruction.TargetRegister,
+		superInstruction.MoveRegister,
+		superInstruction.AppendRegister,
+		superInstruction.ForBase,
+		superInstruction.ForBase + 1,
+		superInstruction.ForBase + 2,
+		superInstruction.ForBase + 3,
+	}
+	for _, registerIndex := range requiredRegisters {
+		// 任一参与寄存器越界时交给普通 VM 报原始错误。
+		if uint(registerIndex) >= uint(len(registers)) {
+			return 0, 0, false
+		}
+	}
+
+	currentValue := registers[superInstruction.TargetRegister]
+	indexValue := registers[superInstruction.ForBase]
+	limitValue := registers[superInstruction.ForBase+1]
+	stepValue := registers[superInstruction.ForBase+2]
+	if currentValue.Kind != KindString || indexValue.Kind != KindInteger || limitValue.Kind != KindInteger || stepValue.Kind != KindInteger {
+		// 只覆盖 raw string 累加器和 integer numeric-for；其他类型保留完整 CONCAT/FORLOOP 语义。
+		return 0, 0, false
+	}
+
+	index := indexValue.Integer
+	limit := limitValue.Integer
+	step := stepValue.Integer
+	iterations := 0
+	nextPC := superInstruction.ExitPC
+	loopContinues := false
+	for iterations < maxIterations {
+		// 每一轮代表已经执行 MOVE、LOADK、CONCAT 和 FORLOOP。
+		iterations++
+		nextIndex := index + step
+		if forIntegerLoopContinues(nextIndex, limit, step) {
+			// 循环继续时 FORLOOP 会更新内部 index 和外部可见循环变量。
+			index = nextIndex
+			nextPC = superInstruction.LoopPC
+			loopContinues = true
+			continue
+		}
+
+		// 循环退出时 FORLOOP 不写入越界后的 index。
+		nextPC = superInstruction.ExitPC
+		loopContinues = false
+		break
+	}
+	if iterations == 0 {
+		// 没有实际提交轮数时不能宣称处理成功。
+		return 0, 0, false
+	}
+
+	finalText, ok := repeatedAppendString(currentValue.String, superInstruction.AppendText, iterations)
+	if !ok {
+		// 长度溢出或无法构造时回退普通 VM，保留原始错误/分配行为。
+		return 0, 0, false
+	}
+	previousText, ok := repeatedAppendString(currentValue.String, superInstruction.AppendText, iterations-1)
+	if !ok {
+		// previousText 理论上不会在 finalText 成功后失败；防御异常溢出仍回退普通 VM。
+		return 0, 0, false
+	}
+
+	// guard 全部通过后，按最后一轮 MOVE/LOADK/CONCAT 结束后的可见寄存器状态提交。
+	registers[superInstruction.MoveRegister] = StringValue(previousText)
+	registers[superInstruction.AppendRegister] = StringValue(superInstruction.AppendText)
+	registers[superInstruction.TargetRegister] = StringValue(finalText)
+	registers[superInstruction.ForBase] = IntegerValue(index)
+	registers[superInstruction.ForBase+3] = IntegerValue(index)
+	if loopContinues {
+		// 批量窗口停在仍需继续循环的位置时，FORLOOP 已请求回跳。
+		vm.pcOffset = superInstruction.ForSBx
+	} else {
+		// 循环退出时写回的 index 仍是最后一次有效迭代值，而不是越界后的 nextIndex。
+		vm.pcOffset = 0
+	}
+	vm.currentPC = pc + 3
+	vm.skipNext = false
+	vm.closeFrom = -1
+	vm.hasCallRequest = false
+	vm.returned = false
+	return nextPC, iterations, true
 }
 
 // TryExecuteMixArithmeticForLoop 尝试执行 `MUL; ADD; SUB; IDIV; MOD; ADD; FORLOOP` superinstruction。
@@ -8899,6 +9163,39 @@ func valueToLuaString(value Value) (string, error) {
 
 	// 其他类型当前不能参与拼接，后续通过 __concat 元方法支持。
 	return "", ErrConcatOperand
+}
+
+// repeatedAppendString 返回 base 后连续追加 count 次 suffix 的字符串。
+//
+// count 必须非负；长度溢出 Go int 时返回 ok=false，让调用方回退普通 VM 路径。该 helper 只服务
+// 已证明 raw string 的窄形态 builder，不执行 number 转换或 `__concat` 元方法。
+func repeatedAppendString(base string, suffix string, count int) (string, bool) {
+	// count 为 0 时结果就是原字符串，保持 Lua string 不可变值语义且避免无意义分配。
+	if count == 0 {
+		return base, true
+	}
+	if count < 0 {
+		// 负次数不是合法批量窗口，调用方应回退普通 VM。
+		return "", false
+	}
+	if suffix == "" {
+		// 空后缀追加不改变结果；当前构建期通常已排除该形态，这里保留防御语义。
+		return base, true
+	}
+	if len(suffix) > (math.MaxInt-len(base))/count {
+		// 目标长度超出 Go int 可表达范围时不能构造 Builder。
+		return "", false
+	}
+
+	totalLength := len(base) + len(suffix)*count
+	var builder strings.Builder
+	builder.Grow(totalLength)
+	builder.WriteString(base)
+	for appendIndex := 0; appendIndex < count; appendIndex++ {
+		// 每次追加同一个固定右侧字符串，等价于多轮 `s = s .. suffix` 的最终结果。
+		builder.WriteString(suffix)
+	}
+	return builder.String(), true
 }
 
 // concatStringRegisterRange 直接拼接寄存器区间内的纯 string 操作数。

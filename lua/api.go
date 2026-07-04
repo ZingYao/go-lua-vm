@@ -2483,6 +2483,7 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 	functionCallAddForLoopSuperInstructionEnabled := false
 	closureUpvalueForLoopSuperInstructionEnabled := false
 	formatLenAddForLoopSuperInstructionEnabled := false
+	stringAppendForLoopSuperInstructionEnabled := false
 	tableWriteForLoopSuperInstructionEnabled := false
 	tableReadAddForLoopSuperInstructionEnabled := false
 	if !preciseFrameSync && !hooksEnabled {
@@ -2494,6 +2495,7 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 		functionCallAddForLoopSuperInstructionEnabled = vm.PrepareFunctionCallAddForLoopSuperInstructions()
 		closureUpvalueForLoopSuperInstructionEnabled = vm.PrepareClosureUpvalueForLoopSuperInstructions()
 		formatLenAddForLoopSuperInstructionEnabled = vm.PrepareFormatLenAddForLoopSuperInstructions()
+		stringAppendForLoopSuperInstructionEnabled = vm.PrepareStringAppendForLoopSuperInstructions()
 		tableWriteForLoopSuperInstructionEnabled = vm.PrepareTableWriteForLoopSuperInstructions()
 		tableReadAddForLoopSuperInstructionEnabled = vm.PrepareTableReadAddForLoopSuperInstructions()
 	}
@@ -2581,6 +2583,21 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 				contextCheckCountdown -= 7
 				previousPreviousPC = formatPC + 6
 				previousPC = formatPC + 7
+				pc = nextPC
+				continue
+			}
+		}
+		if stringAppendForLoopSuperInstructionEnabled && !preciseFrameSync && !hooksEnabled && contextCheckCountdown >= 3 && vm.HasStringAppendForLoopAt(pc) {
+			// 四指令字符串自追加循环会额外跳过 LOADK、CONCAT、FORLOOP 三个入口；
+			// 倒计时至少为 3 才能证明逐指令路径不会在被跳过区间触发 context 检查。
+			movePC := pc
+			maxIterations := (contextCheckCountdown + 1) / 4
+			nextPC, handledIterations, handled := vm.TryExecuteStringAppendForLoopBatch(movePC, maxIterations)
+			if handled {
+				// superinstruction 已完成若干轮 MOVE、LOADK、CONCAT 与 FORLOOP；补偿被跳过入口。
+				contextCheckCountdown -= handledIterations*4 - 1
+				previousPreviousPC = movePC + 2
+				previousPC = movePC + 3
 				pc = nextPC
 				continue
 			}
