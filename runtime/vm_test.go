@@ -2638,6 +2638,67 @@ func TestVMTryExecuteAddForLoopBatch(t *testing.T) {
 	}
 }
 
+// TestVMTryExecuteAddForLoopBatchStepOneFormula 验证 step=1 batch 的等差求和路径。
+func TestVMTryExecuteAddForLoopBatchStepOneFormula(t *testing.T) {
+	// 构造官方 arith_add_loop 的 `sum = sum + i; FORLOOP` 形态。
+	proto := bytecode.NewProto("add-forloop-batch-step-one")
+	proto.Code = []bytecode.Instruction{
+		bytecode.CreateABC(bytecode.OpAdd, 0, 0, 4),
+		bytecode.CreateAsBx(bytecode.OpForLoop, 1, -2),
+	}
+	vm := NewVMWithPrototypeData(5, nil, nil, nil, nil)
+	vm.BindPrototype(proto)
+	if !vm.PrepareAddForLoopSuperInstructions() {
+		// ADD;FORLOOP 完整循环体应能预构建 superinstruction。
+		t.Fatalf("expected add for-loop superinstruction")
+	}
+	initialSum := int64(math.MaxInt64 - 2)
+	initialRegisters := []Value{IntegerValue(initialSum), IntegerValue(1), IntegerValue(5), IntegerValue(1), IntegerValue(1)}
+	for registerIndex, value := range initialRegisters {
+		// 初始化 sum 与 FORLOOP 控制槽，sum 接近上界以覆盖 int64 加法 wrap。
+		if err := vm.SetRegister(registerIndex, value); err != nil {
+			t.Fatalf("set register %d failed: %v", registerIndex, err)
+		}
+	}
+
+	batch, ok := vm.PrepareAddForLoopBatch(0)
+	if !ok {
+		// 官方加法循环形态应能准备 batch。
+		t.Fatalf("expected prepared add for-loop batch")
+	}
+	nextPC, iterations, handled := vm.TryExecuteAddForLoopBatch(batch, 4)
+	if !handled || iterations != 4 || nextPC != 0 {
+		// 前四轮仍未到达 limit，必须跳回 ADD。
+		t.Fatalf("partial formula batch mismatch: handled=%v iterations=%d nextPC=%d", handled, iterations, nextPC)
+	}
+	if value, ok := vm.Register(0); !ok || !value.RawEqual(IntegerValue(int64(uint64(initialSum)+10))) {
+		// sum 必须按 1+2+3+4 的二进制环绕语义提交。
+		t.Fatalf("partial formula sum mismatch: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(1); !ok || !value.RawEqual(IntegerValue(5)) {
+		// 部分提交后内部 index 必须指向下一轮。
+		t.Fatalf("partial formula index mismatch: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(4); !ok || !value.RawEqual(IntegerValue(5)) {
+		// 外部可见循环变量必须同步到下一轮。
+		t.Fatalf("partial formula visible index mismatch: value=%#v ok=%v", value, ok)
+	}
+
+	nextPC, iterations, handled = vm.TryExecuteAddForLoopBatch(batch, 8)
+	if !handled || iterations != 1 || nextPC != 2 {
+		// 最后一轮达到 limit 后必须退出循环。
+		t.Fatalf("final formula batch mismatch: handled=%v iterations=%d nextPC=%d", handled, iterations, nextPC)
+	}
+	if value, ok := vm.Register(0); !ok || !value.RawEqual(IntegerValue(int64(uint64(initialSum)+15))) {
+		// 最终 sum 必须等于初值加 1..5，并保持 int64 wrap。
+		t.Fatalf("final formula sum mismatch: value=%#v ok=%v", value, ok)
+	}
+	if value, ok := vm.Register(1); !ok || !value.RawEqual(IntegerValue(5)) {
+		// 循环退出时普通 FORLOOP 不写回越界后的内部 index。
+		t.Fatalf("final formula index mismatch: value=%#v ok=%v", value, ok)
+	}
+}
+
 // TestVMTryExecuteAddForLoopConstantOperandAndFallback 验证常量操作数和 guard 回退。
 //
 // integer 常量 ADD 可以直接命中；当任一操作数或 FORLOOP 控制槽不是 integer 时，fast path 必须

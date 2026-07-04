@@ -3174,6 +3174,10 @@ func (vm *VM) TryExecuteAddForLoopBatch(batch AddForLoopBatch, maxIterations int
 	limit := limitValue.Integer
 	step := stepValue.Integer
 	visibleIndex := visibleIndexValue.Integer
+	if step == 1 && visibleIndex == index && index >= 0 {
+		// 正向连续整数循环可在当前 context 窗口内用等差求和提交；不扩大 maxIterations 边界。
+		return vm.tryExecuteAddForLoopStepOneBatch(batch, sum, index, limit, maxIterations)
+	}
 	nextPC = batch.pc
 	for iterations < maxIterations {
 		sum += visibleIndex
@@ -3205,6 +3209,77 @@ func (vm *VM) TryExecuteAddForLoopBatch(batch AddForLoopBatch, maxIterations int
 	vm.hasCallRequest = false
 	vm.returned = false
 	return nextPC, iterations, true
+}
+
+// tryExecuteAddForLoopStepOneBatch 用等差求和提交 step=1 的 ADD;FORLOOP batch。
+//
+// batch 必须已通过 TryExecuteAddForLoopBatch 的寄存器、类型、step 和可见 index guard；maxIterations
+// 仍由调用方按 context 检查窗口换算，本 helper 只减少窗口内逐轮整数加法，不改变 PC 或退出语义。
+func (vm *VM) tryExecuteAddForLoopStepOneBatch(batch AddForLoopBatch, sum int64, index int64, limit int64, maxIterations int) (nextPC int, iterations int, handled bool) {
+	// 计算本窗口最多能提交的迭代数；即使 index 已越过 limit，也保留当前 ADD 后退出的防御语义。
+	iterations, exits := addForLoopStepOneBatchIterations(index, limit, maxIterations)
+	if iterations <= 0 {
+		// 理论上 maxIterations 已经过滤；保留防御回退避免产生部分副作用。
+		return 0, 0, false
+	}
+
+	superInstruction := batch.superInstruction
+	registers := vm.registers
+	sum = int64(uint64(sum) + addForLoopStepOneTermSum(index, iterations))
+	registers[superInstruction.AddTarget] = IntegerValue(sum)
+	nextPC = superInstruction.ExitPC
+	if exits {
+		// 退出时普通 FORLOOP 保留最后一次有效 index，不写入越界后的 nextIndex。
+		lastIndex := index + int64(iterations) - 1
+		registers[superInstruction.ForBase] = IntegerValue(lastIndex)
+		registers[superInstruction.ForBase+3] = IntegerValue(lastIndex)
+		vm.pcOffset = 0
+	} else {
+		// 未到 limit 时必须写入下一轮可见 index，并跳回 ADD。
+		nextIndex := index + int64(iterations)
+		registers[superInstruction.ForBase] = IntegerValue(nextIndex)
+		registers[superInstruction.ForBase+3] = IntegerValue(nextIndex)
+		nextPC = superInstruction.LoopPC
+		vm.pcOffset = superInstruction.ForSBx
+	}
+	vm.currentPC = batch.pc + 1
+	vm.skipNext = false
+	vm.closeFrom = -1
+	vm.hasCallRequest = false
+	vm.returned = false
+	return nextPC, iterations, true
+}
+
+// addForLoopStepOneBatchIterations 计算 step=1 batch 在当前窗口内能提交的迭代数。
+//
+// 调用方保证 index 非负且 maxIterations 来自 context 窗口；返回 exits=true 表示本次 batch 会执行到
+// FORLOOP 退出分支。若 index 已经大于 limit，仍提交当前 ADD 的一轮并退出，以匹配已位于循环体 PC
+// 时的防御性逐指令语义。
+func addForLoopStepOneBatchIterations(index int64, limit int64, maxIterations int) (iterations int, exits bool) {
+	// 没有可用窗口时不能提交任何虚拟指令。
+	if maxIterations <= 0 {
+		return 0, false
+	}
+	if limit < index {
+		// 当前 ADD 已经开始执行；即使控制槽异常越界，也要执行本轮后退出。
+		return 1, true
+	}
+	maxBatch := int64(maxIterations)
+	distance := limit - index
+	if distance < maxBatch {
+		// 剩余可执行轮数落在窗口内，本 batch 会在最后一轮退出。
+		return int(distance) + 1, true
+	}
+
+	// limit 仍在窗口之外，完整提交 maxIterations 并继续循环。
+	return maxIterations, false
+}
+
+// addForLoopStepOneTermSum 返回 start, start+1 ... 的 count 项和，按 int64 ADD wrap 语义取模。
+func addForLoopStepOneTermSum(start int64, count int) uint64 {
+	// 用 uint64 表示 Lua integer 加法的二进制环绕；count 来自 context 窗口，三角数不会放大循环成本。
+	termCount := uint64(count)
+	return uint64(start)*termCount + termCount*(termCount-1)/2
 }
 
 // TryExecuteAddForLoop 尝试执行 `ADD; FORLOOP` superinstruction。

@@ -950,6 +950,66 @@ CGO_ENABLED=0 go test ./internal/luac -run '^$' \
 codegen arena 生命周期设计；否则下一轮更适合转向当前完整基线中仍高于 `1.0x` 的 `arith_add_loop`
 prepared profile。
 
+### `arith_add_loop`
+
+2026-07-04 在 `38e9ad4` 后按最新排序转向 `arith_add_loop` prepared profile：
+
+```bash
+CGO_ENABLED=0 go test ./lua -run '^$' \
+  -bench '^BenchmarkPreparedArithAddLoopOfficial$' \
+  -benchmem -benchtime=5s -count=1 \
+  -cpuprofile /tmp/go-lua-vm-next-profiles/arith_add_after_38e9ad4_cpu.pprof
+go tool pprof -top /tmp/go-lua-vm-next-profiles/arith_add_after_38e9ad4_cpu.pprof
+```
+
+- `BenchmarkPreparedArithAddLoopOfficial`：约 `5.08 ms/op`、`0 allocs/op`。
+- CPU profile 中 `runtime.(*VM).TryExecuteAddForLoopBatch` 约 `83.65%` flat / `84.16%` cum；
+  `PrepareAddForLoopBatch` 约 `2.90%` flat；普通 `VM.Step` 只约 `1.36%` cum。
+
+结论：该项剩余成本已经集中在现有 `ADD; FORLOOP` batch 本体。现有 batch 按 context 窗口一次最多提交
+约 64 轮，但窗口内仍逐轮执行 `sum += i`、更新 FORLOOP 控制槽和判断退出；继续做 dispatch 或
+`VM.Step` 微调没有意义。
+
+已实现 `step == 1` 窄形态等差求和 batch：只在 `sum = sum + i` / `sum = i + sum` 已通过
+`PrepareAddForLoopBatch`、控制槽和 sum 均为 integer、`step == 1`、外部可见循环变量等于内部 index、
+且 index 非负时命中。命中后仍只提交调用方按 context 窗口给出的 `maxIterations`，不会扩大取消检查边界；
+未到 limit 时写入下一轮 index 并跳回 ADD，退出时保留最后一次有效 index，不写入越界后的 nextIndex。
+sum 使用 `uint64` 计算等差项和再转回 `int64`，保持 Lua integer 加法的二进制 wrap 语义。任一 guard
+不满足继续走原逐轮 batch 或普通 VM。
+
+目标 Go micro 结果：
+
+```bash
+CGO_ENABLED=0 go test ./lua -run '^$' \
+  -bench '^Benchmark(DoString|Prepared)ArithAddLoopOfficial$' \
+  -benchmem -benchtime=2s -count=5
+```
+
+- `BenchmarkDoStringArithAddLoopOfficial`：约 `1.09-1.10 ms/op`、约 `122.4 KB/op`、`194 allocs/op`。
+- `BenchmarkPreparedArithAddLoopOfficial`：约 `1.046-1.048 ms/op`、`0 allocs/op`。
+
+对比本轮 profile 前约 `5.06-5.15 ms/op`，wall-clock 降幅约 `79%`；分配保持不变，收益完全来自
+窗口内公式化提交。
+
+重建 `bin/glua` / `bin/gluac` 后，显式使用官方 Lua/Luac 5.3.6 的完整 benchmark 抽样结果：
+
+| 用例 | 官方工具中位数 | 本项目中位数 | 本项目/官方 |
+| --- | ---: | ---: | ---: |
+| `arith_add_loop` | `0.007727s` | `0.005106s` | `0.66x` |
+| `arith_mix_loop` | `0.011497s` | `0.013674s` | `1.19x` |
+| `arith_chain_temp` | `0.013112s` | `0.010085s` | `0.77x` |
+| `table_rw` | `0.007171s` | `0.006376s` | `0.89x` |
+| `function_call` | `0.006864s` | `0.007085s` | `1.03x` |
+| `string_concat` | `0.004702s` | `0.004977s` | `1.06x` |
+| `closure_upvalue` | `0.008108s` | `0.007027s` | `0.87x` |
+| `stdlib_math_string` | `0.019504s` | `0.011330s` | `0.58x` |
+| `recursion` | `0.003691s` | `0.003941s` | `1.07x` |
+| `compile_3000_functions` | `0.005249s` | `0.006853s` | `1.31x` |
+
+结论：`arith_add_loop` 从当前三轮基线约 `1.23x` 降到抽样 `0.66x`，已经快于官方 Lua 5.3.6；
+后续不要继续扩张该项。剩余高于 `1.0x` 的主项回到 `compile_3000_functions`、`arith_mix_loop`、
+`recursion`、`string_concat` 和 `function_call`，但后三者接近噪声带，继续优化前必须先 profile。
+
 ### 3. `arith_mix_loop`：批量 mix arithmetic superinstruction
 
 `arith_mix_loop` 当前约 `1.9x`，运行期仍高于官方。上一阶段已有完整
@@ -1039,6 +1099,7 @@ prepared profile。
 - [x] 优化 lexer token 首字节分派，复核 `compile_3000_functions` Go micro 收益。
 - [x] 优化 parser 语句分派，复核 `compile_3000_functions` Go micro 与 CLI 抽样口径。
 - [x] 在 `e5b67a2` 后重新 profile `compile_3000_functions`，记录暂无新的低风险编译期小切口。
+- [x] 优化 `arith_add_loop` step=1 batch 等差求和，复核 Go micro 与 CLI 抽样收益。
 - [ ] 每个生产优化 commit 后更新本文或 `docs/BENCHMARK.md`。
 
 ## 正确性门禁
