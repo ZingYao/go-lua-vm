@@ -36,6 +36,59 @@
 低于 `1.00x` 表示本项目快于官方 Lua 5.3.6。下一阶段优先级按平均倍率、语义风险和泛化价值排序，
 不再围绕已经快于官方或接近官方的 benchmark 定向路径继续扩张。
 
+## 首轮 profile 基线
+
+2026-07-04 在 `quanquan/feature/glua-next-perf` 上先补充了两个运行期高倍率项的 profile，
+用于决定第一轮生产切口。
+
+### `arith_mix_loop`
+
+命令：
+
+```bash
+CGO_ENABLED=0 go test ./lua -run '^$' -bench '^BenchmarkPreparedArithMixLoopOfficial$' \
+  -benchmem -benchtime=5s -count=1 \
+  -cpuprofile /tmp/go-lua-vm-next-profiles/arith_mix_prepared_cpu.pprof
+go tool pprof -top /tmp/go-lua-vm-next-profiles/arith_mix_prepared_cpu.pprof
+```
+
+结果：
+
+- `BenchmarkPreparedArithMixLoopOfficial`：约 `17.19 ms/op`、`90 B/op`、`0 allocs/op`。
+- CPU top 中 `runtime.(*VM).TryExecuteMixArithmeticForLoop` 占约 `61.20%` flat / `74.79%` cum。
+- `runtime.integerFloorDiv` 占约 `13.03%` flat。
+- 普通 `VM.Step` 仅约 `1.68%` flat / `6.30%` cum。
+
+结论：`arith_mix_loop` 已经主要落在现有单轮 mix fast path 内，继续做普通 dispatch 或局部 Step
+微调收益有限。下一轮更合适的生产切口是 batch 版 mix arithmetic superinstruction：把固定寄存器、
+常量、FORLOOP 回跳和整数操作 guard 前置，并在安全窗口内连续执行多轮。
+
+### `string_concat`
+
+命令：
+
+```bash
+CGO_ENABLED=0 go test ./lua -run '^$' -bench '^BenchmarkDoStringStringConcat$' \
+  -benchmem -benchtime=5s -count=1 \
+  -cpuprofile /tmp/go-lua-vm-next-profiles/string_concat_cpu.pprof \
+  -memprofile /tmp/go-lua-vm-next-profiles/string_concat_mem.pprof
+go tool pprof -top /tmp/go-lua-vm-next-profiles/string_concat_cpu.pprof
+go tool pprof -top -alloc_objects /tmp/go-lua-vm-next-profiles/string_concat_mem.pprof
+go tool pprof -top -alloc_space /tmp/go-lua-vm-next-profiles/string_concat_mem.pprof
+```
+
+结果：
+
+- `BenchmarkDoStringStringConcat`：约 `435.49 us/op`、`2.25 MB/op`、`2196 allocs/op`。
+- CPU 中 `runtime.concatstrings` 与 `runtime.(*VM).executeConcat` 合计贡献明显，同时 GC/runtime
+  调度占比很高。
+- `alloc_objects` 中 `runtime.(*VM).executeConcat` 占约 `90.90%` flat。
+- `alloc_space` 中 `runtime.(*VM).executeConcat` 占约 `94.64%` flat，约 `48.32 GB` 采样分配。
+
+结论：`string_concat` 的主因是循环内短命字符串分配和 GC 压力。窄形态 builder 仍可能有收益，
+但必须处理字符串不可变、`__concat` 元方法、debug hook 和中间值可见性，语义风险高于
+`arith_mix_loop` batch。除非先补充字节码和元方法可见性设计，本分支优先不直接实现该 fast path。
+
 ## 优化路线
 
 ### 1. `compile_3000_functions`：typed statement / AST 生命周期结构
@@ -116,9 +169,11 @@
 - [ ] profile `compile_3000_functions`，确认 `FunctionStatement` / typed statement storage 是否仍是主切口。
 - [ ] 为 typed statement / compact AST 方案补设计小节，列出 parser、semantic、codegen、debug 和错误语义影响面。
 - [ ] 只有设计通过后，才实现最小 typed statement prototype；若收益不足或 B/op 升高，记录证伪并回退。
-- [ ] profile `arith_mix_loop` prepared 与 DoString，确认当前主要成本是否在现有 mix fast path 内。
+- [x] profile `arith_mix_loop` prepared，确认当前主要成本在现有 mix fast path 内。
+- [ ] 必要时补跑 `arith_mix_loop` DoString profile，确认端到端没有新的编译期噪声。
 - [ ] 设计 batch mix arithmetic superinstruction，并证明 context、PC、debug hook、coroutine 和错误路径等价。
-- [ ] profile `string_concat`，复核官方 fixture 字节码与元方法可见性，再决定是否进入窄形态 builder。
+- [x] profile `string_concat` CPU/alloc，确认主因是 `executeConcat` 短命字符串分配和 GC 压力。
+- [ ] 复核 `string_concat` 官方 fixture 字节码与元方法可见性，再决定是否进入窄形态 builder。
 - [ ] profile `stdlib_math_string` 剩余热点，确认是否仍有表达式级消费消除空间。
 - [ ] 每个生产优化 commit 后更新本文或 `docs/BENCHMARK.md`。
 
