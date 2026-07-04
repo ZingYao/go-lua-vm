@@ -262,6 +262,44 @@ CGO_ENABLED=0 go test ./lua -run '^$' -bench '^BenchmarkDoStringStdlibMathString
 结论：`stdlib_math_string` 已从当前基线约 `1.54x` 降到 `0.58x`，该项暂不继续扩张。下一轮优先级
 转向 `table_rw` 的数组分配/预估入口，或继续压缩 `compile_3000_functions` 的编译期差距。
 
+### `table_rw`
+
+2026-07-04 在 `48c3491` 后复核 `table_rw` prepared profile：
+
+```bash
+CGO_ENABLED=0 go test ./lua -run '^$' -bench '^BenchmarkPreparedTableReadWriteOfficial$' \
+  -benchmem -benchtime=5s -count=1 \
+  -cpuprofile /tmp/go-lua-vm-next-profiles/table_rw_prepared_cpu.pprof \
+  -memprofile /tmp/go-lua-vm-next-profiles/table_rw_prepared_mem.pprof
+go tool pprof -top /tmp/go-lua-vm-next-profiles/table_rw_prepared_cpu.pprof
+go tool pprof -top -alloc_space /tmp/go-lua-vm-next-profiles/table_rw_prepared_mem.pprof
+go tool pprof -top -alloc_objects /tmp/go-lua-vm-next-profiles/table_rw_prepared_mem.pprof
+```
+
+结果：
+
+- `BenchmarkPreparedTableReadWriteOfficial`：约 `4.98 ms/op`、`11.21 MB/op`、`3 allocs/op`。
+- CPU profile 主要受大数组分配后的 GC/runtime 调度影响；可归因的 VM 热点中
+  `TryExecuteTableReadAddForLoopBatch` 仍是主要执行成本，`RawGetInteger` 和普通 `VM.Step` 占比已经较低。
+- `alloc_space` 中 `runtime.newTableWithArrayCapacity` 占 `100%`，说明此前数组预分配、table write batch
+  和 table read-add batch 已经消除了连续扩容和大部分 dispatch 成本。
+- `alloc_objects` 中剩余对象主要是一轮执行创建的 table、数组 backing store 以及少量 VM/proto 绑定对象。
+
+结论：当前 `table_rw` 剩余差距不再是简单扩容阈值、读写 opcode dispatch 或 table lookup 分支问题，而是
+官方规模 `local t = {}; for i = 1, 200000 do t[i] = i end` 必然触发的一次大 `[]Value` backing array
+分配和 GC 扫描成本。继续调 `ensureArraySize` 或重复增加局部读写 fast path 预计收益有限。
+
+下一步若继续激进优化，必须先补设计而不是直接改生产代码：
+
+- 候选一：`Table` 增加可回退的 dense integer array 表示，用无指针整数 backing store 承载连续正整数键和值；
+  任一 nil、非整数、hash、元表、弱表、`next`/`pairs` 可见性或 debug/错误路径 guard 失败时 materialize 回普通
+  `[]Value` 数组区。
+- 候选二：对 `NEWTABLE; table write for-loop; table read-add for-loop; RETURN` 做逃逸证明，只在 table 完全不逃逸、
+  中间无 hook/调用/元表观察且最终只消费求和结果时消除 table 存储。该方向语义风险更高，更接近 benchmark
+  专项，不应在没有设计和定向测试前实现。
+- 回滚标准：任一方案如果改变 `#t`、`rawget/rawset`、`next/pairs` 顺序、弱表/finalizer、metatable、
+  debug hook 或错误路径可见性，必须回退普通 table。
+
 ### `compile_3000_functions`
 
 命令：
@@ -410,6 +448,8 @@ typed statement / compact function statement prototype：在不破坏 parser、s
 - [x] 重建 CLI 后复核官方完整 benchmark，确认 `string_concat` 8000 次追加端到端收益。
 - [x] profile `stdlib_math_string` 剩余热点，确认完整热体 batch 仍有表达式级消费消除空间。
 - [x] 实现 `stdlib_math_string` 完整热体 batch superinstruction，并复核官方完整 benchmark。
+- [x] profile `table_rw`，确认当前主要成本已从连续扩容和 dispatch 转为大数组分配与 GC 扫描。
+- [ ] 为 `table_rw` dense integer array 或逃逸消除方案补设计小节，先列出 materialize、迭代、元表、弱表和 debug 可见性边界。
 - [ ] 每个生产优化 commit 后更新本文或 `docs/BENCHMARK.md`。
 
 ## 正确性门禁
