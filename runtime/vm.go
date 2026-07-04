@@ -507,6 +507,16 @@ type mixArithmeticForLoopSuperInstruction struct {
 	ExitPC int
 	// LoopPC 保存循环继续时的跳转 PC。
 	LoopPC int
+	// BatchTempRegister 保存 batch 路径中 MUL/ADD/IDIV 复用的临时寄存器。
+	BatchTempRegister int
+	// BatchSumRegister 保存 batch 路径中 SUB 与末尾 ADD 写回的累加寄存器。
+	BatchSumRegister int
+	// BatchModRegister 保存 batch 路径中 MOD 写回的临时寄存器。
+	BatchModRegister int
+	// BatchMaxRegisterIndex 保存 batch 路径一次性寄存器边界检查所需的最大下标。
+	BatchMaxRegisterIndex int
+	// BatchValid 表示当前预匹配形态同时满足 batch 静态别名约束。
+	BatchValid bool
 	// Valid 表示当前 PC 是否匹配完整混合算术循环形态。
 	Valid bool
 }
@@ -3799,40 +3809,61 @@ func buildMixArithmeticForLoopSuperInstructions(proto *bytecode.Proto) []mixArit
 			// 算术目标不能覆盖 numeric-for 控制槽，否则需要逐指令别名语义。
 			continue
 		}
+		tempRegister := mulInstruction.A()
+		modRegister := modInstruction.A()
+		batchValid := tempRegister != sumRegister && tempRegister != modRegister && sumRegister != modRegister
+		batchMaxRegisterIndex := forBase + 3
+		if tempRegister > batchMaxRegisterIndex {
+			// IDIV 临时寄存器可能高于控制槽，需要纳入 batch 边界检查。
+			batchMaxRegisterIndex = tempRegister
+		}
+		if sumRegister > batchMaxRegisterIndex {
+			// sum 寄存器可能高于控制槽，需要纳入 batch 边界检查。
+			batchMaxRegisterIndex = sumRegister
+		}
+		if modRegister > batchMaxRegisterIndex {
+			// MOD 临时寄存器可能高于控制槽，需要纳入 batch 边界检查。
+			batchMaxRegisterIndex = modRegister
+		}
 		if superInstructions == nil {
 			// 只有真实存在匹配形态时才分配 PC 对齐表，避免普通函数执行增加分配。
 			superInstructions = make([]mixArithmeticForLoopSuperInstruction, len(proto.Code))
 		}
 		superInstructions[pc] = mixArithmeticForLoopSuperInstruction{
-			MulTarget:            mulInstruction.A(),
-			MulLeftOperand:       mulLeftOperand,
-			MulRightOperand:      mulRightOperand,
-			FirstAddTarget:       firstAddInstruction.A(),
-			FirstAddLeftOperand:  firstAddLeftOperand,
-			FirstAddRightOperand: firstAddRightOperand,
-			SubTarget:            subInstruction.A(),
-			SubLeftOperand:       subLeftOperand,
-			SubRightOperand:      subRightOperand,
-			IDivTarget:           iDivInstruction.A(),
-			IDivLeftOperand:      iDivLeftOperand,
-			IDivRightOperand:     iDivRightOperand,
-			ModTarget:            modInstruction.A(),
-			ModLeftOperand:       modLeftOperand,
-			ModRightOperand:      modRightOperand,
-			FinalAddTarget:       finalAddInstruction.A(),
-			FinalAddLeftOperand:  finalAddLeftOperand,
-			FinalAddRightOperand: finalAddRightOperand,
-			SumRegister:          sumRegister,
-			LoopRegister:         mulRegister,
-			MulConstant:          mulConstant,
-			SubConstant:          subConstant,
-			IDivConstant:         iDivConstant,
-			ModConstant:          modConstant,
-			ForBase:              forBase,
-			ForSBx:               forLoopInstruction.SBx(),
-			ExitPC:               exitPC,
-			LoopPC:               loopPC,
-			Valid:                true,
+			MulTarget:             mulInstruction.A(),
+			MulLeftOperand:        mulLeftOperand,
+			MulRightOperand:       mulRightOperand,
+			FirstAddTarget:        firstAddInstruction.A(),
+			FirstAddLeftOperand:   firstAddLeftOperand,
+			FirstAddRightOperand:  firstAddRightOperand,
+			SubTarget:             subInstruction.A(),
+			SubLeftOperand:        subLeftOperand,
+			SubRightOperand:       subRightOperand,
+			IDivTarget:            iDivInstruction.A(),
+			IDivLeftOperand:       iDivLeftOperand,
+			IDivRightOperand:      iDivRightOperand,
+			ModTarget:             modInstruction.A(),
+			ModLeftOperand:        modLeftOperand,
+			ModRightOperand:       modRightOperand,
+			FinalAddTarget:        finalAddInstruction.A(),
+			FinalAddLeftOperand:   finalAddLeftOperand,
+			FinalAddRightOperand:  finalAddRightOperand,
+			SumRegister:           sumRegister,
+			LoopRegister:          mulRegister,
+			MulConstant:           mulConstant,
+			SubConstant:           subConstant,
+			IDivConstant:          iDivConstant,
+			ModConstant:           modConstant,
+			ForBase:               forBase,
+			ForSBx:                forLoopInstruction.SBx(),
+			ExitPC:                exitPC,
+			LoopPC:                loopPC,
+			BatchTempRegister:     tempRegister,
+			BatchSumRegister:      sumRegister,
+			BatchModRegister:      modRegister,
+			BatchMaxRegisterIndex: batchMaxRegisterIndex,
+			BatchValid:            batchValid,
+			Valid:                 true,
 		}
 	}
 	return superInstructions
@@ -3861,53 +3892,18 @@ func (vm *VM) PrepareMixArithmeticForLoopBatch(pc int) (MixArithmeticForLoopBatc
 	if !superInstruction.Valid {
 		return MixArithmeticForLoopBatch{}, false
 	}
-
-	forBase := superInstruction.ForBase
-	tempRegister := superInstruction.MulTarget
-	sumRegister := superInstruction.SumRegister
-	modRegister := superInstruction.ModTarget
-	if superInstruction.FirstAddTarget != tempRegister || superInstruction.IDivTarget != tempRegister {
-		// 当前 batch 只覆盖 MUL、第一条 ADD、IDIV 复用同一临时寄存器的官方形态。
+	if !superInstruction.BatchValid {
+		// batch 最终只写回最后一轮可见状态；别名形态保留单轮路径的逐指令覆盖顺序。
 		return MixArithmeticForLoopBatch{}, false
-	}
-	if superInstruction.SubTarget != sumRegister || superInstruction.FinalAddTarget != sumRegister {
-		// SUB 和末尾 ADD 必须写回同一个 sum 寄存器。
-		return MixArithmeticForLoopBatch{}, false
-	}
-	if superInstruction.LoopRegister != forBase+3 {
-		// 混合算术必须读取 numeric-for 的外部可见循环变量。
-		return MixArithmeticForLoopBatch{}, false
-	}
-	if tempRegister == sumRegister || tempRegister == modRegister || sumRegister == modRegister {
-		// batch 最终只写回最后一轮可见状态；别名形态需要单轮路径保留逐指令覆盖顺序。
-		return MixArithmeticForLoopBatch{}, false
-	}
-	if registerInRange(tempRegister, forBase, forBase+3) || registerInRange(sumRegister, forBase, forBase+3) || registerInRange(modRegister, forBase, forBase+3) {
-		// 算术目标不能覆盖 numeric-for 控制槽，否则需要逐指令别名语义。
-		return MixArithmeticForLoopBatch{}, false
-	}
-
-	maxRegisterIndex := forBase + 3
-	if tempRegister > maxRegisterIndex {
-		// IDIV 临时寄存器可能高于控制槽，需要纳入边界检查。
-		maxRegisterIndex = tempRegister
-	}
-	if sumRegister > maxRegisterIndex {
-		// sum 寄存器可能高于控制槽，需要纳入边界检查。
-		maxRegisterIndex = sumRegister
-	}
-	if modRegister > maxRegisterIndex {
-		// MOD 临时寄存器可能高于控制槽，需要纳入边界检查。
-		maxRegisterIndex = modRegister
 	}
 	return MixArithmeticForLoopBatch{
 		proto:            vm.proto,
 		pc:               pc,
 		superInstruction: superInstruction,
-		TempRegister:     tempRegister,
-		SumRegister:      sumRegister,
-		ModRegister:      modRegister,
-		maxRegisterIndex: maxRegisterIndex,
+		TempRegister:     superInstruction.BatchTempRegister,
+		SumRegister:      superInstruction.BatchSumRegister,
+		ModRegister:      superInstruction.BatchModRegister,
+		maxRegisterIndex: superInstruction.BatchMaxRegisterIndex,
 		valid:            true,
 	}, true
 }

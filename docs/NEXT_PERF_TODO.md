@@ -1028,6 +1028,60 @@ CGO_ENABLED=0 go test ./lua -run '^$' \
 - 默认完整 `arith_mix_loop` 稳定低于 `1.5x`。
 - 非目标 arithmetic/table/function/recursion prepared 矩阵不出现稳定退化。
 
+2026-07-04 在 `8fd6bce` 后重新 profile：
+
+```bash
+CGO_ENABLED=0 go test ./lua -run '^$' \
+  -bench '^BenchmarkPreparedArithMixLoopOfficial$' \
+  -benchmem -benchtime=5s -count=1 \
+  -cpuprofile /tmp/go-lua-vm-next-profiles/arith_mix_after_8fd6bce_cpu.pprof
+go tool pprof -top /tmp/go-lua-vm-next-profiles/arith_mix_after_8fd6bce_cpu.pprof
+```
+
+- `BenchmarkPreparedArithMixLoopOfficial`：约 `8.95 ms/op`、`0 allocs/op`。
+- CPU profile 中 `PrepareMixArithmeticForLoopBatch` 约 `21.25%` flat，`TryExecuteMixArithmeticForLoopBatch`
+  约 `16.31%` flat / `22.73%` cum；普通 `VM.Step` 约 `13.51%` cum。
+
+结论：当前剩余成本不是普通 dispatch，而是 batch 路径每个 context 窗口都重复执行静态 batch guard。
+已把 `PrepareMixArithmeticForLoopBatch` 中的目标寄存器、别名、控制槽和 `maxRegisterIndex` 等静态条件
+前移到 `buildMixArithmeticForLoopSuperInstructions`，预匹配表额外记录 batch 元数据；执行期仍保留原有
+Proto 绑定、寄存器边界、integer 类型、除数非零和写回 guard。别名形态继续不设置 `BatchValid`，回退
+单轮 superinstruction 或普通 VM，保留逐指令覆盖顺序。
+
+目标 Go micro 结果：
+
+```bash
+CGO_ENABLED=0 go test ./lua -run '^$' \
+  -bench '^Benchmark(DoString|Prepared)ArithMixLoopOfficial$' \
+  -benchmem -benchtime=2s -count=5
+```
+
+- `BenchmarkDoStringArithMixLoopOfficial`：约 `7.21-7.24 ms/op`、约 `130.4 KB/op`、`199 allocs/op`。
+- `BenchmarkPreparedArithMixLoopOfficial`：约 `7.13-7.17 ms/op`、`0 allocs/op`。
+
+对比本轮 profile 前 prepared 约 `8.95 ms/op`，wall-clock 降幅约 `20%`；分配保持不变，收益来自减少
+每个 batch 窗口的重复静态验证。
+
+重建 `bin/glua` / `bin/gluac` 后，显式使用官方 Lua/Luac 5.3.6 的完整 benchmark 抽样结果：
+
+| 用例 | 官方工具中位数 | 本项目中位数 | 本项目/官方 |
+| --- | ---: | ---: | ---: |
+| `arith_add_loop` | `0.007364s` | `0.004623s` | `0.63x` |
+| `arith_mix_loop` | `0.010693s` | `0.010906s` | `1.02x` |
+| `arith_chain_temp` | `0.012983s` | `0.009527s` | `0.73x` |
+| `table_rw` | `0.006723s` | `0.005993s` | `0.89x` |
+| `function_call` | `0.006256s` | `0.006649s` | `1.06x` |
+| `string_concat` | `0.004286s` | `0.004625s` | `1.08x` |
+| `closure_upvalue` | `0.007626s` | `0.006503s` | `0.85x` |
+| `stdlib_math_string` | `0.018863s` | `0.010749s` | `0.57x` |
+| `recursion` | `0.003336s` | `0.003616s` | `1.08x` |
+| `compile_3000_functions` | `0.004798s` | `0.006472s` | `1.35x` |
+
+结论：`arith_mix_loop` 从上一轮抽样约 `1.19x` 降到 `1.02x`，已经进入官方基线噪声带；后续不应继续
+围绕 mix arithmetic 局部扩张。剩余高于 `1.0x` 的主项仍是 `compile_3000_functions`，但前文已判定
+需要更大的紧凑 AST / codegen arena 生命周期设计；其他 `recursion`、`string_concat`、`function_call`
+也接近噪声带，继续优化前必须先 profile。
+
 ### 4. `string_concat`：窄形态字符串构建
 
 `string_concat` 当前约 `1.8x`。官方 fixture 是循环内 `s = s .. 'x'`，可考虑把连续追加同一短字符串的
@@ -1100,6 +1154,7 @@ CGO_ENABLED=0 go test ./lua -run '^$' \
 - [x] 优化 parser 语句分派，复核 `compile_3000_functions` Go micro 与 CLI 抽样口径。
 - [x] 在 `e5b67a2` 后重新 profile `compile_3000_functions`，记录暂无新的低风险编译期小切口。
 - [x] 优化 `arith_add_loop` step=1 batch 等差求和，复核 Go micro 与 CLI 抽样收益。
+- [x] 优化 `arith_mix_loop` batch 静态 guard 前移，复核 Go micro 与 CLI 抽样收益。
 - [ ] 每个生产优化 commit 后更新本文或 `docs/BENCHMARK.md`。
 
 ## 正确性门禁
