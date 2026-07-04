@@ -2209,6 +2209,89 @@ func TestVMTryExecuteTableWriteForLoopBatch(t *testing.T) {
 	}
 }
 
+// TestVMTryExecuteTableWriteForLoopBatchKeepsDenseGuardState 锁定 table 写入 batch 的 dense 可见边界。
+func TestVMTryExecuteTableWriteForLoopBatchKeepsDenseGuardState(t *testing.T) {
+	// 构造官方 table_rw 写入段，并使用 VM 专用 dense table 入口固定未来直接写入 batch 的 guard。
+	proto := testTableWriteForLoopProto()
+	vm := NewVMWithPrototypeData(5, nil, nil, nil, nil)
+	vm.BindPrototype(proto)
+	if !vm.PrepareTableWriteForLoopSuperInstructions() {
+		// 官方 table_rw 写入循环形态应能预构建 superinstruction。
+		t.Fatalf("expected table write for-loop superinstruction")
+	}
+	table := newTableWithArrayCapacity(5)
+	if !table.hasDenseIntegerArray() {
+		// 预分配入口必须创建 dense 表示，后续测试才有意义。
+		t.Fatalf("expected dense integer table")
+	}
+	initialRegisters := []Value{
+		ReferenceValue(KindTable, table),
+		IntegerValue(1),
+		IntegerValue(3),
+		IntegerValue(1),
+		IntegerValue(1),
+	}
+	for registerIndex, value := range initialRegisters {
+		// 初始化 table 与 FORLOOP 控制寄存器，模拟 FORPREP 后进入循环体的状态。
+		if err := vm.SetRegister(registerIndex, value); err != nil {
+			t.Fatalf("set register %d failed: %v", registerIndex, err)
+		}
+	}
+
+	batch, ok := vm.PrepareTableWriteForLoopBatch(0)
+	if !ok {
+		// 精确 `t[i] = i` 写入循环应能准备 batch。
+		t.Fatalf("expected prepared table write batch")
+	}
+	initialVersion := table.MutationVersion()
+	nextPC, iterations, handled := vm.TryExecuteTableWriteForLoopBatch(batch, 2)
+	if !handled || iterations != 2 || nextPC != 0 {
+		// 最多提交两轮时循环仍应跳回 SETTABLE。
+		t.Fatalf("partial dense batch mismatch: handled=%v iterations=%d nextPC=%d", handled, iterations, nextPC)
+	}
+	if !table.hasDenseIntegerArray() || len(table.arrayValues) != 0 {
+		// 纯连续整数写入不能提前 materialize 到普通数组区。
+		t.Fatalf("dense table materialized early: dense=%v arrayLen=%d", table.hasDenseIntegerArray(), len(table.arrayValues))
+	}
+	if length := table.Len(); length != 2 {
+		// dense 表示的长度边界必须等于当前连续写入前缀。
+		t.Fatalf("partial dense length mismatch: got %d", length)
+	}
+	if table.MutationVersion() <= initialVersion {
+		// 写入 batch 至少要让缓存观察到 table 已发生 raw 变化。
+		t.Fatalf("mutation version did not advance: before=%d after=%d", initialVersion, table.MutationVersion())
+	}
+
+	partialVersion := table.MutationVersion()
+	nextPC, iterations, handled = vm.TryExecuteTableWriteForLoopBatch(batch, 10)
+	if !handled || iterations != 1 || nextPC != 2 {
+		// 剩余一轮后达到 limit 并退出循环。
+		t.Fatalf("final dense batch mismatch: handled=%v iterations=%d nextPC=%d", handled, iterations, nextPC)
+	}
+	if !table.hasDenseIntegerArray() || len(table.arrayValues) != 0 {
+		// 循环完整结束后仍应保持 dense 表示，直到遇到复杂观察入口。
+		t.Fatalf("dense table materialized after final batch: dense=%v arrayLen=%d", table.hasDenseIntegerArray(), len(table.arrayValues))
+	}
+	if length := table.Len(); length != 3 {
+		// 完整写入后的长度边界必须覆盖三轮写入。
+		t.Fatalf("final dense length mismatch: got %d", length)
+	}
+	if table.MutationVersion() <= partialVersion {
+		// 最后一轮写入同样必须使缓存版本前进，不能被 batch 提交吞掉。
+		t.Fatalf("final mutation version did not advance: before=%d after=%d", partialVersion, table.MutationVersion())
+	}
+
+	nextKey, nextValue, ok, err := table.RawNext(NilValue())
+	if err != nil || !ok || !nextKey.RawEqual(IntegerValue(1)) || !nextValue.RawEqual(IntegerValue(1)) {
+		// RawNext 需要完整迭代语义，必须能从 dense 表示 materialize 后返回第一项。
+		t.Fatalf("dense raw next mismatch: key=%#v value=%#v ok=%v err=%v", nextKey, nextValue, ok, err)
+	}
+	if table.hasDenseIntegerArray() || len(table.arrayValues) != 3 {
+		// next/pairs 类复杂观察之后必须回到普通数组区，避免两套迭代实现分叉。
+		t.Fatalf("dense table should materialize after raw next: dense=%v arrayLen=%d", table.hasDenseIntegerArray(), len(table.arrayValues))
+	}
+}
+
 // TestVMTryExecuteTableWriteForLoopFallback 验证 table 写入 batch 动态 guard 失败无副作用。
 func TestVMTryExecuteTableWriteForLoopFallback(t *testing.T) {
 	proto := testTableWriteForLoopProto()
@@ -2326,6 +2409,117 @@ func TestVMTryExecuteTableReadAddForLoopBatch(t *testing.T) {
 	if vm.currentPC != 2 || vm.pcOffset != 0 {
 		// batch 后 VM 状态应等价于刚执行完 FORLOOP。
 		t.Fatalf("final pc state mismatch: currentPC=%d pcOffset=%d", vm.currentPC, vm.pcOffset)
+	}
+}
+
+// TestVMTryExecuteTableReadAddForLoopBatchKeepsDenseGuardState 锁定 table 读取 batch 的 dense 回退边界。
+func TestVMTryExecuteTableReadAddForLoopBatchKeepsDenseGuardState(t *testing.T) {
+	// 构造官方 table_rw 读取段，并验证读取 batch 不会 materialize dense 表示。
+	proto := testTableReadAddForLoopProto()
+	vm := NewVMWithPrototypeData(7, nil, nil, nil, nil)
+	vm.BindPrototype(proto)
+	if !vm.PrepareTableReadAddForLoopSuperInstructions() {
+		// 官方 table_rw 读取循环形态应能预构建 superinstruction。
+		t.Fatalf("expected table read-add for-loop superinstruction")
+	}
+	table := newTableWithArrayCapacity(3)
+	for index := int64(1); index <= 3; index++ {
+		// 准备连续 dense integer 前缀，模拟写入 batch 完成后的 table 状态。
+		table.RawSetPositiveIntegerNonNil(index, IntegerValue(index))
+	}
+	initialRegisters := map[int]Value{
+		0: ReferenceValue(KindTable, table),
+		1: IntegerValue(0),
+		2: IntegerValue(1),
+		3: IntegerValue(3),
+		4: IntegerValue(1),
+		5: IntegerValue(1),
+	}
+	for registerIndex, value := range initialRegisters {
+		// 初始化 table、sum 与 FORLOOP 控制寄存器，模拟 FORPREP 后进入读取循环体的状态。
+		if err := vm.SetRegister(registerIndex, value); err != nil {
+			t.Fatalf("set register %d failed: %v", registerIndex, err)
+		}
+	}
+
+	batch, ok := vm.PrepareTableReadAddForLoopBatch(0)
+	if !ok {
+		// 精确 `sum = sum + t[i]` 读取循环应能准备 batch。
+		t.Fatalf("expected prepared table read-add batch")
+	}
+	initialVersion := table.MutationVersion()
+	nextPC, iterations, handled := vm.TryExecuteTableReadAddForLoopBatch(batch, 2)
+	if !handled || iterations != 2 || nextPC != 0 {
+		// 最多提交两轮时循环仍应跳回 GETTABLE。
+		t.Fatalf("partial dense read batch mismatch: handled=%v iterations=%d nextPC=%d", handled, iterations, nextPC)
+	}
+	if !table.hasDenseIntegerArray() || len(table.arrayValues) != 0 {
+		// 纯 raw integer 读取不能为了返回 Value 而 materialize。
+		t.Fatalf("dense table materialized by read: dense=%v arrayLen=%d", table.hasDenseIntegerArray(), len(table.arrayValues))
+	}
+	if table.MutationVersion() != initialVersion {
+		// 读取 batch 不应产生 raw 写入版本变化。
+		t.Fatalf("read changed mutation version: before=%d after=%d", initialVersion, table.MutationVersion())
+	}
+	if value, ok := vm.Register(1); !ok || !value.RawEqual(IntegerValue(3)) {
+		// sum 必须等于 t[1]+t[2]。
+		t.Fatalf("partial dense read sum mismatch: value=%#v ok=%v", value, ok)
+	}
+
+	nextPC, iterations, handled = vm.TryExecuteTableReadAddForLoopBatch(batch, 10)
+	if !handled || iterations != 1 || nextPC != 3 {
+		// 剩余一轮后达到 limit 并退出循环。
+		t.Fatalf("final dense read batch mismatch: handled=%v iterations=%d nextPC=%d", handled, iterations, nextPC)
+	}
+	if !table.hasDenseIntegerArray() || len(table.arrayValues) != 0 {
+		// 完整读取循环结束后仍应保持 dense 表示。
+		t.Fatalf("dense table materialized after final read: dense=%v arrayLen=%d", table.hasDenseIntegerArray(), len(table.arrayValues))
+	}
+	if value, ok := vm.Register(1); !ok || !value.RawEqual(IntegerValue(6)) {
+		// 三轮读取结果必须等于 1+2+3。
+		t.Fatalf("final dense read sum mismatch: value=%#v ok=%v", value, ok)
+	}
+
+	metatableVM := NewVMWithPrototypeData(7, nil, nil, nil, nil)
+	metatableVM.BindPrototype(proto)
+	if !metatableVM.PrepareTableReadAddForLoopSuperInstructions() {
+		// 同一个读取 Proto 在第二个 VM 中仍应能准备静态 superinstruction。
+		t.Fatalf("expected metatable table read-add for-loop superinstruction")
+	}
+	metatableTable := newTableWithArrayCapacity(3)
+	metatableTable.RawSetPositiveIntegerNonNil(1, IntegerValue(1))
+	metatableTable.SetMetatable(NewTable())
+	metatableRegisters := map[int]Value{
+		0: ReferenceValue(KindTable, metatableTable),
+		1: IntegerValue(0),
+		2: IntegerValue(1),
+		3: IntegerValue(3),
+		4: IntegerValue(1),
+		5: IntegerValue(1),
+	}
+	for registerIndex, value := range metatableRegisters {
+		// 带元表 table 只能在执行期 guard 回退，不能提前改变寄存器。
+		if err := metatableVM.SetRegister(registerIndex, value); err != nil {
+			t.Fatalf("set metatable register %d failed: %v", registerIndex, err)
+		}
+	}
+	metatableBatch, ok := metatableVM.PrepareTableReadAddForLoopBatch(0)
+	if !ok {
+		// 元表不是静态 guard，batch 准备应成功并在执行期回退。
+		t.Fatalf("expected prepared metatable table read-add batch")
+	}
+	nextPC, iterations, handled = metatableVM.TryExecuteTableReadAddForLoopBatch(metatableBatch, 8)
+	if handled || iterations != 0 || nextPC != 0 {
+		// 带元表 table 必须回退普通 GETTABLE，保留 __index 语义。
+		t.Fatalf("metatable fallback mismatch: handled=%v iterations=%d nextPC=%d", handled, iterations, nextPC)
+	}
+	if value, ok := metatableVM.Register(1); !ok || !value.RawEqual(IntegerValue(0)) {
+		// guard 失败不能提前累加 sum。
+		t.Fatalf("metatable fallback sum changed: value=%#v ok=%v", value, ok)
+	}
+	if !metatableTable.hasDenseIntegerArray() || len(metatableTable.arrayValues) != 0 {
+		// 元表回退只是拒绝 fast path，不能为了检查 guard 提前 materialize。
+		t.Fatalf("metatable fallback materialized dense table: dense=%v arrayLen=%d", metatableTable.hasDenseIntegerArray(), len(metatableTable.arrayValues))
 	}
 }
 
