@@ -716,6 +716,12 @@ CGO_ENABLED=0 go test ./internal/luac -run '^$' \
 `compile_3000_functions` 为官方 `0.005389s`、本项目 `0.008717s`、倍率 `1.62x`；该结果与上一轮
 `41c03e7` 后 `1.57x` 抽样处于同一量级，仍低于 `dd2c206` 后约 `1.77x` 的端到端口径。
 
+同轮继续试验过 `Source.Next` ASCII 快路径：ASCII 按单字节推进，CR/LF 仍保持 Lua 5.3 的 CRLF/LFCR
+单换行归一，非 ASCII 与非法 UTF-8 回落标准解码路径。该试验通过 gopls 与 Source/invalid UTF-8
+定向测试，但 `BenchmarkCompileSource3000Functions` 五轮约 `4.24 / 4.22 / 4.21 / 4.22 / 4.24 ms/op`，
+相比当前约 `4.10-4.23 ms/op` 没有证明稳定收益，生产改动已回退。后续不要重复做 `Source.Next`
+ASCII 直推，除非 profile 显示它成为独立主热点并能在同机基线中稳定降低 wall-clock。
+
 ### 3. `arith_mix_loop`：批量 mix arithmetic superinstruction
 
 `arith_mix_loop` 当前约 `1.9x`，运行期仍高于官方。上一阶段已有完整
@@ -796,6 +802,7 @@ CGO_ENABLED=0 go test ./internal/luac -run '^$' \
 - [x] 证伪 `skipWhitespace` byte 直扫，未保留生产改动。
 - [x] 证伪已知 keyword 直接 advance，未保留生产改动。
 - [x] 优化 `Source.Peek` / `PeekOffset` ASCII 预读，复核 `compile_3000_functions` Go micro 收益。
+- [x] 证伪 `Source.Next` ASCII 直推，未保留生产改动。
 - [ ] 每个生产优化 commit 后更新本文或 `docs/BENCHMARK.md`。
 
 ## 正确性门禁
