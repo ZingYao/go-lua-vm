@@ -331,7 +331,53 @@ typed statement / compact function statement prototype：在不破坏 parser、s
 
 ## 优化路线
 
-### 1. `compile_3000_functions`：typed statement / AST 生命周期结构
+### 1. `table_rw`：dense integer table 与逃逸消除边界
+
+`table_rw` 当前仍约 `1.48x`。上一阶段已经完成数组预分配、table write batch 和 table read-add batch，
+prepared profile 显示剩余分配主要是一次 `[]Value` 大数组 backing store 以及随后的 GC 扫描。
+继续调扩容阈值或增加局部 `RawGetInteger` 分支不能触及主因。
+
+首选激进方案是可回退的 dense integer table 表示，而不是整段 benchmark 逃逸消除：
+
+- 只由 VM 中已证明的 table write batch 创建 compact table；普通 `NewTable`、外部 Go API 和未证明的
+  `OP_NEWTABLE` 保持现有 `[]Value` 数组区。
+- compact table 只承载连续正整数 key，首轮只覆盖官方 fixture 的 `t[i] = i` / `t[i] = Kinteger`
+  这类非 nil integer value；key 隐含为 `1..n`，value 放入无指针 `[]int64` backing store。
+- `RawGetInteger`、`RawSetPositiveIntegerNonNil`、`Len`、`RawIPairsNext` 可以在 compact 表示上直接读写；
+  返回值仍即时构造 `IntegerValue`，不得向外泄露内部表示。
+- 任一非 integer value、nil 删除、稀疏写入、hash key 写入、非正整数 key、超出 compact 上限、
+  `RawSet` 的 NaN/nil key 错误路径、或需要稳定 `Value` 槽位地址的路径都必须先 materialize 到普通
+  `[]Value` 数组区，再沿现有逻辑执行。
+- `ArraySize`、`RawNext`、`RawPairsNext`、raw 迭代快照、迭代中删除当前 key 后继续、`next` 非法 key
+  错误边界，首轮应直接 materialize 后复用现有实现，避免维护两套迭代顺序。
+- `SetMetatable` / `SetMetatableChecked` 本身不必 materialize；但弱表 sweep、finalizer 前 weak 清理、
+  `__mode` 后续变化、以及任何遍历或对外 raw 快照都必须在观察前 materialize，保证弱表和 finalizer
+  不需要理解 compact 内部表示。
+- 普通 `Get` / `Set` 仍先经 raw 路径；raw miss 后的 `__index` / `__newindex` 链必须与现有 table 一致。
+  如果 compact 状态下出现 miss 且后续需要元方法，允许不 materialize；但一旦元方法可能观察 table 本体
+  或写回 table，必须回到普通路径。
+- debug hook、precise frame sync、yield/continuation 和错误 traceback 不应看到压缩过的 table 状态；
+  创建 compact table 的 VM batch 必须沿用现有无 hook、无 continuation guard。
+
+首轮验收：
+
+- `BenchmarkPreparedTableReadWriteOfficial` 的 B/op 至少下降 `70%`，或 wall-clock 稳定下降 `15%` 以上。
+- 默认完整 `table_rw` 稳定低于 `1.25x`；若官方基线波动较大，至少要求 Go micro 五轮稳定改善。
+- 必须新增定向测试覆盖 compact table 的 `RawGetInteger`、连续写入、`Len`、`ipairs`、nil 删除 materialize、
+  非 integer 写入 materialize、hash 写入 materialize、`RawNext`/`pairs` 顺序、`SetMetatableChecked`、
+  weak value sweep 和 `__index`/`__newindex` miss 语义。
+- 官方兼容脚本必须全绿；任何 `#t`、`rawget/rawset`、`next/pairs` 顺序、弱表/finalizer、metatable、
+  debug hook 或错误路径差异都回退。
+
+更激进的后备方案是整段 table 逃逸消除：
+
+- 只匹配 `NEWTABLE; numeric-for t[i]=i; numeric-for sum=sum+t[i]; RETURN` 这一类 table 完全不逃逸的固定形态。
+- 必须证明 table 没有被 upvalue 捕获、没有赋给全局/返回/传参、两个循环之间没有调用、没有 hook、
+  没有元表观察、没有 `next/pairs/#/rawget/rawset` 或 debug API 读取局部 `t` 的机会。
+- 命中后可以不创建 table，直接计算读循环结果；但这更接近 benchmark 专项，必须在 dense integer table
+  方案收益不足且文档化语义证明后才允许进入 prototype。
+
+### 2. `compile_3000_functions`：typed statement / AST 生命周期结构
 
 当前最高项仍是编译期。上一阶段已经把 `compile_3000_functions` 从约 `8.34 ms/op`、`7.58 MB/op`、
 `81151 allocs/op` 降到约 `6.1 ms/op`、`5.22 MB/op`、`3110-3114 allocs/op`。剩余对象主要来自
@@ -378,7 +424,7 @@ typed statement / compact function statement prototype：在不破坏 parser、s
 `5.46-5.63 ms/op`、`5.25 MB/op`、`125 allocs/op`。对象数大幅下降，B/op 只有小幅上浮；
 后续必须用完整 benchmark 和官方兼容脚本继续复核，暂不继续扩大到 `Block.Statements` union。
 
-### 2. `arith_mix_loop`：批量 mix arithmetic superinstruction
+### 3. `arith_mix_loop`：批量 mix arithmetic superinstruction
 
 `arith_mix_loop` 当前约 `1.9x`，运行期仍高于官方。上一阶段已有完整
 `MUL; ADD; SUB; IDIV; MOD; ADD; FORLOOP` 窄形态 fast path，但尚未像 `arith_add_loop` /
@@ -396,7 +442,7 @@ typed statement / compact function statement prototype：在不破坏 parser、s
 - 默认完整 `arith_mix_loop` 稳定低于 `1.5x`。
 - 非目标 arithmetic/table/function/recursion prepared 矩阵不出现稳定退化。
 
-### 3. `string_concat`：窄形态字符串构建
+### 4. `string_concat`：窄形态字符串构建
 
 `string_concat` 当前约 `1.8x`。官方 fixture 是循环内 `s = s .. 'x'`，可考虑把连续追加同一短字符串的
 窄形态转为受 guard 保护的 builder 路径。
@@ -417,7 +463,7 @@ typed statement / compact function statement prototype：在不破坏 parser、s
 - 默认完整 `string_concat` 稳定低于 `1.4x`。
 - metatable `__concat`、错误路径、debug hook 场景有定向测试覆盖。
 
-### 4. `stdlib_math_string`：表达式级 math/string folding 扩展
+### 5. `stdlib_math_string`：表达式级 math/string folding 扩展
 
 该项当前约 `1.5x`。上一阶段已经覆盖 `string.format("%d", i)` 固定结果和
 `#string.format("%d", i)` 长度消费；剩余可能来自 `math.sqrt`、`math.floor` 与浮点边界。
@@ -449,7 +495,8 @@ typed statement / compact function statement prototype：在不破坏 parser、s
 - [x] profile `stdlib_math_string` 剩余热点，确认完整热体 batch 仍有表达式级消费消除空间。
 - [x] 实现 `stdlib_math_string` 完整热体 batch superinstruction，并复核官方完整 benchmark。
 - [x] profile `table_rw`，确认当前主要成本已从连续扩容和 dispatch 转为大数组分配与 GC 扫描。
-- [ ] 为 `table_rw` dense integer array 或逃逸消除方案补设计小节，先列出 materialize、迭代、元表、弱表和 debug 可见性边界。
+- [x] 为 `table_rw` dense integer array 或逃逸消除方案补设计小节，先列出 materialize、迭代、元表、弱表和 debug 可见性边界。
+- [ ] 为 `table_rw` compact table 补最小 guard 测试，再决定是否实现 dense integer array prototype。
 - [ ] 每个生产优化 commit 后更新本文或 `docs/BENCHMARK.md`。
 
 ## 正确性门禁
