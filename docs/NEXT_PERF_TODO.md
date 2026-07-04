@@ -135,6 +135,20 @@ FORPREP; MOVE; LOADK; CONCAT; FORLOOP
 - 实现前必须先补定向测试：string metatable `__concat` 不拦截 string/string、非 string operand 仍触发
   `__concat`、yielding `__concat` 继续折叠、debug hook 下不命中 builder、错误路径和 `#s` 结果一致。
 
+2026-07-04 已补齐 builder 进入生产实现前的核心 guard 测试：
+
+- `TestDoStringConcatStringPairIgnoresStringMetamethod` 固定 string/string 基础拼接不触发 string 类型
+  `__concat`。
+- `TestDoStringConcatNonStringUsesStringMetamethod` 固定存在非 string 操作数时仍回退普通 `__concat`
+  查找路径。
+- `TestDoStringConcatLineHookSeesSelfAppendIntermediates` 固定 line hook 打开时必须能观察每轮
+  `s = s .. "x"` 前的中间长度 `0,1,2`。
+- 既有 `TestDoStringCoroutineYieldInConcatMetamethod` 继续覆盖 yielding `__concat` 的连续折叠恢复。
+
+这些测试只锁定回退与可见性边界，不引入生产 fast path。下一步若实现 builder 原型，应先在
+runtime 侧构建只覆盖无 hook、无 continuation、raw string operand、固定右侧 string 常量的预匹配表；
+任一 guard 失败必须保持上述测试覆盖的普通路径。
+
 ### `compile_3000_functions`
 
 命令：
@@ -278,7 +292,8 @@ typed statement / compact function statement prototype：在不破坏 parser、s
 - [x] 设计并实现 batch mix arithmetic superinstruction，证明 context、PC、debug hook、coroutine 和错误路径等价。
 - [x] profile `string_concat` CPU/alloc，确认主因是 `executeConcat` 短命字符串分配和 GC 压力。
 - [x] 复核 `string_concat` 官方 fixture 字节码与元方法可见性，再决定是否进入窄形态 builder。
-- [ ] 设计并补齐 `string_concat` builder guard 定向测试后，再决定是否实现窄形态 builder。
+- [x] 设计并补齐 `string_concat` builder guard 定向测试后，再决定是否实现窄形态 builder。
+- [ ] 实现 `string_concat` 窄形态 builder 原型，或先 profile `stdlib_math_string` 作为下一小切口。
 - [ ] profile `stdlib_math_string` 剩余热点，确认是否仍有表达式级消费消除空间。
 - [ ] 每个生产优化 commit 后更新本文或 `docs/BENCHMARK.md`。
 

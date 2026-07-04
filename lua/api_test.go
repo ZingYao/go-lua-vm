@@ -2288,6 +2288,106 @@ result = s
 	}
 }
 
+// TestDoStringConcatStringPairIgnoresStringMetamethod 验证 string/string 基础拼接不触发 __concat。
+//
+// Lua 5.3 对两个可直接转 string 的操作数优先执行基础拼接；即使 debug.setmetatable 为 string 类型
+// 写入 `__concat`，也不能让元方法拦截 `"a" .. "b"`。后续 string_concat builder fast path 必须保留
+// 该边界。
+func TestDoStringConcatStringPairIgnoresStringMetamethod(t *testing.T) {
+	// 创建完整标准库 State，确保 debug.setmetatable 可写入 string 类型级元表。
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库打开不应失败。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+
+	source := `
+local called = false
+debug.setmetatable("", {
+  __concat = function()
+    called = true
+    return "bad"
+  end,
+})
+assert(("a" .. "b") == "ab")
+assert(called == false)
+`
+	if err := DoString(state, source); err != nil {
+		// 纯 string 基础拼接不应进入 string 类型 __concat。
+		t.Fatalf("DoString string concat metamethod guard failed: %v", err)
+	}
+}
+
+// TestDoStringConcatNonStringUsesStringMetamethod 验证非 string 操作数仍可通过 string __concat 处理。
+//
+// 当任一操作数不能直接转 string 时，Lua 5.3 会查找两侧 `__concat`。这里左侧 table 没有元表、
+// 右侧 string 有类型级元表，必须调用 string `__concat`；builder fast path 的 operand guard 失败时
+// 也必须回退到该普通路径。
+func TestDoStringConcatNonStringUsesStringMetamethod(t *testing.T) {
+	// 创建完整标准库 State，确保 debug.setmetatable 可写入 string 类型级元表。
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库打开不应失败。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+
+	source := `
+local calls = 0
+debug.setmetatable("", {
+  __concat = function(a, b)
+    calls = calls + 1
+    assert(type(a) == "table")
+    assert(b == "b")
+    return "ok"
+  end,
+})
+assert(({} .. "b") == "ok")
+assert(calls == 1)
+`
+	if err := DoString(state, source); err != nil {
+		// 非 string 操作数必须继续触发 `__concat` 元方法。
+		t.Fatalf("DoString non-string concat metamethod failed: %v", err)
+	}
+}
+
+// TestDoStringConcatLineHookSeesSelfAppendIntermediates 验证 line hook 可观察自拼接中间值。
+//
+// `s = s .. "x"` 的普通 VM 路径每轮都会在执行语句前触发 line hook，并在上一轮结束后把新字符串
+// 写回 `s`。若未来 builder fast path 批量压缩循环，在 debug hook 打开时必须回退普通路径，否则
+// hook 将无法看到 `0,1,2` 这三个中间长度。
+func TestDoStringConcatLineHookSeesSelfAppendIntermediates(t *testing.T) {
+	// 创建完整标准库 State，确保 debug.sethook 与 table.concat 可用。
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库打开不应失败。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+
+	source := `local seen = {}
+local s = ""
+local appendLine = debug.getinfo(1).currentline + 8
+debug.sethook(function(event, line)
+  assert(event == "line")
+  if line == appendLine then
+    seen[#seen + 1] = #s
+  end
+end, "l")
+for i = 1, 3 do
+  s = s .. "x"
+end
+debug.sethook()
+assert(table.concat(seen, ",") == "0,1,2")
+assert(s == "xxx")
+`
+	if err := DoString(state, source); err != nil {
+		// line hook 必须观察到每轮自拼接前的可见中间值。
+		t.Fatalf("DoString concat line hook visibility failed: %v", err)
+	}
+}
+
 // TestDoStringSupportsStringMethodIndex 验证字符串值可通过类型级方法表调用 string 库方法。
 //
 // Lua 5.3 标准库打开后，`("..."):format(x)` 应等价于 `string.format("...", x)`；官方
