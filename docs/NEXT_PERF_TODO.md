@@ -94,6 +94,35 @@ go tool pprof -top -alloc_space /tmp/go-lua-vm-next-profiles/string_concat_mem.p
 但必须处理字符串不可变、`__concat` 元方法、debug hook 和中间值可见性，语义风险高于
 `arith_mix_loop` batch。除非先补充字节码和元方法可见性设计，本分支优先不直接实现该 fast path。
 
+### `compile_3000_functions`
+
+命令：
+
+```bash
+CGO_ENABLED=0 go test ./internal/luac -run '^$' -bench '^BenchmarkCompileSource3000Functions$' \
+  -benchmem -benchtime=5s -count=1 \
+  -cpuprofile /tmp/go-lua-vm-next-profiles/compile_3000_cpu.pprof \
+  -memprofile /tmp/go-lua-vm-next-profiles/compile_3000_mem.pprof
+go tool pprof -top /tmp/go-lua-vm-next-profiles/compile_3000_cpu.pprof
+go tool pprof -top -alloc_objects /tmp/go-lua-vm-next-profiles/compile_3000_mem.pprof
+go tool pprof -top -alloc_space /tmp/go-lua-vm-next-profiles/compile_3000_mem.pprof
+```
+
+结果：
+
+- `BenchmarkCompileSource3000Functions`：约 `5.83 ms/op`、`5.22 MB/op`、`3110 allocs/op`。
+- CPU 中 `compiler/lexer.(*Lexer).NextToken` 约 `48.88%` cum；`parseFunctionStatement` 约
+  `58.79%` cum；codegen 总体占比明显低于 parser/lexer。
+- `alloc_objects` 中 `parseFunctionStatement` 约 `93.52%` flat，说明对象数主因仍是大量函数语句
+  及其函数体 AST。
+- `alloc_space` 中 `prepareDirectFunctionBlockCapacity` 约 `41.02%` flat，`parseFunctionStatement`
+  约 `25.08%` flat。前者是上一阶段用 codegen arena 换低 allocs/op 的空间成本，不能简单删除。
+
+结论：下一步不应直接微调 lexer dispatch 或删除 codegen arena。更合理的激进切口是先设计
+typed statement / compact function statement prototype：在不破坏 parser、semantic、codegen 和错误语义的前提下，
+减少 3000 个顶层 `FunctionStatement` 进入 `Block.Statements` interface 切片时的对象与接口成本；
+同时需要评估 codegen arena 是否可以延迟或分段，避免用 alloc_space 换 allocs/op。
+
 ## 优化路线
 
 ### 1. `compile_3000_functions`：typed statement / AST 生命周期结构
@@ -171,7 +200,7 @@ go tool pprof -top -alloc_space /tmp/go-lua-vm-next-profiles/string_concat_mem.p
 ## TODO
 
 - [ ] 跑下一阶段基线：默认完整 benchmark 三轮、剩余高于 `1.0x` 项的 Go micro 矩阵。
-- [ ] profile `compile_3000_functions`，确认 `FunctionStatement` / typed statement storage 是否仍是主切口。
+- [x] profile `compile_3000_functions`，确认 `FunctionStatement` / typed statement storage 仍是主切口，同时记录 codegen arena 空间成本。
 - [ ] 为 typed statement / compact AST 方案补设计小节，列出 parser、semantic、codegen、debug 和错误语义影响面。
 - [ ] 只有设计通过后，才实现最小 typed statement prototype；若收益不足或 B/op 升高，记录证伪并回退。
 - [x] profile `arith_mix_loop` prepared，确认当前主要成本在现有 mix fast path 内。
