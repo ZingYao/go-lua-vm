@@ -143,6 +143,29 @@ typed statement / compact function statement prototype：在不破坏 parser、s
 - B/op 不高于当前 `5.22 MB/op` 的噪声范围；不能再用大 backing array 换 allocs/op。
 - 官方反汇编、debug local 生命周期、goto/label 错误、parser 错误文本保持一致。
 
+设计切口：
+
+- 目标对象：先只覆盖 parser 创建的简单 `FunctionStatement` / `LocalFunctionStatement` 节点，不替换
+  `Block.Statements []Statement`，也不改 semantic/codegen 的公开遍历入口。
+- 输入边界：`function name (...) ... end` 与 `local function name (...) ... end` 可进入 compact 路径；
+  `function t.x(...)`、`function t:m(...)`、匿名 `function(...)`、控制流嵌套和扩展语法先保持原路径。
+- 输出形态：parser 通过私有 chunked arena 分配 statement 值，返回值仍是 `*FunctionStatement` 或
+  `*LocalFunctionStatement` 并写入现有 `Statement` 接口切片。这样可以减少每个函数语句一次独立对象分配，
+  同时保持 AST 对外类型断言、`Pos()`、`Body`、`inlineBody` 和现有测试行为不变。
+- 生命周期约束：arena chunk 必须随 AST 指针一同被 GC 保留；禁止复用 parser arena 到下一次解析，
+  除非能证明上一棵 AST 已经不可达。chunk 扩容不能搬迁已返回 statement 地址。
+- semantic 影响：`analyzeStatement` 仍按现有 type switch 处理，不新增作用域规则；local function 的
+  先声明后分析语义不变。
+- codegen 影响：`compileStatement`、`compileFunctionStatement`、`compileLocalFunction` 和
+  `directFunctionBlockStatsFor` 不需要改变输入类型；`prepareDirectFunctionBlockCapacity` 暂不删除，
+  后续只在 prototype 证明 parser 对象数下降后再评估分段或延迟 arena。
+- debug / 错误语义：`LineDefined`、`LastLineDefined`、函数体 `Position`、parser 错误文本、goto/label
+  和 local 生命周期必须保持现有 golden 行为。
+- 回滚标准：若 prototype 只降低 allocs/op 但 B/op 或 wall-clock 稳定变差，或任何 parser/semantic/codegen
+  测试行为变化，回退到普通堆分配路径并只保留 profile 记录。
+- 明确不做：本阶段不引入全局 AST 对象池，不把 `Block.Statements` 改成 union，不删除 codegen arena，
+  不跨解析任务共享 mutable state。
+
 ### 2. `arith_mix_loop`：批量 mix arithmetic superinstruction
 
 `arith_mix_loop` 当前约 `1.9x`，运行期仍高于官方。上一阶段已有完整
@@ -201,7 +224,7 @@ typed statement / compact function statement prototype：在不破坏 parser、s
 
 - [ ] 跑下一阶段基线：默认完整 benchmark 三轮、剩余高于 `1.0x` 项的 Go micro 矩阵。
 - [x] profile `compile_3000_functions`，确认 `FunctionStatement` / typed statement storage 仍是主切口，同时记录 codegen arena 空间成本。
-- [ ] 为 typed statement / compact AST 方案补设计小节，列出 parser、semantic、codegen、debug 和错误语义影响面。
+- [x] 为 typed statement / compact AST 方案补设计小节，列出 parser、semantic、codegen、debug 和错误语义影响面。
 - [ ] 只有设计通过后，才实现最小 typed statement prototype；若收益不足或 B/op 升高，记录证伪并回退。
 - [x] profile `arith_mix_loop` prepared，确认当前主要成本在现有 mix fast path 内。
 - [x] 补跑 `arith_mix_loop` DoString benchmark，确认端到端同步受益且没有新的编译期噪声。
