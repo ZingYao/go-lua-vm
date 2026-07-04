@@ -582,6 +582,29 @@ CGO_ENABLED=0 go test ./internal/luac -run '^$' \
 `compile_3000_functions` 为官方 `0.005393s`、本项目 `0.008631s`、倍率 `1.60x`；相比上一轮单轮
 约 `1.77x`，CLI 端到端继续收敛。
 
+2026-07-04 在 `51bf3e6` 后重新 profile：
+
+```bash
+CGO_ENABLED=0 go test ./internal/luac -run '^$' \
+  -bench '^BenchmarkCompileSource3000Functions$' \
+  -benchmem -benchtime=5s -count=1 \
+  -cpuprofile /tmp/go-lua-vm-next-profiles/compile_3000_after_51bf3e6_cpu.pprof \
+  -memprofile /tmp/go-lua-vm-next-profiles/compile_3000_after_51bf3e6_mem.pprof
+```
+
+- `BenchmarkCompileSource3000Functions`：约 `4.30 ms/op`、`5.03 MB/op`、`86 allocs/op`。
+- CPU 采样仍显示 lexer/parser 是主要可归因部分，其中 `scanNumberToken` / `ScanNumber` 累计约
+  `0.47s`，`ScanIdentifier` 已降到较低占比。
+- alloc_space 仍主要来自 `prepareDirectFunctionBlockCapacity`、`newFunctionStatement`、
+  `newLiteralExpression`、`newBinaryExpression`、`newNameExpression` 和 Proto/codegen 结构。
+
+试验过为纯 int64 十进制整数字面量增加 byte 扫描快路径：复杂数字、指数、浮点、十六进制和溢出均回落
+通用路径，定向测试覆盖最大 int64、非 ASCII 后缀、`1..x` 和非法指数。五轮结果约
+`4.31 / 4.31 / 4.31 / 4.31 / 4.45 ms/op`、约 `5.03 MB/op`、`89-90 allocs/op`，没有证明相比
+`51bf3e6` 后 `4.22-4.30 ms/op` 的稳定 wall-clock 收益，且 allocs/op 未改善；生产改动已回退。
+后续不要重复做纯十进制 int64 byte fast path，除非 profile 指向更具体的 number 解析子路径并能证明
+B/op 或 wall-clock 稳定下降。
+
 ### 3. `arith_mix_loop`：批量 mix arithmetic superinstruction
 
 `arith_mix_loop` 当前约 `1.9x`，运行期仍高于官方。上一阶段已有完整
@@ -658,6 +681,7 @@ CGO_ENABLED=0 go test ./internal/luac -run '^$' \
 - [x] 实现 `table_rw` dense integer array prototype，若 B/op 或官方兼容语义不满足验收则回退。
 - [x] 重建 CLI 后复核官方完整 benchmark，确认 `table_rw` 端到端倍率变化。
 - [x] 优化 lexer 标识符 ASCII 扫描，复核 `compile_3000_functions` Go micro 与 CLI 端到端收益。
+- [x] 证伪纯十进制 int64 byte 快路径，未保留生产改动。
 - [ ] 每个生产优化 commit 后更新本文或 `docs/BENCHMARK.md`。
 
 ## 正确性门禁
