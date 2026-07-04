@@ -3594,6 +3594,165 @@ func TestVMTryExecuteFormatLenAddForLoopFallback(t *testing.T) {
 	}
 }
 
+// TestVMTryExecuteStdlibMathStringForLoopBatch 验证 stdlib_math_string 完整循环 batch fast path。
+//
+// 该路径必须批量执行 `math.floor(math.sqrt(i)) + #string.format("%d", i)`，并留下与最后一轮逐指令执行
+// 后等价的 sum、临时槽和 numeric-for 控制槽。
+func TestVMTryExecuteStdlibMathStringForLoopBatch(t *testing.T) {
+	proto := testStdlibMathStringForLoopProto()
+	globals := testGlobalsWithStdlibMathStringFunctions(true)
+	vm := NewVMWithConstantsAndUpvalues(9, proto.Constants, []Value{ReferenceValue(KindTable, globals)})
+	vm.BindPrototype(proto)
+	if !vm.PrepareStdlibMathStringForLoopSuperInstructions() {
+		// 官方 stdlib_math_string 热体应能预构建完整循环 superinstruction。
+		t.Fatalf("expected stdlib math/string superinstruction")
+	}
+	registers := map[int]Value{
+		0: IntegerValue(0),
+		1: IntegerValue(1),
+		2: IntegerValue(3),
+		3: IntegerValue(1),
+		4: IntegerValue(1),
+	}
+	for registerIndex, value := range registers {
+		// 初始化 sum 和 numeric-for 控制槽。
+		if err := vm.SetRegister(registerIndex, value); err != nil {
+			t.Fatalf("set register %d failed: %v", registerIndex, err)
+		}
+	}
+
+	nextPC, iterations, handled, err := vm.TryExecuteStdlibMathStringForLoopBatch(0, 2, NewState())
+	if err != nil || !handled || iterations != 2 || nextPC != 0 {
+		// 两轮后循环仍应回到完整热体入口。
+		t.Fatalf("stdlib math/string batch mismatch: handled=%v iterations=%d nextPC=%d err=%v", handled, iterations, nextPC, err)
+	}
+	if value, _ := vm.Register(0); !value.RawEqual(IntegerValue(4)) {
+		// i=1 与 i=2 每轮贡献 floor(sqrt(i)) + len("%d") = 2。
+		t.Fatalf("sum mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(5); !value.RawEqual(IntegerValue(3)) {
+		// R5 保存最后一轮 `sum + floor(sqrt(i))` 的中间累加值。
+		t.Fatalf("accumulator mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(6); !value.RawEqual(IntegerValue(1)) {
+		// R6 保存最后一轮 `#string.format("%d", i)` 的长度。
+		t.Fatalf("length mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(7); !value.RawEqual(StringValue("%d")) {
+		// R7 保存 LOADK 后的格式串实参。
+		t.Fatalf("format argument mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(8); !value.RawEqual(IntegerValue(2)) {
+		// R8 保存最后一轮 MOVE 后的格式化参数旧值。
+		t.Fatalf("value argument mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(1); !value.RawEqual(IntegerValue(3)) {
+		// 循环继续时内部 index 已推进到下一轮。
+		t.Fatalf("for index mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(4); !value.RawEqual(IntegerValue(3)) {
+		// 循环继续时外部可见 i 与内部 index 一致。
+		t.Fatalf("visible index mismatch: %#v", value)
+	}
+	if vm.currentPC != 15 || vm.pcOffset != -16 {
+		// batch 后 VM 状态应等价于刚执行完 FORLOOP。
+		t.Fatalf("pc state mismatch: currentPC=%d pcOffset=%d", vm.currentPC, vm.pcOffset)
+	}
+}
+
+// TestVMTryExecuteStdlibMathStringForLoopBatchExit 验证 stdlib_math_string batch 可停在循环退出。
+func TestVMTryExecuteStdlibMathStringForLoopBatchExit(t *testing.T) {
+	proto := testStdlibMathStringForLoopProto()
+	globals := testGlobalsWithStdlibMathStringFunctions(true)
+	vm := NewVMWithConstantsAndUpvalues(9, proto.Constants, []Value{ReferenceValue(KindTable, globals)})
+	vm.BindPrototype(proto)
+	if !vm.PrepareStdlibMathStringForLoopSuperInstructions() {
+		// 官方 stdlib_math_string 热体应能预构建完整循环 superinstruction。
+		t.Fatalf("expected stdlib math/string superinstruction")
+	}
+	registers := map[int]Value{
+		0: IntegerValue(0),
+		1: IntegerValue(1),
+		2: IntegerValue(3),
+		3: IntegerValue(1),
+		4: IntegerValue(1),
+	}
+	for registerIndex, value := range registers {
+		// 初始化 sum 和 numeric-for 控制槽。
+		if err := vm.SetRegister(registerIndex, value); err != nil {
+			t.Fatalf("set register %d failed: %v", registerIndex, err)
+		}
+	}
+
+	nextPC, iterations, handled, err := vm.TryExecuteStdlibMathStringForLoopBatch(0, 10, NewState())
+	if err != nil || !handled || iterations != 3 || nextPC != 16 {
+		// 第三轮 FORLOOP 越界时应停在循环退出 PC。
+		t.Fatalf("stdlib math/string exit mismatch: handled=%v iterations=%d nextPC=%d err=%v", handled, iterations, nextPC, err)
+	}
+	if value, _ := vm.Register(0); !value.RawEqual(IntegerValue(6)) {
+		// i=1..3 每轮贡献 2，完整退出时 sum 为 6。
+		t.Fatalf("sum mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(1); !value.RawEqual(IntegerValue(3)) {
+		// 循环退出时 FORLOOP 不写入越界后的 index。
+		t.Fatalf("for index mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(4); !value.RawEqual(IntegerValue(3)) {
+		// 外部可见 i 也保持最后一次有效迭代值。
+		t.Fatalf("visible index mismatch: %#v", value)
+	}
+	if vm.pcOffset != 0 {
+		// 退出时不应请求 PC 回跳。
+		t.Fatalf("pcOffset = %d, want 0", vm.pcOffset)
+	}
+}
+
+// TestVMTryExecuteStdlibMathStringForLoopFallback 验证 stdlib_math_string guard 失败无副作用。
+func TestVMTryExecuteStdlibMathStringForLoopFallback(t *testing.T) {
+	proto := testStdlibMathStringForLoopProto()
+	globals := testGlobalsWithStdlibMathStringFunctions(false)
+	vm := NewVMWithConstantsAndUpvalues(9, proto.Constants, []Value{ReferenceValue(KindTable, globals)})
+	vm.BindPrototype(proto)
+	if !vm.PrepareStdlibMathStringForLoopSuperInstructions() {
+		// 字节码形态仍应能预构建，执行期由函数身份 guard 决定是否命中。
+		t.Fatalf("expected stdlib math/string superinstruction")
+	}
+	if err := vm.SetRegister(0, IntegerValue(10)); err != nil {
+		// sum 初值必须能写入寄存器。
+		t.Fatalf("set sum failed: %v", err)
+	}
+	if err := vm.SetRegister(1, IntegerValue(1)); err != nil {
+		// 设置 FORLOOP 内部 index。
+		t.Fatalf("set for index failed: %v", err)
+	}
+	if err := vm.SetRegister(2, IntegerValue(3)); err != nil {
+		// 设置 FORLOOP limit。
+		t.Fatalf("set limit failed: %v", err)
+	}
+	if err := vm.SetRegister(3, IntegerValue(1)); err != nil {
+		// 设置 FORLOOP step。
+		t.Fatalf("set step failed: %v", err)
+	}
+	if err := vm.SetRegister(4, IntegerValue(1)); err != nil {
+		// 设置外部可见循环变量。
+		t.Fatalf("set visible index failed: %v", err)
+	}
+
+	nextPC, iterations, handled, err := vm.TryExecuteStdlibMathStringForLoopBatch(0, 2, NewState())
+	if err != nil || handled || iterations != 0 || nextPC != 0 {
+		// 未带标准库 fast-path 标记的 math/string 函数不应被表达式级消费。
+		t.Fatalf("fallback mismatch: handled=%v iterations=%d nextPC=%d err=%v", handled, iterations, nextPC, err)
+	}
+	if value, _ := vm.Register(0); !value.RawEqual(IntegerValue(10)) {
+		// guard 失败不能提前修改 sum。
+		t.Fatalf("sum should be unchanged: %#v", value)
+	}
+	if value, _ := vm.Register(5); !value.IsNil() {
+		// guard 失败不能执行 GETTABUP。
+		t.Fatalf("temporary slot should stay nil: %#v", value)
+	}
+}
+
 // TestVMTryExecuteStringAppendForLoopBatch 验证字符串自追加 batch fast path。
 //
 // 该路径必须批量执行 `MOVE; LOADK; CONCAT; FORLOOP`，并在停留于循环内时留下与最后一轮
@@ -3856,6 +4015,38 @@ func testFormatLenAddForLoopProto() *bytecode.Proto {
 	}
 }
 
+// testStdlibMathStringForLoopProto 构造官方 stdlib_math_string 的完整循环体 Proto。
+func testStdlibMathStringForLoopProto() *bytecode.Proto {
+	return &bytecode.Proto{
+		Constants: []bytecode.Constant{
+			bytecode.StringConstant("math"),
+			bytecode.StringConstant("floor"),
+			bytecode.StringConstant("sqrt"),
+			bytecode.StringConstant("string"),
+			bytecode.StringConstant("format"),
+			bytecode.StringConstant("%d"),
+		},
+		Code: []bytecode.Instruction{
+			bytecode.CreateABC(bytecode.OpGetTabUp, 5, 0, bytecode.RKAsK(0)),
+			bytecode.CreateABC(bytecode.OpGetTable, 5, 5, bytecode.RKAsK(1)),
+			bytecode.CreateABC(bytecode.OpGetTabUp, 6, 0, bytecode.RKAsK(0)),
+			bytecode.CreateABC(bytecode.OpGetTable, 6, 6, bytecode.RKAsK(2)),
+			bytecode.CreateABC(bytecode.OpMove, 7, 4, 0),
+			bytecode.CreateABC(bytecode.OpCall, 6, 2, 0),
+			bytecode.CreateABC(bytecode.OpCall, 5, 0, 2),
+			bytecode.CreateABC(bytecode.OpAdd, 5, 0, 5),
+			bytecode.CreateABC(bytecode.OpGetTabUp, 6, 0, bytecode.RKAsK(3)),
+			bytecode.CreateABC(bytecode.OpGetTable, 6, 6, bytecode.RKAsK(4)),
+			bytecode.CreateABx(bytecode.OpLoadK, 7, 5),
+			bytecode.CreateABC(bytecode.OpMove, 8, 4, 0),
+			bytecode.CreateABC(bytecode.OpCall, 6, 3, 2),
+			bytecode.CreateABC(bytecode.OpLen, 6, 6, 0),
+			bytecode.CreateABC(bytecode.OpAdd, 0, 5, 6),
+			bytecode.CreateAsBx(bytecode.OpForLoop, 1, -16),
+		},
+	}
+}
+
 // testStringAppendForLoopProto 构造官方 string_concat 的 `s = s .. "x"` 循环体 Proto。
 func testStringAppendForLoopProto() *bytecode.Proto {
 	return &bytecode.Proto{
@@ -3881,6 +4072,30 @@ func testGlobalsWithFormatFixedFunction(marked bool) *Table {
 	}
 	stringTable.RawSetString("format", ReferenceValue(KindGoClosure, &GoFixedResultsFunction{MaxResults: 1, FastPathID: fastPathID}))
 	globals := NewTable()
+	globals.RawSetString("string", ReferenceValue(KindTable, stringTable))
+	return globals
+}
+
+// testGlobalsWithStdlibMathStringFunctions 构造包含 math.floor、math.sqrt 和 string.format 的最小全局表。
+func testGlobalsWithStdlibMathStringFunctions(marked bool) *Table {
+	mathTable := NewTable()
+	floorFastPathID := GoFastUnaryFastPathNone
+	sqrtFastPathID := GoFastUnaryFastPathNone
+	formatFastPathID := GoFixedResultsFastPathNone
+	if marked {
+		// 标记为标准库函数，允许完整 stdlib_math_string 循环被表达式级直接消费。
+		floorFastPathID = GoFastUnaryFastPathMathFloor
+		sqrtFastPathID = GoFastUnaryFastPathMathSqrt
+		formatFastPathID = GoFixedResultsFastPathStringFormatDecimal
+	}
+	mathTable.RawSetString("floor", ReferenceValue(KindGoClosure, &GoFastUnaryFunction{FastPathID: floorFastPathID}))
+	mathTable.RawSetString("sqrt", ReferenceValue(KindGoClosure, &GoFastUnaryFunction{FastPathID: sqrtFastPathID}))
+
+	stringTable := NewTable()
+	stringTable.RawSetString("format", ReferenceValue(KindGoClosure, &GoFixedResultsFunction{MaxResults: 1, FastPathID: formatFastPathID}))
+
+	globals := NewTable()
+	globals.RawSetString("math", ReferenceValue(KindTable, mathTable))
 	globals.RawSetString("string", ReferenceValue(KindTable, stringTable))
 	return globals
 }

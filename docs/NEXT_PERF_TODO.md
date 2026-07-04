@@ -189,6 +189,79 @@ CGO_ENABLED=0 go test ./lua -run '^$' -bench '^BenchmarkDoStringStringConcat$' \
 口径下也有效；该项暂不应继续扩张，后续优先级回到 `stdlib_math_string`、`table_rw` 和
 `compile_3000_functions`。
 
+### `stdlib_math_string`
+
+2026-07-04 在 `string_concat` builder 后复核剩余热点：
+
+```bash
+CGO_ENABLED=0 go test ./lua -run '^$' -bench '^BenchmarkDoStringStdlibMathString$' \
+  -benchmem -benchtime=5s -count=1 \
+  -cpuprofile /tmp/go-lua-vm-next-profiles/stdlib_math_string_cpu.pprof \
+  -memprofile /tmp/go-lua-vm-next-profiles/stdlib_math_string_mem.pprof
+go tool pprof -top /tmp/go-lua-vm-next-profiles/stdlib_math_string_cpu.pprof
+go tool pprof -top -alloc_objects /tmp/go-lua-vm-next-profiles/stdlib_math_string_mem.pprof
+go tool pprof -top -alloc_space /tmp/go-lua-vm-next-profiles/stdlib_math_string_mem.pprof
+```
+
+结果：
+
+- `BenchmarkDoStringStdlibMathString`：约 `25.54 ms/op`、`151.6 KB/op`、`4555 allocs/op`。
+- CPU top 中 `runtime.(*VM).TryExecuteFormatLenAddForLoop` 约 `12.81%` flat / `32.03%` cum；
+  `runtime.(*VM).executeGetTabUp`、`runtime.(*Table).RawGetString`、`runtime.mapaccess2` 和普通
+  `VM.Step` 仍占明显比例。
+- alloc_objects 中 `internal/strconv.FormatInt` 仍是采样主项，但该分配来自未完全命中的普通
+  `string.format("%d", i)` 路径；alloc_space 中 parser/OpenLibs 噪声占比较高。
+
+字节码复核：
+
+```text
+GETTABUP math; GETTABLE floor; GETTABUP math; GETTABLE sqrt; MOVE i; CALL sqrt;
+CALL floor; ADD; GETTABUP string; GETTABLE format; LOADK "%d"; MOVE i; CALL format;
+LEN; ADD; FORLOOP
+```
+
+官方 Lua 5.3.6 与本项目热体一致。此前只覆盖尾部 `#string.format("%d", i)`，前半段
+`math.floor(math.sqrt(i))` 每轮仍要执行全局 table 查找、两次 Go fast unary CALL 和普通 dispatch。
+
+2026-07-04 已实现完整热体 batch superinstruction：新增标准库一元函数 fast-path 标记，只把内建
+`math.floor` 和 `math.sqrt` 暴露给 VM 的跨 opcode guard。运行期只在无 hook、无 precise frame sync、
+环境 table 无元表、`math`/`string` 均为无元表 table、`math.floor`/`math.sqrt`/`string.format`
+仍是带 fast-path 标记的标准库函数、sum 和 numeric-for 控制槽均为非负 integer 且官方寄存器复用布局
+完全匹配时命中。任一条件不满足都会回退普通 `GETTABUP; GETTABLE; CALL; LEN; ADD; FORLOOP`，保留
+用户替换函数、元表 `__index`、参数错误、NaN/number 路径、debug hook、yield/continuation 和
+context 取消语义。
+
+目标 Go micro 结果：
+
+```bash
+CGO_ENABLED=0 go test ./lua -run '^$' -bench '^BenchmarkDoStringStdlibMathString$' \
+  -benchmem -benchtime=3s -count=5
+```
+
+- `BenchmarkDoStringStdlibMathString`：约 `7.00 / 6.97 / 6.96 / 6.98 / 6.99 ms/op`。
+- B/op 约 `154.6 KB/op`，`4556 allocs/op`。
+
+对比本轮 profile 记录的约 `25.54 ms/op`，wall-clock 降幅约 `72%`；分配数量基本不变，说明收益主要来自
+跳过 table lookup、Go CALL 边界和 dispatch，而不是继续压缩格式化分配。
+
+重建 `bin/glua` / `bin/gluac` 后，显式使用官方 Lua/Luac 5.3.6 的完整 benchmark 复核结果：
+
+| 用例 | 官方工具中位数 | 本项目中位数 | 本项目/官方 |
+| --- | ---: | ---: | ---: |
+| `arith_add_loop` | `0.007632s` | `0.009347s` | `1.22x` |
+| `arith_mix_loop` | `0.011592s` | `0.013402s` | `1.16x` |
+| `arith_chain_temp` | `0.013125s` | `0.009932s` | `0.76x` |
+| `table_rw` | `0.007193s` | `0.010633s` | `1.48x` |
+| `function_call` | `0.006847s` | `0.007052s` | `1.03x` |
+| `string_concat` | `0.004872s` | `0.004988s` | `1.02x` |
+| `closure_upvalue` | `0.008196s` | `0.007017s` | `0.86x` |
+| `stdlib_math_string` | `0.019454s` | `0.011246s` | `0.58x` |
+| `recursion` | `0.003783s` | `0.003860s` | `1.02x` |
+| `compile_3000_functions` | `0.005355s` | `0.009714s` | `1.81x` |
+
+结论：`stdlib_math_string` 已从当前基线约 `1.54x` 降到 `0.58x`，该项暂不继续扩张。下一轮优先级
+转向 `table_rw` 的数组分配/预估入口，或继续压缩 `compile_3000_functions` 的编译期差距。
+
 ### `compile_3000_functions`
 
 命令：
@@ -335,7 +408,8 @@ typed statement / compact function statement prototype：在不破坏 parser、s
 - [x] 设计并补齐 `string_concat` builder guard 定向测试后，再决定是否实现窄形态 builder。
 - [x] 实现 `string_concat` 窄形态 builder 原型，或先 profile `stdlib_math_string` 作为下一小切口。
 - [x] 重建 CLI 后复核官方完整 benchmark，确认 `string_concat` 8000 次追加端到端收益。
-- [ ] profile `stdlib_math_string` 剩余热点，确认是否仍有表达式级消费消除空间。
+- [x] profile `stdlib_math_string` 剩余热点，确认完整热体 batch 仍有表达式级消费消除空间。
+- [x] 实现 `stdlib_math_string` 完整热体 batch superinstruction，并复核官方完整 benchmark。
 - [ ] 每个生产优化 commit 后更新本文或 `docs/BENCHMARK.md`。
 
 ## 正确性门禁

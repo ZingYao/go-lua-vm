@@ -102,6 +102,10 @@ type VM struct {
 	formatLenAddForLoopSuperInstructionProto *bytecode.Proto
 	// formatLenAddForLoopSuperInstructions 按 PC 保存 string.format 长度消费循环 superinstruction 预匹配结果。
 	formatLenAddForLoopSuperInstructions []formatLenAddForLoopSuperInstruction
+	// stdlibMathStringForLoopSuperInstructionProto 记录 stdlib_math_string 循环 superinstruction 表对应的 Proto。
+	stdlibMathStringForLoopSuperInstructionProto *bytecode.Proto
+	// stdlibMathStringForLoopSuperInstructions 按 PC 保存 stdlib_math_string 循环 superinstruction 预匹配结果。
+	stdlibMathStringForLoopSuperInstructions []stdlibMathStringForLoopSuperInstruction
 	// stringAppendForLoopSuperInstructionProto 记录字符串自追加循环 superinstruction 表对应的 Proto。
 	stringAppendForLoopSuperInstructionProto *bytecode.Proto
 	// stringAppendForLoopSuperInstructions 按 PC 保存字符串自追加循环 superinstruction 预匹配结果。
@@ -711,6 +715,46 @@ type formatLenAddForLoopSuperInstruction struct {
 	// LoopPC 保存循环继续时的跳转 PC。
 	LoopPC int
 	// Valid 表示当前 PC 是否匹配完整 string.format 长度消费形态。
+	Valid bool
+}
+
+// stdlibMathStringForLoopSuperInstruction 保存官方 stdlib_math_string 的完整循环体形态。
+//
+// 该形态覆盖 `math.floor(math.sqrt(i)) + #string.format("%d", i)` 的热体。构建期只记录寄存器、
+// upvalue 和常量数据流；执行期仍检查环境表、math/string 表、函数身份、累加器与 numeric-for
+// 控制槽，任一 guard 不满足时必须回退普通 VM。
+type stdlibMathStringForLoopSuperInstruction struct {
+	// EnvUpvalueIndex 保存 GETTABUP 读取的环境 upvalue 下标。
+	EnvUpvalueIndex int
+	// FloorSlot 保存 math.floor 函数槽，也是外层 CALL 结果槽。
+	FloorSlot int
+	// SqrtSlot 保存 math.sqrt 函数槽，也是内层 CALL 结果槽。
+	SqrtSlot int
+	// SqrtArgumentSlot 保存 MOVE 写入 sqrt 参数的槽位。
+	SqrtArgumentSlot int
+	// FormatSlot 保存 string.format 函数槽，也是 CALL 结果槽和 LEN 目标槽。
+	FormatSlot int
+	// FormatArgumentSlot 保存 LOADK 写入 `%d` 的实参槽。
+	FormatArgumentSlot int
+	// ValueArgumentSlot 保存 MOVE 写入待格式化值的实参槽。
+	ValueArgumentSlot int
+	// ValueArgumentSource 保存待计算/格式化的 numeric-for 外部循环变量。
+	ValueArgumentSource int
+	// FormatString 保存 LOADK 的 exact `%d` 常量，用于还原被跳过指令后的寄存器状态。
+	FormatString string
+	// AccumulatorRegister 保存前序 math ADD 生成的中间累加值寄存器。
+	AccumulatorRegister int
+	// SumRegister 保存最终 ADD 写回的 sum 寄存器。
+	SumRegister int
+	// ForBase 保存 FORLOOP 的 base 寄存器。
+	ForBase int
+	// ForSBx 保存 FORLOOP 的有符号跳转偏移。
+	ForSBx int
+	// ExitPC 保存循环退出时的下一条 PC。
+	ExitPC int
+	// LoopPC 保存循环继续时的跳转 PC。
+	LoopPC int
+	// Valid 表示当前 PC 是否匹配完整 stdlib_math_string 循环体形态。
 	Valid bool
 }
 
@@ -2053,6 +2097,8 @@ func (vm *VM) BindPrototype(proto *bytecode.Proto) {
 		vm.closureUpvalueForLoopSuperInstructions = nil
 		vm.formatLenAddForLoopSuperInstructionProto = nil
 		vm.formatLenAddForLoopSuperInstructions = nil
+		vm.stdlibMathStringForLoopSuperInstructionProto = nil
+		vm.stdlibMathStringForLoopSuperInstructions = nil
 		vm.stringAppendForLoopSuperInstructionProto = nil
 		vm.stringAppendForLoopSuperInstructions = nil
 		vm.tableWriteForLoopSuperInstructionProto = nil
@@ -2107,6 +2153,11 @@ func (vm *VM) BindPrototype(proto *bytecode.Proto) {
 		// VM 池切换到其他 Proto 时丢弃 string.format 长度消费表，避免不同 Proto 的 PC 误命中。
 		vm.formatLenAddForLoopSuperInstructionProto = nil
 		vm.formatLenAddForLoopSuperInstructions = nil
+	}
+	if vm.stdlibMathStringForLoopSuperInstructionProto != nil && vm.stdlibMathStringForLoopSuperInstructionProto != proto {
+		// VM 池切换到其他 Proto 时丢弃 stdlib_math_string 循环表，避免不同 Proto 的 PC 误命中。
+		vm.stdlibMathStringForLoopSuperInstructionProto = nil
+		vm.stdlibMathStringForLoopSuperInstructions = nil
 	}
 	if vm.stringAppendForLoopSuperInstructionProto != nil && vm.stringAppendForLoopSuperInstructionProto != proto {
 		// VM 池切换到其他 Proto 时丢弃字符串自追加循环表，避免不同 Proto 的 PC 误命中。
@@ -4609,6 +4660,362 @@ func (vm *VM) TryExecuteClosureUpvalueForLoopBatch(batch ClosureUpvalueForLoopBa
 		return 0, 0, false, nil
 	}
 	vm.currentPC = batch.pc + 4
+	vm.skipNext = false
+	vm.closeFrom = -1
+	vm.hasCallRequest = false
+	vm.returned = false
+	return nextPC, iterations, true, nil
+}
+
+// ensureStdlibMathStringForLoopSuperInstructions 返回当前 Proto 的 stdlib_math_string 预匹配表。
+//
+// 该表按 PC 与 Proto.Code 对齐，只记录官方 `math.floor(math.sqrt(i)) + #string.format("%d", i)`
+// 循环热体形态；运行期函数身份、table 元表、参数类型、sum 和 numeric-for 控制槽仍由
+// TryExecuteStdlibMathStringForLoopBatch 检查。
+func (vm *VM) ensureStdlibMathStringForLoopSuperInstructions() []stdlibMathStringForLoopSuperInstruction {
+	// 按当前 Proto 懒构建 stdlib_math_string superinstruction 表，并在 Proto 未变化时复用。
+	if vm == nil || vm.proto == nil {
+		// 缺少 VM 或 Proto 时没有可用 superinstruction 表。
+		return nil
+	}
+	if len(vm.proto.Code) < 16 {
+		// 少于十六条指令不可能包含完整官方 stdlib_math_string 循环体。
+		vm.stdlibMathStringForLoopSuperInstructionProto = vm.proto
+		vm.stdlibMathStringForLoopSuperInstructions = nil
+		return nil
+	}
+	if vm.stdlibMathStringForLoopSuperInstructionProto == vm.proto {
+		// 当前 Proto 已完成扫描；nil 表示无匹配形态，非 nil 表示可按 PC 读取。
+		return vm.stdlibMathStringForLoopSuperInstructions
+	}
+
+	vm.stdlibMathStringForLoopSuperInstructionProto = vm.proto
+	vm.stdlibMathStringForLoopSuperInstructions = buildStdlibMathStringForLoopSuperInstructions(vm.proto)
+	return vm.stdlibMathStringForLoopSuperInstructions
+}
+
+// buildStdlibMathStringForLoopSuperInstructions 构建 stdlib_math_string 完整循环体预匹配表。
+//
+// 返回表按 PC 对齐；没有匹配形态时返回 nil，表示该 Proto 不需要承担额外表分配。
+func buildStdlibMathStringForLoopSuperInstructions(proto *bytecode.Proto) []stdlibMathStringForLoopSuperInstruction {
+	// 空 Proto 或短函数没有可构建的 stdlib_math_string superinstruction。
+	if proto == nil || len(proto.Code) < 16 {
+		return nil
+	}
+
+	var superInstructions []stdlibMathStringForLoopSuperInstruction
+	for pc := 0; pc+15 < len(proto.Code); pc++ {
+		// 只识别官方热体：math.floor(math.sqrt(i))、ADD、string.format、LEN、ADD、FORLOOP。
+		getMathFloorInstruction := proto.Code[pc]
+		getFloorInstruction := proto.Code[pc+1]
+		getMathSqrtInstruction := proto.Code[pc+2]
+		getSqrtInstruction := proto.Code[pc+3]
+		moveSqrtArgumentInstruction := proto.Code[pc+4]
+		callSqrtInstruction := proto.Code[pc+5]
+		callFloorInstruction := proto.Code[pc+6]
+		addMathInstruction := proto.Code[pc+7]
+		getStringInstruction := proto.Code[pc+8]
+		getFormatInstruction := proto.Code[pc+9]
+		loadFormatInstruction := proto.Code[pc+10]
+		moveFormatArgumentInstruction := proto.Code[pc+11]
+		callFormatInstruction := proto.Code[pc+12]
+		lenInstruction := proto.Code[pc+13]
+		addFormatInstruction := proto.Code[pc+14]
+		forLoopInstruction := proto.Code[pc+15]
+		if getMathFloorInstruction.OpCode() != bytecode.OpGetTabUp || getFloorInstruction.OpCode() != bytecode.OpGetTable || getMathSqrtInstruction.OpCode() != bytecode.OpGetTabUp || getSqrtInstruction.OpCode() != bytecode.OpGetTable || moveSqrtArgumentInstruction.OpCode() != bytecode.OpMove || callSqrtInstruction.OpCode() != bytecode.OpCall || callFloorInstruction.OpCode() != bytecode.OpCall || addMathInstruction.OpCode() != bytecode.OpAdd || getStringInstruction.OpCode() != bytecode.OpGetTabUp || getFormatInstruction.OpCode() != bytecode.OpGetTable || loadFormatInstruction.OpCode() != bytecode.OpLoadK || moveFormatArgumentInstruction.OpCode() != bytecode.OpMove || callFormatInstruction.OpCode() != bytecode.OpCall || lenInstruction.OpCode() != bytecode.OpLen || addFormatInstruction.OpCode() != bytecode.OpAdd || forLoopInstruction.OpCode() != bytecode.OpForLoop {
+			// 当前 PC 不匹配目标模式，继续扫描后续指令。
+			continue
+		}
+
+		floorSlot := callFloorInstruction.A()
+		sqrtSlot := callSqrtInstruction.A()
+		if getMathFloorInstruction.A() != floorSlot || getFloorInstruction.A() != floorSlot || getFloorInstruction.B() != floorSlot {
+			// math.floor 的 GETTABUP/GETTABLE/CALL 必须复用同一个函数槽。
+			continue
+		}
+		if getMathSqrtInstruction.A() != sqrtSlot || getSqrtInstruction.A() != sqrtSlot || getSqrtInstruction.B() != sqrtSlot {
+			// math.sqrt 的 GETTABUP/GETTABLE/CALL 必须复用同一个函数槽。
+			continue
+		}
+		if sqrtSlot != floorSlot+1 || moveSqrtArgumentInstruction.A() != sqrtSlot+1 || callSqrtInstruction.B() != 2 || callSqrtInstruction.C() != 0 || callFloorInstruction.B() != 0 || callFloorInstruction.C() != 2 {
+			// 只覆盖官方开放返回链：sqrt 单参数开放返回，floor 用 B=0 消费该结果并返回单值。
+			continue
+		}
+
+		mathName, ok := protoStringConstant(proto, bytecode.IndexK(getMathFloorInstruction.C()))
+		if !ok || !bytecode.IsK(getMathFloorInstruction.C()) || mathName != "math" {
+			// 第一段 GETTABUP 必须读取全局 math table。
+			continue
+		}
+		secondMathName, ok := protoStringConstant(proto, bytecode.IndexK(getMathSqrtInstruction.C()))
+		if !ok || !bytecode.IsK(getMathSqrtInstruction.C()) || secondMathName != "math" || getMathSqrtInstruction.B() != getMathFloorInstruction.B() {
+			// 两次 math 读取必须来自同一个环境 upvalue。
+			continue
+		}
+		floorName, ok := protoStringConstant(proto, bytecode.IndexK(getFloorInstruction.C()))
+		if !ok || !bytecode.IsK(getFloorInstruction.C()) || floorName != "floor" {
+			// GETTABLE 必须读取 math.floor。
+			continue
+		}
+		sqrtName, ok := protoStringConstant(proto, bytecode.IndexK(getSqrtInstruction.C()))
+		if !ok || !bytecode.IsK(getSqrtInstruction.C()) || sqrtName != "sqrt" {
+			// GETTABLE 必须读取 math.sqrt。
+			continue
+		}
+
+		addMathLeftOperand := decodeRKOperand(proto, addMathInstruction.B())
+		addMathRightOperand := decodeRKOperand(proto, addMathInstruction.C())
+		sumRegister, ok := decodedRegisterPlusTarget(addMathLeftOperand, addMathRightOperand, floorSlot)
+		if !ok || addMathInstruction.A() == sumRegister {
+			// 前半段 ADD 必须形如 `accumulator = sum + floorResult`，且不能覆盖 sum 本身。
+			continue
+		}
+		accumulatorRegister := addMathInstruction.A()
+
+		formatSlot := callFormatInstruction.A()
+		if formatSlot != sqrtSlot || formatSlot+1 != moveSqrtArgumentInstruction.A() {
+			// 当前实现只覆盖官方寄存器复用布局：format 槽覆盖 sqrt 结果槽，格式串槽覆盖 sqrt 参数槽。
+			continue
+		}
+		if getStringInstruction.A() != formatSlot || getFormatInstruction.A() != formatSlot || getFormatInstruction.B() != formatSlot || lenInstruction.A() != formatSlot || lenInstruction.B() != formatSlot {
+			// string 表、format 函数、CALL 结果和 LEN 结果必须复用同一个临时槽。
+			continue
+		}
+		if loadFormatInstruction.A() != formatSlot+1 || moveFormatArgumentInstruction.A() != formatSlot+2 || callFormatInstruction.B() != 3 || callFormatInstruction.C() != 2 {
+			// 只覆盖固定两个实参、单返回 CALL，实参槽必须紧跟函数槽。
+			continue
+		}
+
+		stringName, ok := protoStringConstant(proto, bytecode.IndexK(getStringInstruction.C()))
+		if !ok || !bytecode.IsK(getStringInstruction.C()) || stringName != "string" || getStringInstruction.B() != getMathFloorInstruction.B() {
+			// GETTABUP 必须从同一个环境 upvalue 读取全局 string table。
+			continue
+		}
+		formatName, ok := protoStringConstant(proto, bytecode.IndexK(getFormatInstruction.C()))
+		if !ok || !bytecode.IsK(getFormatInstruction.C()) || formatName != "format" {
+			// GETTABLE 必须读取 string.format。
+			continue
+		}
+		formatText, ok := protoStringConstant(proto, loadFormatInstruction.Bx())
+		if !ok || formatText != "%d" {
+			// 只覆盖 exact `%d`，其他格式串保持完整格式化路径。
+			continue
+		}
+
+		addFormatLeftOperand := decodeRKOperand(proto, addFormatInstruction.B())
+		addFormatRightOperand := decodeRKOperand(proto, addFormatInstruction.C())
+		previousAccumulator, ok := decodedRegisterPlusTarget(addFormatLeftOperand, addFormatRightOperand, formatSlot)
+		if !ok || previousAccumulator != accumulatorRegister || addFormatInstruction.A() != sumRegister {
+			// 最终 ADD 必须形如 `sum = accumulator + len`，保留官方求值顺序和寄存器可见性。
+			continue
+		}
+
+		forBase := forLoopInstruction.A()
+		exitPC := pc + 16
+		loopPC := exitPC + forLoopInstruction.SBx()
+		if loopPC != pc || moveSqrtArgumentInstruction.B() != forBase+3 || moveFormatArgumentInstruction.B() != forBase+3 {
+			// 当前窄路径只覆盖官方热循环体，两个参数都来自外部 numeric-for 变量。
+			continue
+		}
+		if registerInRange(floorSlot, forBase, forBase+3) || registerInRange(sqrtSlot, forBase, forBase+3) || registerInRange(sqrtSlot+1, forBase, forBase+3) || registerInRange(formatSlot, forBase, forBase+3) || registerInRange(formatSlot+1, forBase, forBase+3) || registerInRange(formatSlot+2, forBase, forBase+3) || registerInRange(accumulatorRegister, forBase, forBase+3) || registerInRange(sumRegister, forBase, forBase+3) {
+			// 任一参与槽覆盖 numeric-for 控制槽时逐指令别名语义会变复杂。
+			continue
+		}
+
+		if superInstructions == nil {
+			// 只有真实存在匹配形态时才分配 PC 对齐表，避免普通函数执行增加分配。
+			superInstructions = make([]stdlibMathStringForLoopSuperInstruction, len(proto.Code))
+		}
+		superInstructions[pc] = stdlibMathStringForLoopSuperInstruction{
+			EnvUpvalueIndex:     getMathFloorInstruction.B(),
+			FloorSlot:           floorSlot,
+			SqrtSlot:            sqrtSlot,
+			SqrtArgumentSlot:    sqrtSlot + 1,
+			FormatSlot:          formatSlot,
+			FormatArgumentSlot:  formatSlot + 1,
+			ValueArgumentSlot:   formatSlot + 2,
+			ValueArgumentSource: moveFormatArgumentInstruction.B(),
+			FormatString:        formatText,
+			AccumulatorRegister: accumulatorRegister,
+			SumRegister:         sumRegister,
+			ForBase:             forBase,
+			ForSBx:              forLoopInstruction.SBx(),
+			ExitPC:              exitPC,
+			LoopPC:              loopPC,
+			Valid:               true,
+		}
+	}
+	return superInstructions
+}
+
+// PrepareStdlibMathStringForLoopSuperInstructions 预构建当前 Proto 的 stdlib_math_string 循环表。
+//
+// 返回 true 表示当前 Proto 至少存在一个可尝试的完整循环体 superinstruction PC。
+func (vm *VM) PrepareStdlibMathStringForLoopSuperInstructions() bool {
+	// 预构建失败不影响普通 VM；后续 TryExecuteStdlibMathStringForLoopBatch 会因为表不匹配而回退。
+	return len(vm.ensureStdlibMathStringForLoopSuperInstructions()) > 0
+}
+
+// HasStdlibMathStringForLoopAt 判断当前 PC 是否存在 stdlib_math_string 循环 superinstruction。
+func (vm *VM) HasStdlibMathStringForLoopAt(pc int) bool {
+	// 该 helper 只读取已准备好的表，供 API 层决定是否需要执行 CALL 边界 context 检查。
+	if vm == nil || vm.stdlibMathStringForLoopSuperInstructionProto != vm.proto {
+		// 表尚未准备或 Proto 已变化时不能命中。
+		return false
+	}
+	superInstructions := vm.stdlibMathStringForLoopSuperInstructions
+	if uint(pc) >= uint(len(superInstructions)) {
+		// PC 越界时不能命中。
+		return false
+	}
+	return superInstructions[pc].Valid
+}
+
+// TryExecuteStdlibMathStringForLoopBatch 批量执行官方 stdlib_math_string 的完整循环体。
+//
+// pc 必须指向第一条 GETTABUP math；maxIterations 由调用方按 context 检查窗口换算。本方法在首个
+// 虚拟 CALL 前检查 context，后续每轮继续检查，保留普通 CALL 入口取消边界。
+func (vm *VM) TryExecuteStdlibMathStringForLoopBatch(pc int, maxIterations int, state *State) (nextPC int, iterations int, handled bool, err error) {
+	// 先按 PC 读取已准备好的预匹配表；非目标 PC 必须快速失败。
+	if vm == nil || vm.stdlibMathStringForLoopSuperInstructionProto != vm.proto || maxIterations <= 0 || state == nil {
+		// 调用方尚未为当前 Proto 准备表，或没有可批量执行窗口。
+		return 0, 0, false, nil
+	}
+	superInstructions := vm.stdlibMathStringForLoopSuperInstructions
+	if uint(pc) >= uint(len(superInstructions)) {
+		// 当前 PC 不在表范围内，回退普通 VM。
+		return 0, 0, false, nil
+	}
+	superInstruction := superInstructions[pc]
+	if !superInstruction.Valid {
+		// 当前 PC 没有匹配 stdlib_math_string 形态，回退普通 VM。
+		return 0, 0, false, nil
+	}
+	if err := state.CheckContext(); err != nil {
+		// 首个虚拟 CALL 入口的取消检查必须发生在动态 guard 和任何寄存器写入之前。
+		return 0, 0, false, err
+	}
+
+	registers := vm.registers
+	requiredRegisters := [...]int{
+		superInstruction.FloorSlot,
+		superInstruction.SqrtSlot,
+		superInstruction.SqrtArgumentSlot,
+		superInstruction.FormatSlot,
+		superInstruction.FormatArgumentSlot,
+		superInstruction.ValueArgumentSlot,
+		superInstruction.ValueArgumentSource,
+		superInstruction.AccumulatorRegister,
+		superInstruction.SumRegister,
+		superInstruction.ForBase,
+		superInstruction.ForBase + 1,
+		superInstruction.ForBase + 2,
+		superInstruction.ForBase + 3,
+	}
+	for _, registerIndex := range requiredRegisters {
+		// 任一参与寄存器越界时交给普通 VM 报原始错误。
+		if uint(registerIndex) >= uint(len(registers)) {
+			return 0, 0, false, nil
+		}
+	}
+
+	envTable, tableErr := tableFromValue(vm.upvalueValue(superInstruction.EnvUpvalueIndex))
+	if tableErr != nil || envTable.GetMetatable() != nil {
+		// GETTABUP 对有元表环境可能触发 __index，必须回退普通 VM。
+		return 0, 0, false, nil
+	}
+	mathValue := envTable.RawGetString("math")
+	mathTable, tableErr := tableFromValue(mathValue)
+	if tableErr != nil || mathTable.GetMetatable() != nil {
+		// math 字段不是无元表 table 时，GETTABLE 可能触发普通错误或元方法。
+		return 0, 0, false, nil
+	}
+	floorValue := mathTable.RawGetString("floor")
+	floorFunction, ok := floorValue.Ref.(*GoFastUnaryFunction)
+	if floorValue.Kind != KindGoClosure || !ok || floorFunction == nil || floorFunction.FastPathID != GoFastUnaryFastPathMathFloor {
+		// math.floor 被替换或不再是标准库 fast unary 时必须回退普通 CALL。
+		return 0, 0, false, nil
+	}
+	sqrtValue := mathTable.RawGetString("sqrt")
+	sqrtFunction, ok := sqrtValue.Ref.(*GoFastUnaryFunction)
+	if sqrtValue.Kind != KindGoClosure || !ok || sqrtFunction == nil || sqrtFunction.FastPathID != GoFastUnaryFastPathMathSqrt {
+		// math.sqrt 被替换或不再是标准库 fast unary 时必须回退普通 CALL。
+		return 0, 0, false, nil
+	}
+	stringValue := envTable.RawGetString("string")
+	stringTable, tableErr := tableFromValue(stringValue)
+	if tableErr != nil || stringTable.GetMetatable() != nil {
+		// string 字段不是无元表 table 时，GETTABLE 可能触发普通错误或元方法。
+		return 0, 0, false, nil
+	}
+	formatValue := stringTable.RawGetString("format")
+	formatFunction, ok := formatValue.Ref.(*GoFixedResultsFunction)
+	if formatValue.Kind != KindGoClosure || !ok || formatFunction == nil || formatFunction.FastPathID != GoFixedResultsFastPathStringFormatDecimal {
+		// 只有标准库标记过的 exact `%d` 固定结果函数才能被表达式级直接消费。
+		return 0, 0, false, nil
+	}
+
+	sumValue := registers[superInstruction.SumRegister]
+	indexValue := registers[superInstruction.ForBase]
+	limitValue := registers[superInstruction.ForBase+1]
+	stepValue := registers[superInstruction.ForBase+2]
+	visibleIndexValue := registers[superInstruction.ValueArgumentSource]
+	if sumValue.Kind != KindInteger || indexValue.Kind != KindInteger || limitValue.Kind != KindInteger || stepValue.Kind != KindInteger || visibleIndexValue.Kind != KindInteger {
+		// 批量路径只覆盖 integer sum、integer numeric-for 和 integer 可见循环变量。
+		return 0, 0, false, nil
+	}
+	if stepValue.Integer <= 0 || indexValue.Integer < 0 || limitValue.Integer < 0 || visibleIndexValue.Integer != indexValue.Integer {
+		// 当前官方 fixture 是正向非负整数循环；负数会让 sqrt/floor 产生 NaN/number 路径，必须回退。
+		return 0, 0, false, nil
+	}
+
+	sum := sumValue.Integer
+	index := indexValue.Integer
+	limit := limitValue.Integer
+	step := stepValue.Integer
+	visibleIndex := visibleIndexValue.Integer
+	nextPC = pc
+	for iterations < maxIterations {
+		if iterations > 0 {
+			// 首轮已在动态 guard 前检查；后续每个虚拟 CALL 组前继续保留取消边界。
+			if err := state.CheckContext(); err != nil {
+				return nextPC, iterations, true, err
+			}
+		}
+
+		floorResult := int64(math.Floor(math.Sqrt(float64(visibleIndex))))
+		accumulator := sum + floorResult
+		lengthValue := decimalIntegerStringLength(visibleIndex)
+		sum = accumulator + lengthValue
+		registers[superInstruction.FloorSlot] = IntegerValue(accumulator)
+		registers[superInstruction.FormatSlot] = IntegerValue(lengthValue)
+		registers[superInstruction.FormatArgumentSlot] = StringValue(superInstruction.FormatString)
+		registers[superInstruction.ValueArgumentSlot] = IntegerValue(visibleIndex)
+		registers[superInstruction.SumRegister] = IntegerValue(sum)
+		iterations++
+
+		nextIndex := index + step
+		nextPC = superInstruction.ExitPC
+		if forIntegerLoopContinues(nextIndex, limit, step) {
+			// 循环继续时更新内部 index 和外部可见循环变量，并跳回循环体开头。
+			index = nextIndex
+			visibleIndex = nextIndex
+			registers[superInstruction.ForBase] = IntegerValue(index)
+			registers[superInstruction.ForBase+3] = IntegerValue(visibleIndex)
+			nextPC = superInstruction.LoopPC
+			vm.pcOffset = superInstruction.ForSBx
+		} else {
+			// 循环结束时不写入越界后的 index，保持普通 FORLOOP 语义。
+			vm.pcOffset = 0
+			break
+		}
+	}
+	if iterations == 0 {
+		// 没有提交任何迭代时调用方可安全回退普通 VM。
+		return 0, 0, false, nil
+	}
+	vm.currentPC = pc + 15
+	vm.openTop = -1
 	vm.skipNext = false
 	vm.closeFrom = -1
 	vm.hasCallRequest = false

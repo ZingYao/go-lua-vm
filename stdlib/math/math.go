@@ -43,10 +43,10 @@ var mathFastUnaryFunctions = struct {
 	cos:   &runtime.GoFastUnaryFunction{Function: CosUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
 	deg:   &runtime.GoFastUnaryFunction{Function: DegUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
 	exp:   &runtime.GoFastUnaryFunction{Function: ExpUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
-	floor: &runtime.GoFastUnaryFunction{Function: FloorUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
+	floor: &runtime.GoFastUnaryFunction{FastPathID: runtime.GoFastUnaryFastPathMathFloor, Function: FloorUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
 	rad:   &runtime.GoFastUnaryFunction{Function: RadUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
 	sin:   &runtime.GoFastUnaryFunction{Function: SinUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
-	sqrt:  &runtime.GoFastUnaryFunction{Function: SqrtUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
+	sqrt:  &runtime.GoFastUnaryFunction{FastPathID: runtime.GoFastUnaryFastPathMathSqrt, Function: SqrtUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
 	tan:   &runtime.GoFastUnaryFunction{Function: TanUnaryValue, AcceptedKinds: mathNumberUnaryKinds},
 }
 

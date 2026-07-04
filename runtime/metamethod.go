@@ -74,11 +74,27 @@ type GoUnaryFunction func(Value) (Value, error)
 // Function 必须在 AcceptedKinds 覆盖的参数类型下不依赖 Go 调用帧副作用；未命中类型时调用方
 // 必须回退 GoUnaryFunction 的完整 debug-frame 路径，以保留参数错误 traceback 语义。
 type GoFastUnaryFunction struct {
+	// FastPathID 标记该一元函数是否允许 VM 在严格 guard 下跨 opcode 直接消费其结果。
+	FastPathID GoFastUnaryFastPathID
 	// Function 保存真实一元函数入口。
 	Function GoUnaryFunction
 	// AcceptedKinds 用 bit mask 表示允许跳过 debug frame 的参数类型集合。
 	AcceptedKinds uint64
 }
+
+// GoFastUnaryFastPathID 标识可被 VM 跨 opcode 消费的一元 Go 回调。
+//
+// 默认值表示没有额外表达式级语义承诺；非默认值只能用于标准库内部可证明等价的窄快路径。
+type GoFastUnaryFastPathID uint8
+
+const (
+	// GoFastUnaryFastPathNone 表示普通一元 Go 回调，不参与表达式级消费消除。
+	GoFastUnaryFastPathNone GoFastUnaryFastPathID = iota
+	// GoFastUnaryFastPathMathFloor 表示标准库 math.floor 成功路径。
+	GoFastUnaryFastPathMathFloor
+	// GoFastUnaryFastPathMathSqrt 表示标准库 math.sqrt 成功路径。
+	GoFastUnaryFastPathMathSqrt
+)
 
 // UnaryKindMask 构造 GoFastUnaryFunction 使用的 ValueKind bit mask。
 //

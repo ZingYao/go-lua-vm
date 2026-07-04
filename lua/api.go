@@ -2482,6 +2482,7 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 	functionCallAssignForLoopSuperInstructionEnabled := false
 	functionCallAddForLoopSuperInstructionEnabled := false
 	closureUpvalueForLoopSuperInstructionEnabled := false
+	stdlibMathStringForLoopSuperInstructionEnabled := false
 	formatLenAddForLoopSuperInstructionEnabled := false
 	stringAppendForLoopSuperInstructionEnabled := false
 	tableWriteForLoopSuperInstructionEnabled := false
@@ -2494,6 +2495,7 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 		functionCallAssignForLoopSuperInstructionEnabled = vm.PrepareFunctionCallAssignForLoopSuperInstructions()
 		functionCallAddForLoopSuperInstructionEnabled = vm.PrepareFunctionCallAddForLoopSuperInstructions()
 		closureUpvalueForLoopSuperInstructionEnabled = vm.PrepareClosureUpvalueForLoopSuperInstructions()
+		stdlibMathStringForLoopSuperInstructionEnabled = vm.PrepareStdlibMathStringForLoopSuperInstructions()
 		formatLenAddForLoopSuperInstructionEnabled = vm.PrepareFormatLenAddForLoopSuperInstructions()
 		stringAppendForLoopSuperInstructionEnabled = vm.PrepareStringAppendForLoopSuperInstructions()
 		tableWriteForLoopSuperInstructionEnabled = vm.PrepareTableWriteForLoopSuperInstructions()
@@ -2565,6 +2567,28 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 					pc = nextPC
 					continue
 				}
+			}
+		}
+		if stdlibMathStringForLoopSuperInstructionEnabled && !preciseFrameSync && !hooksEnabled && contextCheckCountdown >= 15 && vm.HasStdlibMathStringForLoopAt(pc) {
+			// 十六指令 stdlib_math_string 完整循环体会额外跳过后续十五个入口；
+			// 倒计时至少为 15 才能证明逐指令路径不会在被跳过区间触发 context 检查。
+			loopPC := pc
+			maxIterations := (contextCheckCountdown + 1) / 16
+			nextPC, handledIterations, handled, err := vm.TryExecuteStdlibMathStringForLoopBatch(loopPC, maxIterations, state)
+			if err != nil {
+				// context 取消时同步到当前循环体入口，保持标准库 CALL fast path 的错误 PC 边界。
+				if syncErr := syncCurrentFrame(loopPC); syncErr != nil {
+					return nil, syncErr
+				}
+				return nil, err
+			}
+			if handled {
+				// superinstruction 已完成若干轮完整循环体；补偿被跳过的指令入口。
+				contextCheckCountdown -= handledIterations*16 - 1
+				previousPreviousPC = loopPC + 14
+				previousPC = loopPC + 15
+				pc = nextPC
+				continue
 			}
 		}
 		if formatLenAddForLoopSuperInstructionEnabled && !preciseFrameSync && !hooksEnabled && contextCheckCountdown >= 7 && vm.HasFormatLenAddForLoopAt(pc) {
