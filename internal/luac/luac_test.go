@@ -102,6 +102,97 @@ func TestCompileSourceWithSyntaxDisablesExtensions(t *testing.T) {
 	}
 }
 
+// TestCompileSourceSimpleFunctionBodyPrototypeShape 固定简单函数体紧凑编译候选必须保持的 Proto 形态。
+func TestCompileSourceSimpleFunctionBodyPrototypeShape(t *testing.T) {
+	// 编译官方 compile_3000_functions 同构的单函数样例，锁定未来 fast path 的 bytecode/debug 输出边界。
+	proto, err := CompileSource("function f0(x) return x + 7 end\nreturn f0(1)\n", "@simple-function.lua")
+	if err != nil {
+		// 合法样例编译失败说明 parser/codegen 入口发生回归。
+		t.Fatalf("CompileSource simple function failed: %v", err)
+	}
+	if len(proto.Protos) != 1 {
+		// 顶层 function 声明必须生成一个子 Proto。
+		t.Fatalf("unexpected child proto count=%d", len(proto.Protos))
+	}
+
+	child := proto.Protos[0]
+	if child.NumParams != 1 || child.IsVararg || child.MaxStackSize != 2 {
+		// 简单函数体只有单参数、非 vararg，并且只需要参数槽与返回槽两个寄存器。
+		t.Fatalf("unexpected child header params=%d vararg=%v maxstack=%d", child.NumParams, child.IsVararg, child.MaxStackSize)
+	}
+	if child.LineDefined != 1 || child.LastLineDefined != 1 {
+		// debug.getinfo 依赖函数定义起止行，紧凑路径不能丢失源码行范围。
+		t.Fatalf("unexpected child line range=%d,%d", child.LineDefined, child.LastLineDefined)
+	}
+	if len(child.Constants) != 1 || child.Constants[0].Kind != bytecode.ConstantInteger || child.Constants[0].Integer != 7 {
+		// return x + 7 必须只保留整数常量 7。
+		t.Fatalf("unexpected child constants=%+v", child.Constants)
+	}
+	if len(child.Code) != 2 {
+		// 目标形态当前应只生成 ADD 和 RETURN 两条指令。
+		t.Fatalf("unexpected child code length=%d code=%v", len(child.Code), child.Code)
+	}
+	assertInstructionFields(t, child.Code[0], bytecode.OpAdd, 1, 0, bytecode.BitRK)
+	assertInstructionFields(t, child.Code[1], bytecode.OpReturn, 1, 2, 0)
+	if len(child.LineInfo) != 2 || child.LineInfo[0] != 1 || child.LineInfo[1] != 1 {
+		// 每条子函数指令都必须映射到函数定义行，供 debug hook 和反汇编展示。
+		t.Fatalf("unexpected child lineinfo=%v", child.LineInfo)
+	}
+	if len(child.LocalVars) != 1 || child.LocalVars[0].Name != "x" || child.LocalVars[0].StartPC != 0 || child.LocalVars[0].EndPC != 2 {
+		// 参数 x 的局部变量生命周期必须覆盖完整函数体指令区间。
+		t.Fatalf("unexpected child locals=%+v", child.LocalVars)
+	}
+	if len(child.Upvalues) != 0 {
+		// 目标函数体不读取外层变量，不能产生 upvalue。
+		t.Fatalf("unexpected child upvalues=%+v", child.Upvalues)
+	}
+}
+
+// TestCompileSourceSimpleFunctionBodyNonTargetKeepsOrdinaryShape 固定非目标函数体必须回退普通 AST/codegen。
+func TestCompileSourceSimpleFunctionBodyNonTargetKeepsOrdinaryShape(t *testing.T) {
+	// 引入局部变量 y，使函数体不再满足 `return <param> + <integer>` 紧凑候选形态。
+	proto, err := CompileSource("function f0(x) local y = x return y + 7 end\nreturn f0(1)\n", "@non-target-function.lua")
+	if err != nil {
+		// 合法非目标样例仍必须正常编译。
+		t.Fatalf("CompileSource non-target function failed: %v", err)
+	}
+	if len(proto.Protos) != 1 {
+		// 顶层 function 声明必须生成一个子 Proto。
+		t.Fatalf("unexpected child proto count=%d", len(proto.Protos))
+	}
+
+	child := proto.Protos[0]
+	if child.NumParams != 1 || child.IsVararg || child.MaxStackSize != 3 {
+		// 局部变量 y 需要额外寄存器，不能被误压成目标紧凑函数体的两个寄存器形态。
+		t.Fatalf("unexpected child header params=%d vararg=%v maxstack=%d", child.NumParams, child.IsVararg, child.MaxStackSize)
+	}
+	if len(child.Code) != 3 {
+		// 非目标函数体当前应保留 MOVE、ADD、RETURN 三条普通 codegen 指令。
+		t.Fatalf("unexpected child code length=%d code=%v", len(child.Code), child.Code)
+	}
+	assertInstructionFields(t, child.Code[0], bytecode.OpMove, 1, 0, 0)
+	assertInstructionFields(t, child.Code[1], bytecode.OpAdd, 2, 1, bytecode.BitRK)
+	assertInstructionFields(t, child.Code[2], bytecode.OpReturn, 2, 2, 0)
+	if len(child.LocalVars) != 2 || child.LocalVars[0].Name != "x" || child.LocalVars[1].Name != "y" {
+		// 普通路径必须保留参数 x 和局部 y 的 debug local 记录。
+		t.Fatalf("unexpected child locals=%+v", child.LocalVars)
+	}
+	if child.LocalVars[0].StartPC != 0 || child.LocalVars[0].EndPC != 3 || child.LocalVars[1].StartPC != 1 || child.LocalVars[1].EndPC != 3 {
+		// 局部变量生命周期必须覆盖当前普通 codegen 指令区间。
+		t.Fatalf("unexpected child local ranges=%+v", child.LocalVars)
+	}
+}
+
+// assertInstructionFields 校验 Lua 5.3 ABC 指令的 opcode 与 A/B/C 字段。
+func assertInstructionFields(t *testing.T, instruction bytecode.Instruction, opCode bytecode.OpCode, a int, b int, c int) {
+	// 标记 helper 后，失败行会指向调用方测试断言。
+	t.Helper()
+	if instruction.OpCode() != opCode || instruction.A() != a || instruction.B() != b || instruction.C() != c {
+		// 指令字段不匹配时输出完整字段，便于判断是 opcode 还是寄存器/RK 编码回归。
+		t.Fatalf("instruction mismatch got=%s A=%d B=%d C=%d want=%s A=%d B=%d C=%d", instruction.OpCode().Name(), instruction.A(), instruction.B(), instruction.C(), opCode.Name(), a, b, c)
+	}
+}
+
 // BenchmarkCompileSource3000Functions 度量 gluac 兼容编译入口处理大量顶层函数定义的成本。
 func BenchmarkCompileSource3000Functions(b *testing.B) {
 	// 使用官方 benchmark 同形态源码，覆盖 parser、semantic analyzer 与 codegen 的编译期路径。

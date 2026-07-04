@@ -1210,6 +1210,7 @@ CGO_ENABLED=0 go test ./lua -run '^$' \
 - [x] 在 `976728e` 后重新 profile `compile_3000_functions`，记录仍无低风险编译期小切口。
 - [x] 在 `f5f9028` 后重建 CLI 并复跑默认完整 benchmark 三轮，确认剩余唯一清晰主项是编译期。
 - [x] 为 `compile_3000_functions` 简单函数体紧凑编译计划补设计门禁，限定目标形态和回退验收。
+- [x] 为简单函数体紧凑编译计划补 bytecode/debug 定向测试，固定目标形态和非目标回退形态。
 - [ ] 每个生产优化 commit 后更新本文或 `docs/BENCHMARK.md`。
 
 ## 正确性门禁
