@@ -1230,20 +1230,33 @@ go tool pprof -top -alloc_space /tmp/go-lua-vm-next-profiles/string_concat_after
 `CONCAT` 噪声。进一步减少 builder 最终分配会触及 Lua 字符串不可变与可观察结果语义；减少 `DoString`
 开销则不属于 `string_concat` 执行期优化。因此该项停止生产扩张，只保留回归复核。
 
-### 7. `stdlib_math_string`：表达式级 math/string folding 扩展
+### 7. `stdlib_math_string`：完整热体 batch 后剩余 profile
 
-该项当前约 `1.5x`。上一阶段已经覆盖 `string.format("%d", i)` 固定结果和
-`#string.format("%d", i)` 长度消费；剩余可能来自 `math.sqrt`、`math.floor` 与浮点边界。
+`stdlib_math_string` 已实现完整热体 batch，`f5f9028` 后三轮完整基线为
+`0.58x / 0.58x / 0.58x`，已经稳定快于官方 Lua 5.3.6。该项后续不应继续扩张标准库折叠，除非新的
+完整三轮基线显示稳定退化，且 profile 证明退化来自某个可证明语义等价的窄形态。
 
-激进方案：
+2026-07-04 在 `f41e65d` 后补跑 residual profile：
 
-- 只在 profile 证明收益时，评估 `math.floor(math.sqrt(i))` 的表达式级窄形态。
-- 必须对齐 Lua 5.3 的 number、NaN、-0、整数/浮点转换和错误文本。
+```bash
+CGO_ENABLED=0 go test ./lua -run '^$' -bench '^BenchmarkDoStringStdlibMathString$' \
+  -benchmem -benchtime=5s -count=1 \
+  -cpuprofile /tmp/go-lua-vm-next-profiles/stdlib_math_string_after_f41e65d_cpu.pprof \
+  -memprofile /tmp/go-lua-vm-next-profiles/stdlib_math_string_after_f41e65d_mem.pprof
+go tool pprof -top /tmp/go-lua-vm-next-profiles/stdlib_math_string_after_f41e65d_cpu.pprof
+go tool pprof -top -alloc_objects /tmp/go-lua-vm-next-profiles/stdlib_math_string_after_f41e65d_mem.pprof
+go tool pprof -top -alloc_space /tmp/go-lua-vm-next-profiles/stdlib_math_string_after_f41e65d_mem.pprof
+```
 
-验收：
+- 单轮 profile：约 `7.08 ms/op`、`155.1 KB/op`、`4556 allocs/op`。
+- 五轮 micro：约 `6.92-6.95 ms/op`、`155.0 KB/op`、`4556 allocs/op`。
+- CPU 中 `TryExecuteStdlibMathStringForLoopBatch` 仍是主要可归因执行路径；普通 `VM.Step`
+  和 `TryExecuteFormatLenAddForLoop` 占比较小，说明热体 batch 命中稳定。
+- `alloc_objects` 中 `internal/strconv.FormatInt` 约 `72%`，这是 `string.format("%d", i)` 必须返回
+  字符串结果的残余分配；`alloc_space` 中 parser/OpenLibs 和标准库 table 初始化仍属于 `DoString` 口径。
 
-- 默认完整 `stdlib_math_string` 稳定低于 `1.25x`。
-- math/string 标准库官方测试继续通过。
+结论：相比生产切口前约 `25.54 ms/op`，当前 wall-clock 已下降约 `73%`；剩余分配来自 Lua 语义可见的
+字符串结果和 `DoString` 编译/开库成本，不适合继续做标准库语义折叠。该项停止生产扩张，只保留回归复核。
 
 ## TODO
 
@@ -1290,6 +1303,7 @@ go tool pprof -top -alloc_space /tmp/go-lua-vm-next-profiles/string_concat_after
 - [x] profile `recursion` prepared，确认剩余分配来自 closure/upvalue 生命周期而非递归 fast path 本体。
 - [x] profile `function_call` prepared，确认剩余成本集中在现有 batch 本体且接近噪声带。
 - [x] 在 `525aafb` 后 profile `string_concat`，确认 builder 后剩余成本为最终字符串构建和 DoString 口径噪声。
+- [x] 在 `f41e65d` 后 profile `stdlib_math_string`，确认完整热体 batch 后已快于官方且剩余为语义可见字符串结果。
 - [ ] 每个生产优化 commit 后更新本文或 `docs/BENCHMARK.md`。
 
 ## 正确性门禁
