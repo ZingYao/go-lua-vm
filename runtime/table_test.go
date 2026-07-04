@@ -118,6 +118,187 @@ func TestTableArrayGrowthKeepsVisibleSize(t *testing.T) {
 	}
 }
 
+// TestTableCompactIntegerGuardBasicSemantics 锁定 compact integer table 的基础可见语义。
+//
+// 该测试使用 VM 预分配入口模拟未来 compact table 的创建边界；连续正整数写入、raw integer
+// 读取、长度边界和 ipairs 迭代必须与普通数组区完全一致。
+func TestTableCompactIntegerGuardBasicSemantics(t *testing.T) {
+	table := newTableWithArrayCapacity(8)
+	for index := int64(1); index <= 4; index++ {
+		// 连续正整数 key/value 是 table_rw compact 表示首轮唯一允许的写入形态。
+		table.RawSetPositiveIntegerNonNil(index, IntegerValue(index*10))
+	}
+
+	if got := table.RawGetInteger(3); !got.RawEqual(IntegerValue(30)) {
+		// raw integer 读取必须即时构造与普通数组区一致的 Lua integer 值。
+		t.Fatalf("compact guard raw get mismatch: %#v", got)
+	}
+	if length := table.Len(); length != 4 {
+		// 连续正整数前缀的长度边界必须等于最高连续 key。
+		t.Fatalf("compact guard length mismatch: got %d", length)
+	}
+
+	currentIndex := int64(0)
+	for wantIndex := int64(1); wantIndex <= 4; wantIndex++ {
+		// ipairs 每轮都从上一个正整数 key 后继续，直到第一个 nil。
+		nextIndex, nextValue, ok := table.RawIPairsNext(currentIndex)
+		if !ok {
+			// 连续前缀内不应提前结束。
+			t.Fatalf("compact guard ipairs stopped at %d", currentIndex)
+		}
+		if nextIndex != wantIndex || !nextValue.RawEqual(IntegerValue(wantIndex*10)) {
+			// ipairs 返回的 key/value 必须与普通 raw integer 读取一致。
+			t.Fatalf("compact guard ipairs mismatch: index=%d value=%#v", nextIndex, nextValue)
+		}
+		currentIndex = nextIndex
+	}
+	if _, endValue, ok := table.RawIPairsNext(currentIndex); ok || !endValue.IsNil() {
+		// 连续前缀之后的第一个 nil 必须终止 ipairs。
+		t.Fatalf("compact guard ipairs should stop after prefix: value=%#v ok=%v", endValue, ok)
+	}
+}
+
+// TestTableCompactIntegerGuardMaterializeSemantics 锁定 compact table 退出窄表示后的 raw 可见语义。
+//
+// 未来 dense integer array 遇到 nil 删除、非整数值、hash 写入、raw next/pairs 或受保护元表时，
+// 必须 materialize 到普通 table，并复用当前 RawNext、RawPairsNext 和元表保护行为。
+func TestTableCompactIntegerGuardMaterializeSemantics(t *testing.T) {
+	table := newTableWithArrayCapacity(4)
+	for index := int64(1); index <= 4; index++ {
+		// 先构造可进入 compact 表示的连续整数前缀。
+		table.RawSetPositiveIntegerNonNil(index, IntegerValue(index))
+	}
+
+	table.RawSetInteger(2, NilValue())
+	if got := table.RawGetInteger(2); !got.IsNil() {
+		// nil 写入必须删除数组项，不能在 compact 表示中保留幽灵值。
+		t.Fatalf("compact guard nil delete mismatch: %#v", got)
+	}
+	if got := table.RawGetInteger(3); !got.RawEqual(IntegerValue(3)) {
+		// 删除一个槽位不能污染其他正整数 key。
+		t.Fatalf("compact guard neighbor value mismatch after delete: %#v", got)
+	}
+
+	table.RawSetInteger(3, StringValue("three"))
+	if got := table.RawGetInteger(3); !got.RawEqual(StringValue("three")) {
+		// 非 integer value 写入必须可见，未来 compact 表示应先 materialize 再写入。
+		t.Fatalf("compact guard non-integer value mismatch: %#v", got)
+	}
+	if err := table.RawSet(StringValue("name"), StringValue("lua")); err != nil {
+		// hash key 写入必须沿现有 RawSet 语义执行，保留错误边界。
+		t.Fatalf("compact guard hash write failed: %v", err)
+	}
+
+	expectedKeys := []Value{IntegerValue(1), IntegerValue(3), IntegerValue(4), StringValue("name")}
+	expectedValues := []Value{IntegerValue(1), StringValue("three"), IntegerValue(4), StringValue("lua")}
+	currentKey := NilValue()
+	for index, expectedKey := range expectedKeys {
+		// RawNext 必须继续使用数组区升序、hash 区稳定排序，不暴露 compact 内部形态。
+		nextKey, nextValue, ok, err := table.RawNext(currentKey)
+		if err != nil || !ok {
+			// 合法继续 key 不应触发 invalid key 或提前结束。
+			t.Fatalf("compact guard raw next failed at %d: ok=%v err=%v", index, ok, err)
+		}
+		if !nextKey.RawEqual(expectedKey) || !nextValue.RawEqual(expectedValues[index]) {
+			// RawNext 返回的 key/value 必须与普通 table 迭代一致。
+			t.Fatalf("compact guard raw next[%d] mismatch: key=%#v value=%#v", index, nextKey, nextValue)
+		}
+		currentKey = nextKey
+	}
+	if nextKey, nextValue, ok, err := table.RawNext(currentKey); err != nil || ok || !nextKey.IsNil() || !nextValue.IsNil() {
+		// 所有可见项遍历完后必须稳定结束。
+		t.Fatalf("compact guard raw next end mismatch: key=%#v value=%#v ok=%v err=%v", nextKey, nextValue, ok, err)
+	}
+
+	currentKey = NilValue()
+	for index, expectedKey := range expectedKeys {
+		// RawPairsNext 复用 RawNext，compact 方案不能绕过 pairs 的 raw 迭代语义。
+		nextKey, nextValue, ok, err := table.RawPairsNext(currentKey)
+		if err != nil || !ok {
+			// pairs 迭代合法 key 时不应失败。
+			t.Fatalf("compact guard raw pairs failed at %d: ok=%v err=%v", index, ok, err)
+		}
+		if !nextKey.RawEqual(expectedKey) || !nextValue.RawEqual(expectedValues[index]) {
+			// pairs 返回内容必须与 RawNext 保持一致。
+			t.Fatalf("compact guard raw pairs[%d] mismatch: key=%#v value=%#v", index, nextKey, nextValue)
+		}
+		currentKey = nextKey
+	}
+
+	metatable := NewTable()
+	metatable.RawSetString("__metatable", StringValue("locked"))
+	if err := table.SetMetatableChecked(metatable); err != nil {
+		// compact table 设置初始元表时必须沿公开保护语义成功。
+		t.Fatalf("compact guard set metatable failed: %v", err)
+	}
+	if err := table.SetMetatableChecked(NewTable()); !errors.Is(err, ErrProtectedMetatable) {
+		// 受保护元表必须阻止后续替换，不能被 materialize 流程绕过。
+		t.Fatalf("compact guard protected metatable mismatch: %v", err)
+	}
+}
+
+// TestTableCompactIntegerGuardWeakAndMetamethodSemantics 锁定弱表与元方法 miss 的 compact 回退边界。
+//
+// 未来 compact table 必须在弱表清理和普通 Get/Set 元方法链上保持与普通 table 相同的观察结果。
+func TestTableCompactIntegerGuardWeakAndMetamethodSemantics(t *testing.T) {
+	weakTable := newTableWithArrayCapacity(3)
+	weakTable.RawSetPositiveIntegerNonNil(1, IntegerValue(1))
+	weakTable.RawSetPositiveIntegerNonNil(2, ReferenceValue(KindTable, NewTable()))
+	weakTable.RawSetPositiveIntegerNonNil(3, IntegerValue(3))
+	weakMetatable := NewTable()
+	weakMetatable.RawSetString("__mode", StringValue("v"))
+	weakTable.SetMetatable(weakMetatable)
+
+	if !weakTable.SweepWeakValueEntries(nil) {
+		// weak value table 中的引用值应被清理，整数值不应触发删除。
+		t.Fatalf("compact guard weak sweep should remove reference value")
+	}
+	if got := weakTable.RawGetInteger(1); !got.RawEqual(IntegerValue(1)) {
+		// 弱 value 清理不能移除不可收集的 integer。
+		t.Fatalf("compact guard weak sweep removed integer 1: %#v", got)
+	}
+	if got := weakTable.RawGetInteger(2); !got.IsNil() {
+		// weak value 清理必须删除不可达引用值。
+		t.Fatalf("compact guard weak sweep kept reference: %#v", got)
+	}
+	if got := weakTable.RawGetInteger(3); !got.RawEqual(IntegerValue(3)) {
+		// 弱表清理后后续整数槽位仍必须保持可读。
+		t.Fatalf("compact guard weak sweep removed integer 3: %#v", got)
+	}
+
+	table := newTableWithArrayCapacity(2)
+	table.RawSetPositiveIntegerNonNil(1, IntegerValue(10))
+	metatable := NewTable()
+	indexTable := NewTable()
+	newIndexTable := NewTable()
+	indexTable.RawSetString("missing", StringValue("from-index"))
+	metatable.RawSetString("__index", ReferenceValue(KindTable, indexTable))
+	metatable.RawSetString("__newindex", ReferenceValue(KindTable, newIndexTable))
+	table.SetMetatable(metatable)
+
+	value, err := table.Get(StringValue("missing"))
+	if err != nil || !value.RawEqual(StringValue("from-index")) {
+		// raw miss 后必须继续走 __index table，不能因 compact 表示直接返回 nil。
+		t.Fatalf("compact guard __index mismatch: value=%#v err=%v", value, err)
+	}
+	if err := table.Set(StringValue("new"), StringValue("written")); err != nil {
+		// raw miss 写入必须继续走 __newindex table。
+		t.Fatalf("compact guard __newindex set failed: %v", err)
+	}
+	if got := table.RawGetString("new"); !got.IsNil() {
+		// __newindex 命中时原表不能落入 raw hash 字段。
+		t.Fatalf("compact guard source table received __newindex write: %#v", got)
+	}
+	if got := newIndexTable.RawGetString("new"); !got.RawEqual(StringValue("written")) {
+		// __newindex table 必须收到写入值。
+		t.Fatalf("compact guard __newindex target mismatch: %#v", got)
+	}
+	if got := table.RawGetInteger(1); !got.RawEqual(IntegerValue(10)) {
+		// 元方法 miss 路径不能破坏已有 integer 前缀。
+		t.Fatalf("compact guard integer prefix after metamethod mismatch: %#v", got)
+	}
+}
+
 // TestTableHashPart 验证非数组 key 会进入 hash 区。
 //
 // 当前 hash 区支持 string、boolean、非正 integer 和非整数 number。

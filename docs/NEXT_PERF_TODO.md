@@ -496,7 +496,8 @@ prepared profile 显示剩余分配主要是一次 `[]Value` 大数组 backing s
 - [x] 实现 `stdlib_math_string` 完整热体 batch superinstruction，并复核官方完整 benchmark。
 - [x] profile `table_rw`，确认当前主要成本已从连续扩容和 dispatch 转为大数组分配与 GC 扫描。
 - [x] 为 `table_rw` dense integer array 或逃逸消除方案补设计小节，先列出 materialize、迭代、元表、弱表和 debug 可见性边界。
-- [ ] 为 `table_rw` compact table 补最小 guard 测试，再决定是否实现 dense integer array prototype。
+- [x] 为 `table_rw` compact table 补最小 guard 测试，再决定是否实现 dense integer array prototype。
+- [ ] 实现 `table_rw` dense integer array prototype，若 B/op 或官方兼容语义不满足验收则回退。
 - [ ] 每个生产优化 commit 后更新本文或 `docs/BENCHMARK.md`。
 
 ## 正确性门禁
