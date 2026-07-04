@@ -950,6 +950,35 @@ CGO_ENABLED=0 go test ./internal/luac -run '^$' \
 codegen arena 生命周期设计；否则下一轮更适合转向当前完整基线中仍高于 `1.0x` 的 `arith_add_loop`
 prepared profile。
 
+2026-07-04 在 `976728e` 后按最新排序重新复核 `compile_3000_functions`：
+
+```bash
+CGO_ENABLED=0 go test ./internal/luac -run '^$' \
+  -bench '^BenchmarkCompileSource3000Functions$' \
+  -benchmem -benchtime=5s -count=1 \
+  -cpuprofile /tmp/go-lua-vm-next-profiles/compile_3000_after_976728e_cpu.pprof \
+  -memprofile /tmp/go-lua-vm-next-profiles/compile_3000_after_976728e_mem.pprof
+CGO_ENABLED=0 go test ./internal/luac -run '^$' \
+  -bench '^BenchmarkCompileSource3000Functions$' \
+  -benchmem -benchtime=2s -count=5
+```
+
+- 单轮 profile：约 `2.586 ms/op`、`3.78 MB/op`、`85 allocs/op`。
+- 五轮 micro：约 `2.570-2.579 ms/op`、`3.78 MB/op`、`88-89 allocs/op`。
+- CPU profile 仍被 `runtime.madvise`、`runtime.kevent`、`runtime.usleep`、`runtime.pthread_cond_wait`
+  等 runtime/GC/调度噪声主导；可归因源码侧中 `Lexer.NextToken` 约 `5.09%` cum、
+  `Parser.advance` 约 `5.96%` cum、`parseBlockUntilInto` 约 `9.59%` cum、
+  `parseFunctionBodyInto` 约 `7.41%` cum、codegen `compileBlock` 约 `3.49%` cum。
+- `alloc_space` 主项仍是 `newFunctionStatement` 约 `35.90%`、`prepareDirectFunctionBlockCapacity`
+  约 `26.50%`、`newLiteralExpression` 约 `10.84%`、`newBinaryExpression` 约 `6.23%`。
+- `alloc_objects` 仍分散在 `parseExpressionList`、表达式 AST arena、函数语句 arena 和 codegen
+  inline 预留；per-op 对象数已接近 `85-89 allocs/op`，没有新的单点删除空间。
+
+结论：当前 `compile_3000_functions` 的 micro 已稳定在约 `2.57-2.59 ms/op`，但剩余差距不再对应
+lexer token 解码、keyword 判定、Source ASCII 读取或函数语句容量预留这类低风险小切口。继续生产改动
+必须先做更大的函数体紧凑 AST / codegen arena 生命周期方案，并接受 parser、semantic、codegen、错误位置
+与 debug 信息的联合验收；本轮不保留生产改动，只记录证伪基线。
+
 ### `arith_add_loop`
 
 2026-07-04 在 `38e9ad4` 后按最新排序转向 `arith_add_loop` prepared profile：
@@ -1155,6 +1184,7 @@ CGO_ENABLED=0 go test ./lua -run '^$' \
 - [x] 在 `e5b67a2` 后重新 profile `compile_3000_functions`，记录暂无新的低风险编译期小切口。
 - [x] 优化 `arith_add_loop` step=1 batch 等差求和，复核 Go micro 与 CLI 抽样收益。
 - [x] 优化 `arith_mix_loop` batch 静态 guard 前移，复核 Go micro 与 CLI 抽样收益。
+- [x] 在 `976728e` 后重新 profile `compile_3000_functions`，记录仍无低风险编译期小切口。
 - [ ] 每个生产优化 commit 后更新本文或 `docs/BENCHMARK.md`。
 
 ## 正确性门禁
