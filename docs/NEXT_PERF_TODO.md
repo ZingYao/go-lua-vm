@@ -463,6 +463,29 @@ CGO_ENABLED=0 go test ./lua -run '^$' -bench '^Benchmark(DoString|Prepared)Table
 `5.46-5.63 ms/op`、`5.25 MB/op`、`125 allocs/op`。对象数大幅下降，B/op 只有小幅上浮；
 后续必须用完整 benchmark 和官方兼容脚本继续复核，暂不继续扩大到 `Block.Statements` union。
 
+2026-07-04 在 `fe051cc` 后复核剩余 profile：`BenchmarkCompileSource3000Functions` 约
+`5.39 ms/op`、`5.25 MB/op`、`122 allocs/op`；CPU 中可归因部分仍集中在 lexer/parser，alloc_space 中
+`prepareDirectFunctionBlockCapacity` 和 `newFunctionStatement` 仍是大头，alloc_objects 中
+`recordConstantIndex` 说明顶层 3000 个普通 function 名称常量索引仍会触发 string map 增长。已实现最小
+codegen 切口：复用 `directFunctionBlockStatsFor` 已知的普通 function 名称数量，为当前 Proto 的 string
+常量索引 map 预留容量，不改变常量插入、去重、顺序或 Proto 输出。
+
+目标 Go micro 结果：
+
+```bash
+CGO_ENABLED=0 go test ./internal/luac -run '^$' \
+  -bench '^BenchmarkCompileSource3000Functions$' \
+  -benchmem -benchtime=3s -count=5
+```
+
+- `BenchmarkCompileSource3000Functions`：约 `5.33 / 5.33 / 5.33 / 5.43 / 5.38 ms/op`。
+- B/op 约 `5.14 MB/op`，`104-105 allocs/op`。
+
+结论：该切口收益较小但稳定，主要减少 string 常量索引 map 扩容对象和少量空间；后续不应继续围绕
+常量索引做局部调参，剩余差距应回到 lexer/parser CPU 或更明确的 codegen arena 空间设计。重建
+`bin/glua` / `bin/gluac` 后单轮完整 benchmark 中 `compile_3000_functions` 为官方 `0.004795s`、
+本项目 `0.009207s`、倍率 `1.92x`，端到端只有小幅变化。
+
 ### 3. `arith_mix_loop`：批量 mix arithmetic superinstruction
 
 `arith_mix_loop` 当前约 `1.9x`，运行期仍高于官方。上一阶段已有完整

@@ -901,6 +901,10 @@ func TestCompileChunkPreallocatesDirectFunctionBlock(t *testing.T) {
 
 	arenaGenerator := newGenerator("child-arena")
 	arenaGenerator.prepareDirectFunctionBlockCapacity(functionChunk.Block)
+	if arenaGenerator.constants.strings == nil {
+		// 普通 function 名称常量索引应按直接函数统计预留，避免大量全局函数名触发 map 连续扩容。
+		t.Fatalf("expected preallocated string constant index")
+	}
 	if len(arenaGenerator.childProtoArena) != stats.childCount {
 		// 直接子函数 Proto arena 应按统计数量精确分配。
 		t.Fatalf("unexpected child proto arena length=%d stats=%+v", len(arenaGenerator.childProtoArena), stats)

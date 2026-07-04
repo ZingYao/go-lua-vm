@@ -386,6 +386,10 @@ func (gen *generator) prepareDirectFunctionBlockCapacity(block *parser.Block) {
 		// 普通 function 名称会进入当前 Proto 常量表；只预留容量，不写入常量。
 		gen.proto.PrepareInlineConstants(stats.nameConstantCapacity)
 	}
+	if stats.nameConstantCapacity > 0 && gen.constants.strings == nil {
+		// 普通 function 名称同时会登记到 string 常量索引；按已知数量预留 map，避免 3000 函数场景逐步扩容。
+		gen.constants.strings = make(map[string]int, stats.nameConstantCapacity)
+	}
 	if stats.childCount > 0 && len(gen.proto.Protos) == 0 && cap(gen.proto.Protos) == 0 {
 		// 直接函数声明会在当前 Proto.p 追加子 Proto；无子函数时保持 nil 切片。
 		gen.proto.Protos = make([]*bytecode.Proto, 0, stats.childCount)
