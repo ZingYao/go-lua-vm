@@ -611,6 +611,14 @@ CRLF 与 LFCR 仍按 Lua 5.3 归一为单个换行，普通空白只推进列号
 `51bf3e6` 后基线没有收益且略慢；生产改动已回退。后续不要重复做 `skipWhitespace` byte 直扫，
 除非 profile 证明空白跳过重新成为独立主热点并能在同机基线中稳定降低 wall-clock。
 
+同轮还试验过在 `parseFunctionStatement` 和 `parseReturnStatementInto` 中跳过防御式
+`expectKeyword("function")` / `expectKeyword("return")`，改为调用方已确认 keyword 后直接
+`advance`。该改动不改变正常 AST 路径，定向 parser 测试通过，但
+`BenchmarkCompileSource3000Functions` 五轮约 `4.34 / 4.35 / 4.38 / 4.34 / 4.36 ms/op`、
+约 `5.03 MB/op`、`89 allocs/op`，没有证明相比当前基线有稳定收益；生产改动已回退。后续不要重复做
+已知 keyword 直接 advance 这类 parser 防御检查微调，除非 profile 显示 `expectKeyword` 自身成为
+独立 flat 热点。
+
 ### 3. `arith_mix_loop`：批量 mix arithmetic superinstruction
 
 `arith_mix_loop` 当前约 `1.9x`，运行期仍高于官方。上一阶段已有完整
@@ -689,6 +697,7 @@ CRLF 与 LFCR 仍按 Lua 5.3 归一为单个换行，普通空白只推进列号
 - [x] 优化 lexer 标识符 ASCII 扫描，复核 `compile_3000_functions` Go micro 与 CLI 端到端收益。
 - [x] 证伪纯十进制 int64 byte 快路径，未保留生产改动。
 - [x] 证伪 `skipWhitespace` byte 直扫，未保留生产改动。
+- [x] 证伪已知 keyword 直接 advance，未保留生产改动。
 - [ ] 每个生产优化 commit 后更新本文或 `docs/BENCHMARK.md`。
 
 ## 正确性门禁
