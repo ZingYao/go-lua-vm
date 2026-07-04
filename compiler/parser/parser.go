@@ -14,6 +14,8 @@ const (
 	maxSyntaxCLevels = 200
 	// parserExpressionArenaPageSize 表示 parser 表达式节点 arena 的单页容量。
 	parserExpressionArenaPageSize = 256
+	// parserStatementArenaPageSize 表示 parser 语句节点 arena 的单页容量。
+	parserStatementArenaPageSize = 256
 )
 
 // Parser 表示 Lua 5.3 递归下降语法分析器。
@@ -36,6 +38,10 @@ type Parser struct {
 	literalExpressionPage []LiteralExpression
 	// binaryExpressionPage 保存当前页内紧凑分配的二元表达式节点。
 	binaryExpressionPage []BinaryExpression
+	// functionStatementPage 保存当前页内紧凑分配的普通 function 语句节点。
+	functionStatementPage []FunctionStatement
+	// localFunctionStatementPage 保存当前页内紧凑分配的 local function 语句节点。
+	localFunctionStatementPage []LocalFunctionStatement
 }
 
 // New 创建新的 Parser。
@@ -91,6 +97,32 @@ func (parser *Parser) newBinaryExpression(operator string, left Expression, righ
 	}
 	parser.binaryExpressionPage = append(parser.binaryExpressionPage, BinaryExpression{Operator: operator, Left: left, Right: right, Position: position})
 	return &parser.binaryExpressionPage[len(parser.binaryExpressionPage)-1]
+}
+
+// newFunctionStatement 创建普通 function 语句节点。
+//
+// name 和 position 来自已解析的函数名与 function token；返回值保持 `*FunctionStatement` 类型，
+// 让现有 AST、semantic 和 codegen 类型断言继续生效。
+func (parser *Parser) newFunctionStatement(name string, position lexer.Position) *FunctionStatement {
+	// 当前页满时分配新页，避免 3000 个顶层函数各自触发独立节点对象分配。
+	if len(parser.functionStatementPage) == cap(parser.functionStatementPage) {
+		parser.functionStatementPage = make([]FunctionStatement, 0, parserStatementArenaPageSize)
+	}
+	parser.functionStatementPage = append(parser.functionStatementPage, FunctionStatement{Name: name, Position: position})
+	return &parser.functionStatementPage[len(parser.functionStatementPage)-1]
+}
+
+// newLocalFunctionStatement 创建 local function 语句节点。
+//
+// name 和 position 来自 local function 语法；返回值保持 `*LocalFunctionStatement` 类型，避免修改
+// 作用域分析与 codegen 的公开输入结构。
+func (parser *Parser) newLocalFunctionStatement(name string, position lexer.Position) *LocalFunctionStatement {
+	// 当前页满时分配新页，保持已返回 local function 语句指针稳定。
+	if len(parser.localFunctionStatementPage) == cap(parser.localFunctionStatementPage) {
+		parser.localFunctionStatementPage = make([]LocalFunctionStatement, 0, parserStatementArenaPageSize)
+	}
+	parser.localFunctionStatementPage = append(parser.localFunctionStatementPage, LocalFunctionStatement{Name: name, Position: position})
+	return &parser.localFunctionStatementPage[len(parser.localFunctionStatementPage)-1]
 }
 
 // ParseChunk 解析完整 Lua chunk。
@@ -396,7 +428,7 @@ func (parser *Parser) parseLocalAssignmentStatement() (Statement, error) {
 			// local function 后必须有函数名。
 			return nil, err
 		}
-		statement := &LocalFunctionStatement{Name: name, Position: startPosition}
+		statement := parser.newLocalFunctionStatement(name, startPosition)
 		statement.Body = &statement.inlineBody
 		if err := parser.parseFunctionBodyInto(statement.Body); err != nil {
 			// 函数体解析失败时无法构造 local function。
@@ -447,7 +479,7 @@ func (parser *Parser) parseFunctionStatement() (Statement, error) {
 	}
 	if simpleName != "" && !isMethod {
 		// 简单函数名保留原有 AST，函数体直接内嵌在 FunctionStatement 中。
-		statement := &FunctionStatement{Name: simpleName, Position: startPosition}
+		statement := parser.newFunctionStatement(simpleName, startPosition)
 		statement.Body = &statement.inlineBody
 		if err := parser.parseFunctionBodyInto(statement.Body); err != nil {
 			// 函数体解析失败时无法构造 function 语句。

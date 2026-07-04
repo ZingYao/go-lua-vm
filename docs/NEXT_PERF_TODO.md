@@ -166,6 +166,12 @@ typed statement / compact function statement prototype：在不破坏 parser、s
 - 明确不做：本阶段不引入全局 AST 对象池，不把 `Block.Statements` 改成 union，不删除 codegen arena，
   不跨解析任务共享 mutable state。
 
+2026-07-04 已实现第一阶段 parser 私有 chunked statement arena prototype：简单 `function name`
+和 `local function name` 语句仍返回原有 AST 指针类型，但节点来自不可搬迁的页式 slice。目标 benchmark
+从约 `5.83 ms/op`、`5.22 MB/op`、`3110 allocs/op` 变为五轮约
+`5.46-5.63 ms/op`、`5.25 MB/op`、`125 allocs/op`。对象数大幅下降，B/op 只有小幅上浮；
+后续必须用完整 benchmark 和官方兼容脚本继续复核，暂不继续扩大到 `Block.Statements` union。
+
 ### 2. `arith_mix_loop`：批量 mix arithmetic superinstruction
 
 `arith_mix_loop` 当前约 `1.9x`，运行期仍高于官方。上一阶段已有完整
@@ -225,7 +231,7 @@ typed statement / compact function statement prototype：在不破坏 parser、s
 - [ ] 跑下一阶段基线：默认完整 benchmark 三轮、剩余高于 `1.0x` 项的 Go micro 矩阵。
 - [x] profile `compile_3000_functions`，确认 `FunctionStatement` / typed statement storage 仍是主切口，同时记录 codegen arena 空间成本。
 - [x] 为 typed statement / compact AST 方案补设计小节，列出 parser、semantic、codegen、debug 和错误语义影响面。
-- [ ] 只有设计通过后，才实现最小 typed statement prototype；若收益不足或 B/op 升高，记录证伪并回退。
+- [x] 实现最小 typed statement prototype；若收益不足或 B/op 升高，记录证伪并回退。
 - [x] profile `arith_mix_loop` prepared，确认当前主要成本在现有 mix fast path 内。
 - [x] 补跑 `arith_mix_loop` DoString benchmark，确认端到端同步受益且没有新的编译期噪声。
 - [x] 设计并实现 batch mix arithmetic superinstruction，证明 context、PC、debug hook、coroutine 和错误路径等价。
