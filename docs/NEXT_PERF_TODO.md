@@ -924,6 +924,32 @@ CGO_ENABLED=0 go test ./internal/luac -run '^$' \
 `1.31x` 同属端到端噪声带，不能宣称 CLI 口径突破。继续推进编译期必须重新 profile；若没有新的
 结构性 parser/codegen 切口，应转向当前同样接近最高项的 `table_rw`。
 
+2026-07-04 在 `e5b67a2` 三轮完整基线后重新 profile：
+
+```bash
+CGO_ENABLED=0 go test ./internal/luac -run '^$' \
+  -bench '^BenchmarkCompileSource3000Functions$' \
+  -benchmem -benchtime=5s -count=1 \
+  -cpuprofile /tmp/go-lua-vm-next-profiles/compile_3000_after_e5b67a2_cpu.pprof \
+  -memprofile /tmp/go-lua-vm-next-profiles/compile_3000_after_e5b67a2_mem.pprof
+```
+
+- `BenchmarkCompileSource3000Functions`：约 `2.674 ms/op`、`3.78 MB/op`、`85 allocs/op`。
+- CPU profile 中 runtime 调度、GC 和 madvise 噪声占比较高；可归因部分分散在 `Lexer.NextToken`
+  约 `13.51%` cum、`Parser.advance` 约 `16.22%` cum、`parseBlockUntilInto` 约 `24.01%` cum、
+  `parseFunctionStatement` 约 `22.58%` cum、`parseSubExpression` 约 `8.74%` cum。
+- `alloc_space` 仍主要来自 `newFunctionStatement`、`prepareDirectFunctionBlockCapacity`、
+  `newLiteralExpression`、`newBinaryExpression`、`newNameExpression` 和 Proto/codegen 结构。
+- `alloc_objects` 的采样分布仍能看到表达式 AST、FunctionStatement arena、codegen inline capacity 和
+  benchmark fixture 构造噪声；实际 per-op 已稳定在约 `85 allocs/op`，不再是简单对象数问题。
+
+结论：当前编译期已经从 lexer 大类分派、标识符扫描、Source 预读、parser 语句分派和 codegen scratch
+几个低风险切口中吃完主要收益；本轮 profile 没有新的独立 flat 热点。`expectKeyword`、十进制整数扫描、
+`skipWhitespace`、`Source.Next`、expression arena 大页容量和紧凑表达式 AST 均已在前文证伪或被判定为
+非小切口，不能继续局部调参。后续若继续压缩 `compile_3000_functions`，应先进入函数体紧凑 AST /
+codegen arena 生命周期设计；否则下一轮更适合转向当前完整基线中仍高于 `1.0x` 的 `arith_add_loop`
+prepared profile。
+
 ### 3. `arith_mix_loop`：批量 mix arithmetic superinstruction
 
 `arith_mix_loop` 当前约 `1.9x`，运行期仍高于官方。上一阶段已有完整
@@ -1012,6 +1038,7 @@ CGO_ENABLED=0 go test ./internal/luac -run '^$' \
 - [x] 优化 lexer 字符串与注释起始 guard，复核 `compile_3000_functions` Go micro 收益。
 - [x] 优化 lexer token 首字节分派，复核 `compile_3000_functions` Go micro 收益。
 - [x] 优化 parser 语句分派，复核 `compile_3000_functions` Go micro 与 CLI 抽样口径。
+- [x] 在 `e5b67a2` 后重新 profile `compile_3000_functions`，记录暂无新的低风险编译期小切口。
 - [ ] 每个生产优化 commit 后更新本文或 `docs/BENCHMARK.md`。
 
 ## 正确性门禁
