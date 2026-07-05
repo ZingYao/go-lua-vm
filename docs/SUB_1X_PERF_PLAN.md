@@ -31,6 +31,28 @@ benchmark 单轮：
 本轮目标更激进，但仍必须保持 Lua 5.3 兼容语义。每个生产提交只允许一个可验证小切口，并且必须先由
 benchmark/profile 证明该切口对应真实差距。
 
+## 三轮稳定基线
+
+2026-07-05 在 `bb1a7ae` 之后重建 `bin/glua` / `bin/gluac`，用默认 `scripts/benchmark-official.sh`
+参数跑三轮完整 benchmark。按三轮中位数重新排序后，稳定高于 `1.00x` 的项仍为：
+
+| 排名 | English case | 中文名称 | 官方三轮中位数 | 本项目三轮中位数 | 本项目/官方 | 相对初始倍率 |
+| ---: | --- | --- | ---: | ---: | ---: | ---: |
+| 1 | `compile_3000_functions` | 编译3000个函数 | 0.005369s | 0.006670s | 1.24x | 持平 |
+| 2 | `recursion` | 递归 | 0.003773s | 0.004084s | 1.08x | 持平 |
+| 3 | `string_concat` | 字符串拼接 | 0.004851s | 0.005086s | 1.05x | 持平 |
+| 4 | `function_call` | 函数调用 | 0.006974s | 0.007206s | 1.03x | 改善 0.01x |
+| 5 | `arith_mix_loop` | 混合算术循环 | 0.011563s | 0.011932s | 1.03x | 回退 0.02x |
+| 6 | `table_rw` | 表读写 | 0.007225s | 0.006383s | 0.88x | 改善 0.02x |
+| 7 | `closure_upvalue` | 闭包 upvalue | 0.008103s | 0.007263s | 0.90x | 回退 0.02x |
+| 8 | `arith_chain_temp` | 算术临时链 | 0.013049s | 0.010140s | 0.78x | 回退 0.01x |
+| 9 | `arith_add_loop` | 整数累加循环 | 0.007707s | 0.005168s | 0.67x | 回退 0.02x |
+| 10 | `stdlib_math_string` | 标准库数学与字符串 | 0.019501s | 0.011554s | 0.59x | 持平 |
+
+结论：`compile_3000_functions` 是唯一超过 `1.20x` 的稳定主差距，下一轮必须先跑 Go micro/profile，
+再决定 compile-only streaming 简单函数声明路径是否具备安全切口。`recursion`、`string_concat`、`function_call`
+和 `arith_mix_loop` 暂不插队，除非 compile 路径被证伪或三轮基线发生明显变化。
+
 优先级：
 
 1. `compile_3000_functions` / 编译3000个函数：探索 compile-only streaming 简单函数声明路径。目标是跳过公开

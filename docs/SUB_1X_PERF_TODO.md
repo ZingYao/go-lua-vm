@@ -13,7 +13,7 @@
 - [x] 重建 `bin/glua` 和 `bin/gluac`。
 - [x] 确认官方 `lua` / `luac` 为 5.3.6。
 - [x] 运行默认完整 benchmark 单轮，记录中英文用例名和初始倍率。
-- [ ] 运行默认完整 benchmark 三轮，确认哪些 `> 1.00x` 是稳定差距。
+- [x] 运行默认完整 benchmark 三轮，确认哪些 `> 1.00x` 是稳定差距。
 
 初始单轮基线：
 
@@ -30,9 +30,24 @@
 | `arith_add_loop` | 整数累加循环 | 0.65x | 观察 |
 | `stdlib_math_string` | 标准库数学与字符串 | 0.59x | 观察 |
 
+2026-07-05 三轮完整 benchmark 稳定差距排序：
+
+| English case | 中文名称 | 官方三轮中位数 | 本项目三轮中位数 | 三轮倍率 | 结论 |
+| --- | --- | ---: | ---: | ---: | --- |
+| `compile_3000_functions` | 编译3000个函数 | 0.005369s | 0.006670s | 1.24x | P0，进入 profile |
+| `recursion` | 递归 | 0.003773s | 0.004084s | 1.08x | P1，等待 compile 之后 |
+| `string_concat` | 字符串拼接 | 0.004851s | 0.005086s | 1.05x | P1，等待 compile 之后 |
+| `function_call` | 函数调用 | 0.006974s | 0.007206s | 1.03x | P1，等待 compile 之后 |
+| `arith_mix_loop` | 混合算术循环 | 0.011563s | 0.011932s | 1.03x | P2，仅复核 |
+| `table_rw` | 表读写 | 0.007225s | 0.006383s | 0.88x | 已低于 1.0 |
+| `closure_upvalue` | 闭包 upvalue | 0.008103s | 0.007263s | 0.90x | 已低于 1.0 |
+| `arith_chain_temp` | 算术临时链 | 0.013049s | 0.010140s | 0.78x | 已低于 1.0 |
+| `arith_add_loop` | 整数累加循环 | 0.007707s | 0.005168s | 0.67x | 已低于 1.0 |
+| `stdlib_math_string` | 标准库数学与字符串 | 0.019501s | 0.011554s | 0.59x | 已低于 1.0 |
+
 ## 1. `compile_3000_functions` / 编译3000个函数
 
-- [ ] 跑三轮完整 benchmark，确认该项稳定 `> 1.00x`。
+- [x] 跑三轮完整 benchmark，确认该项稳定 `> 1.00x`。
 - [ ] 跑 `BenchmarkCompileSource3000Functions` 五轮和 CPU/memory profile。
 - [ ] 设计 compile-only streaming 简单函数声明路径，明确普通 parser、semantic、debug、`luac -l -l`、
   错误位置和非目标回退边界。
@@ -69,7 +84,7 @@
 
 ## 5. `arith_mix_loop` / 混合算术循环
 
-- [ ] 仅做完整 benchmark 三轮复核。
+- [x] 仅做完整 benchmark 三轮复核。
 - [ ] 只有稳定 `> 1.00x` 且 profile 指向新的单一主因时才重新打开。
 
 ## 6. 全局验证
