@@ -139,6 +139,20 @@
 - 下一步：继续 compile 必须先跑新的 `BenchmarkCompileSource3000Functions` micro/profile；若 profile 无结构性
   生产切口，则转入 `recursion` profile。不得基于本轮 benchmark 直接继续堆 compile 字段微调。
 
+2026-07-05 compact function statement arena 预留：
+
+- 7224aa9 后五轮 micro：`1.880 / 1.875 / 1.882 / 1.886 / 1.875 ms/op`、约 `1.925 MB/op`、
+  `56 allocs/op`。
+- GOGC=off CPU profile：`Parser.newCompactFunctionStatement` flat 约 `49.62%`；alloc_space 中
+  `newCompactFunctionStatement` 约 `11.06%`。
+- 生产切口：`NewCompactWithSyntax` 复用顶层 function 行数预估，延迟到首个 compact 节点命中时一次性预留
+  `compactFunctionStatementPage`；普通 parser 入口和未命中 compact 的源码不承担额外分配。
+- 五轮 micro 后验：`1.855 / 1.855 / 1.853 / 1.837 / 1.844 ms/op`、约 `1.917 MB/op`、`45-47 allocs/op`。
+  中位数 wall-clock 下降约 `1.6%`，allocs/op 减少约 `9-11` 次。
+- 单轮完整官方 benchmark：`compile_3000_functions` 官方 `0.005305s`，本项目 `0.005692s`，倍率 `1.07x`。
+- 下一步：不再围绕 compact 节点页容量做扩张；继续 compile 必须重新 profile 证明 parser streaming 或其他结构性
+  空间，否则转入 `recursion` profile。
+
 ## 2. `recursion` / 递归
 
 - [ ] 仅在完整 benchmark 三轮稳定高于 `1.00x` 且接近或超过 `1.08x` 时进入。

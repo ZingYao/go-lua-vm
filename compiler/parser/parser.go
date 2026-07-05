@@ -44,6 +44,8 @@ type Parser struct {
 	functionStatementPage []FunctionStatement
 	// compactFunctionStatementPage 保存当前页内紧凑分配的编译专用简单 function 语句节点。
 	compactFunctionStatementPage []CompactFunctionStatement
+	// compactFunctionStatementCapacityHint 保存顶层 function 行数预估，供 compact 节点首个 arena 页使用。
+	compactFunctionStatementCapacityHint int
 	// localFunctionStatementPage 保存当前页内紧凑分配的 local function 语句节点。
 	localFunctionStatementPage []LocalFunctionStatement
 	// compactSimpleFunctionBodyPage 保存当前页内紧凑分配的简单函数体摘要。
@@ -173,7 +175,13 @@ func (parser *Parser) newFunctionStatement(name string, position lexer.Position)
 func (parser *Parser) newCompactFunctionStatement(statement CompactFunctionStatement) *CompactFunctionStatement {
 	// 当前页满时分配新页，避免 compact 节点扩容复制后旧指针失效。
 	if len(parser.compactFunctionStatementPage) == cap(parser.compactFunctionStatementPage) {
-		parser.compactFunctionStatementPage = make([]CompactFunctionStatement, 0, parserStatementArenaPageSize)
+		capacity := parserStatementArenaPageSize
+		if parser.compactFunctionStatementCapacityHint > capacity {
+			// 顶层大量简单函数声明在 compact 编译入口会连续命中，复用预估容量减少 arena 页分配。
+			capacity = parser.compactFunctionStatementCapacityHint
+			parser.compactFunctionStatementCapacityHint = 0
+		}
+		parser.compactFunctionStatementPage = make([]CompactFunctionStatement, 0, capacity)
 	}
 	parser.compactFunctionStatementPage = append(parser.compactFunctionStatementPage, statement)
 	return &parser.compactFunctionStatementPage[len(parser.compactFunctionStatementPage)-1]
@@ -270,6 +278,10 @@ func (parser *Parser) parseBlockUntilInto(block *Block, extraEnd func(lexer.Toke
 	if capacityHint := parser.topLevelBlockStatementCapacityHint(extraEnd); capacityHint > 0 {
 		// 顶层大量函数声明场景提前预留语句切片容量；只改变 cap，不改变语句数量、顺序或 AST 类型。
 		block.Statements = make([]Statement, 0, capacityHint)
+		if parser.compactFunctionBodies && parser.compactFunctionStatementCapacityHint == 0 {
+			// compact 编译入口延迟到首个命中节点时再分配 arena，避免非目标源码承担额外内存成本。
+			parser.compactFunctionStatementCapacityHint = capacityHint
+		}
 	}
 	for !parser.isBlockEndToken(parser.current, extraEnd) {
 		if parser.current.Kind == lexer.TokenKeyword && parser.current.Text == "return" {

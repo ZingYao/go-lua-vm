@@ -141,27 +141,44 @@ func TestParserParseChunkAndBlock(t *testing.T) {
 func TestParserPreallocatesLargeTopLevelFunctionBlock(t *testing.T) {
 	// 构造超过容量 hint 阈值的顶层函数声明，覆盖 compile_3000_functions 的源码形态。
 	var builder strings.Builder
-	for functionIndex := 0; functionIndex < 20; functionIndex++ {
+	const functionCount = 300
+	for functionIndex := 0; functionIndex < functionCount; functionIndex++ {
 		// 每行以 function 开头，容量预估可以在不消费 token 的情况下计入语句下界。
 		builder.WriteString("function f")
 		builder.WriteString(strconv.Itoa(functionIndex))
-		builder.WriteString("(x) return x end\n")
+		builder.WriteString("(x) return x + 1 end\n")
 	}
-	builder.WriteString("return f19(1)\n")
+	builder.WriteString("return f299(1)\n")
+	source := builder.String()
 
-	parser := New(builder.String())
+	parser := New(source)
 	chunk, err := parser.ParseChunk()
 	if err != nil {
 		// 合法的大量函数声明样例必须能正常解析。
 		t.Fatalf("ParseChunk failed: %v", err)
 	}
-	if len(chunk.Block.Statements) != 20 {
+	if len(chunk.Block.Statements) != functionCount {
 		// 容量预估不能改变实际语句数量。
 		t.Fatalf("unexpected statement count: %d", len(chunk.Block.Statements))
 	}
-	if cap(chunk.Block.Statements) < 20 {
+	if cap(chunk.Block.Statements) < functionCount {
 		// 顶层函数声明容量应按行首声明数量预留。
 		t.Fatalf("expected preallocated top-level statement capacity, cap=%d", cap(chunk.Block.Statements))
+	}
+
+	compactParser := NewCompactWithSyntax(source, extensions.Default())
+	compactChunk, err := compactParser.ParseChunk()
+	if err != nil {
+		// compact 编译入口必须同样保持合法源码可解析。
+		t.Fatalf("compact ParseChunk failed: %v", err)
+	}
+	if len(compactChunk.Block.Statements) != functionCount {
+		// compact 节点预留不能改变语句数量。
+		t.Fatalf("unexpected compact statement count: %d", len(compactChunk.Block.Statements))
+	}
+	if len(compactParser.compactFunctionStatementPage) != functionCount || cap(compactParser.compactFunctionStatementPage) < functionCount {
+		// compact function 节点应复用顶层容量预估，避免 3000 函数场景反复分配 256 大小页。
+		t.Fatalf("unexpected compact arena len/cap=%d/%d", len(compactParser.compactFunctionStatementPage), cap(compactParser.compactFunctionStatementPage))
 	}
 }
 
