@@ -174,7 +174,7 @@
 
 ## 2. `recursion` / 递归
 
-- [ ] 仅在完整 benchmark 三轮稳定高于 `1.00x` 且接近或超过 `1.08x` 时进入。
+- [x] 仅在完整 benchmark 三轮稳定高于 `1.00x` 且接近或超过 `1.08x` 时进入。
 - [x] 跑 `BenchmarkPreparedRecursion` 五轮和 CPU/memory profile。
 - [x] 补 guard：闭包返回、闭包传参、闭包存表、闭包身份比较、`debug.getupvalue`、`debug.setupvalue`、
   `debug.upvalueid`、`debug.upvaluejoin`、错误 traceback、line/call hook、pcall/error、coroutine/yield。
@@ -208,6 +208,20 @@
   但完整 CLI 用例剩余差距不再由局部函数闭包分配单独决定。
 - 下一步：不再扩大同一 borrowed closure 形态；优先转向 `string_concat` 或 `function_call` profile。若继续
   `compile_3000_functions`，必须先补完整 chunk streaming 设计和 guard 测试。
+
+2026-07-06 9eb7f54 后 recursion profile 复核：
+
+- 五轮 `BenchmarkPreparedRecursion`：`1706 / 1706 / 1707 / 1700 / 1703 ns/op`、`0 B/op`、`0 allocs/op`。
+- profile benchmark：普通 `1730 ns/op`，`GOGC=off` `1727 ns/op`，均为 `0 B/op`、`0 allocs/op`。
+- 普通 CPU：`executePreparedLuaClosureWithDebugNameTailFromArgs` flat `41.58%` / cum `95.05%`，
+  `VM.Step` flat `8.91%` / cum `29.70%`，`TryExecuteSelfRecursiveIntegerFibInCaller` cum `6.93%`。
+- `GOGC=off` CPU：`executePreparedLuaClosureWithDebugNameTailFromArgs` flat `38.10%` / cum `96.19%`，
+  `VM.Step` flat `13.33%` / cum `34.29%`，`TryExecuteSelfRecursiveIntegerFibInCaller` cum `6.67%`。
+- memory profile 不再出现执行期 `runtime.NewLuaClosure` / `runtime.NewOpenUpvalueCell`；可见分配来自
+  pprof/test harness、一次性编译和 Go runtime 背景分配，不对应 prepared 执行期 `b.ReportAllocs`。
+- 证伪结论：borrowed closure 已消除上一轮明确分配主因；剩余差距是执行框架、VM step 和既有自递归 fast path
+  固定 CPU。继续扩大 closure/upvalue 生命周期没有收益证据；更激进的整段递归折叠或调用帧绕过会触碰 hook、
+  coroutine/yield、traceback、错误 PC、调用帧可见性和普通递归语义，本轮不做生产代码改动。
 
 ## 3. `string_concat` / 字符串拼接
 
