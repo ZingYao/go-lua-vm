@@ -214,6 +214,19 @@ CGO_ENABLED=0 go test ./internal/luac -run '^$' \
 - [ ] 若通过 micro，重建 CLI 并运行完整 benchmark 三轮；`compile_3000_functions` 未继续低于 `1.20x`
   则回退或降级为证伪记录。
 
+2026-07-05 证伪 prototype 2 的最小私有语句实现：实现曾让 compact parser 在精确目标形态返回私有
+简单 function 语句，并让 semantic/codegen 通过只读 helper 继续按普通全局 function 语义处理。
+`TestCompactParserSimpleFunctionStatementGuard`、简单函数体 luac guard 均通过，但五轮 micro 为：
+
+- `2.365593 / 2.367518 / 2.364550 / 2.362496 / 2.361972 ms/op`
+- `3.4975 MB/op`
+- `64-65 allocs/op`
+
+结论：该形态没有相对 `5008d65` 后约 `2.35 ms/op`、`3.4975 MB/op`、`64-65 allocs/op` 继续改善，
+未达到 `5%` wall-clock 门槛；生产 Go 改动已回退。后续不要重复“用等价私有语句替换
+`FunctionStatement`”这一小切口。若继续 `compile_3000_functions`，必须先提出能减少整段顶层函数声明
+对象数量或 codegen 生命周期成本的新结构设计；否则优先转向 `recursion` 门槛复核 profile。
+
 ## 2. `function_call` batch guard 冻结候选
 
 - [ ] 仅在 `function_call` 完整三轮稳定高于 `1.05x` 时进入本项。

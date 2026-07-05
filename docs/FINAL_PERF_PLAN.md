@@ -210,6 +210,19 @@ profile 指向 `newFunctionStatement` 后，下一候选不能再扩张函数体
 B/op 不高于当前约 `3.50 MB/op`，并且完整 benchmark `compile_3000_functions` 继续低于 `1.20x`
 时，才能保留生产改动；否则回退实现，只保留设计和证伪记录。
 
+### 2026-07-05 prototype 2 证伪
+
+按上述设计尝试过最小实现：在 compact parser 中用私有简单 function 语句替代完整
+`FunctionStatement`，并通过 parser helper 让 semantic/codegen 仍按普通全局 function 语义处理。
+定向 parser/luac guard 通过，但五轮 `BenchmarkCompileSource3000Functions` 为
+`2.365593 / 2.367518 / 2.364550 / 2.362496 / 2.361972 ms/op`，`3.4975 MB/op`，
+`64-65 allocs/op`，没有相对 `5008d65` 后的 `2.35 ms/op` 区间继续下降 `5%`。
+
+结论：只把 `FunctionStatement` 替换为等价私有语句，本质上仍保留每个函数一份语句对象和
+`FunctionBody` 内嵌结构，无法降低 wall-clock 或 B/op。该生产改动已回退。后续不得重复
+“私有语句等价替换”形态；若继续 `compile_3000_functions`，必须先证明能减少整段顶层函数声明的
+对象数量或 codegen 生命周期成本，否则应转向 `recursion` 的门槛复核 profile。
+
 ## 方案 B：`function_call` batch guard 冻结
 
 目标源码形态：
