@@ -152,6 +152,34 @@ offset 仍由普通回退路径承载；compact 节点只服务 compile-only cod
 倍率 `1.08x`。这是单轮结果，下一轮需要三轮确认稳定性；若稳定在 `1.08x` 左右，剩余 compile 差距已经
 接近 `recursion` / `string_concat`，应按 profile 证据决定继续 compile 还是切换目标。
 
+## compact child Proto 直接构造
+
+2026-07-05 在 `678abe7` 后跑三轮完整 benchmark 和 compile profile。三轮完整 benchmark 中
+`compile_3000_functions` 稳定约 `1.07-1.10x`；五轮 micro 为 `1.982-1.989 ms/op`、约 `1.925 MB/op`、
+`58 allocs/op`。GOGC=off CPU profile 仍显示 `borrowChildProto` 约 `19.40%`，alloc_space 中
+`prepareDirectFunctionBlockCapacity` 约 `50.56%`。
+
+本轮只做一个 codegen 小切口：对 `CompactFunctionStatement` 直接构造 child `Proto`，写入固定两条指令
+`ADD R1 R0 K0` / `RETURN R1 2`、单 integer 常量、两条 lineinfo、一个参数 local 和 `MaxStackSize=2`。
+该形态由 parser 精确证明没有 upvalue、嵌套 block、额外 local、vararg 或复杂 return；普通函数和非目标形态
+仍走完整 generator。
+
+五轮 micro：
+
+| 指标 | direct Proto 前 | direct Proto 后 | 改善 |
+| --- | ---: | ---: | ---: |
+| `BenchmarkCompileSource3000Functions` wall-clock | `1.982-1.989 ms/op` | `1.877-1.893 ms/op` | 中位数约下降 `5%` |
+| B/op | 约 `1.925 MB/op` | 约 `1.925 MB/op` | 基本持平 |
+| allocs/op | `58` | `56` | 减少 `2` 次 |
+
+结论：direct Proto 主要降低 codegen 状态机开销与少量分配，保持 bytecode/debug shape 等价。下一轮需要重建
+CLI 后跑完整 benchmark，确认 `compile_3000_functions` 是否进一步接近或低于 `1.00x`；若仍高于 `1.00x`，
+继续 compile 只能基于新的 profile 判断是否还有安全结构切口。
+
+重建 CLI 后单轮完整官方 benchmark 中 `compile_3000_functions` 为官方 `0.005352s`、本项目 `0.005673s`、
+倍率 `1.06x`。该结果说明 direct Proto 能继续传导到 CLI 路径；剩余最大稳定差距已接近
+`recursion`、`string_concat` 和 `arith_mix_loop`，下一轮应先三轮确认排序，再决定继续 compile 还是切换目标。
+
 优先级：
 
 1. `compile_3000_functions` / 编译3000个函数：探索 compile-only streaming 简单函数声明路径。目标是跳过公开

@@ -3017,49 +3017,28 @@ func (generator *generator) compileChildProto(body *parser.FunctionBody) (int, e
 // statement 已由 parser 精确证明为单参数整数加法返回；本方法仍按普通 codegen 规则写入参数 local、
 // ADD/RETURN 行号、Proto 行范围和 MaxStackSize，保证 debug 与 luac 反汇编等价。
 func (generator *generator) compileCompactFunctionChildProto(statement *parser.CompactFunctionStatement) (int, error) {
-	child := newChildGenerator(generator, generator.proto.Source)
-	child.proto.NumParams = 1
-	child.proto.IsVararg = false
-	child.proto.LineDefined = statement.LineDefined
-	child.proto.LastLineDefined = statement.LastLineDefined
+	child := generator.borrowChildProto(generator.proto.Source)
+	child.NumParams = 1
+	child.IsVararg = false
+	child.LineDefined = statement.LineDefined
+	child.LastLineDefined = statement.LastLineDefined
 
-	paramRegister := child.allocateRegister()
-	child.defineLocal(statement.ParamName, paramRegister, lexer.Position{Line: statement.LineDefined})
-	resultRegister := child.allocateRegister()
-	constantIndex := child.addConstant(bytecode.IntegerConstant(statement.Integer))
-	constantOperand, constantRegister, err := child.rkOperandForConstantIndex(constantIndex)
-	if err != nil {
-		// 常量无法编码时释放临时寄存器并返回原错误。
-		child.releaseRegister(resultRegister)
-		return 0, err
-	}
-	if err := child.withSourceLine(lexer.Position{Line: statement.OperatorLine}, func() error {
-		// ADD 行号必须归因到 `+`，与普通二元 return codegen 保持一致。
-		child.emitABC(bytecode.OpAdd, resultRegister, paramRegister, constantOperand)
-		return nil
-	}); err != nil {
-		// 当前 emit 不会返回错误；保留释放路径以匹配 withSourceLine 签名。
-		child.releaseOptionalRegister(constantRegister)
-		child.releaseRegister(resultRegister)
-		return 0, err
-	}
-	child.releaseOptionalRegister(constantRegister)
-	if err := child.withSourceLine(lexer.Position{Line: statement.ReturnLine}, func() error {
-		// RETURN 行号必须归因到 return 关键字，供 debug hook 与 luac -l -l 展示。
-		child.emitABC(bytecode.OpReturn, resultRegister, 2, 0)
-		return nil
-	}); err != nil {
-		// 当前 emit 不会返回错误；保留释放路径以匹配 withSourceLine 签名。
-		child.releaseRegister(resultRegister)
-		return 0, err
-	}
-	child.releaseRegister(resultRegister)
-	child.returned = true
-	child.closeLocals(len(child.proto.Code))
-	child.proto.MaxStackSize = child.maxStackSize()
+	child.Constants = append(child.Constants, bytecode.IntegerConstant(statement.Integer))
+	child.Code = append(child.Code,
+		bytecode.CreateABC(bytecode.OpAdd, 1, 0, bytecode.RKAsK(0)),
+		bytecode.CreateABC(bytecode.OpReturn, 1, 2, 0),
+	)
+	child.LineInfo = append(child.LineInfo, statement.OperatorLine, statement.ReturnLine)
+	child.LocalVars = append(child.LocalVars, bytecode.LocalVar{
+		Name:     statement.ParamName,
+		Register: 0,
+		StartPC:  0,
+		EndPC:    len(child.Code),
+	})
+	child.MaxStackSize = 2
 
 	// 追加子 Proto 并返回索引。
-	return generator.proto.AddChild(child.proto), nil
+	return generator.proto.AddChild(child), nil
 }
 
 // compileCompactSimpleFunctionBody 编译 parser compact summary 记录的简单函数体。

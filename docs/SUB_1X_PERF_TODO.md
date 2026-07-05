@@ -113,6 +113,22 @@
 - 下一步：重新 profile 判断 `borrowChildProto` / child Proto 初始化是否还有结构性空间；若没有明确生产切口，
   转入 `recursion` 或 `string_concat`。
 
+2026-07-05 compact child Proto 直接构造：
+
+- 行号压缩后三轮完整 benchmark：`compile_3000_functions` 三轮约 `1.09x / 1.10x / 1.07x`，仍未低于
+  `1.00x`，但较 `1.16x` 基线继续改善。
+- 五轮 micro：`1.982 / 1.989 / 1.987 / 1.989 / 1.983 ms/op`、约 `1.925 MB/op`、`58 allocs/op`。
+- GOGC=off CPU profile：`Parser.newCompactFunctionStatement` flat `50.00%`，`codegen.borrowChildProto`
+  flat `19.40%`；alloc_space：`prepareDirectFunctionBlockCapacity` 约 `50.56%`。
+- 生产切口：`CompactFunctionStatement` 的 child Proto 直接写入 `ADD R1 R0 K0`、`RETURN R1 2`、
+  单 integer 常量、lineinfo、参数 local 和 `MaxStackSize=2`，绕过 child generator 的寄存器/local/upvalue 状态机。
+- 五轮 micro 后验：`1.888 / 1.887 / 1.884 / 1.893 / 1.877 ms/op`、约 `1.925 MB/op`、`56 allocs/op`。
+  相比本轮前中位数 wall-clock 下降约 `5%`，allocs/op 减少 `2` 次。
+- 单轮完整官方 benchmark：`compile_3000_functions` 官方 `0.005352s`，本项目 `0.005673s`，倍率 `1.06x`。
+  收益继续传导到 CLI 路径，但仍未低于 `1.00x`。
+- 下一步：跑三轮完整 benchmark 重新排序剩余差距；若 `compile_3000_functions` 仍最高，继续 compile 必须重新
+  profile 后再决定；若与 `recursion` / `string_concat` 接近，则按三轮排序切换目标。
+
 ## 2. `recursion` / 递归
 
 - [ ] 仅在完整 benchmark 三轮稳定高于 `1.00x` 且接近或超过 `1.08x` 时进入。
