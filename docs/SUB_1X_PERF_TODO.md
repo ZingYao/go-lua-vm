@@ -178,9 +178,9 @@
 - [x] 跑 `BenchmarkPreparedRecursion` 五轮和 CPU/memory profile。
 - [x] 补 guard：闭包返回、闭包传参、闭包存表、闭包身份比较、`debug.getupvalue`、`debug.setupvalue`、
   `debug.upvalueid`、`debug.upvaluejoin`、错误 traceback、line/call hook、pcall/error、coroutine/yield。
-- [ ] 实现非逃逸 local function descriptor prototype。
-- [ ] prepared 路径去掉当前 `2 allocs/op`，并且 wall-clock 稳定下降。
-- [ ] 完整 benchmark 三轮稳定低于 `1.00x`，否则回退或记录证伪。
+- [x] 实现非逃逸 local function descriptor prototype。
+- [x] prepared 路径去掉当前 `2 allocs/op`，并且 wall-clock 稳定下降。
+- [x] 完整 benchmark 三轮稳定低于 `1.00x`，否则回退或记录证伪。
 
 2026-07-05 recursion guard 测试补齐：
 
@@ -193,6 +193,21 @@
 - 本轮无生产性能变化；五轮 `BenchmarkPreparedRecursion` 为 `1770 / 1771 / 1762 / 1766 / 1808 ns/op`、
   `224 B/op`、`2 allocs/op`。下一步若实现 descriptor prototype，必须在上述 guard 全绿且明确无逃逸、
   无 debug/hook/coroutine 可见风险时启用。
+
+2026-07-05 recursion borrowed closure prototype：
+
+- 生产切口：仅在无 debug hook、无 coroutine、无 continuation 且父 Proto 精确匹配官方 recursion 顶层 prepared
+  chunk 时，`OP_CLOSURE` 复用 VM 本地自递归 Lua closure 与 closed self upvalue cell；非目标形态回退普通
+  `LuaClosure` + open upvalue cell。
+- 新增 runtime guard：exact 形态不创建 open upvalue，同一 VM/child Proto 复用同一 closure；关闭开关或父字节码
+  不匹配时必须创建普通 open upvalue。
+- 五轮 `BenchmarkPreparedRecursion`：`1763 / 1702 / 1709 / 1700 / 1703 ns/op`、`0 B/op`、`0 allocs/op`。
+  相比 profile 阶段 `1763-1769 ns/op`、`224 B/op`、`2 allocs/op`，中位数约下降 `3.6%`，分配全部消除。
+- 三轮完整官方 benchmark：`recursion` 官方三轮中位数 `0.003726s`、本项目三轮中位数 `0.003981s`、
+  倍率约 `1.068x`，未低于 `1.00x`。该结果记录为当前切口完整 benchmark 证伪：prepared micro 分配已消除，
+  但完整 CLI 用例剩余差距不再由局部函数闭包分配单独决定。
+- 下一步：不再扩大同一 borrowed closure 形态；优先转向 `string_concat` 或 `function_call` profile。若继续
+  `compile_3000_functions`，必须先补完整 chunk streaming 设计和 guard 测试。
 
 ## 3. `string_concat` / 字符串拼接
 

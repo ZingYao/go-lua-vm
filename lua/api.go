@@ -2353,10 +2353,12 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 		if !hasDebugEnvironment {
 			// 未打开 debug 库时仍需刷新 coroutine 创建状态。
 			preciseFrameSync = continuation != nil || coroutinesCreated
+			vm.EnableBorrowedSelfRecursiveLocalFunctionClosure(!preciseFrameSync)
 			return
 		}
 		hooksEnabled = debugEnvironment.HasActiveHook()
 		preciseFrameSync = hooksEnabled || continuation != nil || coroutinesCreated
+		vm.EnableBorrowedSelfRecursiveLocalFunctionClosure(!preciseFrameSync && !hooksEnabled)
 	}
 	if hooksEnabled && continuation == nil {
 		// call/tail call hook 在目标调用帧入栈后触发，使 hook 中 debug.getinfo(2, "f") 指向被调 closure。
@@ -2396,6 +2398,7 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 		return triggerLuaReturnHook(state, debugEnvironment)
 	}
 	defer func() {
+		vm.EnableBorrowedSelfRecursiveLocalFunctionClosure(false)
 		if err == nil || errors.Is(err, runtime.ErrCoroutineYield) {
 			// 成功路径和协程 yield 都弹出当前帧；普通错误路径保留帧到 protected call 边界统一恢复。
 			_, _ = state.PopCallFrame()
@@ -2487,6 +2490,7 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 	stringAppendForLoopSuperInstructionEnabled := false
 	tableWriteForLoopSuperInstructionEnabled := false
 	tableReadAddForLoopSuperInstructionEnabled := false
+	vm.EnableBorrowedSelfRecursiveLocalFunctionClosure(!preciseFrameSync && !hooksEnabled)
 	if !preciseFrameSync && !hooksEnabled {
 		// 普通主线程无 hook 路径可提前准备 superinstruction 表；hook/coroutine 路径必须保留逐 PC 语义。
 		addForLoopSuperInstructionEnabled = vm.PrepareAddForLoopSuperInstructions()

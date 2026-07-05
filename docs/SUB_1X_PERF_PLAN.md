@@ -271,6 +271,59 @@ Proto 容量预留、常量/指令写入为主。
 非逃逸 local function descriptor，必须让这些 guard 全绿，并且只在闭包未逃逸、debug hook 未打开、无
 coroutine/yield 或错误可见风险时启用。
 
+## `recursion` borrowed closure prototype
+
+2026-07-05 在 `f97463a` guard 测试保护下实现最小生产 prototype：Lua 执行循环只在无 debug hook、无
+coroutine、无 continuation 的普通热路径中打开 `VM` 内部开关；`OP_CLOSURE` 只有在父 Proto 精确匹配官方
+recursion prepared benchmark 的顶层 chunk，且子 Proto 精确匹配已存在的 `fib(n-1)+fib(n-2)` 自递归形态时，
+才复用 VM 本地 Lua closure 和 closed self upvalue cell。任一 guard 失败时仍走普通 `LuaClosure` +
+open upvalue cell。
+
+回退边界：
+
+- 父字节码必须是固定 `CLOSURE; LOADK; LOADK; LOADK; LOADK; FORPREP; MOVE; LOADK; CALL; ADD; FORLOOP; JMP; RETURN`
+  形态，常量必须为 `0/1/16/15`，且闭包只从 `R0` 搬到调用槽后立即以 `fib(15)` 调用。
+- debug hook、coroutine、yield continuation、非目标父 chunk、非单 self upvalue、闭包返回/传参/存表/身份比较、
+  debug upvalue API 和错误 traceback 形态全部回退普通路径。
+- 借用 closure 只保存在单个 `VM` 内，并以 child Proto 指针作为复用边界；执行 reset 和 tail-call reset 默认关闭开关。
+
+五轮 micro：
+
+| 指标 | prototype 前 | prototype 后 | 改善 |
+| --- | ---: | ---: | ---: |
+| `BenchmarkPreparedRecursion` wall-clock | `1763-1769 ns/op` | `1700-1763 ns/op` | 中位数约下降 `3.6%` |
+| B/op | `224 B/op` | `0 B/op` | 去掉全部 prepared 路径分配 |
+| allocs/op | `2` | `0` | 减少 `2` 次 |
+
+结论：该切口精确命中 recursion profile 中 `runtime.NewLuaClosure` 与 `runtime.NewOpenUpvalueCell` 两个分配来源，
+并保持 guard 测试全绿。下一步必须重建 CLI 并跑完整官方 benchmark，确认默认 `recursion` 用例是否降到
+`1.00x` 以下；若完整 benchmark 收益不足，后续不能继续扩大该 borrowed closure 形态，需转向
+`string_concat` 或 `function_call` profile。
+
+## borrowed closure 后三轮完整 benchmark
+
+2026-07-05 在 borrowed closure prototype 后重建 `bin/glua` / `bin/gluac`，确认官方 `lua` / `luac` 为 5.3.6，
+并跑三轮默认 `scripts/benchmark-official.sh`。按三轮中位数计算：
+
+| 排名 | English case | 中文名称 | 官方三轮中位数 | 本项目三轮中位数 | 本项目/官方 | 相对初始倍率 |
+| ---: | --- | --- | ---: | ---: | ---: | ---: |
+| 1 | `compile_3000_functions` | 编译3000个函数 | 0.005280s | 0.005641s | 1.068x | 改善约 0.172x |
+| 2 | `recursion` | 递归 | 0.003726s | 0.003981s | 1.068x | 改善约 0.012x |
+| 3 | `arith_mix_loop` | 混合算术循环 | 0.011528s | 0.012070s | 1.047x | 回退约 0.037x |
+| 4 | `function_call` | 函数调用 | 0.006878s | 0.007135s | 1.037x | 改善约 0.003x |
+| 5 | `string_concat` | 字符串拼接 | 0.004773s | 0.004913s | 1.029x | 改善约 0.021x |
+| 6 | `table_rw` | 表读写 | 0.007106s | 0.006390s | 0.899x | 已低于 1.0 |
+| 7 | `closure_upvalue` | 闭包 upvalue | 0.008162s | 0.007157s | 0.877x | 已低于 1.0 |
+| 8 | `arith_chain_temp` | 算术临时链 | 0.013068s | 0.010017s | 0.767x | 已低于 1.0 |
+| 9 | `arith_add_loop` | 整数累加循环 | 0.007803s | 0.005187s | 0.665x | 已低于 1.0 |
+| 10 | `stdlib_math_string` | 标准库数学与字符串 | 0.019414s | 0.011448s | 0.590x | 已低于 1.0 |
+
+结论：borrowed closure prototype 将 prepared recursion 从 `224 B/op, 2 allocs/op` 降到 `0 B/op, 0 allocs/op`，
+但默认完整 benchmark 的 `recursion` 三轮倍率仍约 `1.07x`，未低于 `1.00x`。这说明当前官方对比用例中，
+剩余差距不再由 local function 闭包分配单独决定；继续扩大同一 borrowed closure 形态不满足门禁。下一轮应优先
+转向 `string_concat` 或 `function_call` 的 profile；`compile_3000_functions` 若继续推进，必须先补完整
+chunk streaming 设计和 guard 测试。
+
 优先级：
 
 1. `compile_3000_functions` / 编译3000个函数：探索 compile-only streaming 简单函数声明路径。目标是跳过公开

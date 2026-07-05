@@ -840,6 +840,125 @@ func testSelfRecursiveIntegerFibProto() *bytecode.Proto {
 	}
 }
 
+// TestVMBorrowedSelfRecursiveLocalFunctionClosure 验证非逃逸自递归局部函数可借用 VM 本地 closure。
+//
+// 该测试固定官方 recursion prepared benchmark 的顶层 chunk 形态：fib 闭包只在循环内被固定调用，
+// 不返回、不传参、不存表，也不经过 debug/hook/coroutine 边界。命中时 OP_CLOSURE 不应创建 open
+// upvalue cell，并且同一个 VM 重复执行时应复用同一个闭包对象。
+func TestVMBorrowedSelfRecursiveLocalFunctionClosure(t *testing.T) {
+	childProto := testSelfRecursiveIntegerFibProto()
+	parentProto := testPreparedSelfRecursiveIntegerFibChunkProto(childProto)
+	vm := NewVMWithBorrowedPrototypeData(int(parentProto.MaxStackSize), parentProto.Constants, nil, parentProto.Protos, nil)
+	vm.BindPrototype(parentProto)
+	vm.EnableBorrowedSelfRecursiveLocalFunctionClosure(true)
+
+	if err := vm.Step(parentProto.Code[0]); err != nil {
+		// exact 顶层 chunk 的 OP_CLOSURE 必须能由借用路径执行成功。
+		t.Fatalf("borrowed closure step failed: %v", err)
+	}
+	firstValue, firstOK := vm.Register(0)
+	if !firstOK || firstValue.Kind != KindLuaClosure {
+		// R0 必须写入 Lua closure 引用。
+		t.Fatalf("borrowed closure value mismatch: value=%#v ok=%v", firstValue, firstOK)
+	}
+	firstClosure, firstClosureOK := firstValue.Ref.(*LuaClosure)
+	if !firstClosureOK || firstClosure == nil || !firstClosure.SelfRecursiveIntegerFib {
+		// 借用闭包必须仍保留 fib 子 Proto 的自递归元数据。
+		t.Fatalf("borrowed closure metadata mismatch: closure=%#v ok=%v", firstClosure, firstClosureOK)
+	}
+	if !firstClosure.hasSelfUpvalueReference() {
+		// 借用闭包的 self cell 必须指回自身，供 caller-side fib 快路径继续命中。
+		t.Fatalf("borrowed closure should keep self upvalue reference")
+	}
+	if len(vm.openUpvalues) != 0 {
+		// 借用路径不能把 R0 注册为开放 upvalue，否则仍会保留原来的分配成本。
+		t.Fatalf("borrowed closure should not create open upvalues: %d", len(vm.openUpvalues))
+	}
+
+	if err := vm.SetRegister(0, NilValue()); err != nil {
+		// 复用验证前先清空目标寄存器，避免读取旧值误判。
+		t.Fatalf("clear borrowed closure register failed: %v", err)
+	}
+	if err := vm.Step(parentProto.Code[0]); err != nil {
+		// 同一 VM 第二次执行相同 OP_CLOSURE 也必须成功。
+		t.Fatalf("borrowed closure second step failed: %v", err)
+	}
+	secondValue, secondOK := vm.Register(0)
+	if !secondOK || secondValue.Ref != firstClosure {
+		// 同一 VM 和同一子 Proto 应复用同一个闭包对象，避免每轮 prepared 执行重新分配。
+		t.Fatalf("borrowed closure should be reused: first=%p second=%#v ok=%v", firstClosure, secondValue, secondOK)
+	}
+}
+
+// TestVMBorrowedSelfRecursiveLocalFunctionClosureFallback 验证借用闭包 guard 失败时回退普通 OP_CLOSURE。
+//
+// 关闭热路径开关或父 Proto 字节码不再是官方 recursion 顶层形态时，VM 必须走普通 open upvalue
+// 捕获路径，保留闭包逃逸、debug upvalue API、traceback 和后续寄存器生命周期语义。
+func TestVMBorrowedSelfRecursiveLocalFunctionClosureFallback(t *testing.T) {
+	childProto := testSelfRecursiveIntegerFibProto()
+	parentProto := testPreparedSelfRecursiveIntegerFibChunkProto(childProto)
+	disabledVM := NewVMWithBorrowedPrototypeData(int(parentProto.MaxStackSize), parentProto.Constants, nil, parentProto.Protos, nil)
+	disabledVM.BindPrototype(parentProto)
+	if err := disabledVM.Step(parentProto.Code[0]); err != nil {
+		// 未开启借用开关时普通 OP_CLOSURE 必须仍能执行。
+		t.Fatalf("disabled borrowed closure fallback failed: %v", err)
+	}
+	if len(disabledVM.openUpvalues) != 1 {
+		// 普通路径必须创建捕获 R0 的开放 upvalue cell。
+		t.Fatalf("disabled borrowed closure should create one open upvalue: %d", len(disabledVM.openUpvalues))
+	}
+
+	mismatchedParent := testPreparedSelfRecursiveIntegerFibChunkProto(childProto)
+	mismatchedParent.Code[9] = bytecode.CreateABC(bytecode.OpMove, 1, 1, 0)
+	mismatchedVM := NewVMWithBorrowedPrototypeData(int(mismatchedParent.MaxStackSize), mismatchedParent.Constants, nil, mismatchedParent.Protos, nil)
+	mismatchedVM.BindPrototype(mismatchedParent)
+	mismatchedVM.EnableBorrowedSelfRecursiveLocalFunctionClosure(true)
+	if err := mismatchedVM.Step(mismatchedParent.Code[0]); err != nil {
+		// 父 Proto 不匹配时仍必须回退普通 OP_CLOSURE，而不是拒绝执行。
+		t.Fatalf("mismatched borrowed closure fallback failed: %v", err)
+	}
+	if len(mismatchedVM.openUpvalues) != 1 {
+		// guard 失败后必须出现普通开放 upvalue，以证明没有误走借用路径。
+		t.Fatalf("mismatched borrowed closure should create one open upvalue: %d", len(mismatchedVM.openUpvalues))
+	}
+}
+
+// testPreparedSelfRecursiveIntegerFibChunkProto 构造官方 recursion benchmark 的顶层 prepared chunk。
+func testPreparedSelfRecursiveIntegerFibChunkProto(childProto *bytecode.Proto) *bytecode.Proto {
+	// 指令形态对应：local fib; local sum=0; for i=1,16 do sum=sum+fib(15) end; return sum。
+	return &bytecode.Proto{
+		IsVararg:     true,
+		MaxStackSize: 8,
+		Constants: []bytecode.Constant{
+			bytecode.IntegerConstant(0),
+			bytecode.IntegerConstant(1),
+			bytecode.IntegerConstant(16),
+			bytecode.IntegerConstant(15),
+		},
+		Protos: []*bytecode.Proto{childProto},
+		Code: []bytecode.Instruction{
+			bytecode.CreateABx(bytecode.OpClosure, 0, 0),
+			bytecode.CreateABx(bytecode.OpLoadK, 1, 0),
+			bytecode.CreateABx(bytecode.OpLoadK, 2, 1),
+			bytecode.CreateABx(bytecode.OpLoadK, 3, 2),
+			bytecode.CreateABx(bytecode.OpLoadK, 4, 1),
+			bytecode.CreateAsBx(bytecode.OpForPrep, 2, 4),
+			bytecode.CreateABC(bytecode.OpMove, 6, 0, 0),
+			bytecode.CreateABx(bytecode.OpLoadK, 7, 3),
+			bytecode.CreateABC(bytecode.OpCall, 6, 2, 2),
+			bytecode.CreateABC(bytecode.OpAdd, 1, 1, 6),
+			bytecode.CreateAsBx(bytecode.OpForLoop, 2, -5),
+			bytecode.CreateAsBx(bytecode.OpJmp, 0, 0),
+			bytecode.CreateABC(bytecode.OpReturn, 1, 2, 0),
+		},
+		LocalVars: []bytecode.LocalVar{
+			{Name: "fib", Register: 0, StartPC: 0, EndPC: 13},
+			{Name: "sum", Register: 1, StartPC: 2, EndPC: 13},
+			{Name: "i", Register: 2, StartPC: 5, EndPC: 12},
+		},
+	}
+}
+
 // TestVMTryExecuteLeafAddReturn 验证 `ADD; RETURN` 叶子函数快路径。
 //
 // 该快路径服务 Lua direct CALL 热点，必须只在单值返回形态命中，并保持普通 ADD/RETURN 语义。
