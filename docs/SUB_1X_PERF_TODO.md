@@ -129,6 +129,16 @@
 - 下一步：跑三轮完整 benchmark 重新排序剩余差距；若 `compile_3000_functions` 仍最高，继续 compile 必须重新
   profile 后再决定；若与 `recursion` / `string_concat` 接近，则按三轮排序切换目标。
 
+2026-07-05 direct Proto 后三轮完整 benchmark：
+
+- 已重建 `bin/glua` / `bin/gluac`，官方 `lua` / `luac` 确认为 5.3.6。
+- 三轮中位数排序：`compile_3000_functions` 官方 `0.005032s`、本项目 `0.005480s`、倍率 `1.089x`；
+  `recursion` `1.056x`；`function_call` `1.028x`；`string_concat` `1.006x`；`arith_mix_loop` `1.004x`。
+- 相比初始单轮 `1.24x`，`compile_3000_functions` 已改善约 `0.151x`；相比 compact prototype 三轮
+  `1.16x`，继续改善约 `0.071x`，但仍未低于 `1.00x`。
+- 下一步：继续 compile 必须先跑新的 `BenchmarkCompileSource3000Functions` micro/profile；若 profile 无结构性
+  生产切口，则转入 `recursion` profile。不得基于本轮 benchmark 直接继续堆 compile 字段微调。
+
 ## 2. `recursion` / 递归
 
 - [ ] 仅在完整 benchmark 三轮稳定高于 `1.00x` 且接近或超过 `1.08x` 时进入。
