@@ -214,9 +214,9 @@
 - [x] 跑官方 8000 次拼接 fixture 的 DoString/prepared micro 和 profile。
 - [x] 复核 `__concat` 元方法、debug 可见性、yield、错误路径和 materialize 边界。
 - [x] 只有语义可证明时，设计更窄 builder/materialize 切口。
-- [ ] 实现整段 builder/materialize prototype，仅覆盖无 hook、无 coroutine、raw string 累加器、固定非空 string
+- [x] 实现整段 builder/materialize prototype，仅覆盖无 hook、无 coroutine、raw string 累加器、固定非空 string
   常量、integer numeric-for，且 batch 内可保留 context 检查边界的窄形态。
-- [ ] 完整 benchmark 三轮稳定低于 `1.00x`，否则不保留生产改动。
+- [x] 完整 benchmark 三轮稳定低于 `1.00x`，否则不保留生产改动。
 
 2026-07-05 string_concat profile：
 
@@ -239,6 +239,29 @@
   yield 恢复测试，确认整段 builder 必须在任意 debug hook、元方法/yield 风险或非 raw string 形态下回退。
 - 本轮无生产性能变化；定向 guard 测试通过。下一轮若实现 prototype，必须继续跑这些 guard、官方 8000 次
   prepared micro 五轮和完整 benchmark 三轮。
+
+2026-07-05 string_concat 整段 builder prototype：
+
+- 生产切口：`TryExecuteStringAppendForLoopWholeBatch` 只覆盖已识别的 `MOVE; LOADK; CONCAT; FORLOOP`，
+  并要求 raw string 累加器、固定非空 string 后缀、正步长 integer numeric-for、无 debug hook、无 coroutine/
+  continuation 风险。
+- context 语义：内部按虚拟指令入口模拟原 API context countdown；取消时提交到对应虚拟指令边界再返回错误。
+- 五轮 DoString：`113859 / 112084 / 112484 / 112585 / 112529 ns/op`、约 `139.5 KB/op`、`200 allocs/op`。
+- 五轮 prepared：`79191 / 79164 / 79405 / 79341 / 79243 ns/op`、`16 KB/op`、`2 allocs/op`。
+- 相比 profile 阶段 prepared `396463-402148 ns/op`、约 `2.943 MB/op`、`684 allocs/op`，wall-clock 下降约
+  `80%`，分配下降约 `99%`，allocs/op 减少 `682` 次。
+- 下一步：重建 CLI、跑官方兼容脚本和完整 benchmark 三轮；若 `string_concat` 未稳定低于 `1.00x`，记录完整
+  benchmark 证伪，不扩大到 hook/coroutine/元方法风险形态。
+
+2026-07-05 string_concat builder 后完整 benchmark：
+
+- 已重建 `bin/glua` / `bin/gluac`，官方 `lua` / `luac` 确认为 5.3.6。
+- 三轮中位数：`string_concat` 官方 `0.004775s`、本项目 `0.004041s`、倍率 `0.846x`。
+- 相比初始 `1.05x`，倍率改善约 `0.204x`，已稳定低于 `1.00x`。
+- 剩余高于 `1.00x` 排序：`compile_3000_functions` 约 `1.064x`、`recursion` 约 `1.062x`、
+  `arith_mix_loop` 约 `1.049x`、`function_call` 约 `1.045x`。
+- 下一步不再扩大 string builder；继续优化应回到 `compile_3000_functions` 完整 chunk streaming 设计，或先 profile
+  `function_call` / `arith_mix_loop` 的剩余差距。
 
 ## 4. `function_call` / 函数调用
 

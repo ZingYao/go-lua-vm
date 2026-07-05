@@ -4280,6 +4280,77 @@ func TestVMTryExecuteStringAppendForLoopBatchFallback(t *testing.T) {
 	}
 }
 
+// TestVMTryExecuteStringAppendForLoopWholeBatch 验证字符串自追加整段 batch fast path。
+//
+// 该路径必须在无 hook/coroutine 的安全入口内跨多个 context 窗口执行完整循环，并只在最终提交时
+// materialize 结果字符串；寄存器状态仍要等价于最后一轮 FORLOOP 后。
+func TestVMTryExecuteStringAppendForLoopWholeBatch(t *testing.T) {
+	proto := testStringAppendForLoopProto()
+	vm := NewVMWithConstants(7, proto.Constants)
+	vm.BindPrototype(proto)
+	if !vm.PrepareStringAppendForLoopSuperInstructions() {
+		// 官方 string_concat 热体应能预构建 superinstruction。
+		t.Fatalf("expected string append superinstruction")
+	}
+	registers := map[int]Value{
+		0: StringValue("a"),
+		1: IntegerValue(1),
+		2: IntegerValue(5),
+		3: IntegerValue(1),
+		4: IntegerValue(1),
+	}
+	for registerIndex, value := range registers {
+		// 初始化累加字符串和 numeric-for 控制槽。
+		if err := vm.SetRegister(registerIndex, value); err != nil {
+			t.Fatalf("set register %d failed: %v", registerIndex, err)
+		}
+	}
+	checks := 0
+	checkContext := func() error {
+		// 统计内部 context 检查次数，确保整段 batch 跨过了至少一个窗口。
+		checks++
+		return nil
+	}
+
+	nextPC, iterations, _, handled, err := vm.TryExecuteStringAppendForLoopWholeBatch(0, 3, 4, checkContext)
+	if err != nil {
+		// context 未取消时整段 batch 不应返回错误。
+		t.Fatalf("whole string append batch returned error: %v", err)
+	}
+	if !handled || iterations != 5 || nextPC != 4 {
+		// 五轮后循环应停在退出 PC。
+		t.Fatalf("whole string append mismatch: handled=%v iterations=%d nextPC=%d", handled, iterations, nextPC)
+	}
+	if checks == 0 {
+		// 小 context 窗口必须触发内部检查，避免整段 batch 绕过取消边界。
+		t.Fatalf("expected internal context checks")
+	}
+	if value, _ := vm.Register(0); !value.RawEqual(StringValue("axxxxx")) {
+		// 目标寄存器保存完整五轮追加结果。
+		t.Fatalf("target mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(5); !value.RawEqual(StringValue("axxxx")) {
+		// MOVE 临时槽保存最后一轮 CONCAT 前的旧字符串。
+		t.Fatalf("move temporary mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(6); !value.RawEqual(StringValue("x")) {
+		// LOADK 临时槽保存右侧固定常量。
+		t.Fatalf("append temporary mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(1); !value.RawEqual(IntegerValue(5)) {
+		// 循环退出时 FORLOOP 不写入越界后的 index。
+		t.Fatalf("for index mismatch: %#v", value)
+	}
+	if value, _ := vm.Register(4); !value.RawEqual(IntegerValue(5)) {
+		// 外部可见 i 保持最后一次有效迭代值。
+		t.Fatalf("visible index mismatch: %#v", value)
+	}
+	if vm.currentPC != 3 || vm.pcOffset != 0 {
+		// 整段 batch 后 VM 状态应等价于刚执行完退出的 FORLOOP。
+		t.Fatalf("pc state mismatch: currentPC=%d pcOffset=%d", vm.currentPC, vm.pcOffset)
+	}
+}
+
 // testFunctionCallAddForLoopProto 构造官方 function_call benchmark 的循环体 Proto。
 func testFunctionCallAddForLoopProto() *bytecode.Proto {
 	return &bytecode.Proto{

@@ -804,6 +804,22 @@ type stringAppendForLoopSuperInstruction struct {
 	Valid bool
 }
 
+// stringAppendContextPhase 表示整段字符串自追加 batch 内部 context 检查发生的虚拟指令边界。
+//
+// 这些边界只用于取消路径提交寄存器快照；正常热路径不 materialize 中间字符串。
+type stringAppendContextPhase int
+
+const (
+	// stringAppendPhaseAfterCompleted 表示检查发生在上一轮 FORLOOP 后、下一轮 MOVE 前。
+	stringAppendPhaseAfterCompleted stringAppendContextPhase = iota
+	// stringAppendPhaseAfterMove 表示检查发生在当前轮 MOVE 后、LOADK 前。
+	stringAppendPhaseAfterMove
+	// stringAppendPhaseAfterLoadK 表示检查发生在当前轮 LOADK 后、CONCAT 前。
+	stringAppendPhaseAfterLoadK
+	// stringAppendPhaseAfterConcat 表示检查发生在当前轮 CONCAT 后、FORLOOP 前。
+	stringAppendPhaseAfterConcat
+)
+
 // LuaClosure 表示最小 VM 阶段的 Lua closure 值。
 //
 // Proto 指向待执行函数原型；Upvalues 保存 CLOSURE 指令根据 UpvalueDesc 捕获到的值。
@@ -5699,6 +5715,125 @@ func (vm *VM) HasStringAppendForLoopAt(pc int) bool {
 	return superInstructions[pc].Valid
 }
 
+// TryExecuteStringAppendForLoopWholeBatch 尝试整段执行 `s = s .. Kstring` numeric-for 循环。
+//
+// pc 必须指向 MOVE；contextCheckCountdown/contextCheckInterval 必须来自 lua API 执行循环。该方法只覆盖
+// 正步长 integer numeric-for、raw string 累加器和固定非空 string 后缀；正常路径只在循环结束时 materialize
+// final/previous 两个字符串。若 context 在内部虚拟指令边界取消，会提交到对应边界后返回原始错误。
+func (vm *VM) TryExecuteStringAppendForLoopWholeBatch(pc int, contextCheckCountdown int, contextCheckInterval int, checkContext func() error) (int, int, int, bool, error) {
+	// 整段 batch 需要可用 context 回调和正数检查窗口；否则回退现有窗口 batch。
+	if vm == nil || checkContext == nil || contextCheckInterval <= 0 || vm.stringAppendForLoopSuperInstructionProto != vm.proto {
+		// 缺少执行环境或未准备 superinstruction 表时不处理。
+		return 0, 0, contextCheckCountdown, false, nil
+	}
+	superInstructions := vm.stringAppendForLoopSuperInstructions
+	if uint(pc) >= uint(len(superInstructions)) {
+		// PC 越界时不能命中整段 batch。
+		return 0, 0, contextCheckCountdown, false, nil
+	}
+	superInstruction := superInstructions[pc]
+	if !superInstruction.Valid {
+		// 当前 PC 没有匹配字符串自追加形态。
+		return 0, 0, contextCheckCountdown, false, nil
+	}
+
+	registers := vm.registers
+	requiredRegisters := [...]int{
+		superInstruction.TargetRegister,
+		superInstruction.MoveRegister,
+		superInstruction.AppendRegister,
+		superInstruction.ForBase,
+		superInstruction.ForBase + 1,
+		superInstruction.ForBase + 2,
+		superInstruction.ForBase + 3,
+	}
+	for _, registerIndex := range requiredRegisters {
+		// 任一参与寄存器越界时交给普通 VM 报原始错误。
+		if uint(registerIndex) >= uint(len(registers)) {
+			return 0, 0, contextCheckCountdown, false, nil
+		}
+	}
+
+	currentValue := registers[superInstruction.TargetRegister]
+	indexValue := registers[superInstruction.ForBase]
+	limitValue := registers[superInstruction.ForBase+1]
+	stepValue := registers[superInstruction.ForBase+2]
+	if currentValue.Kind != KindString || indexValue.Kind != KindInteger || limitValue.Kind != KindInteger || stepValue.Kind != KindInteger {
+		// 只覆盖 raw string 累加器和 integer numeric-for；其他类型保留完整 CONCAT/FORLOOP 语义。
+		return 0, 0, contextCheckCountdown, false, nil
+	}
+	if stepValue.Integer <= 0 {
+		// prototype 只覆盖官方正步长字符串拼接；零/负步长保持现有窗口 batch 或普通 VM。
+		return 0, 0, contextCheckCountdown, false, nil
+	}
+
+	totalIterations, ok := positiveIntegerForLoopRemainingIterations(indexValue.Integer, limitValue.Integer, stepValue.Integer)
+	if !ok || totalIterations <= 0 {
+		// 无法静态证明剩余轮数时不做整段 materialize。
+		return 0, 0, contextCheckCountdown, false, nil
+	}
+	if !repeatedAppendStringLengthOK(len(currentValue.String), len(superInstruction.AppendText), totalIterations) {
+		// 目标字符串长度不可表达时回退普通路径，保留原始分配/错误行为。
+		return 0, 0, contextCheckCountdown, false, nil
+	}
+
+	countdown := contextCheckCountdown
+	completedIterations := 0
+	currentIndex := indexValue.Integer
+	consumeContext := func(phase stringAppendContextPhase) error {
+		// 模拟 API 执行循环在每个虚拟指令入口的 context 检查/倒计时。
+		if countdown <= 0 {
+			// 检查失败时提交到检查发生前已经执行完的虚拟指令边界。
+			if err := checkContext(); err != nil {
+				vm.commitStringAppendForLoopState(superInstruction, currentValue.String, completedIterations, currentIndex, phase, totalIterations)
+				return err
+			}
+			countdown = contextCheckInterval
+			return nil
+		}
+
+		// 本虚拟指令入口消耗一个普通热路径倒计时单位。
+		countdown--
+		return nil
+	}
+
+	for completedIterations < totalIterations {
+		// 除第一轮 MOVE 外，后续每轮 MOVE 入口都需要模拟 context 边界。
+		if completedIterations > 0 {
+			// 上一轮 FORLOOP 已经更新到当前轮 index；若取消，提交到下一轮 MOVE 前。
+			if err := consumeContext(stringAppendPhaseAfterCompleted); err != nil {
+				return superInstruction.LoopPC, completedIterations, countdown, true, err
+			}
+		}
+		if err := consumeContext(stringAppendPhaseAfterMove); err != nil {
+			// MOVE 已把当前累加字符串复制到临时槽。
+			return pc + 1, completedIterations, countdown, true, err
+		}
+		if err := consumeContext(stringAppendPhaseAfterLoadK); err != nil {
+			// LOADK 已把固定后缀写入临时槽。
+			return pc + 2, completedIterations, countdown, true, err
+		}
+		if err := consumeContext(stringAppendPhaseAfterConcat); err != nil {
+			// CONCAT 已写回本轮目标字符串，但 FORLOOP 尚未推进 index。
+			return pc + 3, completedIterations, countdown, true, err
+		}
+
+		// FORLOOP 执行成功后，本轮拼接才进入完整提交计数。
+		completedIterations++
+		if completedIterations < totalIterations {
+			// 循环继续时 FORLOOP 写入下一轮 index 和外部可见循环变量。
+			currentIndex += stepValue.Integer
+			continue
+		}
+	}
+
+	if !vm.commitStringAppendForLoopState(superInstruction, currentValue.String, completedIterations, currentIndex, stringAppendPhaseAfterCompleted, totalIterations) {
+		// 防御性处理：长度前置校验已通过，正常不应失败。
+		return 0, 0, contextCheckCountdown, false, nil
+	}
+	return superInstruction.ExitPC, completedIterations, countdown, true, nil
+}
+
 // TryExecuteStringAppendForLoopBatch 尝试批量执行 `s = s .. Kstring` 与末尾 FORLOOP。
 //
 // pc 必须指向 MOVE；maxIterations 是调用方按 context 检查窗口给出的最多批量轮数。返回
@@ -9942,6 +10077,48 @@ func valueToLuaString(value Value) (string, error) {
 	return "", ErrConcatOperand
 }
 
+// positiveIntegerForLoopRemainingIterations 计算正步长 integer for 从当前 index 到 limit 的剩余轮数。
+//
+// step 必须大于 0；返回 false 表示当前控制槽无法静态证明有限正向循环，调用方应回退普通 VM。
+func positiveIntegerForLoopRemainingIterations(index int64, limit int64, step int64) (int, bool) {
+	// 整段字符串拼接 prototype 只覆盖正步长 numeric-for。
+	if step <= 0 {
+		// 零或负步长不进入整段 builder。
+		return 0, false
+	}
+	if index > limit {
+		// 当前 body 理论上不应在越界后执行；防御性回退普通路径。
+		return 0, false
+	}
+
+	distance := uint64(limit) - uint64(index)
+	remaining := distance/uint64(step) + 1
+	if remaining > uint64(math.MaxInt) {
+		// Go int 无法表达轮数时不能安全构造字符串。
+		return 0, false
+	}
+	return int(remaining), true
+}
+
+// repeatedAppendStringLengthOK 判断 base 追加 count 次 suffix 后的长度是否可表达。
+//
+// 该 helper 只做整数长度预检，不分配 builder；正常整段 batch 会在最终提交时再 materialize 字符串。
+func repeatedAppendStringLengthOK(baseLength int, suffixLength int, count int) bool {
+	// count 为 0 时长度保持不变。
+	if count == 0 {
+		return true
+	}
+	if count < 0 || suffixLength < 0 || baseLength < 0 {
+		// 非法长度参数不能进入 builder 路径。
+		return false
+	}
+	if suffixLength == 0 {
+		// 空后缀不增加长度。
+		return true
+	}
+	return suffixLength <= (math.MaxInt-baseLength)/count
+}
+
 // repeatedAppendString 返回 base 后连续追加 count 次 suffix 的字符串。
 //
 // count 必须非负；长度溢出 Go int 时返回 ok=false，让调用方回退普通 VM 路径。该 helper 只服务
@@ -9959,7 +10136,7 @@ func repeatedAppendString(base string, suffix string, count int) (string, bool) 
 		// 空后缀追加不改变结果；当前构建期通常已排除该形态，这里保留防御语义。
 		return base, true
 	}
-	if len(suffix) > (math.MaxInt-len(base))/count {
+	if !repeatedAppendStringLengthOK(len(base), len(suffix), count) {
 		// 目标长度超出 Go int 可表达范围时不能构造 Builder。
 		return "", false
 	}
@@ -9973,6 +10150,78 @@ func repeatedAppendString(base string, suffix string, count int) (string, bool) 
 		builder.WriteString(suffix)
 	}
 	return builder.String(), true
+}
+
+// commitStringAppendForLoopState 按整段字符串自追加 batch 的虚拟指令边界提交寄存器状态。
+//
+// completedIterations 表示已经执行完 FORLOOP 的完整轮数；phase 表示可能额外执行了当前轮 MOVE、
+// LOADK 或 CONCAT。该 helper 只在整段 batch 最终提交或 context 取消路径 materialize 字符串。
+func (vm *VM) commitStringAppendForLoopState(superInstruction stringAppendForLoopSuperInstruction, base string, completedIterations int, currentIndex int64, phase stringAppendContextPhase, totalIterations int) bool {
+	// 根据虚拟指令边界推导目标字符串、MOVE 临时槽和 LOADK 临时槽是否已经可见。
+	targetIterations := completedIterations
+	moveIterations := completedIterations - 1
+	appendVisible := completedIterations > 0
+	currentPC := superInstruction.LoopPC
+	pcOffset := superInstruction.ForSBx
+	switch phase {
+	case stringAppendPhaseAfterCompleted:
+		// 已停在完整 FORLOOP 边界，默认状态就是上一轮结束后。
+	case stringAppendPhaseAfterMove:
+		// MOVE 已执行，临时槽保存当前累加字符串。
+		moveIterations = completedIterations
+		currentPC = superInstruction.LoopPC
+		pcOffset = 0
+	case stringAppendPhaseAfterLoadK:
+		// LOADK 已执行，右侧固定字符串临时槽也可见。
+		moveIterations = completedIterations
+		appendVisible = true
+		currentPC = superInstruction.LoopPC + 1
+		pcOffset = 0
+	case stringAppendPhaseAfterConcat:
+		// CONCAT 已执行但 FORLOOP 未执行，目标多包含当前轮后缀。
+		targetIterations = completedIterations + 1
+		moveIterations = completedIterations
+		appendVisible = true
+		currentPC = superInstruction.LoopPC + 2
+		pcOffset = 0
+	default:
+		// 未知 phase 表示调用方状态损坏，拒绝提交副作用。
+		return false
+	}
+	if phase == stringAppendPhaseAfterCompleted && completedIterations >= totalIterations {
+		// 循环自然退出时 FORLOOP 不再回跳。
+		currentPC = superInstruction.ExitPC - 1
+		pcOffset = 0
+	}
+
+	targetText, ok := repeatedAppendString(base, superInstruction.AppendText, targetIterations)
+	if !ok {
+		// 长度溢出时不提交半截寄存器状态。
+		return false
+	}
+	vm.registers[superInstruction.TargetRegister] = StringValue(targetText)
+	if moveIterations >= 0 {
+		// MOVE 临时槽只在至少执行过 MOVE 或已有完整轮数时可见。
+		moveText, moveOK := repeatedAppendString(base, superInstruction.AppendText, moveIterations)
+		if !moveOK {
+			// MOVE 临时槽构造失败时不提交半截寄存器状态。
+			return false
+		}
+		vm.registers[superInstruction.MoveRegister] = StringValue(moveText)
+	}
+	if appendVisible {
+		// LOADK 或前序完整轮数已让右侧固定字符串临时槽可见。
+		vm.registers[superInstruction.AppendRegister] = StringValue(superInstruction.AppendText)
+	}
+	vm.registers[superInstruction.ForBase] = IntegerValue(currentIndex)
+	vm.registers[superInstruction.ForBase+3] = IntegerValue(currentIndex)
+	vm.pcOffset = pcOffset
+	vm.currentPC = currentPC
+	vm.skipNext = false
+	vm.closeFrom = -1
+	vm.hasCallRequest = false
+	vm.returned = false
+	return true
 }
 
 // concatStringRegisterRange 直接拼接寄存器区间内的纯 string 操作数。

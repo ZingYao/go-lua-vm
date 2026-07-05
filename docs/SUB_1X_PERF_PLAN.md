@@ -392,6 +392,62 @@ traceback 和 context cancellation 边界。
 本轮是 guard/设计切口，不改变生产性能。后验定向测试通过；下一轮若实现 prototype，验收必须至少包含上述
 guard、官方 8000 次 prepared micro 五轮和完整 benchmark 三轮。
 
+## `string_concat` 整段 builder prototype
+
+2026-07-05 在 `9c1bfd6` 的 guard 保护下实现最小生产 prototype：API 执行循环在无 precise frame sync、无
+debug hook 的普通热路径中，优先调用 `TryExecuteStringAppendForLoopWholeBatch`。该路径只覆盖已识别的
+`MOVE; LOADK; CONCAT; FORLOOP`，并在运行时继续要求 raw string 累加器、固定非空 string 后缀、正步长
+integer numeric-for 和可静态计算的有限剩余轮数。任一 guard 失败时仍回退到原有按 context 窗口 materialize 的
+`TryExecuteStringAppendForLoopBatch`，再失败则回退普通 VM。
+
+语义边界：
+
+- 正常路径只在循环自然结束时 materialize final string 和最后一轮 CONCAT 前的 previous string，保持临时寄存器、
+  target 寄存器、FORLOOP index/visible index 与逐指令执行后的状态一致。
+- 内部按原 API 执行循环的 context countdown 模拟每个虚拟指令入口；context 取消时提交到对应 MOVE/LOADK/CONCAT/
+  FORLOOP 边界，再向上返回原始 context 错误。
+- debug hook、line/count hook、coroutine/yield continuation、非 raw string、非正步长和无法证明有限轮数的形态全部
+  不进入整段 builder。
+- `__concat` 元方法、concat 元方法 yield、错误 PC 和 traceback 仍由 guard 失败后的旧路径/普通 VM 处理。
+
+五轮 micro：
+
+| Benchmark | prototype 前 | prototype 后 | 改善 |
+| --- | ---: | ---: | ---: |
+| `BenchmarkDoStringStringConcatOfficial` wall-clock | `440866-453702 ns/op` | `112084-113859 ns/op` | 约下降 `74%` |
+| `BenchmarkDoStringStringConcatOfficial` B/op | 约 `3.066 MB` | 约 `139.5 KB` | 约下降 `95%` |
+| `BenchmarkDoStringStringConcatOfficial` allocs/op | `882` | `200` | 减少 `682` 次 |
+| `BenchmarkPreparedStringConcatOfficial` wall-clock | `396463-402148 ns/op` | `79164-79405 ns/op` | 约下降 `80%` |
+| `BenchmarkPreparedStringConcatOfficial` B/op | 约 `2.943 MB` | `16 KB` | 约下降 `99%` |
+| `BenchmarkPreparedStringConcatOfficial` allocs/op | `684` | `2` | 减少 `682` 次 |
+
+结论：整段 builder 直接消除 profile 中绝大多数中间字符串 materialize，micro 收益满足生产门槛。下一步必须重建
+CLI、跑官方兼容脚本和完整 benchmark 三轮；若默认 `string_concat` 未稳定低于 `1.00x`，需要记录完整 benchmark
+证伪，不再扩大该路径到有 hook/coroutine/元方法风险的形态。
+
+## string_concat builder 后三轮完整 benchmark
+
+2026-07-05 在整段 builder prototype 后重建 `bin/glua` / `bin/gluac`，确认官方 `lua` / `luac` 为 5.3.6，
+并跑三轮默认 `scripts/benchmark-official.sh`。按三轮中位数计算：
+
+| 排名 | English case | 中文名称 | 官方三轮中位数 | 本项目三轮中位数 | 本项目/官方 | 相对初始倍率 |
+| ---: | --- | --- | ---: | ---: | ---: | ---: |
+| 1 | `compile_3000_functions` | 编译3000个函数 | 0.005305s | 0.005643s | 1.064x | 改善约 0.176x |
+| 2 | `recursion` | 递归 | 0.003741s | 0.003974s | 1.062x | 改善约 0.018x |
+| 3 | `arith_mix_loop` | 混合算术循环 | 0.011502s | 0.012066s | 1.049x | 回退约 0.039x |
+| 4 | `function_call` | 函数调用 | 0.006820s | 0.007126s | 1.045x | 回退约 0.005x |
+| 5 | `table_rw` | 表读写 | 0.007102s | 0.006417s | 0.903x | 已低于 1.0 |
+| 6 | `closure_upvalue` | 闭包 upvalue | 0.008001s | 0.007096s | 0.887x | 已低于 1.0 |
+| 7 | `string_concat` | 字符串拼接 | 0.004775s | 0.004041s | 0.846x | 改善约 0.204x |
+| 8 | `arith_chain_temp` | 算术临时链 | 0.013046s | 0.010147s | 0.778x | 已低于 1.0 |
+| 9 | `arith_add_loop` | 整数累加循环 | 0.007651s | 0.005117s | 0.669x | 已低于 1.0 |
+| 10 | `stdlib_math_string` | 标准库数学与字符串 | 0.019432s | 0.011347s | 0.584x | 已低于 1.0 |
+
+结论：`string_concat` 从初始 `1.05x` 降到三轮中位数 `0.846x`，已稳定低于 `1.00x`；相对初始倍率改善约
+`19%`。下一轮不再扩大 string builder 到 hook/coroutine/元方法风险形态，应按剩余排序回到
+`compile_3000_functions` 的完整 chunk streaming 设计，或先 profile `function_call` / `arith_mix_loop` 中更容易
+被三轮噪声放大的项。
+
 优先级：
 
 1. `compile_3000_functions` / 编译3000个函数：探索 compile-only streaming 简单函数声明路径。目标是跳过公开

@@ -2619,8 +2619,24 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 			// 四指令字符串自追加循环会额外跳过 LOADK、CONCAT、FORLOOP 三个入口；
 			// 倒计时至少为 3 才能证明逐指令路径不会在被跳过区间触发 context 检查。
 			movePC := pc
+			nextPC, handledIterations, updatedCountdown, handled, err := vm.TryExecuteStringAppendForLoopWholeBatch(movePC, contextCheckCountdown, luaContextCheckInstructionInterval, state.CheckContext)
+			if err != nil {
+				// context 取消时同步到循环体入口，保持字符串自追加 fast path 的错误 PC 边界。
+				if syncErr := syncCurrentFrame(movePC); syncErr != nil {
+					return nil, syncErr
+				}
+				return nil, err
+			}
+			if handled {
+				// 整段 builder 已在内部模拟 context 检查；直接采用返回的倒计时状态。
+				contextCheckCountdown = updatedCountdown
+				previousPreviousPC = movePC + 2
+				previousPC = movePC + 3
+				pc = nextPC
+				continue
+			}
 			maxIterations := (contextCheckCountdown + 1) / 4
-			nextPC, handledIterations, handled := vm.TryExecuteStringAppendForLoopBatch(movePC, maxIterations)
+			nextPC, handledIterations, handled = vm.TryExecuteStringAppendForLoopBatch(movePC, maxIterations)
 			if handled {
 				// superinstruction 已完成若干轮 MOVE、LOADK、CONCAT 与 FORLOOP；补偿被跳过入口。
 				contextCheckCountdown -= handledIterations*4 - 1
