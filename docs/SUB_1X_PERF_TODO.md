@@ -265,11 +265,22 @@
 
 ## 4. `function_call` / 函数调用
 
-- [ ] 完整 benchmark 三轮稳定 `> 1.00x` 后进入。
-- [ ] 跑 `BenchmarkPreparedFunctionCallOfficial` 五轮和 CPU profile。
+- [x] 完整 benchmark 三轮稳定 `> 1.00x` 后进入。
+- [x] 跑 `BenchmarkPreparedFunctionCallOfficial` 五轮和 CPU profile。
 - [ ] 评估 leaf add-return batch guard 冻结：闭包寄存器、函数 Proto、参数寄存器、结果寄存器。
 - [ ] 补 guard：函数值替换、upvalue/env 变化、hook 打开、yield/continuation、错误 PC、traceback、context 取消。
 - [ ] 完整 benchmark 三轮稳定低于 `1.00x`，否则回退或记录证伪。
+
+2026-07-05 function_call profile：
+
+- 五轮 `BenchmarkDoStringFunctionCallOfficial`：`2884954-2935799 ns/op`、约 `248.9 KB/op`、
+  `214 allocs/op`。
+- 五轮 `BenchmarkPreparedFunctionCallOfficial`：`2878147-2887546 ns/op`、`408 B/op`、`2 allocs/op`。
+- CPU profile：`TryExecuteFunctionCallAssignForLoopBatch` 是主因，普通 CPU flat `64.96%` / cum `74.45%`；
+  GOGC=off flat `69.78%` / cum `79.14%`。`CheckContext` 约 `8.6%`。
+- 结论：编译/OpenLibs 不是剩余差距主因，现有 `sum = add(sum, i)` assign batch 已命中。下一步若推进生产
+  优化，必须先补“整段 function_call assign batch + 内部 context 边界提交”的 guard，覆盖函数值替换、
+  upvalue/env 变化、hook、yield/continuation、错误 PC、traceback 和 context 取消；本轮不直接冻结 batch guard。
 
 ## 5. `arith_mix_loop` / 混合算术循环
 

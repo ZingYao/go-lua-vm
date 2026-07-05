@@ -460,6 +460,41 @@ CLI、跑官方兼容脚本和完整 benchmark 三轮；若默认 `string_concat
    内 guard。
 5. `arith_mix_loop` / 混合算术循环：只做回归复核；除非完整三轮稳定高于 `1.00x`，不扩张生产 fast path。
 
+## `function_call` profile 结论
+
+2026-07-05 在 `2f35930` 后复核官方规模 function_call micro/profile。fixture 与默认官方 benchmark 一致：
+
+```lua
+local function add(a, b) return a + b end
+local sum = 0
+for i = 1, 100000 do
+  sum = add(sum, i)
+end
+return sum
+```
+
+五轮 micro：
+
+| Benchmark | ns/op | B/op | allocs/op |
+| --- | ---: | ---: | ---: |
+| `BenchmarkDoStringFunctionCallOfficial` | `2884954-2935799` | 约 `248.9 KB` | `214` |
+| `BenchmarkPreparedFunctionCallOfficial` | `2878147-2887546` | `408 B` | `2` |
+
+profile 结果：
+
+- 普通 CPU：`runtime.(*VM).TryExecuteFunctionCallAssignForLoopBatch` flat `64.96%` / cum `74.45%`；
+  `runtime.(*State).CheckContext` flat `8.76%`；`executePreparedLuaClosureWithDebugNameTailFromArgs` cum `97.81%`。
+- GOGC=off CPU：`TryExecuteFunctionCallAssignForLoopBatch` flat `69.78%` / cum `79.14%`；
+  `CheckContext` flat `8.63%`；`PrepareFunctionCallAssignForLoopBatch` flat `5.76%`。
+- memory profile 主要被 pprof/test harness 影响；业务侧只剩 `runtime.luaProtoLeafAddReturn` / `NewLuaClosure`
+  约 `512 KB alloc_space`、`2185 alloc_objects`，实际 benchmark 口径为 `408 B/op`、`2 allocs/op`。
+
+结论：DoString 与 prepared wall-clock 基本重合，编译/OpenLibs 分配不是 `function_call` 剩余差距；现有
+`sum = add(sum, i)` batch 已经命中，剩余 CPU 主要在 batch 本体与每个虚拟 CALL 的 context 检查。若继续生产优化，
+只能设计“整段 function_call assign batch + 内部 context 边界提交”这类窄切口，类似 string_concat builder；
+但必须先补 guard 覆盖函数值替换、upvalue/env 变化、hook 打开、yield/continuation、错误 PC、traceback 和
+context 取消。没有这些 guard 前，不直接冻结或扩大 batch 内 guard。
+
 ## 语义门禁
 
 - 不引入 CGO，不接 Lua C API，不新增外部依赖。
