@@ -175,6 +175,24 @@
 - 下一步：若实现完整 chunk streaming，只允许命中精确“批量顶层简单函数声明 + 最终 return”形态；任意错误位置、
   debug、全局绑定、非目标函数或扩展语法风险都必须回退现有 parser/codegen 路径。
 
+2026-07-06 完整 chunk streaming 简单函数块：
+
+- 生产切口：`CompileSourceWithSyntax` 在普通 parser/codegen 前尝试 `compileSimpleFunctionStreamChunk`，只命中
+  顶层连续 `function name(param) return param + decimalInteger end` 加最后一条 `return name(decimalInteger)`。
+- 语义边界：函数名/参数名必须是普通 identifier，整数只接受十进制非负 literal，最终调用目标必须来自本 chunk；
+  任一条件不满足都 `ok=false` 回退现有 parser/codegen，保留错误位置、`luac -l -l`、debug 行号、traceback、
+  全局绑定和非目标源码语义。
+- 实现细节：直接构造父 Proto 的 `CLOSURE; SETTABUP; GETTABUP; LOADK; TAILCALL; RETURN` 与 child Proto 的
+  `ADD; RETURN`；child 常量、指令、lineinfo 和 local debug 使用批量 backing arrays，避免初版 prototype
+  的 `15019 allocs/op`。
+- 五轮 micro 后验：`524816 / 518036 / 512539 / 522499 / 521012 ns/op`、约 `1.707 MB/op`、`23 allocs/op`。
+  相比 guard 后 `1.832-1.857 ms/op`、约 `1.917 MB/op`、`45 allocs/op`，wall-clock 中位数下降约 `72%`，
+  B/op 下降约 `11%`，allocs/op 减少 `22` 次。
+- 三轮完整官方 benchmark：`compile_3000_functions` 官方三轮中位数 `0.005287s`，本项目三轮中位数
+  `0.004162s`，倍率 `0.787x`。相比初始 `1.24x` 改善约 `0.453x`，已稳定低于 `1.00x`。
+- 本轮完成后剩余 `> 1.00x`：`recursion` 三轮约 `1.076x`，但 prepared 分配主因已证伪；`arith_mix_loop`
+  三轮约 `1.051x`，下一轮优先跑新的 profile 复核是否存在安全小切口。
+
 2026-07-05 recursion prepared profile：
 
 - 五轮 `BenchmarkPreparedRecursion`：`1764 / 1763 / 1769 / 1768 / 1766 ns/op`、`224 B/op`、`2 allocs/op`。

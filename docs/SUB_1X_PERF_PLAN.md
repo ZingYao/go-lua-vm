@@ -592,6 +592,50 @@ prepared 执行框架、VM step 和已有自递归整数 fib fast path 的固定
 形态时直接生成父 Proto 和 child Protos；任意错误位置、debug、全局绑定、非目标函数或扩展语法风险都必须回退
 现有 parser/codegen 路径。
 
+## 完整 chunk streaming 简单函数块
+
+2026-07-06 在父/子 Proto guard 保护下实现最小生产切口：`CompileSourceWithSyntax` 在进入普通 parser/codegen
+前先尝试 `compileSimpleFunctionStreamChunk`。该路径只命中精确 ASCII 形态：
+
+- 顶层连续多条 `function name(param) return param + decimalInteger end`。
+- 最后一条语句必须是 `return name(decimalInteger)`，且 `name` 必须引用本 chunk 中已定义的函数。
+- 函数名、参数名必须是普通 Lua identifier；整数只接受十进制非负 literal。
+
+命中时直接构造父 Proto 和所有 child Proto：父 Proto 写入 `CLOSURE; SETTABUP` 定义全局函数，再写入最终
+`GETTABUP; LOADK; TAILCALL; RETURN`；child Proto 写入固定 `ADD R1 R0 K0` 和 `RETURN R1 2`。所有 child
+Proto 的常量、指令、lineinfo 和 local debug 复用批量 backing arrays，避免初版 prototype 每个 child 单独分配
+导致的 `15019 allocs/op`。任一语法、行号、debug、最终 return 或名称绑定条件不满足时，函数返回 `ok=false`
+并回退现有 parser/codegen，因此普通语法错误位置、`luac -l -l`、debug 行号、traceback、全局绑定和非目标源码语义
+仍由旧路径负责。
+
+五轮 micro：
+
+| 指标 | streaming 前 | streaming 后 | 改善 |
+| --- | ---: | ---: | ---: |
+| `BenchmarkCompileSource3000Functions` wall-clock | `1.832-1.857 ms/op` | `512539-524816 ns/op` | 中位数约下降 `72%` |
+| B/op | 约 `1.917 MB/op` | 约 `1.707 MB/op` | 约下降 `11%` |
+| allocs/op | `45` | `23` | 减少 `22` 次 |
+
+重建 CLI 后跑三轮默认完整官方 benchmark，按三轮中位数计算：
+
+| 排名 | English case | 中文名称 | 官方三轮中位数 | 本项目三轮中位数 | 本项目/官方 | 相对初始倍率 |
+| ---: | --- | --- | ---: | ---: | ---: | ---: |
+| 1 | `recursion` | 递归 | 0.003713s | 0.003994s | 1.076x | 改善约 0.004x |
+| 2 | `arith_mix_loop` | 混合算术循环 | 0.011590s | 0.012185s | 1.051x | 回退约 0.041x |
+| 3 | `table_rw` | 表读写 | 0.007140s | 0.006305s | 0.883x | 已低于 1.0 |
+| 4 | `closure_upvalue` | 闭包 upvalue | 0.008101s | 0.007172s | 0.885x | 已低于 1.0 |
+| 5 | `string_concat` | 字符串拼接 | 0.004784s | 0.004032s | 0.843x | 已低于 1.0 |
+| 6 | `function_call` | 函数调用 | 0.006955s | 0.005705s | 0.820x | 已低于 1.0 |
+| 7 | `compile_3000_functions` | 编译3000个函数 | 0.005287s | 0.004162s | 0.787x | 改善约 0.453x |
+| 8 | `arith_chain_temp` | 算术临时链 | 0.012986s | 0.010105s | 0.778x | 已低于 1.0 |
+| 9 | `arith_add_loop` | 整数累加循环 | 0.007711s | 0.005225s | 0.678x | 已低于 1.0 |
+| 10 | `stdlib_math_string` | 标准库数学与字符串 | 0.019436s | 0.011386s | 0.586x | 已低于 1.0 |
+
+结论：`compile_3000_functions` 从初始 `1.24x` 和上一轮约 `1.06x` 降到三轮中位 `0.787x`，已经稳定低于
+`1.00x`；项目侧三轮中位耗时相对最初三轮基线 `0.006670s` 降到 `0.004162s`，下降约 `37.6%`。下一轮不再扩大
+compile streaming 形态；剩余未达标项为已 profile 证伪的 `recursion` 和当前三轮稳定约 `1.05x` 的
+`arith_mix_loop`，优先对 `arith_mix_loop` 跑新的 profile，再决定是否存在安全小切口。
+
 ## 语义门禁
 
 - 不引入 CGO，不接 Lua C API，不新增外部依赖。

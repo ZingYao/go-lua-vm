@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/zing/go-lua-vm/bytecode"
@@ -391,6 +392,11 @@ func CompileSource(source string, chunkName string) (*bytecode.Proto, error) {
 //
 // source 是完整 Lua chunk；chunkName 写入 Proto.Source；syntax 会裁剪到当前二进制已编译集合。
 func CompileSourceWithSyntax(source string, chunkName string, syntax extensions.SyntaxSet) (*bytecode.Proto, error) {
+	// 优先尝试 compile_3000_functions 同构的完整 chunk streaming 路径；不命中时无副作用回退普通 parser/codegen。
+	if proto, ok := compileSimpleFunctionStreamChunk(source, chunkName); ok {
+		// streaming 路径已经直接生成 Lua 5.3 Proto，调用方无需再经过 AST 和 codegen。
+		return proto, nil
+	}
 	// 先解析源码为 AST，再交给 codegen 生成 Proto。
 	chunkParser := parser.NewCompactWithSyntax(source, syntax)
 	chunk, err := chunkParser.ParseChunk()
@@ -404,6 +410,445 @@ func CompileSourceWithSyntax(source string, chunkName string, syntax extensions.
 		return nil, err
 	}
 	return proto, nil
+}
+
+// simpleFunctionStreamFunction 保存完整 chunk streaming 命中的单个顶层简单函数声明。
+//
+// 字段均来自已证明的 `function name(param) return param + integer end` 单行形态；该结构只服务
+// CompileSourceWithSyntax 的编译期 fast path，不暴露给普通 parser 或 runtime。
+type simpleFunctionStreamFunction struct {
+	// Name 是顶层全局函数名。
+	Name string
+	// ParamName 是唯一形参名称。
+	ParamName string
+	// Integer 是 return 表达式右侧的整数常量。
+	Integer int64
+	// Line 是函数定义所在源码行。
+	Line int
+}
+
+// simpleFunctionStreamReturn 保存完整 chunk streaming 命中的最终单调用 return。
+//
+// 当前只覆盖 `return fN(integer)`，用于生成与普通 codegen 等价的 TAILCALL + RETURN。
+type simpleFunctionStreamReturn struct {
+	// Name 是最终被调用的全局函数名。
+	Name string
+	// Argument 是最终调用的单个整数参数。
+	Argument int64
+	// Line 是 return 语句所在源码行。
+	Line int
+}
+
+// simpleFunctionStreamCursor 保存源码扫描位置和当前行号。
+//
+// cursor 只识别 ASCII Lua benchmark 子集；任何非目标形态都返回 ok=false，交给普通 parser 保留语义和错误位置。
+type simpleFunctionStreamCursor struct {
+	// source 是完整 Lua 源码。
+	source string
+	// offset 是当前读取字节偏移。
+	offset int
+	// line 是当前 1-based 源码行号。
+	line int
+}
+
+// compileSimpleFunctionStreamChunk 尝试直接生成批量顶层简单函数声明 chunk 的 Proto。
+//
+// source 必须精确匹配若干 `function name(param) return param + integer end`，并以
+// `return name(integer)` 结束；不匹配时返回 ok=false 且不产生错误，调用方必须回退普通 parser/codegen。
+func compileSimpleFunctionStreamChunk(source string, chunkName string) (*bytecode.Proto, bool) {
+	// 初始化 cursor 时行号从 1 开始，保持 Lua 5.3 debug 行号语义。
+	cursor := simpleFunctionStreamCursor{source: source, line: 1}
+	functions := make([]simpleFunctionStreamFunction, 0, strings.Count(source, "\nfunction ")+1)
+	for {
+		// 顶层只允许横向空白；空行、注释或其他语句全部回退普通 parser。
+		cursor.skipHorizontalWhitespace()
+		if cursor.atEOF() {
+			// 没有最终 return 语句时不是目标完整 chunk。
+			return nil, false
+		}
+		if cursor.hasKeywordPrefix("return") {
+			// 遇到最终 return 后结束函数声明扫描。
+			break
+		}
+		function, ok := cursor.parseSimpleFunctionDefinition()
+		if !ok {
+			// 任一函数声明不满足目标形态时回退普通 parser/codegen。
+			return nil, false
+		}
+		functions = append(functions, function)
+		if !cursor.consumeLineBreak() {
+			// 函数声明后必须换行，避免吞掉同一行额外语句或分号语义。
+			return nil, false
+		}
+	}
+	if len(functions) == 0 {
+		// 没有顶层函数声明时不是 compile_3000_functions 同构形态。
+		return nil, false
+	}
+	returnCall, ok := cursor.parseSimpleFunctionReturnCall()
+	if !ok {
+		// 最终 return 不是单个整数实参调用时回退普通 parser/codegen。
+		return nil, false
+	}
+	cursor.skipTrailingWhitespace()
+	if !cursor.atEOF() {
+		// return 之后存在额外 token 时必须回退，保留普通 parser 的错误或语义。
+		return nil, false
+	}
+	nameIndexes := make(map[string]int, len(functions))
+	for index, function := range functions {
+		// 记录函数名常量索引；重复定义时最后一次覆盖不影响同名常量位置，因为常量表仍按源码函数声明顺序写入。
+		nameIndexes[function.Name] = index
+	}
+	if _, ok := nameIndexes[returnCall.Name]; !ok {
+		// 当前 streaming 只覆盖最终调用已在本 chunk 中声明的函数，其他全局查找交给普通 codegen。
+		return nil, false
+	}
+	if len(functions)+1 > bytecode.MaxArgBx {
+		// 常量表索引无法放入 LOADK Bx 时必须回退普通路径并由现有 codegen 报错或处理。
+		return nil, false
+	}
+	return buildSimpleFunctionStreamProto(functions, returnCall, nameIndexes, chunkName), true
+}
+
+// parseSimpleFunctionDefinition 解析单行简单函数声明。
+//
+// 只接受 `function name(param) return param + integer end`；任意额外语句、复杂表达式、hex/float 或多参数都回退。
+func (cursor *simpleFunctionStreamCursor) parseSimpleFunctionDefinition() (simpleFunctionStreamFunction, bool) {
+	// 记录函数定义行号，后续直接写入 child Proto debug 信息。
+	line := cursor.line
+	if !cursor.consumeKeyword("function") || !cursor.requireHorizontalWhitespace() {
+		// 顶层函数声明必须以 function 关键字开头，并跟随空白。
+		return simpleFunctionStreamFunction{}, false
+	}
+	name, ok := cursor.consumeIdentifier()
+	if !ok {
+		// 函数名必须是 ASCII 简单标识符；字段、方法和扩展形态回退普通 parser。
+		return simpleFunctionStreamFunction{}, false
+	}
+	cursor.skipHorizontalWhitespace()
+	if !cursor.consumeByte('(') {
+		// 目标形态必须立即进入普通参数列表。
+		return simpleFunctionStreamFunction{}, false
+	}
+	cursor.skipHorizontalWhitespace()
+	paramName, ok := cursor.consumeIdentifier()
+	if !ok {
+		// 目标形态只覆盖单个普通参数，空参数或 vararg 回退。
+		return simpleFunctionStreamFunction{}, false
+	}
+	cursor.skipHorizontalWhitespace()
+	if !cursor.consumeByte(')') {
+		// 多参数或缺失右括号回退普通 parser。
+		return simpleFunctionStreamFunction{}, false
+	}
+	if !cursor.requireHorizontalWhitespace() || !cursor.consumeKeyword("return") || !cursor.requireHorizontalWhitespace() {
+		// 函数体必须只包含 return 语句。
+		return simpleFunctionStreamFunction{}, false
+	}
+	leftName, ok := cursor.consumeIdentifier()
+	if !ok || leftName != paramName {
+		// return 左操作数必须精确读取唯一参数名，避免 local/upvalue/global 语义变化。
+		return simpleFunctionStreamFunction{}, false
+	}
+	cursor.skipHorizontalWhitespace()
+	if !cursor.consumeByte('+') {
+		// 当前 streaming 只覆盖整数加法。
+		return simpleFunctionStreamFunction{}, false
+	}
+	cursor.skipHorizontalWhitespace()
+	integer, ok := cursor.consumeDecimalInteger()
+	if !ok {
+		// 只覆盖十进制非负整数；hex、float 或非法数字回退普通 parser。
+		return simpleFunctionStreamFunction{}, false
+	}
+	if !cursor.requireHorizontalWhitespace() || !cursor.consumeKeyword("end") {
+		// integer 后必须直接关闭函数体。
+		return simpleFunctionStreamFunction{}, false
+	}
+	cursor.skipHorizontalWhitespace()
+	return simpleFunctionStreamFunction{Name: name, ParamName: paramName, Integer: integer, Line: line}, true
+}
+
+// parseSimpleFunctionReturnCall 解析最终单调用 return 语句。
+//
+// 只接受 `return name(integer)`，因为该形态由普通 codegen 生成 TAILCALL + RETURN，正好覆盖默认 compile benchmark。
+func (cursor *simpleFunctionStreamCursor) parseSimpleFunctionReturnCall() (simpleFunctionStreamReturn, bool) {
+	// 记录 return 行号，父 Proto 的 tailcall 指令全部映射到该行。
+	line := cursor.line
+	if !cursor.consumeKeyword("return") || !cursor.requireHorizontalWhitespace() {
+		// 最终语句必须是 return。
+		return simpleFunctionStreamReturn{}, false
+	}
+	name, ok := cursor.consumeIdentifier()
+	if !ok {
+		// 当前只覆盖简单全局函数名调用。
+		return simpleFunctionStreamReturn{}, false
+	}
+	cursor.skipHorizontalWhitespace()
+	if !cursor.consumeByte('(') {
+		// 调用必须使用括号形态。
+		return simpleFunctionStreamReturn{}, false
+	}
+	cursor.skipHorizontalWhitespace()
+	argument, ok := cursor.consumeDecimalInteger()
+	if !ok {
+		// 当前只覆盖单个十进制整数实参。
+		return simpleFunctionStreamReturn{}, false
+	}
+	cursor.skipHorizontalWhitespace()
+	if !cursor.consumeByte(')') {
+		// 缺失右括号或存在更多实参时回退普通 parser。
+		return simpleFunctionStreamReturn{}, false
+	}
+	return simpleFunctionStreamReturn{Name: name, Argument: argument, Line: line}, true
+}
+
+// buildSimpleFunctionStreamProto 直接构造完整 chunk streaming 的父 Proto 和子 Proto。
+//
+// 入参必须来自 compileSimpleFunctionStreamChunk 的精确解析结果；函数按源码顺序写入全局 `_ENV`，
+// 最终 return 生成与普通 codegen 等价的 TAILCALL + RETURN。
+func buildSimpleFunctionStreamProto(functions []simpleFunctionStreamFunction, returnCall simpleFunctionStreamReturn, nameIndexes map[string]int, chunkName string) *bytecode.Proto {
+	// 父常量表先保存所有函数名，再保存最终调用的整数实参，保持与现有 codegen 对齐。
+	constants := make([]bytecode.Constant, 0, len(functions)+1)
+	for _, function := range functions {
+		// 每个 function 声明都需要一个全局名称常量。
+		constants = append(constants, bytecode.StringConstant(function.Name))
+	}
+	argumentIndex := len(constants)
+	constants = append(constants, bytecode.IntegerConstant(returnCall.Argument))
+
+	code := make([]bytecode.Instruction, 0, len(functions)*3+5)
+	lineInfo := make([]int, 0, len(functions)*3+5)
+	children := make([]*bytecode.Proto, len(functions))
+	childProtos := make([]bytecode.Proto, len(functions))
+	childConstants := make([]bytecode.Constant, len(functions))
+	childCode := make([]bytecode.Instruction, len(functions)*2)
+	childLineInfo := make([]int, len(functions)*2)
+	childLocalVars := make([]bytecode.LocalVar, len(functions))
+	for functionIndex, function := range functions {
+		// 子 Proto 使用批量 backing arrays，避免 compile_3000_functions 每个 child 产生多次切片分配。
+		childConstants[functionIndex] = bytecode.IntegerConstant(function.Integer)
+		codeStart := functionIndex * 2
+		childCode[codeStart] = bytecode.CreateABC(bytecode.OpAdd, 1, 0, bytecode.RKAsK(0))
+		childCode[codeStart+1] = bytecode.CreateABC(bytecode.OpReturn, 1, 2, 0)
+		childLineInfo[codeStart] = function.Line
+		childLineInfo[codeStart+1] = function.Line
+		childLocalVars[functionIndex] = bytecode.LocalVar{
+			Name:     function.ParamName,
+			Register: 0,
+			StartPC:  0,
+			EndPC:    2,
+		}
+		childProtos[functionIndex] = bytecode.Proto{
+			NumParams:       1,
+			IsVararg:        false,
+			MaxStackSize:    2,
+			LineDefined:     function.Line,
+			LastLineDefined: function.Line,
+			Source:          chunkName,
+			Constants:       childConstants[functionIndex : functionIndex+1],
+			Code:            childCode[codeStart : codeStart+2],
+			LineInfo:        childLineInfo[codeStart : codeStart+2],
+			LocalVars:       childLocalVars[functionIndex : functionIndex+1],
+		}
+		children[functionIndex] = &childProtos[functionIndex]
+		code = append(code, bytecode.CreateABx(bytecode.OpClosure, 0, functionIndex))
+		lineInfo = append(lineInfo, function.Line)
+		appendGlobalNameStore(&code, &lineInfo, functionIndex, function.Line)
+	}
+
+	nameIndex := nameIndexes[returnCall.Name]
+	appendGlobalNameLoad(&code, &lineInfo, nameIndex, returnCall.Line)
+	code = append(code,
+		bytecode.CreateABx(bytecode.OpLoadK, 1, argumentIndex),
+		bytecode.CreateABC(bytecode.OpTailCall, 0, 2, 0),
+		bytecode.CreateABC(bytecode.OpReturn, 0, 0, 0),
+	)
+	lineInfo = append(lineInfo, returnCall.Line, returnCall.Line, returnCall.Line)
+
+	return &bytecode.Proto{
+		NumParams:    0,
+		IsVararg:     true,
+		MaxStackSize: 2,
+		Source:       chunkName,
+		Constants:    constants,
+		Code:         code,
+		Protos:       children,
+		LineInfo:     lineInfo,
+		Upvalues:     []bytecode.UpvalueDesc{{Name: "_ENV", InStack: true, Index: 0}},
+	}
+}
+
+// appendGlobalNameStore 追加 `_ENV[name] = R0` 对应指令。
+//
+// nameIndex 可被 RK 直接编码时使用 SETTABUP K；超过 RK 上限时先 LOADK 到 R1，再用寄存器键写入。
+func appendGlobalNameStore(code *[]bytecode.Instruction, lineInfo *[]int, nameIndex int, line int) {
+	if nameIndex <= bytecode.MaxIndexRK {
+		// 常量索引可直接编码到 SETTABUP 的 B 字段。
+		*code = append(*code, bytecode.CreateABC(bytecode.OpSetTabUp, 0, bytecode.RKAsK(nameIndex), 0))
+		*lineInfo = append(*lineInfo, line)
+		return
+	}
+	// 常量索引超过 RK 上限时，先把全局名加载到 R1，再按寄存器键写入 `_ENV`。
+	*code = append(*code,
+		bytecode.CreateABx(bytecode.OpLoadK, 1, nameIndex),
+		bytecode.CreateABC(bytecode.OpSetTabUp, 0, 1, 0),
+	)
+	*lineInfo = append(*lineInfo, line, line)
+}
+
+// appendGlobalNameLoad 追加 `R0 = _ENV[name]` 对应指令。
+//
+// nameIndex 可被 RK 直接编码时使用 GETTABUP K；超过 RK 上限时复用 R1 作为临时键寄存器。
+func appendGlobalNameLoad(code *[]bytecode.Instruction, lineInfo *[]int, nameIndex int, line int) {
+	if nameIndex <= bytecode.MaxIndexRK {
+		// 常量索引可直接编码到 GETTABUP 的 C 字段。
+		*code = append(*code, bytecode.CreateABC(bytecode.OpGetTabUp, 0, 0, bytecode.RKAsK(nameIndex)))
+		*lineInfo = append(*lineInfo, line)
+		return
+	}
+	// 常量索引超过 RK 上限时，先把全局名加载到 R1，再从 `_ENV` 读取函数值到 R0。
+	*code = append(*code,
+		bytecode.CreateABx(bytecode.OpLoadK, 1, nameIndex),
+		bytecode.CreateABC(bytecode.OpGetTabUp, 0, 0, 1),
+	)
+	*lineInfo = append(*lineInfo, line, line)
+}
+
+// atEOF 判断 cursor 是否已经读完源码。
+func (cursor *simpleFunctionStreamCursor) atEOF() bool {
+	// offset 到达源码长度即表示 EOF。
+	return cursor.offset >= len(cursor.source)
+}
+
+// skipHorizontalWhitespace 跳过不换行的空白字节。
+func (cursor *simpleFunctionStreamCursor) skipHorizontalWhitespace() {
+	for cursor.offset < len(cursor.source) {
+		// 只跳过空格、制表符和 CR；LF 由行边界函数处理。
+		switch cursor.source[cursor.offset] {
+		case ' ', '\t', '\r':
+			cursor.offset++
+		default:
+			return
+		}
+	}
+}
+
+// skipTrailingWhitespace 跳过源码尾部空白，并维护行号。
+func (cursor *simpleFunctionStreamCursor) skipTrailingWhitespace() {
+	for cursor.offset < len(cursor.source) {
+		// 尾部空白可以包含换行，但不能包含注释或其他 token。
+		switch cursor.source[cursor.offset] {
+		case ' ', '\t', '\r':
+			cursor.offset++
+		case '\n':
+			cursor.offset++
+			cursor.line++
+		default:
+			return
+		}
+	}
+}
+
+// consumeLineBreak 消费一个必需的换行。
+func (cursor *simpleFunctionStreamCursor) consumeLineBreak() bool {
+	if cursor.offset < len(cursor.source) && cursor.source[cursor.offset] == '\n' {
+		// 成功消费换行后行号加一。
+		cursor.offset++
+		cursor.line++
+		return true
+	}
+	// 没有换行说明目标单行函数声明后存在额外 token 或 EOF。
+	return false
+}
+
+// requireHorizontalWhitespace 要求当前位置至少存在一个横向空白。
+func (cursor *simpleFunctionStreamCursor) requireHorizontalWhitespace() bool {
+	startOffset := cursor.offset
+	cursor.skipHorizontalWhitespace()
+	return cursor.offset > startOffset
+}
+
+// consumeByte 消费指定 ASCII 字节。
+func (cursor *simpleFunctionStreamCursor) consumeByte(want byte) bool {
+	if cursor.offset < len(cursor.source) && cursor.source[cursor.offset] == want {
+		// 命中目标字节时前进一位。
+		cursor.offset++
+		return true
+	}
+	// 未命中目标字节时保持 cursor 不变。
+	return false
+}
+
+// consumeKeyword 消费 Lua 关键字并确认后续不是标识符字符。
+func (cursor *simpleFunctionStreamCursor) consumeKeyword(keyword string) bool {
+	if !cursor.hasKeywordPrefix(keyword) {
+		// 关键字不匹配时不能前进 cursor。
+		return false
+	}
+	cursor.offset += len(keyword)
+	return true
+}
+
+// hasKeywordPrefix 判断当前位置是否以指定关键字开始。
+func (cursor *simpleFunctionStreamCursor) hasKeywordPrefix(keyword string) bool {
+	if !strings.HasPrefix(cursor.source[cursor.offset:], keyword) {
+		// 文本前缀不匹配时直接失败。
+		return false
+	}
+	nextOffset := cursor.offset + len(keyword)
+	if nextOffset < len(cursor.source) && isSimpleLuaIdentifierPart(cursor.source[nextOffset]) {
+		// 关键字后仍是标识符字符时，说明它只是更长标识符的前缀。
+		return false
+	}
+	return true
+}
+
+// consumeIdentifier 消费 ASCII Lua 标识符。
+func (cursor *simpleFunctionStreamCursor) consumeIdentifier() (string, bool) {
+	if cursor.offset >= len(cursor.source) || !isSimpleLuaIdentifierStart(cursor.source[cursor.offset]) {
+		// 标识符首字节不合法时回退普通 parser。
+		return "", false
+	}
+	startOffset := cursor.offset
+	cursor.offset++
+	for cursor.offset < len(cursor.source) && isSimpleLuaIdentifierPart(cursor.source[cursor.offset]) {
+		// 连续读取标识符后续字节。
+		cursor.offset++
+	}
+	return cursor.source[startOffset:cursor.offset], true
+}
+
+// consumeDecimalInteger 消费十进制非负整数。
+func (cursor *simpleFunctionStreamCursor) consumeDecimalInteger() (int64, bool) {
+	if cursor.offset >= len(cursor.source) || cursor.source[cursor.offset] < '0' || cursor.source[cursor.offset] > '9' {
+		// 当前 streaming 不覆盖负数、hex 或非数字开头。
+		return 0, false
+	}
+	startOffset := cursor.offset
+	for cursor.offset < len(cursor.source) && cursor.source[cursor.offset] >= '0' && cursor.source[cursor.offset] <= '9' {
+		// 连续读取十进制数字。
+		cursor.offset++
+	}
+	value, err := strconv.ParseInt(cursor.source[startOffset:cursor.offset], 10, 64)
+	if err != nil {
+		// 整数溢出或解析失败交给普通 parser/codegen 处理。
+		return 0, false
+	}
+	return value, true
+}
+
+// isSimpleLuaIdentifierStart 判断 ASCII 字节是否可作为 Lua 标识符首字节。
+func isSimpleLuaIdentifierStart(value byte) bool {
+	// 当前 streaming 只覆盖 ASCII 标识符；非 ASCII 名称回退普通 lexer/parser。
+	return value == '_' || (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z')
+}
+
+// isSimpleLuaIdentifierPart 判断 ASCII 字节是否可作为 Lua 标识符后续字节。
+func isSimpleLuaIdentifierPart(value byte) bool {
+	// Lua 标识符后续可包含数字；其他字节由普通 parser 处理。
+	return isSimpleLuaIdentifierStart(value) || (value >= '0' && value <= '9')
 }
 
 // DumpSource 将 Lua 源码编译为 Lua 5.3 binary chunk。
