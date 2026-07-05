@@ -124,6 +124,34 @@ CLI 并跑完整 benchmark 三轮，确认默认官方对比中的 `compile_3000
 profile，重点确认剩余差距是在 child Proto/codegen 生命周期、debug 元数据写入，还是当前官方基线波动导致；
 不得回到已经证伪的 lexer、常量索引、页大小或字段微调。
 
+## compact function statement 行号压缩
+
+2026-07-05 在 `e92a2e9` 后继续 profile `BenchmarkCompileSource3000Functions`。五轮 micro 稳定在
+`2.009-2.062 ms/op`、约 `2.286 MB/op`、`58 allocs/op`。GOGC=off CPU profile 显示剩余热点集中在
+`Parser.newCompactFunctionStatement`（flat `54.14%`）和 `codegen.borrowChildProto`（flat `15.79%`）。
+alloc_space profile 中 `prepareDirectFunctionBlockCapacity` 约 `42.70%`，`newCompactFunctionStatement`
+约 `26.54%`。
+
+本轮只做一个窄切口：把 `CompactFunctionStatement` 中 codegen 实际只需要行号的完整 `lexer.Position`
+压缩为 `LineDefined`、`LastLineDefined`、`ReturnLine`、`OperatorLine`。普通 parser 的完整 AST、错误列号和
+offset 仍由普通回退路径承载；compact 节点只服务 compile-only codegen。
+
+五轮 micro：
+
+| 指标 | 行号压缩前 | 行号压缩后 | 改善 |
+| --- | ---: | ---: | ---: |
+| `BenchmarkCompileSource3000Functions` wall-clock | `2.009-2.062 ms/op` | `1.978-1.997 ms/op` | 小幅下降约 `2%` |
+| B/op | 约 `2.286 MB/op` | 约 `1.925 MB/op` | 下降约 `15.8%` |
+| allocs/op | `58` | `58` | 持平 |
+
+结论：该切口主要降低内存带宽和 GC 压力，不改变可见语义。下一轮如果继续 compile，需要重新 profile 确认
+`borrowChildProto` / child Proto 初始化或父 Proto 容量预留是否还有结构性空间；如果 profile 只剩 runtime/memclr
+和官方基线波动，则应转向 `recursion` 或 `string_concat`。
+
+重建 CLI 后单轮完整官方 benchmark 中 `compile_3000_functions` 为官方 `0.005238s`、本项目 `0.005670s`、
+倍率 `1.08x`。这是单轮结果，下一轮需要三轮确认稳定性；若稳定在 `1.08x` 左右，剩余 compile 差距已经
+接近 `recursion` / `string_concat`，应按 profile 证据决定继续 compile 还是切换目标。
+
 优先级：
 
 1. `compile_3000_functions` / 编译3000个函数：探索 compile-only streaming 简单函数声明路径。目标是跳过公开

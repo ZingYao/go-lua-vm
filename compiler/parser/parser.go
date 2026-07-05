@@ -755,15 +755,13 @@ func (parser *Parser) tryParseCompactFunctionStatement(name string, startPositio
 	parser.advance()
 
 	statement := parser.newCompactFunctionStatement(CompactFunctionStatement{
-		Name:             name,
-		ParamName:        paramName,
-		Integer:          literalToken.Number.Integer,
-		Position:         startPosition,
-		ParamPosition:    paramToken.Position,
-		ReturnPosition:   returnToken.Position,
-		OperatorPosition: operatorToken.Position,
-		LiteralPosition:  literalToken.Position,
-		EndPosition:      endToken.Position,
+		Name:            name,
+		ParamName:       paramName,
+		Integer:         literalToken.Number.Integer,
+		LineDefined:     startPosition.Line,
+		LastLineDefined: endToken.Position.Line,
+		ReturnLine:      returnToken.Position.Line,
+		OperatorLine:    operatorToken.Position.Line,
 	})
 	return statement, true
 }

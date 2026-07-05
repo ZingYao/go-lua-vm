@@ -514,9 +514,9 @@ func TestParserOrdinarySimpleFunctionKeepsFullAST(t *testing.T) {
 		// 编译专用入口应只在精确目标形态上生成 summary。
 		t.Fatalf("unexpected compact statement=%+v", compactFunction)
 	}
-	if compactFunction.Position.Line != 1 || compactFunction.ParamPosition.Line != 1 || compactFunction.ReturnPosition.Line != 1 ||
-		compactFunction.OperatorPosition.Line != 1 || compactFunction.LiteralPosition.Line != 1 || compactFunction.EndPosition.Line != 1 {
-		// compact 语句必须保留关键 token 行号，供 codegen debug 行号使用。
+	if compactFunction.LineDefined != 1 || compactFunction.LastLineDefined != 1 || compactFunction.ReturnLine != 1 ||
+		compactFunction.OperatorLine != 1 || compactFunction.Pos().Line != 1 {
+		// compact 语句必须保留 codegen 所需关键行号，供 debug 行号使用。
 		t.Fatalf("unexpected compact positions=%+v", compactFunction)
 	}
 }

@@ -96,6 +96,23 @@
 - 下一步：继续 profile compile path 剩余成本，优先确认 child Proto/codegen 生命周期或 debug 元数据写入是否还有
   结构性空间；不得回到已经证伪的 lexer、常量索引、页大小或局部字段微调。
 
+2026-07-05 compact function statement 行号压缩：
+
+- e92a2e9 后五轮 micro：`2.042 / 2.062 / 2.040 / 2.013 / 2.009 ms/op`、约 `2.286 MB/op`、
+  `58 allocs/op`。
+- GOGC=off CPU profile：`Parser.newCompactFunctionStatement` flat `54.14%`、cum `59.40%`；
+  `codegen.borrowChildProto` flat `15.79%`。alloc_space：`prepareDirectFunctionBlockCapacity`
+  约 `42.70%`，`newCompactFunctionStatement` 约 `26.54%`。
+- 生产切口：`CompactFunctionStatement` 不再保存完整 `lexer.Position`，只保留 codegen 实际需要的
+  `LineDefined`、`LastLineDefined`、`ReturnLine`、`OperatorLine`。普通 parser、错误列号、offset 和非目标
+  语义仍回退完整 AST。
+- 五轮 micro 后验：`1.991 / 1.984 / 1.997 / 1.995 / 1.978 ms/op`、约 `1.925 MB/op`、`58 allocs/op`。
+  相比本轮前 B/op 下降约 `15.8%`，wall-clock 小幅下降约 `2%`。
+- 单轮完整官方 benchmark：`compile_3000_functions` 官方 `0.005238s`，本项目 `0.005670s`，倍率 `1.08x`。
+  该结果说明内存压缩能传导到 CLI 路径，但仍需下一轮三轮确认稳定性。
+- 下一步：重新 profile 判断 `borrowChildProto` / child Proto 初始化是否还有结构性空间；若没有明确生产切口，
+  转入 `recursion` 或 `string_concat`。
+
 ## 2. `recursion` / 递归
 
 - [ ] 仅在完整 benchmark 三轮稳定高于 `1.00x` 且接近或超过 `1.08x` 时进入。

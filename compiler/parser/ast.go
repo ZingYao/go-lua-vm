@@ -407,7 +407,7 @@ func (statement *FunctionStatement) statementNode() {
 // CompactFunctionStatement 表示编译专用的顶层简单 `function name(param) return param + integer end`。
 //
 // 该节点只由 NewCompactWithSyntax 在精确目标形态上生成；普通 parser 入口必须继续返回完整
-// FunctionStatement。codegen 必须按这些 token 位置信息生成与普通路径等价的 Proto/debug 信息。
+// FunctionStatement。codegen 只需要行号生成与普通路径等价的 Proto/debug 信息，列号和 offset 继续由普通回退路径承载。
 type CompactFunctionStatement struct {
 	// Name 保存函数名称。
 	Name string
@@ -415,18 +415,14 @@ type CompactFunctionStatement struct {
 	ParamName string
 	// Integer 保存右操作数 integer 字面量的精确值。
 	Integer int64
-	// Position 保存 function 关键字位置。
-	Position lexer.Position
-	// ParamPosition 保存唯一参数名称位置，用于 local debug 记录。
-	ParamPosition lexer.Position
-	// ReturnPosition 保存 return 关键字位置，用于 RETURN 行号。
-	ReturnPosition lexer.Position
-	// OperatorPosition 保存 `+` 操作符位置，用于 ADD 行号。
-	OperatorPosition lexer.Position
-	// LiteralPosition 保存 integer 字面量位置，供后续错误或调试扩展使用。
-	LiteralPosition lexer.Position
-	// EndPosition 保存关闭函数体的 end 关键字位置，用于 Proto debug 范围。
-	EndPosition lexer.Position
+	// LineDefined 保存 function 关键字行号，用于 Proto debug 范围。
+	LineDefined int
+	// LastLineDefined 保存关闭函数体的 end 关键字行号，用于 Proto debug 范围。
+	LastLineDefined int
+	// ReturnLine 保存 return 关键字行号，用于 RETURN 行号。
+	ReturnLine int
+	// OperatorLine 保存 `+` 操作符行号，用于 ADD 行号。
+	OperatorLine int
 }
 
 // Pos 返回 compact function 语句起始位置。
@@ -434,7 +430,7 @@ type CompactFunctionStatement struct {
 // 返回值指向 function 关键字。
 func (statement *CompactFunctionStatement) Pos() lexer.Position {
 	// compact function 语句位置在构造时固定。
-	return statement.Position
+	return lexer.Position{Line: statement.LineDefined}
 }
 
 // statementNode 标记 CompactFunctionStatement 是语句节点。

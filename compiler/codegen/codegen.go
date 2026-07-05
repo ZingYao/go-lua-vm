@@ -3020,11 +3020,11 @@ func (generator *generator) compileCompactFunctionChildProto(statement *parser.C
 	child := newChildGenerator(generator, generator.proto.Source)
 	child.proto.NumParams = 1
 	child.proto.IsVararg = false
-	child.proto.LineDefined = statement.Position.Line
-	child.proto.LastLineDefined = statement.EndPosition.Line
+	child.proto.LineDefined = statement.LineDefined
+	child.proto.LastLineDefined = statement.LastLineDefined
 
 	paramRegister := child.allocateRegister()
-	child.defineLocal(statement.ParamName, paramRegister, statement.ParamPosition)
+	child.defineLocal(statement.ParamName, paramRegister, lexer.Position{Line: statement.LineDefined})
 	resultRegister := child.allocateRegister()
 	constantIndex := child.addConstant(bytecode.IntegerConstant(statement.Integer))
 	constantOperand, constantRegister, err := child.rkOperandForConstantIndex(constantIndex)
@@ -3033,7 +3033,7 @@ func (generator *generator) compileCompactFunctionChildProto(statement *parser.C
 		child.releaseRegister(resultRegister)
 		return 0, err
 	}
-	if err := child.withSourceLine(statement.OperatorPosition, func() error {
+	if err := child.withSourceLine(lexer.Position{Line: statement.OperatorLine}, func() error {
 		// ADD 行号必须归因到 `+`，与普通二元 return codegen 保持一致。
 		child.emitABC(bytecode.OpAdd, resultRegister, paramRegister, constantOperand)
 		return nil
@@ -3044,7 +3044,7 @@ func (generator *generator) compileCompactFunctionChildProto(statement *parser.C
 		return 0, err
 	}
 	child.releaseOptionalRegister(constantRegister)
-	if err := child.withSourceLine(statement.ReturnPosition, func() error {
+	if err := child.withSourceLine(lexer.Position{Line: statement.ReturnLine}, func() error {
 		// RETURN 行号必须归因到 return 关键字，供 debug hook 与 luac -l -l 展示。
 		child.emitABC(bytecode.OpReturn, resultRegister, 2, 0)
 		return nil
