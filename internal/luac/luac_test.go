@@ -346,6 +346,113 @@ return f0(1)
 	}
 }
 
+// TestCompileSourceSimpleFunctionBodyExpressionFallbackGuards 固定复杂表达式必须回退普通路径。
+func TestCompileSourceSimpleFunctionBodyExpressionFallbackGuards(t *testing.T) {
+	// 表驱动覆盖 compactSimpleFunctionBody 禁止直接识别的表达式形态。
+	tests := []struct {
+		name   string
+		source string
+		check  func(t *testing.T, child *bytecode.Proto)
+	}{
+		{
+			name: "function call operand",
+			source: `function f0(x) return x + tonumber("7") end
+return f0(1)
+`,
+			check: func(t *testing.T, child *bytecode.Proto) {
+				// 函数调用操作数必须保留 CALL，不能折叠成常量整数加法。
+				if !containsInstructionOp(child, bytecode.OpCall) {
+					t.Fatalf("call operand should keep CALL, code=%v", child.Code)
+				}
+			},
+		},
+		{
+			name: "field access operand",
+			source: `local t = {y = 7}
+function f0(x) return x + t.y end
+return f0(1)
+`,
+			check: func(t *testing.T, child *bytecode.Proto) {
+				// 字段访问必须保留 table 读取和外层 table upvalue 捕获。
+				if !containsInstructionOp(child, bytecode.OpGetTable) || !containsInstructionOp(child, bytecode.OpGetUpval) {
+					t.Fatalf("field operand should keep GETUPVAL/GETTABLE, code=%v upvalues=%+v", child.Code, child.Upvalues)
+				}
+				if len(child.Upvalues) != 1 || child.Upvalues[0].Name != "t" {
+					t.Fatalf("field operand should capture t: %+v", child.Upvalues)
+				}
+			},
+		},
+		{
+			name: "index access operand",
+			source: `local t = {7}
+function f0(x) return x + t[1] end
+return f0(1)
+`,
+			check: func(t *testing.T, child *bytecode.Proto) {
+				// 索引访问必须保留 table 读取，不能把下标读取当成整数 literal。
+				if !containsInstructionOp(child, bytecode.OpGetTable) {
+					t.Fatalf("index operand should keep GETTABLE, code=%v", child.Code)
+				}
+				if len(child.Upvalues) != 1 || child.Upvalues[0].Name != "t" {
+					t.Fatalf("index operand should capture t: %+v", child.Upvalues)
+				}
+			},
+		},
+		{
+			name: "concat expression",
+			source: `function f0(x) return x .. "7" end
+return f0(1)
+`,
+			check: func(t *testing.T, child *bytecode.Proto) {
+				// 拼接表达式必须保留 CONCAT，不能进入整数 ADD 紧凑路径。
+				if !containsInstructionOp(child, bytecode.OpConcat) {
+					t.Fatalf("concat expression should keep CONCAT, code=%v", child.Code)
+				}
+			},
+		},
+		{
+			name: "power expression",
+			source: `function f0(x) return x ^ 2 end
+return f0(2)
+`,
+			check: func(t *testing.T, child *bytecode.Proto) {
+				// 幂运算不是目标整数加法形态，必须保留 POW。
+				if !containsInstructionOp(child, bytecode.OpPow) {
+					t.Fatalf("power expression should keep POW, code=%v", child.Code)
+				}
+			},
+		},
+		{
+			name: "number literal",
+			source: `function f0(x) return x + 7.5 end
+return f0(1)
+`,
+			check: func(t *testing.T, child *bytecode.Proto) {
+				// 非 integer 常量不能进入只接受整数 literal 的 compact summary。
+				if len(child.Constants) != 1 || child.Constants[0].Kind != bytecode.ConstantNumber || child.Constants[0].Number != 7.5 {
+					t.Fatalf("number literal should remain number constant: %+v", child.Constants)
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		// 每个复杂表达式样例都必须独立编译并保留普通 codegen 特征。
+		t.Run(test.name, func(t *testing.T) {
+			proto, err := CompileSource(test.source, "@simple-function-expression-"+test.name+".lua")
+			if err != nil {
+				// 合法表达式样例必须仍能编译。
+				t.Fatalf("CompileSource expression fallback sample failed: %v", err)
+			}
+			if len(proto.Protos) != 1 {
+				// 每个样例都只定义一个待检查函数。
+				t.Fatalf("unexpected child proto count=%d", len(proto.Protos))
+			}
+			test.check(t, proto.Protos[0])
+		})
+	}
+}
+
 // TestCompileSourceSimpleFunctionBodyNonTargetKeepsOrdinaryShape 固定非目标函数体必须回退普通 AST/codegen。
 func TestCompileSourceSimpleFunctionBodyNonTargetKeepsOrdinaryShape(t *testing.T) {
 	// 引入局部变量 y，使函数体不再满足 `return <param> + <integer>` 紧凑候选形态。
