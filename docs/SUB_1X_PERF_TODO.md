@@ -153,10 +153,29 @@
 - 下一步：不再围绕 compact 节点页容量做扩张；继续 compile 必须重新 profile 证明 parser streaming 或其他结构性
   空间，否则转入 `recursion` profile。
 
+2026-07-05 c328f06 后 compile profile 证伪：
+
+- 五轮 micro：`1.855 / 1.844 / 1.847 / 1.853 / 1.848 ms/op`、约 `1.917 MB/op`、`45 allocs/op`。
+- 普通 CPU profile 主体是 `tryParseCompactFunctionStatement` / `advance` / `Lexer.NextToken`；
+  GOGC=off 中 `newCompactFunctionStatement` 的 flat 归因主要来自内联后的 compact 解析路径。
+- alloc_space 仍集中在父 Proto 容量预留、常量/指令写入和直接子 Proto 相关结构。
+- 证伪结论：不再做 compact 节点页、字段压缩、常量索引、operator 扫描或普通 expression arena 调参。若继续
+  compile，必须先设计“完整 chunk compile-only streaming 简单函数声明路径”，并补错误位置、debug、`luac -l -l`
+  和回退 guard；本轮不直接改生产代码。
+
+2026-07-05 recursion prepared profile：
+
+- 五轮 `BenchmarkPreparedRecursion`：`1764 / 1763 / 1769 / 1768 / 1766 ns/op`、`224 B/op`、`2 allocs/op`。
+- alloc_space：`runtime.NewLuaClosure` 约 `67.03%`，`runtime.NewOpenUpvalueCell` 约 `29.72%`。
+- CPU profile 已显示 `TryExecuteSelfRecursiveIntegerFibInCaller`，说明递归调用本体已命中固定签名 fast path；
+  剩余差距主要来自每次顶层执行创建局部函数闭包和 self upvalue cell。
+- 下一步：先补 guard 测试，再设计非逃逸 local function descriptor / borrowed closure cell prototype；必须覆盖闭包返回、
+  传参、存表、身份比较、debug upvalue API、错误 traceback、hook、pcall/error、coroutine/yield。
+
 ## 2. `recursion` / 递归
 
 - [ ] 仅在完整 benchmark 三轮稳定高于 `1.00x` 且接近或超过 `1.08x` 时进入。
-- [ ] 跑 `BenchmarkPreparedRecursion` 五轮和 CPU/memory profile。
+- [x] 跑 `BenchmarkPreparedRecursion` 五轮和 CPU/memory profile。
 - [ ] 补 guard：闭包返回、闭包传参、闭包存表、闭包身份比较、`debug.getupvalue`、`debug.setupvalue`、
   `debug.upvalueid`、`debug.upvaluejoin`、错误 traceback、line/call hook、pcall/error、coroutine/yield。
 - [ ] 实现非逃逸 local function descriptor prototype。
