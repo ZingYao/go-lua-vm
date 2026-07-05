@@ -1,0 +1,191 @@
+# glua 最终性能收敛方案
+
+## 目标与当前基线
+
+本文记录 `quanquan/feature/glua-final-perf` 分支的最终性能收敛方案。分支基于 `de71f7c`
+创建，前序 `quanquan/feature/glua-next-perf` 已合入 `master`。
+
+倍率语义：`本项目/官方 Lua 5.3.6`，低于 `1.00x` 表示本项目快于官方，高于 `1.00x` 表示仍慢于官方。
+最新可用基线来自 `docs/NEXT_PERF_TODO.md` 中 `f5f9028` 后的三轮完整 benchmark：
+
+| 用例 | 三轮倍率 | 平均 | 状态 |
+| --- | ---: | ---: | --- |
+| `stdlib_math_string` | `0.58x / 0.58x / 0.58x` | `0.58x` | 已快于官方，停止扩张 |
+| `arith_add_loop` | `0.66x / 0.66x / 0.67x` | `0.66x` | 已快于官方，停止扩张 |
+| `arith_chain_temp` | `0.76x / 0.77x / 0.78x` | `0.77x` | 已快于官方，停止扩张 |
+| `table_rw` | `0.89x / 0.88x / 0.87x` | `0.88x` | 已快于官方，停止扩张 |
+| `closure_upvalue` | `0.89x / 0.89x / 0.88x` | `0.89x` | 已快于官方，停止扩张 |
+| `arith_mix_loop` | `1.03x / 1.02x / 1.03x` | `1.03x` | 噪声带，仅回归复核 |
+| `string_concat` | `1.03x / 1.03x / 1.05x` | `1.04x` | 噪声带，仅回归复核 |
+| `function_call` | `1.04x / 1.05x / 1.06x` | `1.05x` | 噪声带，需 profile 证明 |
+| `recursion` | `1.09x / 1.07x / 1.08x` | `1.08x` | 噪声带，需 profile 证明 |
+| `compile_3000_functions` | `1.33x / 1.33x / 1.32x` | `1.33x` | 唯一清晰主项 |
+
+2026-07-05 在 `quanquan/feature/glua-final-perf` 起点重建 `bin/glua` / `bin/gluac`，并显式使用
+`/Users/zing/.local/lua/5.3.6/bin/lua` 与 `/Users/zing/.local/lua/5.3.6/bin/luac` 复跑默认完整
+benchmark 三轮后，排序仍保持一致：
+
+| 排名 | 用例 | 三轮倍率 | 平均 | 判断 |
+| ---: | --- | ---: | ---: | --- |
+| 1 | `compile_3000_functions` | `1.30x / 1.32x / 1.31x` | `1.31x` | 唯一清晰主项 |
+| 2 | `recursion` | `1.05x / 1.04x / 1.04x` | `1.04x` | 噪声带，未达进入门槛 |
+| 3 | `function_call` | `1.03x / 1.01x / 1.02x` | `1.02x` | 噪声带，未达进入门槛 |
+| 4 | `arith_mix_loop` | `1.03x / 1.01x / 1.02x` | `1.02x` | 噪声带，仅回归复核 |
+| 5 | `string_concat` | `1.00x / 1.03x / 1.01x` | `1.01x` | 噪声带，仅回归复核 |
+| 6 | `table_rw` | `0.88x / 0.87x / 0.85x` | `0.87x` | 已快于官方 |
+| 7 | `closure_upvalue` | `0.85x / 0.85x / 0.85x` | `0.85x` | 已快于官方 |
+| 8 | `arith_chain_temp` | `0.77x / 0.76x / 0.78x` | `0.77x` | 已快于官方 |
+| 9 | `arith_add_loop` | `0.65x / 0.68x / 0.63x` | `0.65x` | 已快于官方 |
+| 10 | `stdlib_math_string` | `0.57x / 0.57x / 0.57x` | `0.57x` | 已快于官方 |
+
+因此最终分支第一阶段仍只允许继续推进 `compile_3000_functions` profile 和紧凑函数体设计；
+`function_call` 与 `recursion` 未达到 TODO 中的进入门槛，`string_concat` 和 `arith_mix_loop` 不重新打开。
+
+## 总体策略
+
+最终阶段不再堆局部字段、容量 hint 或 token 分派微调。每个生产提交只允许一个可验证切口，并且必须先用
+Go micro/profile 证明剩余差距属于该切口。
+
+优先级如下：
+
+1. `compile_3000_functions`：主攻简单函数体的紧凑编译结构，目标是减少 parser AST 构造或 codegen
+   arena 生命周期成本。
+2. `function_call`：只有 profile 再次证明 `sum = add(sum, i)` batch 内 guard 是稳定主因时，才评估
+   batch guard 冻结。
+3. `recursion`：只有能证明 local `fib` closure/upvalue 不逃逸且不可被 debug 观察时，才评估闭包生命周期
+   复用或 direct descriptor。
+4. `string_concat`、`arith_mix_loop`：当前已进入噪声带，不继续生产扩张，只做回归复核。
+
+禁止事项：
+
+- 不引入 CGO、不接 Lua C API、不新增外部依赖。
+- 不实现 JIT；JIT 仍只作为 `docs/JIT_TODO.md` 长期专项。
+- 不重复以下已完成或已证伪方向：常量索引预留、函数语句 arena、顶层语句容量、expression arena 大页、
+  operator 扫描、标识符扫描、Source ASCII 读取、字符串/注释 guard、token 大类分派、parser 语句分派、
+  codegen-only 简单函数直发、string concat builder、arith mix batch、table dense fast path。
+- 不直接替换全 parser，不扩大到通用 `Block.Statements` union，不在没有 profile 证据时扩展 fast path。
+
+## 方案 A：`compile_3000_functions` 简单函数体紧凑编译
+
+目标源码形态：
+
+```lua
+function fN(x) return x + Kinteger end
+```
+
+激进方向：parser 在完整识别目标函数体后，记录私有 compact summary，避免或延后构造
+`ReturnStatement`、`BinaryExpression`、`NameExpression`、`LiteralExpression` 等重复 AST 节点；codegen
+只在 summary 与普通语义逐项一致时发出子 `Proto`。这次不能只做 codegen 直发，因为前序试验证明
+codegen-only 不降低 wall-clock，且 B/op 反而上升。
+
+必须保持一致的语义面：
+
+- `LineDefined`、`LastLineDefined`、`Position`、行号表、局部变量生命周期、`luac -l -l` 输出。
+- 参数限制、数字字面量错误、语法错误位置和 traceback 文案。
+- 普通 AST 调用方仍能在非目标形态上看到完整 `FunctionStatement.Body`。
+
+必须回退的形态：
+
+- table/method 函数名、vararg、多参数、local/upvalue、嵌套函数、label/goto、尾调用。
+- 复杂表达式、调用、字段访问、索引访问、拼接、幂运算、非 integer 常量、扩展语法。
+- debug hook、`debug.getinfo` 或 luac/debug 信息无法证明完全一致的场景。
+
+验收门槛：
+
+- `BenchmarkCompileSource3000Functions` 五轮 wall-clock 稳定下降至少 `5%`。
+- B/op 不高于当前约 `3.78 MB/op` 的噪声范围；allocs/op 下降但 wall-clock 不降不能接受。
+- 完整 benchmark `compile_3000_functions` 稳定低于当前约 `1.33x`，目标小于 `1.15x`。
+- 如果只改变 profile 采样或只降低 allocs/op，回退生产改动，只保留证伪记录。
+
+## 方案 B：`function_call` batch guard 冻结
+
+目标源码形态：
+
+```lua
+local function add(a, b)
+  return a + b
+end
+local sum = 0
+for i = 1, 200000 do
+  sum = add(sum, i)
+end
+return sum
+```
+
+当前 `TryExecuteFunctionCallAssignForLoopBatch` 已是主路径，普通 `VM.Step` 和 `executeCall` 占比很低。
+后续只能评估在 batch 窗口内冻结闭包寄存器、函数 Proto、leaf add-return descriptor、参数/结果寄存器
+guard，减少每个窗口的重复动态验证。
+
+必须保持一致的语义面：
+
+- closure identity、upvalue、环境表、metatable、debug hook、yield/continuation、错误 PC 和 traceback。
+- context 取消检查延迟不得无界扩大。
+- 任一寄存器别名、函数值变化或 hook/debug 可见性打开时回退普通 batch 或普通 VM。
+
+验收门槛：
+
+- `BenchmarkPreparedFunctionCallOfficial` 稳定改善至少 `8%`。
+- 完整 benchmark `function_call` 稳定低于 `1.00x`。
+- 非目标 function/closure/recursion prepared 矩阵无稳定退化。
+
+## 方案 C：`recursion` local closure/upvalue 生命周期优化
+
+目标源码形态：
+
+```lua
+local function fib(n)
+  if n < 2 then return n end
+  return fib(n - 1) + fib(n - 2)
+end
+local sum = 0
+for i = 1, 16 do
+  sum = sum + fib(15)
+end
+return sum
+```
+
+当前自递归整数 fast path 本体已经很小，剩余 `2 allocs/op` 来自每次执行顶层 chunk 时创建 local `fib`
+closure 和自递归 upvalue cell。激进方向只能是“非逃逸 local function descriptor”：在 prepared 顶层闭包
+重复执行时证明该 closure 不返回、不传参、不存表、不被 debug/upvalue API 观察，再跳过普通 closure/upvalue
+分配或复用等价结构。
+
+必须保持一致的语义面：
+
+- local function 每次执行创建新闭包的 Lua 5.3 可观察语义。
+- `debug.getupvalue`、闭包身份比较、返回/传参/存表逃逸、hook、traceback、pcall/error、coroutine/yield。
+- 任何逃逸、debug 可见性或错误路径不确定时必须回退普通 closure/upvalue 生命周期。
+
+验收门槛：
+
+- `BenchmarkPreparedRecursion` 去掉当前 `2 allocs/op`，且 wall-clock 稳定改善。
+- 完整 benchmark `recursion` 稳定低于 `1.00x`。
+- debug/upvalue/closure identity 定向测试全绿。
+
+## 方案 D：噪声带项目只做回归
+
+`string_concat` 和 `arith_mix_loop` 已完成主要收益切口，当前倍率分别约 `1.04x` 和 `1.03x`。这两项后续
+只允许在完整三轮 benchmark 显示稳定高于 `1.08x`，且 profile 指向新的单一主因时重新打开。
+
+## 全局正确性门禁
+
+涉及 Go 代码的每个生产提交必须执行：
+
+```bash
+gopls check <changed-go-files>
+gofmt -w <changed-go-files>
+CGO_ENABLED=0 go test ./...
+./scripts/check-go-gates.sh
+git ls-files --others --exclude-standard | rg '\.go$|_test\.go$'
+```
+
+涉及 CLI、bytecode、VM、stdlib 或官方兼容行为时还必须执行：
+
+```bash
+CGO_ENABLED=0 go build -o bin/glua ./cmd/glua
+CGO_ENABLED=0 go build -o bin/gluac ./cmd/gluac
+./scripts/compare-cli-golden.sh
+./scripts/compare-official-executables.sh
+./scripts/run-official-tests.sh
+```
+
+提交前必须确认官方 `lua` / `luac` 为 5.3.6，并记录 benchmark 变化、语义依据和 commit hash。
