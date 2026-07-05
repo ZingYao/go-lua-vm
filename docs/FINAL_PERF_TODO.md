@@ -40,9 +40,9 @@ parser AST 构造或 codegen arena 生命周期结构性空间。
 
 - [x] 复跑当前 `BenchmarkCompileSource3000Functions` 五轮，记录 `ns/op`、`B/op`、`allocs/op`。
 - [x] 生成 CPU 和 memory profile，确认剩余成本仍在函数体 AST 构造或 codegen arena 生命周期。
-- [ ] 设计 `compactSimpleFunctionBody` 私有结构，明确字段来源、生命周期和不可逃逸边界。
-- [ ] 列出 parser、semantic、codegen、debug、luac 反汇编、错误位置的逐项一致性要求。
-- [ ] 先补 bytecode/golden 测试：目标形态 `function fN(x) return x + K end` 的子 `Proto` 与普通路径逐项一致。
+- [x] 设计 `compactSimpleFunctionBody` 私有结构，明确字段来源、生命周期和不可逃逸边界。
+- [x] 列出 parser、semantic、codegen、debug、luac 反汇编、错误位置的逐项一致性要求。
+- [x] 先补 bytecode/golden 测试：目标形态 `function fN(x) return x + K end` 的子 `Proto` 与普通路径逐项一致。
 - [ ] 先补 debug 测试：`debug.getinfo` 行号、局部变量生命周期、`luac -l -l` 输出不变。
 - [ ] 先补回退测试：table/method 函数名、vararg、多参数、local/upvalue、嵌套函数、label/goto、复杂表达式、调用、字段访问、索引访问、拼接、幂运算、语法错误位置。
 - [ ] 实现 prototype 1：parser 完整识别目标形态，并减少目标路径 AST 构造或 arena 留存。
@@ -83,6 +83,25 @@ CGO_ENABLED=0 go test ./internal/luac -run '^$' \
 结论：最终分支没有出现新的 lexer/token/Source 低风险单点热点；剩余差距仍对应函数体 AST 构造和
 codegen arena 生命周期。下一步只能进入 `compactSimpleFunctionBody` 私有结构设计与定向测试，不能再做
 局部扫描或容量调参。
+
+2026-07-05 完成 `compactSimpleFunctionBody` 结构设计，下一轮生产实现必须遵守以下约束：
+
+- parser 先补私有 token mark/reset helper，快照 `parser.current` 和底层 lexer/source 位置；没有回滚能力时
+  禁止实现紧凑试探解析。
+- compact 模式只由 `internal/luac.CompileSourceWithSyntax` 使用；`parser.New` / `parser.NewWithSyntax`
+  继续返回完整 AST，避免破坏 parser 包调用方。
+- summary 使用 parser 页式 arena 存储，`FunctionBody` 只保存指针或索引，避免把所有函数体结构膨胀为
+  内嵌 Name/Literal/Binary 节点。
+- summary 字段必须覆盖：参数名、整数常量、return 位置、操作符位置、字面量位置、函数体起止行、
+  是否为 `param + Kinteger` 精确形态。
+- 试探只覆盖单参数、非 vararg、token 序列精确为 `return <param> + <integer> end` 的普通简单函数名。
+- 试探失败必须 reset 并重新走普通 `parseBlockUntilInto`，保证复杂函数体 AST、错误位置、semantic/goto
+  校验和 debug 信息不变。
+- codegen 只在 summary 与当前参数 local 一致时直发子 `Proto`；`ADD` 使用操作符行，`RETURN` 使用 return 行，
+  local 生命周期、常量表、`MaxStackSize`、lineinfo 和 `luac -l -l` 必须与普通路径一致。
+- 已有 `TestCompileSourceSimpleFunctionBodyPrototypeShape` 固定目标 bytecode/debug 形态；
+  `TestCompileSourceSimpleFunctionBodyNonTargetKeepsOrdinaryShape` 固定最小非目标回退形态。后续实现前仍需继续
+  补充多类非目标回退测试。
 
 ## 2. `function_call` batch guard 冻结候选
 

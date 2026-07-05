@@ -97,6 +97,47 @@ codegen-only 不降低 wall-clock，且 B/op 反而上升。
 - 完整 benchmark `compile_3000_functions` 稳定低于当前约 `1.33x`，目标小于 `1.15x`。
 - 如果只改变 profile 采样或只降低 allocs/op，回退生产改动，只保留证伪记录。
 
+### 2026-07-05 结构设计
+
+当前 parser/codegen 结构已经证明两个事实：
+
+- 简单 `function fN(x) return x + K end` 会走 `parseFunctionStatement -> parseFunctionBodyInto ->
+  parseBlockUntilInto -> parseReturnStatementInto -> parseExpression`，因此仍会构造 `Block`、`ReturnStatement`、
+  `NameExpression`、`LiteralExpression` 和 `BinaryExpression`。
+- `Source` 已有 `Mark` / `Reset`，但 `Lexer` 和 `Parser` 还没有 token 级 mark/reset；如果没有回滚能力，
+  “试探紧凑解析失败后回退普通 parser”会破坏复杂函数体的错误位置和 AST。
+
+因此首个生产 prototype 应按三层实现，而不是直接在 `parseFunctionBodyInto` 中硬扫 token：
+
+1. parser 增加私有 token mark/reset helper，快照包含 `parser.current` 和底层 lexer/source 位置。该 helper
+   只服务局部语法试探，不能暴露为通用 public API。
+2. parser 增加编译专用 compact 模式。`parser.New` / `parser.NewWithSyntax` 默认保持完整 AST；
+   `internal/luac.CompileSourceWithSyntax` 可使用新入口启用 compact summary。这样独立 parser 用户仍拿到完整
+   AST，不会因为 benchmark fast path 看到空 `Block.Return`。
+3. `FunctionBody` 保存 parser-private compact summary，并通过只读方法向 codegen 暴露最小字段。summary 建议包含：
+   参数名、整数常量、return 位置、操作符位置、字面量位置、函数体起止行，以及是否为 `param + Kinteger`
+   的精确形态。summary 存储应使用 parser 页式 arena，避免为 3000 个函数引入逐对象分配。
+
+试探解析流程：
+
+- 只在单参数、非 vararg、函数体第一个 token 是 `return` 时进入试探。
+- 试探成功的 token 序列必须精确为 `return <param> + <integer> end`，其中 `<param>` 必须等于唯一参数名。
+- 试探成功后，函数体 `Body` 可保留最小 block/scope 信息供 semantic 参数局部变量分析使用；codegen 通过 summary
+  直接生成子 `Proto`。
+- 试探失败必须 reset 到进入试探前，再调用普通 `parseBlockUntilInto`，确保非目标函数体的 AST、错误位置和语义不变。
+
+codegen 直发流程：
+
+- `compileChildProto` 在定义参数 local 后，如果 summary 存在且形态仍满足约束，直接发出 `ADD; RETURN`。
+- `ADD` 使用操作符位置作为 lineinfo，`RETURN` 使用 return 位置；`LineDefined`、`LastLineDefined` 仍来自
+  `FunctionBody`。
+- 参数 `x` 的 local 生命周期必须覆盖 `[0, len(code))`；`MaxStackSize`、常量表、行号表和 `luac -l -l`
+  输出必须与普通路径一致。
+- summary 缺失、参数不匹配、常量无法 RK 编码或 debug 信息无法对齐时，必须回退普通 `compileBlock`。
+
+该设计的首个可实现切口是“parser mark/reset + compile-only compact summary + codegen direct child proto”。
+它必须证明同时减少 AST 构造和 codegen arena 分配；如果只复现前序 codegen-only 直发，必须回退。
+
 ## 方案 B：`function_call` batch guard 冻结
 
 目标源码形态：
