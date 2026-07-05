@@ -148,6 +148,79 @@ func TestCompileSourceSimpleFunctionBodyPrototypeShape(t *testing.T) {
 	}
 }
 
+// TestCompileSourceSimpleFunctionBodyDebugAndListGuards 固定简单函数体紧凑候选的 debug 与列表输出。
+func TestCompileSourceSimpleFunctionBodyDebugAndListGuards(t *testing.T) {
+	// 使用 luac 编译入口生成 binary chunk，确保后续 guard 覆盖的是 gluac 产物而非 DoString 直编译。
+	source := `function f0(x) return x + 7 end
+local info = debug.getinfo(f0, "Slu")
+assert(info.what == "Lua", info.what)
+assert(info.linedefined == 1, info.linedefined)
+assert(info.lastlinedefined == 1, info.lastlinedefined)
+assert(info.nparams == 1, info.nparams)
+assert(info.isvararg == false, tostring(info.isvararg))
+assert(debug.getlocal(f0, 1) == "x")
+assert(not debug.getlocal(f0, 2))
+simpleResult = f0(35)
+assert(simpleResult == 42, simpleResult)
+`
+	chunk, err := DumpSource(source, "@simple-function-debug.lua", false)
+	if err != nil {
+		// 编译失败说明简单函数体 guard 样例不再合法。
+		t.Fatalf("DumpSource simple function debug failed: %v", err)
+	}
+
+	dir := t.TempDir()
+	chunkPath := filepath.Join(dir, "simple-function-debug.luac")
+	if err := os.WriteFile(chunkPath, chunk, 0o644); err != nil {
+		// 测试 chunk 必须可写入临时目录。
+		t.Fatalf("write simple function chunk: %v", err)
+	}
+
+	state := lua.NewState()
+	defer state.Close()
+	if err := lua.OpenLibs(state); err != nil {
+		// debug.getinfo 与 debug.getlocal 依赖标准库已注册。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+	if err := lua.DoFile(state, chunkPath); err != nil {
+		// 执行失败时说明 luac 产物的 debug metadata 或函数执行语义已偏离。
+		t.Fatalf("DoFile simple function debug chunk failed: %v", err)
+	}
+	result, err := lua.GetGlobal(state, "simpleResult")
+	if err != nil {
+		// 全局读取不应失败。
+		t.Fatalf("GetGlobal simpleResult failed: %v", err)
+	}
+	if result.Kind != runtime.KindInteger || result.Integer != 42 {
+		// 简单函数仍必须按普通 Lua 语义返回参数加整数常量。
+		t.Fatalf("simpleResult = %#v, want integer 42", result)
+	}
+
+	var stdout bytes.Buffer
+	if err := Run([]string{"-l", "-l", chunkPath}, Streams{Stdout: &stdout}); err != nil {
+		// 刚生成的 binary chunk 必须可被 gluac -l -l 读取。
+		t.Fatalf("Run list simple function chunk failed: %v", err)
+	}
+	listOutput := stdout.String()
+	expectedFragments := []string{
+		"child[0] <@simple-function-debug.lua:1,1> params=1 vararg=false maxstack=2",
+		"[0000] line=1 ADD       A=1 B=R(0) C=K(0)",
+		"[0001] line=1 RETURN",
+		"locals (1):",
+		"name=\"x\" pc=[0,2)",
+		"debug child[0] source=\"@simple-function-debug.lua\" lines=1..1 code=2 constants=1 children=0",
+		"lineinfo=[1 1]",
+		"local[0] name=\"x\" pc=[0,2)",
+	}
+	for _, expectedFragment := range expectedFragments {
+		// 每个片段都对应 compact fast path 必须保持的 debug 或 luac -l -l 可见字段。
+		if !strings.Contains(listOutput, expectedFragment) {
+			// 缺少任一片段都说明列表输出或 debug metadata 已经漂移。
+			t.Fatalf("list output missing %q in:\n%s", expectedFragment, listOutput)
+		}
+	}
+}
+
 // TestCompileSourceSimpleFunctionBodyNonTargetKeepsOrdinaryShape 固定非目标函数体必须回退普通 AST/codegen。
 func TestCompileSourceSimpleFunctionBodyNonTargetKeepsOrdinaryShape(t *testing.T) {
 	// 引入局部变量 y，使函数体不再满足 `return <param> + <integer>` 紧凑候选形态。
