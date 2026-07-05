@@ -535,6 +535,90 @@ func TestCompileSourceSimpleFunctionBodyNonTargetKeepsOrdinaryShape(t *testing.T
 	}
 }
 
+// TestCompileSourceMultipleSimpleFunctionsKeepDebugShape 固定多个顶层简单函数声明的 child Proto 与调试输出。
+//
+// 未来 compile-only streaming 路径若跳过 FunctionStatement AST 构造，也必须生成与普通 codegen 等价的
+// 子 Proto 顺序、行号、local debug 记录和反汇编可见 opcode。
+func TestCompileSourceMultipleSimpleFunctionsKeepDebugShape(t *testing.T) {
+	source := "function f0(x) return x + 7 end\nfunction f1(y) return y + 9 end\nreturn f0(1) + f1(2)\n"
+	proto, err := CompileSource(source, "@multi-simple-functions.lua")
+	if err != nil {
+		// 合法多函数样例必须可编译。
+		t.Fatalf("CompileSource multi simple functions failed: %v", err)
+	}
+	if len(proto.Protos) != 2 {
+		// 两个顶层 function 声明必须按源码顺序生成两个 child Proto。
+		t.Fatalf("unexpected child proto count=%d", len(proto.Protos))
+	}
+
+	tests := []struct {
+		name       string
+		childIndex int
+		line       int
+		paramName  string
+		integer    int64
+	}{
+		{name: "first", childIndex: 0, line: 1, paramName: "x", integer: 7},
+		{name: "second", childIndex: 1, line: 2, paramName: "y", integer: 9},
+	}
+	for _, test := range tests {
+		// 每个 child Proto 独立校验，确保 streaming 不交换函数顺序或复用错误行号。
+		t.Run(test.name, func(t *testing.T) {
+			child := proto.Protos[test.childIndex]
+			if child.LineDefined != test.line || child.LastLineDefined != test.line {
+				// debug.getinfo 和 luac -l -l 依赖函数定义行范围。
+				t.Fatalf("unexpected child line range=%d,%d want line=%d", child.LineDefined, child.LastLineDefined, test.line)
+			}
+			if len(child.LineInfo) != 2 || child.LineInfo[0] != test.line || child.LineInfo[1] != test.line {
+				// ADD 与 RETURN 都必须映射回对应源码行。
+				t.Fatalf("unexpected child lineinfo=%v want line=%d", child.LineInfo, test.line)
+			}
+			if len(child.Constants) != 1 || child.Constants[0].Kind != bytecode.ConstantInteger || child.Constants[0].Integer != test.integer {
+				// 每个 child 只应保留自己的 integer 常量。
+				t.Fatalf("unexpected child constants=%+v want integer=%d", child.Constants, test.integer)
+			}
+			if len(child.LocalVars) != 1 || child.LocalVars[0].Name != test.paramName || child.LocalVars[0].StartPC != 0 || child.LocalVars[0].EndPC != 2 {
+				// 参数 local 记录必须保留，供 debug.getlocal 和详细反汇编使用。
+				t.Fatalf("unexpected child locals=%+v want param=%q", child.LocalVars, test.paramName)
+			}
+			if len(child.Code) != 2 {
+				// 目标形态仍应生成 ADD 和 RETURN 两条指令。
+				t.Fatalf("unexpected child code=%v", child.Code)
+			}
+			assertInstructionFields(t, child.Code[0], bytecode.OpAdd, 1, 0, bytecode.BitRK)
+			assertInstructionFields(t, child.Code[1], bytecode.OpReturn, 1, 2, 0)
+		})
+	}
+
+	debugDump := DebugDumpProto(proto)
+	for _, want := range []string{
+		`debug child[0] source="@multi-simple-functions.lua" lines=1..1 code=2 constants=1 children=0`,
+		`debug child[1] source="@multi-simple-functions.lua" lines=2..2 code=2 constants=1 children=0`,
+		`local[0] name="x" pc=[0,2)`,
+		`local[0] name="y" pc=[0,2)`,
+	} {
+		// 详细调试 dump 是 `luac -l -l` 的稳定代理，必须保留 child 行号和 local 名称。
+		if !strings.Contains(debugDump, want) {
+			t.Fatalf("debug dump missing %q:\n%s", want, debugDump)
+		}
+	}
+
+	minimal := MinimalDisassemblyProto(proto)
+	for _, want := range []string{
+		"child[0] code=2",
+		"child[1] code=2",
+		"[0000] line=1 ADD",
+		"[0001] line=1 RETURN",
+		"[0000] line=2 ADD",
+		"[0001] line=2 RETURN",
+	} {
+		// 最小反汇编必须继续展示两段 child 指令和各自 lineinfo。
+		if !strings.Contains(minimal, want) {
+			t.Fatalf("minimal disassembly missing %q:\n%s", want, minimal)
+		}
+	}
+}
+
 // containsInstructionOp 判断 Proto 指令区是否包含指定 opcode。
 func containsInstructionOp(proto *bytecode.Proto, opCode bytecode.OpCode) bool {
 	// 线性扫描足够测试断言使用，保持辅助函数无额外索引状态。

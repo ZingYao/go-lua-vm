@@ -51,7 +51,7 @@
 - [x] 跑 `BenchmarkCompileSource3000Functions` 五轮和 CPU/memory profile。
 - [ ] 设计顶层简单 function 声明 compact/streaming 路径，明确普通 parser、semantic、debug、`luac -l -l`、
   错误位置和非目标回退边界。
-- [ ] 先补 guard 测试：普通 parser 仍返回完整 AST、target Proto/list 与普通路径一致、非目标形态回退、
+- [x] 先补 guard 测试：普通 parser 仍返回完整 AST、target Proto/list 与普通路径一致、非目标形态回退、
   语法错误位置一致。
 - [ ] 实现最小 prototype。
 - [ ] 五轮 micro wall-clock 稳定下降至少 `5%`，且 B/op 不高于当前约 `3.50 MB`。
@@ -68,6 +68,16 @@
 - 结论：继续做 lexer、常量索引、页大小、局部字段或普通表达式微调不满足门禁。下一小切口必须先设计并补
   guard 测试，目标是顶层简单函数声明 compact/streaming 表示；若不能证明普通 parser、debug、`luac -l -l`
   和错误位置完全回退，则不得实现生产改动。
+
+2026-07-05 guard 测试补齐：
+
+- `TestParserOrdinarySimpleFunctionKeepsFullAST` 固定 `parser.New` 必须保留完整 `FunctionStatement`、
+  `ReturnStatement`、`BinaryExpression`、name/literal AST；`NewCompactWithSyntax` 只能在编译专用入口生成
+  `CompactSimpleAddInteger` summary。
+- `TestCompileSourceMultipleSimpleFunctionsKeepDebugShape` 固定多个顶层简单函数声明的 child Proto 顺序、
+  `LineDefined`/`LastLineDefined`、`LineInfo`、参数 local debug 记录、`DebugDumpProto` 和最小反汇编输出。
+- 复跑 `BenchmarkCompileSource3000Functions` 三轮：约 `2.400-2.406 ms/op`、`3.50 MB/op`、`72-73 allocs/op`。
+  本轮是 guard 切口，性能无改善，下一轮才允许在这些测试保护下设计 production prototype。
 
 ## 2. `recursion` / 递归
 

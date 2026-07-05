@@ -452,6 +452,79 @@ func TestParserReturnStatementInlineSingleValue(t *testing.T) {
 	}
 }
 
+// TestParserOrdinarySimpleFunctionKeepsFullAST 验证普通 parser 入口不会生成编译专用 compact summary。
+//
+// 未来 compile-only streaming 路径可以跳过部分 AST 构造，但 parser.New 必须继续返回完整
+// FunctionStatement、ReturnStatement 和 BinaryExpression，供格式化、诊断、工具和宿主直接读取。
+func TestParserOrdinarySimpleFunctionKeepsFullAST(t *testing.T) {
+	source := "function f0(x) return x + 7 end\nreturn f0(1)\n"
+
+	ordinaryParser := New(source)
+	ordinaryChunk, err := ordinaryParser.ParseChunk()
+	if err != nil {
+		// 普通入口必须能解析官方 benchmark 同构的简单函数声明。
+		t.Fatalf("ordinary ParseChunk failed: %v", err)
+	}
+	ordinaryFunction, ok := ordinaryChunk.Block.Statements[0].(*FunctionStatement)
+	if !ok {
+		// 顶层第一条语句必须继续以公开 FunctionStatement 暴露。
+		t.Fatalf("ordinary parser should expose FunctionStatement, got %T", ordinaryChunk.Block.Statements[0])
+	}
+	if _, _, _, _, _, ok := ordinaryFunction.Body.CompactSimpleAddInteger(); ok || ordinaryFunction.Body.compactSimple != nil {
+		// 普通 parser 不允许携带编译专用 summary，避免宿主误依赖内部 fast path。
+		t.Fatalf("ordinary parser should not expose compact summary")
+	}
+	if ordinaryFunction.Body.Body == nil || ordinaryFunction.Body.Body.Return == nil {
+		// 普通 AST 必须保留函数体 block 和 return 节点。
+		t.Fatalf("ordinary function should keep full return AST: %+v", ordinaryFunction.Body)
+	}
+	returnStatement := ordinaryFunction.Body.Body.Return
+	if len(returnStatement.Values) != 1 {
+		// `return x + 7` 必须解析为单返回值表达式。
+		t.Fatalf("unexpected return values=%d", len(returnStatement.Values))
+	}
+	binaryExpression, ok := returnStatement.Values[0].(*BinaryExpression)
+	if !ok || binaryExpression.Operator != "+" {
+		// 返回值必须保留二元加法表达式，供错误位置和工具分析使用。
+		t.Fatalf("return value should be binary + expression, got %#v", returnStatement.Values[0])
+	}
+	leftName, ok := binaryExpression.Left.(*NameExpression)
+	if !ok || leftName.Name != "x" {
+		// 左操作数必须保留参数名读取。
+		t.Fatalf("unexpected left expression=%#v", binaryExpression.Left)
+	}
+	rightLiteral, ok := binaryExpression.Right.(*LiteralExpression)
+	if !ok || rightLiteral.Number.Integer != 7 {
+		// 右操作数必须保留整数 literal 节点。
+		t.Fatalf("unexpected right expression=%#v", binaryExpression.Right)
+	}
+
+	compactParser := NewCompactWithSyntax(source, extensions.Default())
+	compactChunk, err := compactParser.ParseChunk()
+	if err != nil {
+		// 编译专用入口也必须成功解析同一源码。
+		t.Fatalf("compact ParseChunk failed: %v", err)
+	}
+	compactFunction, ok := compactChunk.Block.Statements[0].(*FunctionStatement)
+	if !ok {
+		// 当前 compact 路径仍保留 FunctionStatement 外壳，后续 streaming 也必须能等价生成 Proto。
+		t.Fatalf("compact parser should expose FunctionStatement, got %T", compactChunk.Block.Statements[0])
+	}
+	paramName, integerValue, returnPosition, operatorPosition, literalPosition, ok := compactFunction.Body.CompactSimpleAddInteger()
+	if !ok || paramName != "x" || integerValue != 7 {
+		// 编译专用入口应只在精确目标形态上生成 summary。
+		t.Fatalf("unexpected compact summary param=%q integer=%d ok=%v", paramName, integerValue, ok)
+	}
+	if returnPosition.Line != 1 || operatorPosition.Line != 1 || literalPosition.Line != 1 {
+		// summary 必须保留 return/operator/literal 行号，供 codegen debug 行号使用。
+		t.Fatalf("unexpected compact positions return=%+v operator=%+v literal=%+v", returnPosition, operatorPosition, literalPosition)
+	}
+	if compactFunction.Body.Body == nil || compactFunction.Body.Body.Return != nil || len(compactFunction.Body.Body.Statements) != 0 {
+		// compact 入口的目标函数体只保留空 block 外壳和 summary，不能半构造混合 AST。
+		t.Fatalf("compact function body should contain summary-only block: %+v", compactFunction.Body.Body)
+	}
+}
+
 // TestParserIfWhileRepeatStatements 验证 if/elseif/else、while 和 repeat-until 语句。
 //
 // 条件表达式当前使用基础表达式，block 内使用已实现赋值语句。
