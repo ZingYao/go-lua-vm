@@ -297,18 +297,22 @@ direct child Proto 生命周期继续压缩会触及 Proto/lineinfo/locals/luac/
 
 ## 2. `function_call` batch guard 冻结候选
 
-- [ ] 仅在 `function_call` 完整三轮稳定高于 `1.05x` 时进入本项。
-- [ ] 运行 `BenchmarkPreparedFunctionCallOfficial` 五轮和 CPU profile。
-- [ ] 确认热点仍集中在 `TryExecuteFunctionCallAssignForLoopBatch` 的动态 guard，而不是官方基线噪声。
+- [x] 评估 `function_call` 完整三轮是否稳定高于 `1.05x`。
+- [x] 运行 `BenchmarkPreparedFunctionCallOfficial` 五轮 micro 复核。
+- [x] 因完整 benchmark 未达进入门槛，暂停 CPU profile 和热点归因。
 - [ ] 设计 batch 内可冻结字段：闭包寄存器、函数 Proto、leaf add-return descriptor、参数寄存器、结果寄存器。
 - [ ] 补 guard 测试：函数值被替换、upvalue/环境变化、hook 打开、yield/continuation、错误 PC、traceback、context 取消。
 - [ ] 实现最小 guard 冻结 prototype。
 - [ ] 运行 `BenchmarkPreparedFunctionCallOfficial` 五轮；未稳定改善至少 `8%` 则回退。
 - [ ] 运行完整 benchmark 三轮；`function_call` 未稳定低于 `1.00x` 则不保留生产改动。
 
+状态：2026-07-05 完整 benchmark 只有约 `1.01x`，未达到 `1.05x` 进入门槛；prepared micro 虽稳定在
+约 `2.88-2.90 ms/op`，但不代表端到端稳定差距。后续 guard 设计和 prototype 暂停，除非完整 benchmark
+三轮重新触发门槛。
+
 ## 3. `recursion` closure/upvalue 生命周期候选
 
-- [ ] 仅在 `recursion` 完整三轮稳定高于 `1.08x` 时进入本项。
+- [x] 仅在 `recursion` 完整三轮稳定高于 `1.08x` 时进入本项。
 - [x] 运行 `BenchmarkPreparedRecursion` 五轮和 CPU/memory profile。
 - [x] 证明剩余成本仍为 local `fib` closure 和 self upvalue cell 分配。
 - [x] 设计非逃逸 local function descriptor，列出返回、传参、存表、闭包身份比较、`debug.getupvalue`、hook、traceback、pcall/error、coroutine/yield 的回退边界。
@@ -344,14 +348,32 @@ CGO_ENABLED=0 go test ./lua -run '^$' \
 闭包身份比较、`debug.getupvalue`、`debug.setupvalue`、`debug.upvalueid`、`debug.upvaluejoin`、
 错误 traceback、line/call hook、pcall/error 和 coroutine/yield。未补齐前禁止直接实现 descriptor。
 
+状态：2026-07-05 后续完整 benchmark 只有 `1.06x / 1.06x / 1.05x`，未达到稳定 `1.08x` 进入门槛。
+descriptor guard 和 prototype 暂停，除非完整 benchmark 三轮重新触发门槛。
+
 ## 4. 噪声带回归复核
 
-- [ ] `string_concat` 只有在完整三轮稳定高于 `1.08x` 时重新 profile。
-- [ ] `arith_mix_loop` 只有在完整三轮稳定高于 `1.08x` 时重新 profile。
-- [ ] `arith_add_loop`、`arith_chain_temp`、`table_rw`、`closure_upvalue`、`stdlib_math_string` 当前已快于官方，默认不再扩张。
-- [ ] 任一噪声带项目如果没有新的单一主因，不做生产改动，只更新证伪记录。
+- [x] `string_concat` 只有在完整三轮稳定高于 `1.08x` 时重新 profile。
+- [x] `arith_mix_loop` 只有在完整三轮稳定高于 `1.08x` 时重新 profile。
+- [x] `arith_add_loop`、`arith_chain_temp`、`table_rw`、`closure_upvalue`、`stdlib_math_string` 当前已快于官方，默认不再扩张。
+- [x] 任一噪声带项目如果没有新的单一主因，不做生产改动，只更新证伪记录。
 
-## 5. 全局验证与提交
+状态：2026-07-05 `string_concat`、`arith_mix_loop`、`function_call`、`recursion` 均未稳定超过重新打开门槛；
+其余项目已快于官方。噪声带回归复核关闭。
+
+## 5. 最终收敛结论
+
+- [x] 完成最终分支默认完整 benchmark 三轮复核。
+- [x] 完成所有高于 `1.00x` 项的 Go micro 或 profile 复核。
+- [x] 完成 `compile_3000_functions` prototype 1，并通过完整 benchmark 验证收益。
+- [x] 证伪 `compile_3000_functions` prototype 2，回退生产改动。
+- [x] 记录 `recursion` 与 `function_call` 未达到生产实现门槛。
+- [x] 记录噪声带项目不重新打开。
+
+最终结论：截至 2026-07-05，`quanquan/feature/glua-final-perf` 没有新的五分钟级生产优化切口。后续只在
+完整 benchmark 三轮重新触发门槛，或出现新的 `compile_3000_functions` 结构性设计时重启本 TODO。
+
+## 6. 全局验证与提交
 
 - [ ] 每个 Go 改动提交前执行 `gopls check <changed-go-files>`。
 - [ ] 每个 Go 改动提交前执行 `gofmt -w <changed-go-files>`。
