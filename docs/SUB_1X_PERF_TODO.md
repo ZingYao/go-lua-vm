@@ -212,8 +212,10 @@
 ## 3. `string_concat` / 字符串拼接
 
 - [x] 跑官方 8000 次拼接 fixture 的 DoString/prepared micro 和 profile。
-- [ ] 复核 `__concat` 元方法、debug 可见性、yield、错误路径和 materialize 边界。
-- [ ] 只有语义可证明时，设计更窄 builder/materialize 切口。
+- [x] 复核 `__concat` 元方法、debug 可见性、yield、错误路径和 materialize 边界。
+- [x] 只有语义可证明时，设计更窄 builder/materialize 切口。
+- [ ] 实现整段 builder/materialize prototype，仅覆盖无 hook、无 coroutine、raw string 累加器、固定非空 string
+  常量、integer numeric-for，且 batch 内可保留 context 检查边界的窄形态。
 - [ ] 完整 benchmark 三轮稳定低于 `1.00x`，否则不保留生产改动。
 
 2026-07-05 string_concat profile：
@@ -228,6 +230,15 @@
   `repeatedAppendString` 约 `37.27%`，普通 `executeConcat` 约 `17.27%`。
 - 证据结论：已有 string append batch 生效，但每个 context 窗口仍 materialize 中间字符串；下一步只能先补
   “整段 builder/materialize + batch 内 context check” 设计和 guard，不能直接扩大生产路径。
+
+2026-07-05 string_concat builder guard 设计：
+
+- 新增 `TestDoStringConcatCountHookSeesSelfAppendIntermediates`，固定 count hook 必须观察 `s = s .. "x"`
+  过程中的 `0,1,2,3` 长度。
+- 结合已有 string/string 不触发 `__concat`、非 string 触发 `__concat`、line hook 观察中间值、concat 元方法
+  yield 恢复测试，确认整段 builder 必须在任意 debug hook、元方法/yield 风险或非 raw string 形态下回退。
+- 本轮无生产性能变化；定向 guard 测试通过。下一轮若实现 prototype，必须继续跑这些 guard、官方 8000 次
+  prepared micro 五轮和完整 benchmark 三轮。
 
 ## 4. `function_call` / 函数调用
 

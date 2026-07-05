@@ -360,6 +360,38 @@ profile 结果：
 一次 materialize；否则继续走当前 batch 或普通 `CONCAT`，以保留 `__concat`、line/count hook、yield、错误 PC、
 traceback 和 context cancellation 边界。
 
+## `string_concat` builder guard 设计
+
+2026-07-05 在 `41b6e68` 后补齐整段 builder 前置 guard。新增
+`TestDoStringConcatCountHookSeesSelfAppendIntermediates`，要求 `debug.sethook(fn, "", 1)` 的 count hook 能在
+`s = s .. "x"` 循环中观察到 `0,1,2,3` 四个可见长度；已有
+`TestDoStringConcatLineHookSeesSelfAppendIntermediates` 固定 line hook 必须观察 `0,1,2`。这两类测试共同证明：
+未来整段 builder 只要检测到任意 debug hook 打开，就必须回退普通逐指令路径，不能只按 line hook 特判。
+
+当前已有 guard 覆盖：
+
+- `TestDoStringConcatStringPairIgnoresStringMetamethod`：两个 raw string 直接基础拼接，不触发 string 类型
+  `__concat`。
+- `TestDoStringConcatNonStringUsesStringMetamethod`：任一操作数不能直接转 string 时必须回退并触发 `__concat`。
+- `TestDoStringConcatLineHookSeesSelfAppendIntermediates`：line hook 打开时必须看到每轮自拼接前的中间值。
+- `TestDoStringConcatCountHookSeesSelfAppendIntermediates`：count hook 打开时必须看到自拼接过程中递增的 local
+  长度。
+- `TestDoStringCoroutineYieldInConcatMetamethod`：`__concat` 元方法 yield 后必须恢复连续 `CONCAT` 折叠顺序。
+
+下一步允许的生产 prototype 只能覆盖更窄形态：
+
+- 字节码必须仍是已识别的 `MOVE; LOADK; CONCAT; FORLOOP`，右侧必须是固定非空 string 常量。
+- 运行时寄存器必须证明累加器为 raw string，for index/limit/step 都是 integer numeric-for，且没有 pending
+  concat continuation。
+- API 执行环境必须无 debug hook、无 coroutine/yield 挂起点、无需 precise frame sync；否则保持当前 batch 或普通
+  VM。
+- builder 可以在内部按现有 context 窗口调用 `CheckContext`，但取消时必须同步到循环体 PC 并避免提交超过取消边界
+  的 Lua 可见状态。
+- 任何 guard 失败都不能产生副作用，必须保留 `__concat`、错误 PC、traceback、debug local/upvalue 和 hook 可见性。
+
+本轮是 guard/设计切口，不改变生产性能。后验定向测试通过；下一轮若实现 prototype，验收必须至少包含上述
+guard、官方 8000 次 prepared micro 五轮和完整 benchmark 三轮。
+
 优先级：
 
 1. `compile_3000_functions` / 编译3000个函数：探索 compile-only streaming 简单函数声明路径。目标是跳过公开

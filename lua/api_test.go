@@ -2388,6 +2388,44 @@ assert(s == "xxx")
 	}
 }
 
+// TestDoStringConcatCountHookSeesSelfAppendIntermediates 验证 count hook 可观察自拼接中间值。
+//
+// count hook 没有源码行参数，但它仍会在 VM 指令边界读取闭包中的 local `s`。未来若将字符串自拼接
+// 压缩成整段 builder，必须在任意 debug hook 打开时回退普通路径，否则 count hook 会看不到
+// `0,1,2,3` 这些递增长度。
+func TestDoStringConcatCountHookSeesSelfAppendIntermediates(t *testing.T) {
+	// 创建完整标准库 State，确保 debug.sethook 与 table.concat 可用。
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库打开不应失败。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+
+	source := `local seen = {}
+local seenMap = {}
+local s = ""
+debug.sethook(function(event)
+  assert(event == "count")
+  local length = #s
+  if not seenMap[length] then
+    seenMap[length] = true
+    seen[#seen + 1] = length
+  end
+end, "", 1)
+for i = 1, 3 do
+  s = s .. "x"
+end
+debug.sethook()
+assert(s == "xxx")
+assert(seenMap[0] and seenMap[1] and seenMap[2] and seenMap[3], table.concat(seen, ","))
+`
+	if err := DoString(state, source); err != nil {
+		// count hook 必须观察到自拼接过程中的全部可见长度。
+		t.Fatalf("DoString concat count hook visibility failed: %v", err)
+	}
+}
+
 // TestDoStringSupportsStringMethodIndex 验证字符串值可通过类型级方法表调用 string 库方法。
 //
 // Lua 5.3 标准库打开后，`("..."):format(x)` 应等价于 `string.format("...", x)`；官方
