@@ -513,6 +513,46 @@ context 取消。没有这些 guard 前，不直接冻结或扩大 batch 内 gua
 生产优化，必须先评估 leaf add-return batch 的闭包寄存器、函数 Proto、参数寄存器和结果寄存器冻结边界，
 并证明上述 guard 不被破坏。
 
+## `function_call` 寄存器延迟提交
+
+2026-07-06 在 guard 测试保护下实现一个窄生产切口：`TryExecuteFunctionCallAssignForLoopBatch` 不再每轮写回
+CALL 临时槽、参数槽、sum 和 FORLOOP index，而是在 batch 正常退出或 context 取消边界一次性提交最后一个已完成
+CALL 后的 Lua 可见寄存器状态。该路径不减少每个虚拟 CALL 前的 `state.CheckContext`，不扩大 batch 命中形态，
+也不绕过动态 callee/upvalue/env、hook、coroutine/yield、错误 traceback 或 context 取消 guard。
+
+五轮前置 micro：
+
+| Benchmark | ns/op | B/op | allocs/op |
+| --- | ---: | ---: | ---: |
+| `BenchmarkPreparedFunctionCallOfficial` | `2878656-2903376` | `408-409 B` | `2` |
+
+后验 micro：
+
+| Benchmark | ns/op | B/op | allocs/op |
+| --- | ---: | ---: | ---: |
+| `BenchmarkDoStringFunctionCallOfficial` | `1478466-1506782` | 约 `248.9 KB` | `214` |
+| `BenchmarkPreparedFunctionCallOfficial` | `1410984 / 1412893 / 1520164` | `404 B` | `2` |
+
+完整官方 benchmark 三轮中位数：
+
+| 排名 | English case | 中文名称 | 官方三轮中位数 | 本项目三轮中位数 | 本项目/官方 | 相对初始倍率 |
+| ---: | --- | --- | ---: | ---: | ---: | ---: |
+| 1 | `recursion` | 递归 | 0.003755s | 0.004113s | 1.10x | 回退约 0.02x |
+| 2 | `compile_3000_functions` | 编译3000个函数 | 0.005290s | 0.005661s | 1.07x | 改善约 0.17x |
+| 3 | `arith_mix_loop` | 混合算术循环 | 0.011405s | 0.012068s | 1.06x | 回退约 0.05x |
+| 4 | `table_rw` | 表读写 | 0.007157s | 0.006431s | 0.90x | 已低于 1.0 |
+| 5 | `closure_upvalue` | 闭包 upvalue | 0.008062s | 0.007136s | 0.89x | 已低于 1.0 |
+| 6 | `string_concat` | 字符串拼接 | 0.004770s | 0.004046s | 0.85x | 已低于 1.0 |
+| 7 | `function_call` | 函数调用 | 0.006912s | 0.005671s | 0.82x | 改善约 0.22x |
+| 8 | `arith_chain_temp` | 算术临时链 | 0.012999s | 0.010086s | 0.78x | 已低于 1.0 |
+| 9 | `arith_add_loop` | 整数累加循环 | 0.007719s | 0.005100s | 0.66x | 已低于 1.0 |
+| 10 | `stdlib_math_string` | 标准库数学与字符串 | 0.019358s | 0.011344s | 0.59x | 已低于 1.0 |
+
+结论：`function_call` 从上轮三轮 `1.045x` 降到 `0.82x`，已稳定低于 `1.00x`，后续不再扩大该 batch。
+剩余稳定高于 `1.00x` 的项为 `recursion`、`compile_3000_functions` 和 `arith_mix_loop`；其中 recursion
+在本轮三轮中重新成为最高项，但此前 borrowed closure 已证伪同一分配切口，下一轮必须先 profile 再决定是否还有
+调用体/递归 fast path 空间，不能继续扩大 borrowed closure。
+
 ## 语义门禁
 
 - 不引入 CGO，不接 Lua C API，不新增外部依赖。

@@ -4673,20 +4673,25 @@ func (vm *VM) TryExecuteFunctionCallAssignForLoopBatch(batch FunctionCallAssignF
 	step := stepValue.Integer
 	visibleIndex := visibleIndexValue.Integer
 	nextPC = batch.pc
+	lastSumBeforeCall := sum
+	lastVisibleIndexBeforeCall := visibleIndex
+	lastCallResult := sum
 	for iterations < maxIterations {
 		if iterations > 0 {
 			// 首轮已在动态 guard 前检查；后续每个虚拟 CALL 前继续保留 direct CALL 取消边界。
 			if err := state.CheckContext(); err != nil {
+				// 取消发生在下一次 CALL 入口前，提交到上一轮 FORLOOP 已完成的可见边界。
+				commitFunctionCallAssignForLoopBatchRegisters(registers, superInstruction, lastSumBeforeCall, lastVisibleIndexBeforeCall, lastCallResult, index, visibleIndex)
 				return nextPC, iterations, true, err
 			}
 		}
 
-		callResult := sum + visibleIndex
-		registers[superInstruction.FunctionSlot] = batch.functionValue
-		registers[superInstruction.FirstArgumentSlot] = IntegerValue(sum)
-		registers[superInstruction.SecondArgumentSlot] = IntegerValue(visibleIndex)
-		registers[superInstruction.FunctionSlot] = IntegerValue(callResult)
-		registers[superInstruction.SumRegister] = IntegerValue(callResult)
+		sumBeforeCall := sum
+		visibleIndexBeforeCall := visibleIndex
+		callResult := sumBeforeCall + visibleIndexBeforeCall
+		lastSumBeforeCall = sumBeforeCall
+		lastVisibleIndexBeforeCall = visibleIndexBeforeCall
+		lastCallResult = callResult
 		sum = callResult
 		iterations++
 
@@ -4696,8 +4701,6 @@ func (vm *VM) TryExecuteFunctionCallAssignForLoopBatch(batch FunctionCallAssignF
 			// 循环继续时更新内部 index 和外部可见循环变量，并跳回循环体开头。
 			index = nextIndex
 			visibleIndex = nextIndex
-			registers[superInstruction.ForBase] = IntegerValue(index)
-			registers[superInstruction.ForBase+3] = IntegerValue(visibleIndex)
 			nextPC = superInstruction.LoopPC
 			vm.pcOffset = superInstruction.ForSBx
 		} else {
@@ -4709,12 +4712,29 @@ func (vm *VM) TryExecuteFunctionCallAssignForLoopBatch(batch FunctionCallAssignF
 	if iterations == 0 {
 		return 0, 0, false, nil
 	}
+	commitFunctionCallAssignForLoopBatchRegisters(registers, superInstruction, lastSumBeforeCall, lastVisibleIndexBeforeCall, lastCallResult, index, visibleIndex)
 	vm.currentPC = batch.pc + 5
 	vm.skipNext = false
 	vm.closeFrom = -1
 	vm.hasCallRequest = false
 	vm.returned = false
 	return nextPC, iterations, true, nil
+}
+
+// commitFunctionCallAssignForLoopBatchRegisters 提交 function_call batch 的 Lua 可见寄存器状态。
+//
+// registers 必须是当前 VM 寄存器窗口；superInstruction 来自已验证的 assign batch；sumBeforeCall、
+// visibleIndexBeforeCall 和 callResult 描述最后一个已完成 CALL；index 与 visibleIndex 描述该 CALL 后
+// FORLOOP 的可见控制槽状态。该 helper 只在 batch 退出或 context 取消边界调用，避免热循环每轮重复写
+// 临时 CALL 槽，同时保持普通 VM 在 MOVE 入口或循环退出处的可见寄存器状态。
+func commitFunctionCallAssignForLoopBatchRegisters(registers []Value, superInstruction functionCallAssignForLoopSuperInstruction, sumBeforeCall int64, visibleIndexBeforeCall int64, callResult int64, index int64, visibleIndex int64) {
+	// 函数槽在 CALL 后保存返回值；下一轮普通 MOVE 会再把 closure 放回函数槽。
+	registers[superInstruction.FunctionSlot] = IntegerValue(callResult)
+	registers[superInstruction.FirstArgumentSlot] = IntegerValue(sumBeforeCall)
+	registers[superInstruction.SecondArgumentSlot] = IntegerValue(visibleIndexBeforeCall)
+	registers[superInstruction.SumRegister] = IntegerValue(callResult)
+	registers[superInstruction.ForBase] = IntegerValue(index)
+	registers[superInstruction.ForBase+3] = IntegerValue(visibleIndex)
 }
 
 // ensureClosureUpvalueForLoopSuperInstructions 返回当前 Proto 的闭包 upvalue 循环预匹配表。

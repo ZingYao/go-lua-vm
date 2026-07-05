@@ -267,9 +267,9 @@
 
 - [x] 完整 benchmark 三轮稳定 `> 1.00x` 后进入。
 - [x] 跑 `BenchmarkPreparedFunctionCallOfficial` 五轮和 CPU profile。
-- [ ] 评估 leaf add-return batch guard 冻结：闭包寄存器、函数 Proto、参数寄存器、结果寄存器。
+- [x] 评估 leaf add-return batch guard 冻结：闭包寄存器、函数 Proto、参数寄存器、结果寄存器。
 - [x] 补 guard：函数值替换、upvalue/env 变化、hook 打开、yield/continuation、错误 PC、traceback、context 取消。
-- [ ] 完整 benchmark 三轮稳定低于 `1.00x`，否则回退或记录证伪。
+- [x] 完整 benchmark 三轮稳定低于 `1.00x`，否则回退或记录证伪。
 
 2026-07-05 function_call profile：
 
@@ -295,6 +295,18 @@
 - 后验 `BenchmarkPreparedFunctionCallOfficial` 三轮：`2908173 / 2904620 / 2909274 ns/op`、`408-409 B/op`、
   `2 allocs/op`。本轮是 guard 切口，性能无改善；下一步若生产优化，仍需先评估 leaf add-return batch 的
   闭包寄存器、函数 Proto、参数寄存器和结果寄存器冻结边界。
+
+2026-07-06 function_call 寄存器延迟提交：
+
+- 生产切口：`TryExecuteFunctionCallAssignForLoopBatch` 在 batch 内只保留 `sum`、实参和 numeric-for 控制槽的局部
+  变量状态，延迟到 batch 正常退出或 context 取消边界一次性提交函数槽、参数槽、sum 和 FORLOOP index。
+- 语义边界：没有减少每个虚拟 CALL 前的 `state.CheckContext`，也没有扩大命中形态；debug hook、coroutine、
+  continuation、动态 callee/upvalue/env 和 traceback 仍由既有 guard 回退普通路径。
+- 五轮前置 `BenchmarkPreparedFunctionCallOfficial`：`2878656-2903376 ns/op`、`408-409 B/op`、`2 allocs/op`。
+- 后验 micro：prepared 三轮 `1410984 / 1412893 / 1520164 ns/op`、`404 B/op`、`2 allocs/op`；
+  DoString 三轮 `1478466-1506782 ns/op`、约 `248.9 KB/op`、`214 allocs/op`。
+- 完整官方 benchmark 三轮中位数：`function_call` 官方 `0.006912s`，本项目 `0.005671s`，倍率 `0.82x`；
+  相比上轮三轮 `1.045x` 改善约 `0.225x`，已稳定低于 `1.00x`。后续不再扩大 function_call batch。
 
 ## 5. `arith_mix_loop` / 混合算术循环
 
