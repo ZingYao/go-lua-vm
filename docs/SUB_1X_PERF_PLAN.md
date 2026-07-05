@@ -324,6 +324,42 @@ open upvalue cell。
 转向 `string_concat` 或 `function_call` 的 profile；`compile_3000_functions` 若继续推进，必须先补完整
 chunk streaming 设计和 guard 测试。
 
+## `string_concat` profile 结论
+
+2026-07-05 在 `f482cc2` 后补齐官方规模字符串拼接 micro 入口：
+`BenchmarkDoStringStringConcatOfficial` 覆盖源码编译 + OpenLibs + 执行端到端路径，
+`BenchmarkPreparedStringConcatOfficial` 覆盖预编译 closure 重复执行路径。fixture 与官方 benchmark 一致：
+
+```lua
+local s = ''
+for i = 1, 8000 do
+  s = s .. 'x'
+end
+return #s
+```
+
+五轮 micro：
+
+| Benchmark | ns/op | B/op | allocs/op |
+| --- | ---: | ---: | ---: |
+| `BenchmarkDoStringStringConcatOfficial` | `440866-453702` | 约 `3.066 MB` | `882` |
+| `BenchmarkPreparedStringConcatOfficial` | `396463-402148` | 约 `2.943 MB` | `684` |
+
+profile 结果：
+
+- `alloc_space`：`internal/bytealg.MakeNoZero` / `strings.Builder.grow` 约 `72.88%`，来自
+  `runtime.repeatedAppendString`；`runtime.(*VM).executeConcat` 约 `27.07%`。
+- `alloc_objects`：builder 扩容约 `70.70%`，`executeConcat` 约 `26.51%`。
+- `GOGC=off` CPU：`runtime.memmove` 约 `54.55%`，`TryExecuteStringAppendForLoopBatch` /
+  `repeatedAppendString` 约 `37.27%`，普通 `executeConcat` 约 `17.27%`。
+
+结论：现有 `MOVE; LOADK; CONCAT; FORLOOP` batch fast path 已经命中，但每个 batch 仍 materialize 一个逐步变长的
+中间字符串；API 层为了保留 context 检查边界，按窗口限制 `maxIterations`，因此官方 8000 次拼接仍会产生大量
+中间字符串分配。下一步如果推进生产改动，必须先补设计/guard：只在无 hook、无 coroutine、raw string 累加器、
+固定非空 string 常量、integer numeric-for 且可在 batch 内按窗口执行 `CheckContext` 时，才允许整段 builder
+一次 materialize；否则继续走当前 batch 或普通 `CONCAT`，以保留 `__concat`、line/count hook、yield、错误 PC、
+traceback 和 context cancellation 边界。
+
 优先级：
 
 1. `compile_3000_functions` / 编译3000个函数：探索 compile-only streaming 简单函数声明路径。目标是跳过公开

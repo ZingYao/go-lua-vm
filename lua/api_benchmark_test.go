@@ -264,6 +264,43 @@ return #s
 	}
 }
 
+// BenchmarkDoStringStringConcatOfficial 度量官方完整 benchmark 同规模的循环字符串拼接。
+func BenchmarkDoStringStringConcatOfficial(b *testing.B) {
+	source := `
+local s = ''
+for i = 1, 8000 do
+  s = s .. 'x'
+end
+return #s
+`
+	b.ReportAllocs()
+	for benchmarkIndex := 0; benchmarkIndex < b.N; benchmarkIndex++ {
+		// 每轮创建独立 State，覆盖源码编译、加载和执行的端到端路径，并对齐官方脚本循环规模。
+		state := NewState()
+		if err := OpenLibs(state); err != nil {
+			state.Close()
+			b.Fatalf("OpenLibs failed: %v", err)
+		}
+		if err := DoString(state, source); err != nil {
+			state.Close()
+			b.Fatalf("DoString failed: %v", err)
+		}
+		state.Close()
+	}
+}
+
+// BenchmarkPreparedStringConcatOfficial 度量预编译后重复执行官方规模循环字符串拼接。
+func BenchmarkPreparedStringConcatOfficial(b *testing.B) {
+	source := `
+local s = ''
+for i = 1, 8000 do
+  s = s .. 'x'
+end
+return #s
+`
+	benchmarkPreparedClosure(b, source)
+}
+
 // BenchmarkDoStringStdlibMathString 度量标准库 math/string 混合调用热路径。
 func BenchmarkDoStringStdlibMathString(b *testing.B) {
 	source := `

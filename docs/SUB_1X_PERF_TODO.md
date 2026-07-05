@@ -211,10 +211,23 @@
 
 ## 3. `string_concat` / 字符串拼接
 
-- [ ] 跑官方 8000 次拼接 fixture 的 DoString/prepared micro 和 profile。
+- [x] 跑官方 8000 次拼接 fixture 的 DoString/prepared micro 和 profile。
 - [ ] 复核 `__concat` 元方法、debug 可见性、yield、错误路径和 materialize 边界。
 - [ ] 只有语义可证明时，设计更窄 builder/materialize 切口。
 - [ ] 完整 benchmark 三轮稳定低于 `1.00x`，否则不保留生产改动。
+
+2026-07-05 string_concat profile：
+
+- 新增 `BenchmarkDoStringStringConcatOfficial` 和 `BenchmarkPreparedStringConcatOfficial`，fixture 对齐默认官方
+  benchmark 的 8000 次 `s = s .. 'x'`。
+- 五轮 DoString：`453702 / 444715 / 440866 / 445132 / 442386 ns/op`、约 `3.066 MB/op`、`882 allocs/op`。
+- 五轮 prepared：`402148 / 397012 / 396463 / 397372 / 399792 ns/op`、约 `2.943 MB/op`、`684 allocs/op`。
+- alloc profile：builder 扩容约 `72.88% alloc_space` / `70.70% alloc_objects`，普通 `executeConcat` 约
+  `27.07% alloc_space` / `26.51% alloc_objects`。
+- GOGC=off CPU：`runtime.memmove` 约 `54.55%`，`TryExecuteStringAppendForLoopBatch` /
+  `repeatedAppendString` 约 `37.27%`，普通 `executeConcat` 约 `17.27%`。
+- 证据结论：已有 string append batch 生效，但每个 context 窗口仍 materialize 中间字符串；下一步只能先补
+  “整段 builder/materialize + batch 内 context check” 设计和 guard，不能直接扩大生产路径。
 
 ## 4. `function_call` / 函数调用
 
