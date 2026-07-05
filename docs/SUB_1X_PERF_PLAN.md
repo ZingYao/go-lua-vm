@@ -495,6 +495,24 @@ profile 结果：
 但必须先补 guard 覆盖函数值替换、upvalue/env 变化、hook 打开、yield/continuation、错误 PC、traceback 和
 context 取消。没有这些 guard 前，不直接冻结或扩大 batch 内 guard。
 
+## `function_call` guard 测试
+
+2026-07-05 补齐整段 function_call assign batch 的前置语义守卫，全部位于 `lua` API 层：
+
+- `TestDoStringFunctionCallBatchMutableCalleeAndEnvGuards`：函数体内替换 `add`、修改 upvalue、写入 `_G` 后，
+  后续 `sum = add(sum, i)` 必须逐次读取最新 callee 与环境状态。
+- `TestDoStringFunctionCallBatchHookTracebackGuards`：debug hook 打开时必须回退逐指令可见路径；函数体抛错经
+  `xpcall(debug.traceback)` 必须保留错误消息、`stack traceback` 和 `add` 调用帧。
+- `TestDoStringFunctionCallBatchCoroutineYieldGuard`：被调函数内部 `coroutine.yield` 后必须能从 CALL 内部恢复，
+  继续完成后续循环并返回正确结果。
+- `TestDoStringFunctionCallBatchContextCancellationGuard`：长循环中按 `CheckContext` 次数取消的宿主 context 必须
+  传播为保留 `context.Canceled` 错误链的运行时错误。
+
+后验 micro：`BenchmarkPreparedFunctionCallOfficial` 三轮为 `2908173 / 2904620 / 2909274 ns/op`、
+`408-409 B/op`、`2 allocs/op`。本轮是 guard 切口，不改变生产 fast path；性能无改善符合预期。下一步若继续
+生产优化，必须先评估 leaf add-return batch 的闭包寄存器、函数 Proto、参数寄存器和结果寄存器冻结边界，
+并证明上述 guard 不被破坏。
+
 ## 语义门禁
 
 - 不引入 CGO，不接 Lua C API，不新增外部依赖。

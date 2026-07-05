@@ -268,7 +268,7 @@
 - [x] 完整 benchmark 三轮稳定 `> 1.00x` 后进入。
 - [x] 跑 `BenchmarkPreparedFunctionCallOfficial` 五轮和 CPU profile。
 - [ ] 评估 leaf add-return batch guard 冻结：闭包寄存器、函数 Proto、参数寄存器、结果寄存器。
-- [ ] 补 guard：函数值替换、upvalue/env 变化、hook 打开、yield/continuation、错误 PC、traceback、context 取消。
+- [x] 补 guard：函数值替换、upvalue/env 变化、hook 打开、yield/continuation、错误 PC、traceback、context 取消。
 - [ ] 完整 benchmark 三轮稳定低于 `1.00x`，否则回退或记录证伪。
 
 2026-07-05 function_call profile：
@@ -281,6 +281,20 @@
 - 结论：编译/OpenLibs 不是剩余差距主因，现有 `sum = add(sum, i)` assign batch 已命中。下一步若推进生产
   优化，必须先补“整段 function_call assign batch + 内部 context 边界提交”的 guard，覆盖函数值替换、
   upvalue/env 变化、hook、yield/continuation、错误 PC、traceback 和 context 取消；本轮不直接冻结 batch guard。
+
+2026-07-05 function_call guard 测试补齐：
+
+- `TestDoStringFunctionCallBatchMutableCalleeAndEnvGuards` 固定函数体内替换 callee、修改 upvalue 和写入 `_G`
+  必须逐次对后续调用可见。
+- `TestDoStringFunctionCallBatchHookTracebackGuards` 固定 debug hook 打开时仍能观察 call/return/line/count
+  边界，且函数体 error 经 `xpcall(debug.traceback)` 保留错误消息、traceback 和 `add` 调用帧。
+- `TestDoStringFunctionCallBatchCoroutineYieldGuard` 固定被调函数在 CALL 内部 `coroutine.yield` 后可 resume 并完成
+  后续循环。
+- `TestDoStringFunctionCallBatchContextCancellationGuard` 使用按 `CheckContext` 次数取消的测试 context，固定长循环
+  必须保留 `context.Canceled` 错误链。
+- 后验 `BenchmarkPreparedFunctionCallOfficial` 三轮：`2908173 / 2904620 / 2909274 ns/op`、`408-409 B/op`、
+  `2 allocs/op`。本轮是 guard 切口，性能无改善；下一步若生产优化，仍需先评估 leaf add-return batch 的
+  闭包寄存器、函数 Proto、参数寄存器和结果寄存器冻结边界。
 
 ## 5. `arith_mix_loop` / 混合算术循环
 

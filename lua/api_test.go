@@ -24,6 +24,49 @@ func quoteLuaString(value string) string {
 	return strconv.Quote(value)
 }
 
+// cancelAfterErrContext 是测试专用的可取消 context。
+//
+// Context 会在第 checks 次 Err 调用后稳定返回 context.Canceled，用于验证 VM 热路径在长循环中
+// 仍能通过 State.CheckContext 观察宿主取消信号。
+type cancelAfterErrContext struct {
+	context.Context
+	remainingErrChecks int
+	canceled           bool
+}
+
+// newCancelAfterErrContext 创建按 Err 调用次数取消的测试 context。
+//
+// checks 小于 1 时会归一为 1，避免构造永不取消或初始状态不明确的测试上下文。
+func newCancelAfterErrContext(checks int) *cancelAfterErrContext {
+	// 先归一化检查次数，保证测试上下文总会在有限 CheckContext 调用内取消。
+	if checks < 1 {
+		// 非正数没有明确的倒计时语义，按首次 Err 调用即取消处理。
+		checks = 1
+	}
+	return &cancelAfterErrContext{
+		Context:            context.Background(),
+		remainingErrChecks: checks,
+	}
+}
+
+// Err 按倒计时返回 context.Canceled。
+//
+// 返回 nil 表示 VM 仍可继续执行；首次返回 context.Canceled 后保持幂等，符合 context.Err 的稳定语义。
+func (ctx *cancelAfterErrContext) Err() error {
+	// 已取消后必须稳定返回同一个取消错误，避免 VM 多次检查观察到回退状态。
+	if ctx.canceled {
+		// context.Canceled 是宿主取消的标准错误对象，State.CheckContext 会保留错误链。
+		return context.Canceled
+	}
+	ctx.remainingErrChecks--
+	if ctx.remainingErrChecks <= 0 {
+		// 倒计时耗尽时进入取消态，并从本次检查开始对 VM 可见。
+		ctx.canceled = true
+		return context.Canceled
+	}
+	return nil
+}
+
 // TestNewStateAndOptions 验证 lua 包 API 与 runtime 状态默认选项一致。
 //
 // 校验默认状态可创建、关闭后幂等，以及自定义 options 在构造时生效。
@@ -5518,6 +5561,162 @@ _G.X = nil
 	if err := DoString(state, source); err != nil {
 		// Lua closure __newindex 必须能通过协程 yield 并恢复写入。
 		t.Fatalf("DoString Lua __newindex yield failed: %v", err)
+	}
+}
+
+// TestDoStringFunctionCallBatchMutableCalleeAndEnvGuards 验证函数调用 batch 的动态函数与环境边界。
+//
+// 未来若把 `sum = add(sum, i)` 压成整段 function_call batch，仍必须在函数值或闭包环境可能变化时
+// 回退普通 VM；否则会跳过函数体内的 upvalue 写入、全局环境写入或 callee 替换副作用。
+func TestDoStringFunctionCallBatchMutableCalleeAndEnvGuards(t *testing.T) {
+	// 创建完整标准库 State，确保 `_G` 和 assert 可用。
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库打开不应失败。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+
+	source := `
+local offset = 0
+local replaced = false
+_G.function_call_guard_marker = 0
+local function add(a, b)
+  if b == 3 then
+    offset = 100
+    _G.function_call_guard_marker = b
+  end
+  if b == 4 then
+    replaced = true
+    add = function(x, y) return x - y + offset end
+  end
+  return a + b + offset
+end
+local sum = 0
+for i = 1, 8 do
+  sum = add(sum, i)
+end
+assert(replaced)
+assert(_G.function_call_guard_marker == 3)
+assert(sum == 584, sum)
+`
+	if err := DoString(state, source); err != nil {
+		// 动态 callee/upvalue/env 变化必须按普通 Lua 调用语义逐次生效。
+		t.Fatalf("DoString function call mutable guard failed: %v", err)
+	}
+}
+
+// TestDoStringFunctionCallBatchHookTracebackGuards 验证 hook 与错误 traceback 边界。
+//
+// debug hook 打开时 function_call batch 必须回退逐指令路径；函数体抛错时也必须保留普通 CALL
+// 帧与 xpcall(debug.traceback) 可见的错误现场。
+func TestDoStringFunctionCallBatchHookTracebackGuards(t *testing.T) {
+	// 创建完整标准库 State，确保 debug.sethook、xpcall 和 debug.traceback 可用。
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库打开不应失败。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+
+	source := `
+local hookEvents = 0
+debug.sethook(function(event)
+  assert(event == "line" or event == "call" or event == "return" or event == "count")
+  hookEvents = hookEvents + 1
+end, "crl", 1)
+local function add(a, b)
+  if b == 4 then error("function-call-guard") end
+  return a + b
+end
+local ok, msg = xpcall(function()
+  local sum = 0
+  for i = 1, 5 do
+    sum = add(sum, i)
+  end
+  return sum
+end, debug.traceback)
+debug.sethook()
+assert(not ok)
+assert(hookEvents > 0)
+assert(string.find(msg, "function-call-guard", 1, true))
+assert(string.find(msg, "stack traceback", 1, true))
+assert(string.find(msg, "add", 1, true))
+`
+	if err := DoString(state, source); err != nil {
+		// hook 与 traceback 必须保持普通函数调用路径的可见性。
+		t.Fatalf("DoString function call hook traceback guard failed: %v", err)
+	}
+}
+
+// TestDoStringFunctionCallBatchCoroutineYieldGuard 验证协程 yield 边界。
+//
+// 被调用函数可能在 CALL 内部 yield；未来整段 function_call batch 不能跨过 coroutine/continuation
+// 边界直接提交后续迭代。
+func TestDoStringFunctionCallBatchCoroutineYieldGuard(t *testing.T) {
+	// 创建完整标准库 State，确保 coroutine 与 assert 可用。
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库打开不应失败。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+
+	source := `
+local co = coroutine.create(function()
+  local function add(a, b)
+    if b == 2 then coroutine.yield("pause", a, b) end
+    return a + b
+  end
+  local sum = 0
+  for i = 1, 3 do
+    sum = add(sum, i)
+  end
+  return sum
+end)
+local ok, tag, a, b = coroutine.resume(co)
+assert(ok and tag == "pause" and a == 1 and b == 2)
+local ok2, result = coroutine.resume(co)
+assert(ok2 and result == 6)
+assert(coroutine.status(co) == "dead")
+`
+	if err := DoString(state, source); err != nil {
+		// yield 后 resume 必须继续从函数 CALL 内部恢复并完成后续循环。
+		t.Fatalf("DoString function call coroutine yield guard failed: %v", err)
+	}
+}
+
+// TestDoStringFunctionCallBatchContextCancellationGuard 验证 context 取消边界。
+//
+// function_call batch 允许按窗口跳过普通指令入口，但每个虚拟 CALL 前仍必须能通过 State.CheckContext
+// 观察宿主取消信号，并保留 context.Canceled 错误链。
+func TestDoStringFunctionCallBatchContextCancellationGuard(t *testing.T) {
+	// 使用按 CheckContext 次数取消的 context，避免测试依赖 goroutine 调度或真实时间。
+	state, err := NewStateWithContext(newCancelAfterErrContext(50), Options{})
+	if err != nil {
+		// 有效测试 context 必须能创建 State。
+		t.Fatalf("NewStateWithContext failed: %v", err)
+	}
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库打开不应失败。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+
+	source := `
+local function add(a, b)
+  return a + b
+end
+local sum = 0
+for i = 1, 200000 do
+  sum = add(sum, i)
+end
+return sum
+`
+	err = DoString(state, source)
+	if !errors.Is(err, context.Canceled) {
+		// 取消必须从热循环传播为保留 context.Canceled 错误链的运行时错误。
+		t.Fatalf("DoString function call context cancellation error = %v", err)
 	}
 }
 
