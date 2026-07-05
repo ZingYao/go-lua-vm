@@ -168,6 +168,36 @@ benchmark 三轮显示 `compile_3000_functions` 从最终分支基线约 `1.31x`
 `compile_3000_functions`；下一轮若继续该主项，应重新 profile prototype 后剩余成本，再决定是否存在
 第二个 parser/codegen 结构性小切口。
 
+2026-07-05 在 `5008d65` 后补跑 prototype 1 后续 profile：
+
+```bash
+CGO_ENABLED=0 go test ./internal/luac -run '^$' \
+  -bench '^BenchmarkCompileSource3000Functions$' \
+  -benchmem -benchtime=5s -count=1 \
+  -cpuprofile /tmp/go-lua-vm-final-profiles/post-5008d65/compile_3000_cpu.pprof \
+  -memprofile /tmp/go-lua-vm-final-profiles/post-5008d65/compile_3000_mem.pprof
+```
+
+结果：
+
+- profile 单轮：`2.360645 ms/op`、`3,497,402 B/op`、`63 allocs/op`。
+- CPU profile 仍主要由 Go runtime/GC/调度采样主导；源码侧累计项较分散，`ParseChunk` 约 `7.47%`，
+  `CompileChunk` 约 `2.93%`，`tryParseCompactSimpleFunctionBody` 约 `3.81%`。
+- `alloc_space` 主项为 `newFunctionStatement` 约 `42.27%`、`prepareDirectFunctionBlockCapacity`
+  约 `28.80%`、`newCompactSimpleFunctionBody` 约 `9.57%`、`AddConstant` 约 `4.54%`、
+  `addInstruction` 约 `4.39%`。
+- `alloc_objects` 中 `buildCompile3000FunctionsSource` 被采样到约 `24.02%`，但源码构造发生在
+  `b.ReportAllocs()` 前，不计入 benchmark `B/op`；真实编译器相关主项仍是
+  `prepareDirectFunctionBlockCapacity`、`newCompactSimpleFunctionBody`、`newFunctionStatement`、
+  `envUpvalueIndex` 和 `setUpvalue`。
+
+结论：本轮 profile 没有证明新的低风险生产小切口。`newFunctionStatement` 是剩余最大结构成本，
+但消除它需要引入顶层简单 function 声明紧凑表示，必须先补设计与 guard，不得直接扩展通用
+`Block.Statements` union。`prepareDirectFunctionBlockCapacity` 是输出 Proto 与子 Proto arena 的确定性容量，
+仅做容量 hint 或页大小调整不满足 wall-clock 门槛。下一轮若继续 `compile_3000_functions`，应先补
+“顶层简单 function 声明紧凑表示”设计小节，明确 parser AST 可见性、semantic、debug、luac 列表、
+错误位置和普通 parser 回退边界；若无法证明，则转向 `recursion` 的门槛复核 profile。
+
 ## 2. `function_call` batch guard 冻结候选
 
 - [ ] 仅在 `function_call` 完整三轮稳定高于 `1.05x` 时进入本项。

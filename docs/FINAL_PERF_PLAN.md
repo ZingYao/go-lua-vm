@@ -151,6 +151,26 @@ Go micro 五轮从约 `2.65-2.71 ms/op`、`3.781 MB/op`、`87 allocs/op` 降到
 但仍未达到长期目标 `1.15x`。下一步必须重新 profile prototype 后剩余成本，再决定是否继续扩张
 parser/codegen 结构性优化。
 
+### 2026-07-05 prototype 1 后续 profile
+
+在 `5008d65` 后补跑 `BenchmarkCompileSource3000Functions` profile，单轮结果为
+`2.360645 ms/op`、`3,497,402 B/op`、`63 allocs/op`，与 prototype 1 五轮区间一致。CPU profile
+仍主要受 Go runtime/GC/调度采样影响，源码侧累计项较分散：parser 约 `7.47%`，codegen 约
+`2.93%`，`tryParseCompactSimpleFunctionBody` 约 `3.81%`。
+
+memory profile 显示剩余编译器分配已经集中到三块：
+
+- `newFunctionStatement`：`alloc_space` 约 `42.27%`，说明目标函数虽然跳过函数体表达式 AST，
+  仍保留完整顶层 `FunctionStatement` 结构。
+- `prepareDirectFunctionBlockCapacity`：`alloc_space` 约 `28.80%`，来自顶层子 Proto、Code/LineInfo、
+  常量表和直接子函数 arena 的确定性容量。
+- `newCompactSimpleFunctionBody`：`alloc_space` 约 `9.57%`，来自 compact summary 页式 arena。
+
+结论：prototype 1 后没有出现新的 lexer/token/Source 低风险单点热点；继续降低
+`compile_3000_functions` 需要先设计“顶层简单 function 声明紧凑表示”或“直接函数声明 codegen
+容量生命周期”这样的结构性切口。单纯调整 compact summary 页大小、容量 hint 或局部扫描，不满足
+本阶段的性能门槛和语义回退标准，不进入生产改动。
+
 ## 方案 B：`function_call` batch guard 冻结
 
 目标源码形态：
