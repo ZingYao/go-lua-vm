@@ -3984,6 +3984,21 @@ func (vm *VM) PrepareMixArithmeticForLoopSuperInstructions() bool {
 	return len(vm.ensureMixArithmeticForLoopSuperInstructions()) > 0
 }
 
+// HasMixArithmeticForLoopAt 判断当前 PC 是否存在混合算术循环 superinstruction。
+func (vm *VM) HasMixArithmeticForLoopAt(pc int) bool {
+	// 该 helper 只读取已准备好的表，供 API 层避免在非目标 PC 反复准备 batch。
+	if vm == nil || vm.mixArithmeticForLoopSuperInstructionProto != vm.proto {
+		// 表尚未准备或 Proto 已变化时不能命中。
+		return false
+	}
+	superInstructions := vm.mixArithmeticForLoopSuperInstructions
+	if uint(pc) >= uint(len(superInstructions)) {
+		// PC 越界时不能命中。
+		return false
+	}
+	return superInstructions[pc].Valid
+}
+
 // PrepareMixArithmeticForLoopBatch 为 `MUL; ADD; SUB; IDIV; MOD; ADD; FORLOOP` 混合算术循环准备 batch 上下文。
 func (vm *VM) PrepareMixArithmeticForLoopBatch(pc int) (MixArithmeticForLoopBatch, bool) {
 	// 先按 PC 读取已准备好的预匹配表；非目标 PC 必须快速失败且不能产生副作用。

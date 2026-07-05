@@ -3170,9 +3170,17 @@ func TestVMTryExecuteMixArithmeticForLoop(t *testing.T) {
 	}
 	vm := NewVMWithPrototypeData(7, proto.Constants, nil, nil, nil)
 	vm.BindPrototype(proto)
+	if vm.HasMixArithmeticForLoopAt(0) {
+		// 未准备 superinstruction 表前不能命中，避免 API 层误用旧 Proto 的缓存。
+		t.Fatalf("unexpected mix arithmetic hit before prepare")
+	}
 	if !vm.PrepareMixArithmeticForLoopSuperInstructions() {
 		// 完整循环体回跳到 MUL 时应能准备混合算术 superinstruction。
 		t.Fatalf("expected mix arithmetic superinstruction")
+	}
+	if !vm.HasMixArithmeticForLoopAt(0) || vm.HasMixArithmeticForLoopAt(1) {
+		// 只有回跳入口 MUL 才能命中，普通 PC 必须被 API 预筛排除。
+		t.Fatalf("mix arithmetic pc guard mismatch")
 	}
 	initialRegisters := []Value{IntegerValue(0), IntegerValue(1), IntegerValue(3), IntegerValue(1), IntegerValue(1), NilValue(), NilValue()}
 	for registerIndex, value := range initialRegisters {

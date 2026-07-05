@@ -2751,7 +2751,7 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 				}
 			}
 		}
-		if mixArithmeticForLoopSuperInstructionEnabled && !preciseFrameSync && !hooksEnabled && contextCheckCountdown >= 6 {
+		if mixArithmeticForLoopSuperInstructionEnabled && !preciseFrameSync && !hooksEnabled && contextCheckCountdown >= 6 && vm.HasMixArithmeticForLoopAt(pc) {
 			// 七指令混合算术链会额外跳过 ADD、SUB、IDIV、MOD、ADD、FORLOOP 六个入口；
 			// 倒计时至少为 6 才能证明普通逐指令路径不会在被跳过区间触发 context 检查。
 			mixPC := pc

@@ -355,7 +355,22 @@
 ## 5. `arith_mix_loop` / 混合算术循环
 
 - [x] 仅做完整 benchmark 三轮复核。
-- [ ] 只有稳定 `> 1.00x` 且 profile 指向新的单一主因时才重新打开。
+- [x] 只有稳定 `> 1.00x` 且 profile 指向新的单一主因时才重新打开。
+
+2026-07-06 arith_mix_loop PC 预筛：
+
+- 五轮前置 micro：DoString `7.532-7.551 ms/op`、约 `130.6 KB/op`、`199 allocs/op`；prepared
+  `7.497-7.513 ms/op`、`66 B/op`、`0 allocs/op`。
+- profile：`PrepareMixArithmeticForLoopBatch` 在普通 CPU 中 flat `20.96%`，`GOGC=off` 中 flat `14.53%`；
+  该成本来自 API 层没有先判断当前 PC 是否存在 mix superinstruction，导致非目标 PC 也反复准备 batch。
+- 生产切口：新增 `HasMixArithmeticForLoopAt(pc)`，API 热循环只在静态匹配 `MUL; ADD; SUB; IDIV; MOD; ADD; FORLOOP`
+  的入口 PC 才进入 batch/单轮 mix fast path。动态 integer guard、context 窗口、hook/coroutine 回退和错误路径不变。
+- 五轮后验 micro：DoString `5.197-5.208 ms/op`、约 `130.6 KB/op`、`199 allocs/op`；prepared
+  `5.147-5.151 ms/op`、`45 B/op`、`0 allocs/op`。wall-clock 中位数下降约 `31%`。
+- 三轮完整官方 benchmark：`arith_mix_loop` 官方三轮中位数 `0.011024s`，本项目三轮中位数 `0.009175s`，
+  倍率 `0.832x`。相比上一轮三轮约 `1.051x` 改善约 `0.219x`，相比初始 `1.01x` 改善约 `0.178x`。
+- 当前最终剩余 `> 1.00x` 仅 `recursion`：三轮中位 `1.054x`，但 prepared 路径已在 `9eb7f54` 后证伪为
+  `0 allocs/op`，继续推进需要破坏 debug hook、coroutine/yield、traceback、错误 PC 和调用帧可见性的整段递归折叠。
 
 ## 6. 全局验证
 
