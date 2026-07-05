@@ -61,6 +61,11 @@ benchmark 三轮后，排序仍保持一致：
 生产实现门槛；`function_call`、`string_concat` 与 `arith_mix_loop` 仍在噪声带。下一步不得实现运行期 fast
 path，只能继续寻找 `compile_3000_functions` 的新结构性设计，或记录无新低风险切口的收敛结论。
 
+同日补充 Go micro 复核：`arith_mix_loop` prepared 五轮稳定约 `7.18-7.20 ms/op` 且 `0 allocs/op`；
+`function_call` prepared 五轮稳定约 `2.88-2.90 ms/op`、`402 B/op`、`2 allocs/op`；现有
+`string_concat` DoString micro 五轮约 `81.8-87.9 us/op`、`311.3 KB/op`、`370 allocs/op`。
+这些 micro 没有推翻完整 benchmark 的噪声带判断：运行期项目未稳定超过进入门槛，不能新增生产 fast path。
+
 ## 总体策略
 
 最终阶段不再堆局部字段、容量 hint 或 token 分派微调。每个生产提交只允许一个可验证切口，并且必须先用

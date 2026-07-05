@@ -13,7 +13,7 @@
 - [x] 重建 `bin/glua` 和 `bin/gluac`。
 - [x] 确认官方 `lua` / `luac` 版本为 5.3.6。
 - [x] 运行默认完整 benchmark 三轮，记录 `本项目/官方` 倍率并按倍率倒序排序。
-- [ ] 对所有高于 `1.00x` 的项目补 Go micro 或 profile，确认是否是稳定差距。
+- [x] 对所有高于 `1.00x` 的项目补 Go micro 或 profile，确认是否是稳定差距。
 - [x] 更新 `docs/BENCHMARK.md` 或本文的基线小节。
 
 2026-07-05 在 `quanquan/feature/glua-final-perf` 起点重建 `bin/glua` / `bin/gluac`，并显式使用
@@ -56,6 +56,29 @@ parser AST 构造或 codegen arena 生命周期结构性空间。
 benchmark 只有 `1.05-1.06x`，低于实现门槛；`function_call`、`string_concat` 和 `arith_mix_loop`
 均属于噪声带，不应打开 fast path。后续若无法提出新的 `compile_3000_functions` 结构性设计，应优先记录
 最终收敛结论，而不是继续堆局部调参。
+
+2026-07-05 对剩余高于 `1.00x` 的噪声带项目补 Go micro 复核：
+
+```bash
+CGO_ENABLED=0 go test ./lua -run '^$' \
+  -bench '^(BenchmarkPreparedFunctionCallOfficial|BenchmarkPreparedArithMixLoopOfficial|BenchmarkDoStringStringConcat)$' \
+  -benchmem -benchtime=3s -count=5
+```
+
+结果：
+
+- `BenchmarkPreparedArithMixLoopOfficial`：
+  `7.178955 / 7.188705 / 7.198394 / 7.188664 / 7.184354 ms/op`，约 `20-21 B/op`、`0 allocs/op`。
+- `BenchmarkPreparedFunctionCallOfficial`：
+  `2.876761 / 2.894444 / 2.890210 / 2.898135 / 2.894668 ms/op`，`402 B/op`、`2 allocs/op`。
+- `BenchmarkDoStringStringConcat`：
+  `81.778 / 85.478 / 85.887 / 85.854 / 87.928 us/op`，约 `311.3 KB/op`、`370 allocs/op`。
+
+结论：`arith_mix_loop` prepared 路径稳定无分配，完整 benchmark 仅约 `1.00x`；`function_call` prepared
+保持既有约 `2.88-2.90 ms/op`，但完整 benchmark 只有约 `1.01x`，不满足 `1.05x` 进入门槛；`string_concat`
+已有 DoString micro 只覆盖现有 2000 次拼接夹具，完整 benchmark 仍是判断是否重新打开 builder 的唯一口径，
+当前约 `1.01-1.05x` 未达 `1.08x`。至此高于 `1.00x` 的项目均已完成 profile 或 micro 复核，除
+`compile_3000_functions` 外没有新的可执行生产切口。
 
 ## 1. `compile_3000_functions` 紧凑函数体设计与测试
 
