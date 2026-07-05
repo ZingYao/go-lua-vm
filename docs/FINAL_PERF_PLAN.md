@@ -171,6 +171,45 @@ memory profile 显示剩余编译器分配已经集中到三块：
 容量生命周期”这样的结构性切口。单纯调整 compact summary 页大小、容量 hint 或局部扫描，不满足
 本阶段的性能门槛和语义回退标准，不进入生产改动。
 
+### 2026-07-05 prototype 2 设计：顶层简单函数语句紧凑表示
+
+profile 指向 `newFunctionStatement` 后，下一候选不能再扩张函数体 summary，而是把“普通顶层
+`function fN(x) return x + K end` 语句”整体压成编译专用紧凑语句。该方向只允许服务
+`internal/luac.CompileSourceWithSyntax` 的 compact parser；`parser.New` / `parser.NewWithSyntax`
+必须继续返回完整 `*FunctionStatement`，避免库调用方观察到私有 fast path。
+
+允许形态必须同时满足：
+
+- 函数名是单段普通 identifier，不能是 table field、method、local function 或匿名 function。
+- 函数体已经命中 prototype 1 的 `return <param> + <integer>` summary。
+- 所在 block 为当前直接语句列表，且语句自身不携带 label/goto、扩展语法、尾随额外语句或语法错误恢复状态。
+- 语句位置、函数名、函数体行号和 debug metadata 足以复原普通路径的 `CLOSURE; SETGLOBAL` 与子 Proto。
+
+拟定结构：
+
+1. 新增 parser-private `compactSimpleFunctionStatement`，字段只包含函数名、函数体指针、function
+   位置和名称位置。该结构可由独立页式 arena 保存，避免改变公开 `FunctionStatement` 布局。
+2. 新增未导出的 statement 类型实现 `Statement`，只在 compact parser 模式且目标形态完全命中时写入
+   `Block.Statements`；普通 parser 入口永不生成该类型。
+3. semantic analyzer 必须识别该私有语句，并执行与普通 `FunctionStatement` 相同的
+   `analyzeFunctionBody`，不得向父作用域新增 local 或 label。
+4. codegen 的 `directFunctionBlockStatsFor` 与 `compileStatement` 必须按普通全局 function 语义处理：
+   追加子 Proto，发出 `CLOSURE; SETGLOBAL`，函数名写入当前常量表，子函数继续复用 compact body
+   直发 `ADD; RETURN`。
+
+必须先补 guard，禁止直接实现生产改动：
+
+- parser 入口 guard：`parser.New` 仍返回 `*FunctionStatement`，compact 入口才允许私有语句。
+- semantic guard：嵌套函数、goto/label、扩展语法和错误路径仍执行普通语义校验。
+- codegen/luac guard：目标源码的 Proto、常量表、lineinfo、locals、`luac -l -l` 输出与 prototype 1
+  完全一致。
+- 回退 guard：table field、method、local function、匿名 function、复杂函数体和语法错误位置不能进入
+  紧凑语句。
+
+验收门槛：只有在 `BenchmarkCompileSource3000Functions` 五轮继续稳定降低 wall-clock 至少 `5%`、
+B/op 不高于当前约 `3.50 MB/op`，并且完整 benchmark `compile_3000_functions` 继续低于 `1.20x`
+时，才能保留生产改动；否则回退实现，只保留设计和证伪记录。
+
 ## 方案 B：`function_call` batch guard 冻结
 
 目标源码形态：

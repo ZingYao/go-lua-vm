@@ -198,6 +198,22 @@ CGO_ENABLED=0 go test ./internal/luac -run '^$' \
 “顶层简单 function 声明紧凑表示”设计小节，明确 parser AST 可见性、semantic、debug、luac 列表、
 错误位置和普通 parser 回退边界；若无法证明，则转向 `recursion` 的门槛复核 profile。
 
+2026-07-05 已补 prototype 2 设计：下一候选是 compile-only 的顶层简单函数语句紧凑表示，而不是继续
+扩张函数体 summary。生产实现前必须按以下顺序推进：
+
+- [x] 设计 `compactSimpleFunctionStatement` 私有结构，明确只在 `parser.NewCompactWithSyntax` 入口生成。
+- [x] 明确普通 `parser.New` / `parser.NewWithSyntax` 仍返回完整 `*FunctionStatement`，不暴露私有语句类型。
+- [x] 明确 semantic analyzer 必须对私有语句执行与普通 `FunctionStatement` 相同的 `analyzeFunctionBody`。
+- [x] 明确 codegen 必须保持普通全局 function 的 `CLOSURE; SETGLOBAL`、常量表、子 Proto 和 debug 输出。
+- [ ] 先补 parser guard：普通入口保留 `*FunctionStatement`，compact 入口只在目标形态生成私有语句。
+- [ ] 先补 semantic/codegen/luac guard：目标源码的 Proto、lineinfo、locals 和 `luac -l -l` 与 prototype 1 一致。
+- [ ] 先补回退 guard：table field、method、local function、匿名 function、复杂函数体、goto/label 和语法错误位置。
+- [ ] 实现私有语句 prototype；禁止修改通用 `Block.Statements` 公开 union 或替换全 parser。
+- [ ] 运行 `BenchmarkCompileSource3000Functions` 五轮；若 wall-clock 未继续下降至少 `5%` 或 B/op 高于当前约
+  `3.50 MB/op`，回退生产改动。
+- [ ] 若通过 micro，重建 CLI 并运行完整 benchmark 三轮；`compile_3000_functions` 未继续低于 `1.20x`
+  则回退或降级为证伪记录。
+
 ## 2. `function_call` batch guard 冻结候选
 
 - [ ] 仅在 `function_call` 完整三轮稳定高于 `1.05x` 时进入本项。
