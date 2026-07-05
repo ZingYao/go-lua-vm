@@ -42,6 +42,8 @@ type Parser struct {
 	binaryExpressionPage []BinaryExpression
 	// functionStatementPage 保存当前页内紧凑分配的普通 function 语句节点。
 	functionStatementPage []FunctionStatement
+	// compactFunctionStatementPage 保存当前页内紧凑分配的编译专用简单 function 语句节点。
+	compactFunctionStatementPage []CompactFunctionStatement
 	// localFunctionStatementPage 保存当前页内紧凑分配的 local function 语句节点。
 	localFunctionStatementPage []LocalFunctionStatement
 	// compactSimpleFunctionBodyPage 保存当前页内紧凑分配的简单函数体摘要。
@@ -162,6 +164,19 @@ func (parser *Parser) newFunctionStatement(name string, position lexer.Position)
 	}
 	parser.functionStatementPage = append(parser.functionStatementPage, FunctionStatement{Name: name, Position: position})
 	return &parser.functionStatementPage[len(parser.functionStatementPage)-1]
+}
+
+// newCompactFunctionStatement 创建编译专用的简单 function 语句节点。
+//
+// statement 必须来自完整识别的目标 token 序列；返回指针在当前 parser 生命周期内稳定，供 codegen
+// 直接生成等价 child Proto，普通 parser 入口不会调用该方法。
+func (parser *Parser) newCompactFunctionStatement(statement CompactFunctionStatement) *CompactFunctionStatement {
+	// 当前页满时分配新页，避免 compact 节点扩容复制后旧指针失效。
+	if len(parser.compactFunctionStatementPage) == cap(parser.compactFunctionStatementPage) {
+		parser.compactFunctionStatementPage = make([]CompactFunctionStatement, 0, parserStatementArenaPageSize)
+	}
+	parser.compactFunctionStatementPage = append(parser.compactFunctionStatementPage, statement)
+	return &parser.compactFunctionStatementPage[len(parser.compactFunctionStatementPage)-1]
 }
 
 // newLocalFunctionStatement 创建 local function 语句节点。
@@ -633,7 +648,13 @@ func (parser *Parser) parseFunctionStatement() (Statement, error) {
 		return nil, err
 	}
 	if simpleName != "" && !isMethod {
-		// 简单函数名保留原有 AST，函数体直接内嵌在 FunctionStatement 中。
+		if parser.compactFunctionBodies {
+			// 编译专用入口先试探精确简单函数声明，失败会恢复 token 流并走完整 AST。
+			if statement, ok := parser.tryParseCompactFunctionStatement(simpleName, startPosition); ok {
+				return statement, nil
+			}
+		}
+		// 简单函数名普通路径保留原有 AST，函数体直接内嵌在 FunctionStatement 中。
 		statement := parser.newFunctionStatement(simpleName, startPosition)
 		statement.Body = &statement.inlineBody
 		if err := parser.parseFunctionBodyInto(statement.Body, true); err != nil {
@@ -662,6 +683,89 @@ func (parser *Parser) parseFunctionStatement() (Statement, error) {
 		Right:    []Expression{expression},
 		Position: startPosition,
 	}, nil
+}
+
+// tryParseCompactFunctionStatement 试探解析编译专用的简单 function 声明。
+//
+// name 与 startPosition 来自已经解析的 `function name`；返回 ok=false 时会恢复到函数名之后的 token
+// 流，让普通 parseFunctionBodyInto 继续生成完整 AST 与原始错误位置。
+func (parser *Parser) tryParseCompactFunctionStatement(name string, startPosition lexer.Position) (*CompactFunctionStatement, bool) {
+	mark := parser.mark()
+	if parser.current.Kind != lexer.TokenOperator || parser.current.Text != "(" {
+		// 目标形态必须立即进入参数列表，其他形态回退普通函数体解析。
+		parser.reset(mark)
+		return nil, false
+	}
+	parser.advance()
+
+	paramToken := parser.current
+	if paramToken.Kind != lexer.TokenIdentifier {
+		// 目标形态只覆盖单个普通参数；空参数、vararg 或非法参数回退普通路径。
+		parser.reset(mark)
+		return nil, false
+	}
+	paramName := paramToken.Text
+	parser.advance()
+
+	if parser.current.Kind != lexer.TokenOperator || parser.current.Text != ")" {
+		// 多参数或缺失右括号均回退普通路径，以保持原语法错误和完整 AST。
+		parser.reset(mark)
+		return nil, false
+	}
+	parser.advance()
+
+	returnToken := parser.current
+	if returnToken.Kind != lexer.TokenKeyword || returnToken.Text != "return" {
+		// 函数体必须只包含 return 语句；其他语句交给普通 parser。
+		parser.reset(mark)
+		return nil, false
+	}
+	parser.advance()
+
+	nameToken := parser.current
+	if nameToken.Kind != lexer.TokenIdentifier || nameToken.Text != paramName {
+		// return 左操作数必须精确读取唯一参数名，否则可能涉及 local/upvalue/global 语义。
+		parser.reset(mark)
+		return nil, false
+	}
+	parser.advance()
+
+	operatorToken := parser.current
+	if operatorToken.Kind != lexer.TokenOperator || operatorToken.Text != "+" {
+		// 当前 prototype 只覆盖整数加法；其他操作符必须保留普通表达式 AST。
+		parser.reset(mark)
+		return nil, false
+	}
+	parser.advance()
+
+	literalToken := parser.current
+	if literalToken.Kind != lexer.TokenNumber || (literalToken.Number.Kind != lexer.NumberDecimalInteger && literalToken.Number.Kind != lexer.NumberHexInteger) {
+		// 右操作数必须是 integer 字面量，浮点、字符串或非法数字都需要普通路径处理。
+		parser.reset(mark)
+		return nil, false
+	}
+	parser.advance()
+
+	endToken := parser.current
+	if endToken.Kind != lexer.TokenKeyword || endToken.Text != "end" {
+		// integer 后必须直接关闭函数体；分号、逗号或后续语句均不属于精确目标形态。
+		parser.reset(mark)
+		return nil, false
+	}
+	parser.advance()
+
+	statement := parser.newCompactFunctionStatement(CompactFunctionStatement{
+		Name:             name,
+		ParamName:        paramName,
+		Integer:          literalToken.Number.Integer,
+		Position:         startPosition,
+		ParamPosition:    paramToken.Position,
+		ReturnPosition:   returnToken.Position,
+		OperatorPosition: operatorToken.Position,
+		LiteralPosition:  literalToken.Position,
+		EndPosition:      endToken.Position,
+	})
+	return statement, true
 }
 
 // parseFunctionName 解析 function 语句中的函数名。

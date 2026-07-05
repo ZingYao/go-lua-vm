@@ -404,6 +404,46 @@ func (statement *FunctionStatement) statementNode() {
 	// 空实现用于接口标记。
 }
 
+// CompactFunctionStatement 表示编译专用的顶层简单 `function name(param) return param + integer end`。
+//
+// 该节点只由 NewCompactWithSyntax 在精确目标形态上生成；普通 parser 入口必须继续返回完整
+// FunctionStatement。codegen 必须按这些 token 位置信息生成与普通路径等价的 Proto/debug 信息。
+type CompactFunctionStatement struct {
+	// Name 保存函数名称。
+	Name string
+	// ParamName 保存唯一参数名称。
+	ParamName string
+	// Integer 保存右操作数 integer 字面量的精确值。
+	Integer int64
+	// Position 保存 function 关键字位置。
+	Position lexer.Position
+	// ParamPosition 保存唯一参数名称位置，用于 local debug 记录。
+	ParamPosition lexer.Position
+	// ReturnPosition 保存 return 关键字位置，用于 RETURN 行号。
+	ReturnPosition lexer.Position
+	// OperatorPosition 保存 `+` 操作符位置，用于 ADD 行号。
+	OperatorPosition lexer.Position
+	// LiteralPosition 保存 integer 字面量位置，供后续错误或调试扩展使用。
+	LiteralPosition lexer.Position
+	// EndPosition 保存关闭函数体的 end 关键字位置，用于 Proto debug 范围。
+	EndPosition lexer.Position
+}
+
+// Pos 返回 compact function 语句起始位置。
+//
+// 返回值指向 function 关键字。
+func (statement *CompactFunctionStatement) Pos() lexer.Position {
+	// compact function 语句位置在构造时固定。
+	return statement.Position
+}
+
+// statementNode 标记 CompactFunctionStatement 是语句节点。
+//
+// 该方法没有运行时逻辑，仅用于 Go 类型系统区分 AST 节点类别。
+func (statement *CompactFunctionStatement) statementNode() {
+	// 空实现用于接口标记。
+}
+
 // IfClause 表示 if 或 elseif 的条件分支。
 //
 // Condition 保存分支条件，Block 保存条件为真时执行的语句块。

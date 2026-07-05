@@ -505,23 +505,19 @@ func TestParserOrdinarySimpleFunctionKeepsFullAST(t *testing.T) {
 		// 编译专用入口也必须成功解析同一源码。
 		t.Fatalf("compact ParseChunk failed: %v", err)
 	}
-	compactFunction, ok := compactChunk.Block.Statements[0].(*FunctionStatement)
+	compactFunction, ok := compactChunk.Block.Statements[0].(*CompactFunctionStatement)
 	if !ok {
-		// 当前 compact 路径仍保留 FunctionStatement 外壳，后续 streaming 也必须能等价生成 Proto。
-		t.Fatalf("compact parser should expose FunctionStatement, got %T", compactChunk.Block.Statements[0])
+		// 编译专用入口允许精确目标形态使用轻量语句节点，codegen 必须等价生成 Proto。
+		t.Fatalf("compact parser should expose CompactFunctionStatement, got %T", compactChunk.Block.Statements[0])
 	}
-	paramName, integerValue, returnPosition, operatorPosition, literalPosition, ok := compactFunction.Body.CompactSimpleAddInteger()
-	if !ok || paramName != "x" || integerValue != 7 {
+	if compactFunction.Name != "f0" || compactFunction.ParamName != "x" || compactFunction.Integer != 7 {
 		// 编译专用入口应只在精确目标形态上生成 summary。
-		t.Fatalf("unexpected compact summary param=%q integer=%d ok=%v", paramName, integerValue, ok)
+		t.Fatalf("unexpected compact statement=%+v", compactFunction)
 	}
-	if returnPosition.Line != 1 || operatorPosition.Line != 1 || literalPosition.Line != 1 {
-		// summary 必须保留 return/operator/literal 行号，供 codegen debug 行号使用。
-		t.Fatalf("unexpected compact positions return=%+v operator=%+v literal=%+v", returnPosition, operatorPosition, literalPosition)
-	}
-	if compactFunction.Body.Body == nil || compactFunction.Body.Body.Return != nil || len(compactFunction.Body.Body.Statements) != 0 {
-		// compact 入口的目标函数体只保留空 block 外壳和 summary，不能半构造混合 AST。
-		t.Fatalf("compact function body should contain summary-only block: %+v", compactFunction.Body.Body)
+	if compactFunction.Position.Line != 1 || compactFunction.ParamPosition.Line != 1 || compactFunction.ReturnPosition.Line != 1 ||
+		compactFunction.OperatorPosition.Line != 1 || compactFunction.LiteralPosition.Line != 1 || compactFunction.EndPosition.Line != 1 {
+		// compact 语句必须保留关键 token 行号，供 codegen debug 行号使用。
+		t.Fatalf("unexpected compact positions=%+v", compactFunction)
 	}
 }
 

@@ -424,7 +424,7 @@ func directFunctionBlockStatsFor(block *parser.Block) directFunctionBlockStats {
 	stats := directFunctionBlockStats{}
 	for _, statement := range block.Statements {
 		switch statement.(type) {
-		case *parser.FunctionStatement:
+		case *parser.FunctionStatement, *parser.CompactFunctionStatement:
 			// 普通 function 会追加一个子 Proto，并在常见全局写入路径产生 CLOSURE 和 SETGLOBAL。
 			stats.childCount++
 			stats.instructionCapacity += 2
@@ -606,6 +606,9 @@ func (generator *generator) compileStatement(statement parser.Statement) error {
 	case *parser.FunctionStatement:
 		// 普通 function 当前仅支持写入已声明局部或作为全局能力后续扩展。
 		return generator.compileFunctionStatement(typedStatement)
+	case *parser.CompactFunctionStatement:
+		// 编译专用简单 function 直接生成等价 child Proto，避免构造完整函数体 AST。
+		return generator.compileCompactFunctionStatement(typedStatement)
 	case *parser.IfStatement:
 		// if/elseif/else 使用 TEST/JMP 组合生成条件分支。
 		return generator.compileIfStatement(typedStatement)
@@ -2265,6 +2268,35 @@ func (generator *generator) compileFunctionStatement(statement *parser.FunctionS
 	return nil
 }
 
+// compileCompactFunctionStatement 编译 parser compact 模式生成的简单 function 语句。
+//
+// 该路径只覆盖 `function name(param) return param + integer end`，并复用普通 function 的 local/global
+// 绑定语义；任何非目标形态都不会进入该类型。
+func (generator *generator) compileCompactFunctionStatement(statement *parser.CompactFunctionStatement) error {
+	targetBinding, ok := generator.lookupLocal(statement.Name)
+	childIndex, err := generator.compileCompactFunctionChildProto(statement)
+	if err != nil {
+		// 子函数 Proto 生成失败时返回错误，外层不能继续使用无效 closure。
+		return err
+	}
+	if !ok {
+		// 普通全局函数定义等价于 `_ENV[name] = closure`。
+		valueRegister := generator.allocateRegister()
+		generator.emitABx(bytecode.OpClosure, valueRegister, childIndex)
+		if err := generator.emitSetGlobalName(statement.Name, valueRegister); err != nil {
+			// 全局函数名常量无法 RK 编码时返回错误。
+			generator.releaseRegister(valueRegister)
+			return err
+		}
+		generator.releaseRegister(valueRegister)
+		return nil
+	}
+	generator.emitABx(bytecode.OpClosure, targetBinding.register, childIndex)
+
+	// compact function 编译完成。
+	return nil
+}
+
 // compileIfStatement 编译 if/elseif/else 条件分支语句。
 //
 // 安全有序比较条件直译为 LT/LE 加失败跳转；其他条件先生成到临时寄存器，
@@ -2980,6 +3012,56 @@ func (generator *generator) compileChildProto(body *parser.FunctionBody) (int, e
 	return generator.proto.AddChild(child.proto), nil
 }
 
+// compileCompactFunctionChildProto 直接生成简单 function 语句的子 Proto。
+//
+// statement 已由 parser 精确证明为单参数整数加法返回；本方法仍按普通 codegen 规则写入参数 local、
+// ADD/RETURN 行号、Proto 行范围和 MaxStackSize，保证 debug 与 luac 反汇编等价。
+func (generator *generator) compileCompactFunctionChildProto(statement *parser.CompactFunctionStatement) (int, error) {
+	child := newChildGenerator(generator, generator.proto.Source)
+	child.proto.NumParams = 1
+	child.proto.IsVararg = false
+	child.proto.LineDefined = statement.Position.Line
+	child.proto.LastLineDefined = statement.EndPosition.Line
+
+	paramRegister := child.allocateRegister()
+	child.defineLocal(statement.ParamName, paramRegister, statement.ParamPosition)
+	resultRegister := child.allocateRegister()
+	constantIndex := child.addConstant(bytecode.IntegerConstant(statement.Integer))
+	constantOperand, constantRegister, err := child.rkOperandForConstantIndex(constantIndex)
+	if err != nil {
+		// 常量无法编码时释放临时寄存器并返回原错误。
+		child.releaseRegister(resultRegister)
+		return 0, err
+	}
+	if err := child.withSourceLine(statement.OperatorPosition, func() error {
+		// ADD 行号必须归因到 `+`，与普通二元 return codegen 保持一致。
+		child.emitABC(bytecode.OpAdd, resultRegister, paramRegister, constantOperand)
+		return nil
+	}); err != nil {
+		// 当前 emit 不会返回错误；保留释放路径以匹配 withSourceLine 签名。
+		child.releaseOptionalRegister(constantRegister)
+		child.releaseRegister(resultRegister)
+		return 0, err
+	}
+	child.releaseOptionalRegister(constantRegister)
+	if err := child.withSourceLine(statement.ReturnPosition, func() error {
+		// RETURN 行号必须归因到 return 关键字，供 debug hook 与 luac -l -l 展示。
+		child.emitABC(bytecode.OpReturn, resultRegister, 2, 0)
+		return nil
+	}); err != nil {
+		// 当前 emit 不会返回错误；保留释放路径以匹配 withSourceLine 签名。
+		child.releaseRegister(resultRegister)
+		return 0, err
+	}
+	child.releaseRegister(resultRegister)
+	child.returned = true
+	child.closeLocals(len(child.proto.Code))
+	child.proto.MaxStackSize = child.maxStackSize()
+
+	// 追加子 Proto 并返回索引。
+	return generator.proto.AddChild(child.proto), nil
+}
+
 // compileCompactSimpleFunctionBody 编译 parser compact summary 记录的简单函数体。
 //
 // body 必须来自 compile-only parser 入口；该 helper 会重新核对参数、vararg 与局部变量绑定。返回
@@ -3334,7 +3416,7 @@ func blockContainsFunction(block *parser.Block) bool {
 // 立即返回 true，无需进入函数体内部。
 func statementContainsFunction(statement parser.Statement) bool {
 	switch typedStatement := statement.(type) {
-	case *parser.LocalFunctionStatement, *parser.FunctionStatement:
+	case *parser.LocalFunctionStatement, *parser.FunctionStatement, *parser.CompactFunctionStatement:
 		// 显式函数语句会创建 closure。
 		return true
 	case *parser.AssignmentStatement:

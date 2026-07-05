@@ -76,6 +76,54 @@ GOGC=off CGO_ENABLED=0 go test ./internal/luac -run '^$' -bench '^BenchmarkCompi
 字段/方法函数、local function、闭包/upvalue 和非目标源码必须回退普通路径。继续做 lexer、常量索引、
 页大小、局部字段或普通表达式微调不满足本轮门禁。
 
+## `compile_3000_functions` compact function statement prototype
+
+2026-07-05 在 guard 测试保护下实现最小生产 prototype：`parser.NewCompactWithSyntax` 只在精确匹配
+`function name(param) return param + integer end` 时生成 `CompactFunctionStatement`，codegen 直接生成
+等价 child Proto；普通 `parser.New` / `parser.NewWithSyntax` 仍返回完整 `FunctionStatement`、`ReturnStatement`
+和 `BinaryExpression`。
+
+回退边界：
+
+- 字段函数、冒号方法、`local function`、多参数、vararg、空参数、非整数 literal、非 `+` 操作符、额外语句、
+  分号、复杂 return 或语法错误都 reset 回普通 parser。
+- semantic 阶段只对 compact 节点 no-op，因为 parser 已证明函数体无 local、label、goto、upvalue 和嵌套 block。
+- codegen 仍按普通 function 规则处理同名 local 覆盖全局、`_ENV[name]` 写入、child Proto 行范围、参数 local
+  debug、`ADD` 行号和 `RETURN` 行号。
+
+五轮 micro：
+
+| 指标 | prototype 前 | prototype 后 | 改善 |
+| --- | ---: | ---: | ---: |
+| `BenchmarkCompileSource3000Functions` wall-clock | 约 `2.408-2.417 ms/op` | `1.970-1.997 ms/op` | 中位数约下降 `18%` |
+| B/op | 约 `3.50 MB/op` | 约 `2.286 MB/op` | 约下降 `35%` |
+| allocs/op | `72` | `58` | 减少 `14` 次 |
+
+结论：该切口满足“wall-clock 稳定下降至少 5%，且 B/op 不高于当前约 3.50MB”的生产门槛。下一步必须重建
+CLI 并跑完整 benchmark 三轮，确认默认官方对比中的 `compile_3000_functions` 是否降到 `1.00x` 以下。
+
+## compact function statement 后三轮完整 benchmark
+
+2026-07-05 重建 `bin/glua` / `bin/gluac` 后跑三轮默认 `scripts/benchmark-official.sh`。按三轮中位数计算：
+
+| 排名 | English case | 中文名称 | 官方三轮中位数 | 本项目三轮中位数 | 本项目/官方 | 相对初始倍率 |
+| ---: | --- | --- | ---: | ---: | ---: | ---: |
+| 1 | `compile_3000_functions` | 编译3000个函数 | 0.005108s | 0.005903s | 1.16x | 改善 0.08x |
+| 2 | `string_concat` | 字符串拼接 | 0.004789s | 0.005165s | 1.08x | 回退 0.03x |
+| 3 | `recursion` | 递归 | 0.003838s | 0.004123s | 1.07x | 改善 0.01x |
+| 4 | `function_call` | 函数调用 | 0.006814s | 0.007114s | 1.04x | 持平 |
+| 5 | `arith_mix_loop` | 混合算术循环 | 0.011111s | 0.011550s | 1.04x | 回退 0.03x |
+| 6 | `table_rw` | 表读写 | 0.007201s | 0.006390s | 0.89x | 改善 0.01x |
+| 7 | `closure_upvalue` | 闭包 upvalue | 0.008087s | 0.007212s | 0.89x | 回退 0.01x |
+| 8 | `arith_chain_temp` | 算术临时链 | 0.012636s | 0.009880s | 0.78x | 回退 0.01x |
+| 9 | `arith_add_loop` | 整数累加循环 | 0.007626s | 0.005142s | 0.67x | 回退 0.02x |
+| 10 | `stdlib_math_string` | 标准库数学与字符串 | 0.019306s | 0.011102s | 0.58x | 改善 0.01x |
+
+结论：`compile_3000_functions` 的项目侧三轮中位数从上一基线约 `0.006670s` 降到 `0.005903s`，
+下降约 `11.5%`；倍率从 `1.24x` 降到约 `1.16x`，但仍是最大剩余差距。下一轮继续围绕 compile path
+profile，重点确认剩余差距是在 child Proto/codegen 生命周期、debug 元数据写入，还是当前官方基线波动导致；
+不得回到已经证伪的 lexer、常量索引、页大小或字段微调。
+
 优先级：
 
 1. `compile_3000_functions` / 编译3000个函数：探索 compile-only streaming 简单函数声明路径。目标是跳过公开

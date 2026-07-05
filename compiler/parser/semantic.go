@@ -309,6 +309,8 @@ func (analyzer *semanticAnalyzer) analyzeStatement(block *Block, scope *ScopeInf
 	case *FunctionStatement:
 		// 普通 function 语句不声明 local，但函数体内部需要独立作用域和 label/goto 命名空间。
 		analyzer.analyzeFunctionBody(typedStatement.Body)
+	case *CompactFunctionStatement:
+		// 编译专用简单函数声明已由 parser 精确证明无 local、label、goto 或 upvalue 捕获，语义阶段无需递归。
 	case *IfStatement:
 		// if/elseif/else 每个分支 block 都创建子作用域。
 		analyzer.analyzeIfStatement(scope, depth, statementIndex, typedStatement, namespace)

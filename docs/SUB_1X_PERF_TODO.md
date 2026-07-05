@@ -49,13 +49,13 @@
 
 - [x] 跑三轮完整 benchmark，确认该项稳定 `> 1.00x`。
 - [x] 跑 `BenchmarkCompileSource3000Functions` 五轮和 CPU/memory profile。
-- [ ] 设计顶层简单 function 声明 compact/streaming 路径，明确普通 parser、semantic、debug、`luac -l -l`、
+- [x] 设计顶层简单 function 声明 compact/streaming 路径，明确普通 parser、semantic、debug、`luac -l -l`、
   错误位置和非目标回退边界。
 - [x] 先补 guard 测试：普通 parser 仍返回完整 AST、target Proto/list 与普通路径一致、非目标形态回退、
   语法错误位置一致。
-- [ ] 实现最小 prototype。
-- [ ] 五轮 micro wall-clock 稳定下降至少 `5%`，且 B/op 不高于当前约 `3.50 MB`。
-- [ ] 重建 CLI 并跑完整 benchmark 三轮；未稳定低于 `1.00x` 时必须记录原因或回退。
+- [x] 实现最小 prototype。
+- [x] 五轮 micro wall-clock 稳定下降至少 `5%`，且 B/op 不高于当前约 `3.50 MB`。
+- [x] 重建 CLI 并跑完整 benchmark 三轮；未稳定低于 `1.00x` 时必须记录原因或回退。
 
 2026-07-05 profile 结果：
 
@@ -78,6 +78,23 @@
   `LineDefined`/`LastLineDefined`、`LineInfo`、参数 local debug 记录、`DebugDumpProto` 和最小反汇编输出。
 - 复跑 `BenchmarkCompileSource3000Functions` 三轮：约 `2.400-2.406 ms/op`、`3.50 MB/op`、`72-73 allocs/op`。
   本轮是 guard 切口，性能无改善，下一轮才允许在这些测试保护下设计 production prototype。
+
+2026-07-05 compact function statement prototype：
+
+- `parser.NewCompactWithSyntax` 仅对精确 `function name(param) return param + integer end` 生成
+  `CompactFunctionStatement`；普通 `parser.New` / `parser.NewWithSyntax` 保留完整 `FunctionStatement` AST。
+- 非目标形态全部 reset 回普通 parser：字段/方法函数、`local function`、多参数、vararg、非整数、非 `+`、
+  额外语句、分号和语法错误。
+- codegen 直接生成 child Proto，保留普通 function 的 local/global 绑定、参数 local debug、`LineDefined`、
+  `LastLineDefined`、`ADD` 行号和 `RETURN` 行号。
+- 五轮 micro：`1.997 / 1.974 / 1.970 / 1.973 / 1.974 ms/op`、约 `2.286 MB/op`、`58 allocs/op`。
+  相比 prototype 前约 `2.41 ms/op`、`3.50 MB/op`、`72 allocs/op`，中位数 wall-clock 下降约 `18%`，
+  B/op 下降约 `35%`，allocs/op 减少 `14` 次。
+- 完整官方对比三轮：`compile_3000_functions` 官方三轮中位数 `0.005108s`，本项目三轮中位数
+  `0.005903s`，倍率约 `1.16x`。相比上一三轮基线项目侧 `0.006670s` 下降约 `11.5%`，
+  相比初始倍率 `1.24x` 改善 `0.08x`；但仍未稳定低于 `1.00x`。
+- 下一步：继续 profile compile path 剩余成本，优先确认 child Proto/codegen 生命周期或 debug 元数据写入是否还有
+  结构性空间；不得回到已经证伪的 lexer、常量索引、页大小或局部字段微调。
 
 ## 2. `recursion` / 递归
 
