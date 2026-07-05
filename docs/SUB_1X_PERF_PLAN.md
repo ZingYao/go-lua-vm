@@ -256,6 +256,21 @@ Proto 容量预留、常量/指令写入为主。
 错误 traceback、line/call hook、pcall/error、coroutine/yield；只允许在闭包不逃逸、无 debug/hook/coroutine 可见
 风险时启用，否则回退普通 `LuaClosure` + upvalue cell。
 
+## `recursion` guard 测试
+
+2026-07-05 补齐递归 local function descriptor 的最小语义守卫，新增 `lua` API 层测试覆盖：
+
+- 闭包返回、闭包传参、闭包存表和闭包身份比较，要求递归 `local function fib` 逃逸后仍是同一个 Lua closure。
+- `debug.getupvalue`、`debug.setupvalue`、`debug.upvalueid` 和 `debug.upvaluejoin`，要求 self upvalue 对 debug API
+  可见且保持现有 upvalue 快照/复制语义。
+- `pcall` / `error`、`debug.sethook` 的 line/call/return hook、`debug.traceback` 和 `coroutine.yield`，要求递归
+  调用帧、错误路径和协程挂起/恢复边界保持普通 VM 可见性。
+
+本轮是测试切口，不改变生产路径。后验 `BenchmarkPreparedRecursion` 五轮为
+`1770 / 1771 / 1762 / 1766 / 1808 ns/op`、`224 B/op`、`2 allocs/op`，与 profile 阶段基本持平。下一轮若实现
+非逃逸 local function descriptor，必须让这些 guard 全绿，并且只在闭包未逃逸、debug hook 未打开、无
+coroutine/yield 或错误可见风险时启用。
+
 优先级：
 
 1. `compile_3000_functions` / 编译3000个函数：探索 compile-only streaming 简单函数声明路径。目标是跳过公开

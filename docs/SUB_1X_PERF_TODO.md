@@ -176,11 +176,23 @@
 
 - [ ] 仅在完整 benchmark 三轮稳定高于 `1.00x` 且接近或超过 `1.08x` 时进入。
 - [x] 跑 `BenchmarkPreparedRecursion` 五轮和 CPU/memory profile。
-- [ ] 补 guard：闭包返回、闭包传参、闭包存表、闭包身份比较、`debug.getupvalue`、`debug.setupvalue`、
+- [x] 补 guard：闭包返回、闭包传参、闭包存表、闭包身份比较、`debug.getupvalue`、`debug.setupvalue`、
   `debug.upvalueid`、`debug.upvaluejoin`、错误 traceback、line/call hook、pcall/error、coroutine/yield。
 - [ ] 实现非逃逸 local function descriptor prototype。
 - [ ] prepared 路径去掉当前 `2 allocs/op`，并且 wall-clock 稳定下降。
 - [ ] 完整 benchmark 三轮稳定低于 `1.00x`，否则回退或记录证伪。
+
+2026-07-05 recursion guard 测试补齐：
+
+- `TestDoStringRecursionLocalFunctionEscapeGuards` 固定递归 `local function fib` 经 return、参数传递、table
+  存储和 identity 比较后仍保持普通 Lua closure 语义。
+- `TestDoStringRecursionDebugUpvalueGuards` 固定 self upvalue 对 `debug.getupvalue`、`debug.setupvalue`、
+  `debug.upvalueid` 和 `debug.upvaluejoin` 可见。
+- `TestDoStringRecursionHookTracebackAndCoroutineGuards` 固定 `pcall/error`、line/call/return hook、
+  `debug.traceback` 和 `coroutine.yield` 边界。
+- 本轮无生产性能变化；五轮 `BenchmarkPreparedRecursion` 为 `1770 / 1771 / 1762 / 1766 / 1808 ns/op`、
+  `224 B/op`、`2 allocs/op`。下一步若实现 descriptor prototype，必须在上述 guard 全绿且明确无逃逸、
+  无 debug/hook/coroutine 可见风险时启用。
 
 ## 3. `string_concat` / 字符串拼接
 
