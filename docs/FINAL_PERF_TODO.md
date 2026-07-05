@@ -36,6 +36,27 @@
 结论：本轮无新增运行期主项。下一小切口只允许 profile `compile_3000_functions`，确认是否仍存在
 parser AST 构造或 codegen arena 生命周期结构性空间。
 
+2026-07-05 在 `91fd817` 后再次重建 `bin/glua` / `bin/gluac`，确认官方 `lua` / `luac` 为 5.3.6，
+并复跑默认完整 benchmark 三轮：
+
+| 排名 | 用例 | 三轮倍率 | 平均 | 下一步 |
+| ---: | --- | ---: | ---: | --- |
+| 1 | `compile_3000_functions` | `1.19x / 1.23x / 1.24x` | `1.22x` | 仍是唯一清晰主项 |
+| 2 | `recursion` | `1.06x / 1.06x / 1.05x` | `1.06x` | 未达到 `1.08x` 进入门槛 |
+| 3 | `string_concat` | `1.05x / 1.04x / 1.01x` | `1.03x` | 未达到 `1.08x` 重新打开门槛 |
+| 4 | `function_call` | `1.01x / 1.01x / 1.02x` | `1.01x` | 未达到 `1.05x` 进入门槛 |
+| 5 | `arith_mix_loop` | `1.01x / 1.00x / 1.00x` | `1.00x` | 未达到 `1.08x` 重新打开门槛 |
+| 6 | `closure_upvalue` | `0.85x / 0.85x / 0.85x` | `0.85x` | 停止扩张 |
+| 7 | `table_rw` | `0.84x / 0.85x / 0.85x` | `0.85x` | 停止扩张 |
+| 8 | `arith_chain_temp` | `0.78x / 0.77x / 0.78x` | `0.78x` | 停止扩张 |
+| 9 | `arith_add_loop` | `0.63x / 0.63x / 0.63x` | `0.63x` | 停止扩张 |
+| 10 | `stdlib_math_string` | `0.57x / 0.57x / 0.57x` | `0.57x` | 停止扩张 |
+
+结论：本轮复核没有产生新的运行期生产切口。`recursion` prepared profile 的分配证据仍成立，但完整
+benchmark 只有 `1.05-1.06x`，低于实现门槛；`function_call`、`string_concat` 和 `arith_mix_loop`
+均属于噪声带，不应打开 fast path。后续若无法提出新的 `compile_3000_functions` 结构性设计，应优先记录
+最终收敛结论，而不是继续堆局部调参。
+
 ## 1. `compile_3000_functions` 紧凑函数体设计与测试
 
 - [x] 复跑当前 `BenchmarkCompileSource3000Functions` 五轮，记录 `ns/op`、`B/op`、`allocs/op`。

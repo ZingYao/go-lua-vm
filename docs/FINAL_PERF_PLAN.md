@@ -41,6 +41,26 @@ benchmark 三轮后，排序仍保持一致：
 因此最终分支第一阶段仍只允许继续推进 `compile_3000_functions` profile 和紧凑函数体设计；
 `function_call` 与 `recursion` 未达到 TODO 中的进入门槛，`string_concat` 和 `arith_mix_loop` 不重新打开。
 
+2026-07-05 在 `91fd817` 后再次重建 `bin/glua` / `bin/gluac`，并显式使用官方 Lua/Luac 5.3.6
+复跑默认完整 benchmark 三轮。排序结果如下：
+
+| 排名 | 用例 | 三轮倍率 | 平均 | 判断 |
+| ---: | --- | ---: | ---: | --- |
+| 1 | `compile_3000_functions` | `1.19x / 1.23x / 1.24x` | `1.22x` | 唯一清晰主项 |
+| 2 | `recursion` | `1.06x / 1.06x / 1.05x` | `1.06x` | 未达 `1.08x` 进入门槛 |
+| 3 | `string_concat` | `1.05x / 1.04x / 1.01x` | `1.03x` | 噪声带，仅回归复核 |
+| 4 | `function_call` | `1.01x / 1.01x / 1.02x` | `1.01x` | 未达 `1.05x` 进入门槛 |
+| 5 | `arith_mix_loop` | `1.01x / 1.00x / 1.00x` | `1.00x` | 噪声带，仅回归复核 |
+| 6 | `closure_upvalue` | `0.85x / 0.85x / 0.85x` | `0.85x` | 已快于官方 |
+| 7 | `table_rw` | `0.84x / 0.85x / 0.85x` | `0.85x` | 已快于官方 |
+| 8 | `arith_chain_temp` | `0.78x / 0.77x / 0.78x` | `0.78x` | 已快于官方 |
+| 9 | `arith_add_loop` | `0.63x / 0.63x / 0.63x` | `0.63x` | 已快于官方 |
+| 10 | `stdlib_math_string` | `0.57x / 0.57x / 0.57x` | `0.57x` | 已快于官方 |
+
+结论：`recursion` prepared profile 虽然证明了 closure/upvalue 分配主因，但完整 benchmark 没有稳定触发
+生产实现门槛；`function_call`、`string_concat` 与 `arith_mix_loop` 仍在噪声带。下一步不得实现运行期 fast
+path，只能继续寻找 `compile_3000_functions` 的新结构性设计，或记录无新低风险切口的收敛结论。
+
 ## 总体策略
 
 最终阶段不再堆局部字段、容量 hint 或 token 分派微调。每个生产提交只允许一个可验证切口，并且必须先用
