@@ -2,6 +2,7 @@ package luac
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/zing/go-lua-vm/bytecode"
+	"github.com/zing/go-lua-vm/compiler/parser"
 	"github.com/zing/go-lua-vm/extensions"
 	"github.com/zing/go-lua-vm/lua"
 	"github.com/zing/go-lua-vm/runtime"
@@ -450,6 +452,51 @@ return f0(1)
 			}
 			test.check(t, proto.Protos[0])
 		})
+	}
+}
+
+// TestCompileSourceSimpleFunctionBodyControlFlowAndErrorFallbackGuards 固定控制流与语法错误必须回退普通路径。
+func TestCompileSourceSimpleFunctionBodyControlFlowAndErrorFallbackGuards(t *testing.T) {
+	// goto/label 会改变函数体控制流，compactSimpleFunctionBody 必须保留普通 parser/codegen 的跳转指令。
+	proto, err := CompileSource(`function f0(x)
+  goto done
+  x = x + 1
+  ::done::
+  return x + 7
+end
+return f0(1)
+`, "@simple-function-control-flow.lua")
+	if err != nil {
+		// 合法控制流样例必须仍能编译，失败说明普通 fallback 路径或 goto 语义回归。
+		t.Fatalf("CompileSource control-flow fallback sample failed: %v", err)
+	}
+	if len(proto.Protos) != 1 {
+		// 样例只定义一个待检查函数，子 Proto 数量漂移会影响后续断言语义。
+		t.Fatalf("unexpected child proto count=%d", len(proto.Protos))
+	}
+	child := proto.Protos[0]
+	if !containsInstructionOp(child, bytecode.OpJmp) {
+		// goto 必须保留 JMP，紧凑路径不能误把函数体折叠成 ADD/RETURN。
+		t.Fatalf("goto/label fallback should keep JMP, code=%v", child.Code)
+	}
+	if len(child.Code) <= 2 {
+		// 带控制流的函数体不能退化为目标形态的两条指令。
+		t.Fatalf("control-flow fallback should keep ordinary code, code=%v", child.Code)
+	}
+
+	_, err = CompileSource("function f0(x) return x + end\n", "@simple-function-syntax-error.lua")
+	if err == nil {
+		// 非法简单函数体必须返回 parser 错误，不能被试探解析吞掉或改写成合法 AST。
+		t.Fatalf("CompileSource should reject incomplete expression")
+	}
+	var parseError parser.ParseError
+	if !errors.As(err, &parseError) {
+		// 语法错误必须保留结构化 ParseError，便于 CLI/load 路径继续格式化行列和 near token。
+		t.Fatalf("expected parser.ParseError, got %T: %v", err, err)
+	}
+	if parseError.Position.Line != 1 || parseError.Position.Column == 0 || !strings.Contains(parseError.Message, "expression") {
+		// 错误位置和消息必须仍指向失败表达式，防止试探解析 reset 后丢失 token 位置。
+		t.Fatalf("unexpected parse error position/message: %+v", parseError)
 	}
 }
 
