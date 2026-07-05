@@ -53,6 +53,7 @@
   错误位置和非目标回退边界。
 - [x] 先补 guard 测试：普通 parser 仍返回完整 AST、target Proto/list 与普通路径一致、非目标形态回退、
   语法错误位置一致。
+- [x] 补完整 chunk streaming 父 Proto guard：全局写入、最终 return 调用、lineinfo、常量顺序和 `_ENV` upvalue。
 - [x] 实现最小 prototype。
 - [x] 五轮 micro wall-clock 稳定下降至少 `5%`，且 B/op 不高于当前约 `3.50 MB`。
 - [x] 重建 CLI 并跑完整 benchmark 三轮；未稳定低于 `1.00x` 时必须记录原因或回退。
@@ -162,6 +163,17 @@
 - 证伪结论：不再做 compact 节点页、字段压缩、常量索引、operator 扫描或普通 expression arena 调参。若继续
   compile，必须先设计“完整 chunk compile-only streaming 简单函数声明路径”，并补错误位置、debug、`luac -l -l`
   和回退 guard；本轮不直接改生产代码。
+
+2026-07-06 完整 chunk streaming parent guard：
+
+- 扩展 `TestCompileSourceMultipleSimpleFunctionsKeepDebugShape`，固定父 Proto 的 `CLOSURE; SETTABUP` 顺序、
+  最终 `GETTABUP; LOADK; CALL; GETTABUP; LOADK; CALL; ADD; RETURN`、lineinfo、常量顺序和 `_ENV` upvalue。
+- 语义目标：未来完整 chunk streaming 如果跳过 AST/semantic/codegen 对象流，也必须保留全局函数定义、
+  final return 调用、错误 PC、traceback 和 `luac -l -l` 可见性。
+- 后验 `BenchmarkCompileSource3000Functions` 三轮：`1.856986 / 1.833926 / 1.832137 ms/op`、
+  约 `1.917 MB/op`、`45 allocs/op`。本轮是 guard 切口，性能无改善符合预期。
+- 下一步：若实现完整 chunk streaming，只允许命中精确“批量顶层简单函数声明 + 最终 return”形态；任意错误位置、
+  debug、全局绑定、非目标函数或扩展语法风险都必须回退现有 parser/codegen 路径。
 
 2026-07-05 recursion prepared profile：
 

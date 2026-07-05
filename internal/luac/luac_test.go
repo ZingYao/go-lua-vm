@@ -550,6 +550,38 @@ func TestCompileSourceMultipleSimpleFunctionsKeepDebugShape(t *testing.T) {
 		// 两个顶层 function 声明必须按源码顺序生成两个 child Proto。
 		t.Fatalf("unexpected child proto count=%d", len(proto.Protos))
 	}
+	if len(proto.Code) != 12 {
+		// 父 Proto 必须保留两次全局函数写入、两次全局读取调用和最终返回，streaming 不能只生成 child。
+		t.Fatalf("unexpected parent code length=%d code=%v", len(proto.Code), proto.Code)
+	}
+	if !reflect.DeepEqual(proto.LineInfo, []int{1, 1, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3}) {
+		// 父 Proto 行号必须保留 function 定义行与最终 return 行，供错误 PC、traceback 和 luac 列表输出使用。
+		t.Fatalf("unexpected parent lineinfo=%v", proto.LineInfo)
+	}
+	if len(proto.Upvalues) != 1 || proto.Upvalues[0].Name != "_ENV" || !proto.Upvalues[0].InStack || proto.Upvalues[0].Index != 0 {
+		// 顶层 function 声明写入全局表，必须继续捕获 `_ENV` upvalue。
+		t.Fatalf("unexpected parent upvalues=%+v", proto.Upvalues)
+	}
+	if len(proto.Constants) != 4 ||
+		proto.Constants[0].Kind != bytecode.ConstantString || proto.Constants[0].String != "f0" ||
+		proto.Constants[1].Kind != bytecode.ConstantString || proto.Constants[1].String != "f1" ||
+		proto.Constants[2].Kind != bytecode.ConstantInteger || proto.Constants[2].Integer != 1 ||
+		proto.Constants[3].Kind != bytecode.ConstantInteger || proto.Constants[3].Integer != 2 {
+		// 父 Proto 常量顺序决定 SETTABUP/GETTABUP 和 final return 调用参数，streaming 不得重排。
+		t.Fatalf("unexpected parent constants=%+v", proto.Constants)
+	}
+	assertInstructionABxFields(t, proto.Code[0], bytecode.OpClosure, 0, 0)
+	assertInstructionFields(t, proto.Code[1], bytecode.OpSetTabUp, 0, bytecode.BitRK, 0)
+	assertInstructionABxFields(t, proto.Code[2], bytecode.OpClosure, 0, 1)
+	assertInstructionFields(t, proto.Code[3], bytecode.OpSetTabUp, 0, bytecode.BitRK+1, 0)
+	assertInstructionFields(t, proto.Code[4], bytecode.OpGetTabUp, 0, 0, bytecode.BitRK)
+	assertInstructionABxFields(t, proto.Code[5], bytecode.OpLoadK, 1, 2)
+	assertInstructionFields(t, proto.Code[6], bytecode.OpCall, 0, 2, 2)
+	assertInstructionFields(t, proto.Code[7], bytecode.OpGetTabUp, 1, 0, bytecode.BitRK+1)
+	assertInstructionABxFields(t, proto.Code[8], bytecode.OpLoadK, 2, 3)
+	assertInstructionFields(t, proto.Code[9], bytecode.OpCall, 1, 2, 2)
+	assertInstructionFields(t, proto.Code[10], bytecode.OpAdd, 0, 0, 1)
+	assertInstructionFields(t, proto.Code[11], bytecode.OpReturn, 0, 2, 0)
 
 	tests := []struct {
 		name       string
@@ -638,6 +670,16 @@ func assertInstructionFields(t *testing.T, instruction bytecode.Instruction, opC
 	if instruction.OpCode() != opCode || instruction.A() != a || instruction.B() != b || instruction.C() != c {
 		// 指令字段不匹配时输出完整字段，便于判断是 opcode 还是寄存器/RK 编码回归。
 		t.Fatalf("instruction mismatch got=%s A=%d B=%d C=%d want=%s A=%d B=%d C=%d", instruction.OpCode().Name(), instruction.A(), instruction.B(), instruction.C(), opCode.Name(), a, b, c)
+	}
+}
+
+// assertInstructionABxFields 校验 Lua 5.3 ABx 指令的 opcode、A 与 Bx 字段。
+func assertInstructionABxFields(t *testing.T, instruction bytecode.Instruction, opCode bytecode.OpCode, a int, bx int) {
+	// 标记 helper 后，失败行会指向调用方测试断言。
+	t.Helper()
+	if instruction.OpCode() != opCode || instruction.A() != a || instruction.Bx() != bx {
+		// 指令字段不匹配时输出完整字段，便于定位 child Proto 或常量索引重排。
+		t.Fatalf("instruction mismatch got=%s A=%d Bx=%d want=%s A=%d Bx=%d", instruction.OpCode().Name(), instruction.A(), instruction.Bx(), opCode.Name(), a, bx)
 	}
 }
 

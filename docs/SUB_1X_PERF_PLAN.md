@@ -575,6 +575,23 @@ prepared 执行框架、VM step 和已有自递归整数 fib fast path 的固定
 按语义门禁证伪，不做生产代码改动。下一轮优先回到 `compile_3000_functions` 完整 chunk streaming 设计，或对
 `arith_mix_loop` 做新的 profile 复核。
 
+## 完整 chunk streaming parent guard
+
+2026-07-06 回到 `compile_3000_functions`，先补未来完整 chunk streaming 简单函数声明路径的父 Proto 语义守卫，
+不改生产代码。已有 guard 只固定 child Proto 顺序、行号、local debug 和反汇编；本轮扩展
+`TestCompileSourceMultipleSimpleFunctionsKeepDebugShape`，额外锁定父 Proto：
+
+- 两个顶层 `function fN(...) ... end` 必须按源码顺序生成 `CLOSURE; SETTABUP`，继续写入 `_ENV["fN"]`。
+- 最终 `return f0(1) + f1(2)` 必须保留 `GETTABUP; LOADK; CALL; GETTABUP; LOADK; CALL; ADD; RETURN`。
+- 父 Proto 的 lineinfo 必须保留函数定义行和 return 行，常量顺序必须为 `"f0" / "f1" / 1 / 2`。
+- 父 Proto 必须继续捕获 `_ENV` upvalue，满足全局函数定义、错误 PC、traceback 和 `luac -l -l` 可见性。
+
+后验 `BenchmarkCompileSource3000Functions` 三轮为 `1.856986 / 1.833926 / 1.832137 ms/op`、
+约 `1.917 MB/op`、`45 allocs/op`。本轮是 guard 切口，性能无改善符合预期。下一步如果继续 compile 生产实现，
+只能在这些父/子 Proto guard 保护下设计完整 chunk streaming：命中精确“批量顶层简单函数声明 + 最终 return”
+形态时直接生成父 Proto 和 child Protos；任意错误位置、debug、全局绑定、非目标函数或扩展语法风险都必须回退
+现有 parser/codegen 路径。
+
 ## 语义门禁
 
 - 不引入 CGO，不接 Lua C API，不新增外部依赖。
