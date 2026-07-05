@@ -53,6 +53,29 @@ benchmark/profile 证明该切口对应真实差距。
 再决定 compile-only streaming 简单函数声明路径是否具备安全切口。`recursion`、`string_concat`、`function_call`
 和 `arith_mix_loop` 暂不插队，除非 compile 路径被证伪或三轮基线发生明显变化。
 
+## `compile_3000_functions` profile 结论
+
+2026-07-05 在 `443a29d` 后跑 `BenchmarkCompileSource3000Functions` 五轮和 CPU/memory profile：
+
+```bash
+CGO_ENABLED=0 go test ./internal/luac -run '^$' -bench '^BenchmarkCompileSource3000Functions$' -benchmem -count=5
+CGO_ENABLED=0 go test ./internal/luac -run '^$' -bench '^BenchmarkCompileSource3000Functions$' -benchmem \
+  -cpuprofile /tmp/go-lua-vm-sub-1x-profiles/compile_3000_443a29d/cpu.pprof \
+  -memprofile /tmp/go-lua-vm-sub-1x-profiles/compile_3000_443a29d/mem.pprof
+GOGC=off CGO_ENABLED=0 go test ./internal/luac -run '^$' -bench '^BenchmarkCompileSource3000Functions$' \
+  -benchmem -cpuprofile /tmp/go-lua-vm-sub-1x-profiles/compile_3000_443a29d/cpu_gogc_off.pprof
+```
+
+五轮结果稳定在 `2.408-2.417 ms/op`、约 `3.50 MB/op`、`72 allocs/op`。GOGC=off 的 CPU profile
+显示剩余主因集中在 `Parser.newFunctionStatement` / `parseFunctionStatement`，其次是
+`codegen.borrowChildProto`；lexer 扫描、常量索引和普通表达式解析已经不是主因。memory profile 中
+`newFunctionStatement`、`newCompactSimpleFunctionBody` 与 child Proto 相关分配占主要空间。
+
+结论：下一步只能设计“顶层简单 function 声明 compact/streaming 表示”这类结构切口，目标是绕过
+`FunctionStatement` 大结构和完整公开 AST 节点写入；普通 parser、`luac -l -l`、debug 行号、错误位置、
+字段/方法函数、local function、闭包/upvalue 和非目标源码必须回退普通路径。继续做 lexer、常量索引、
+页大小、局部字段或普通表达式微调不满足本轮门禁。
+
 优先级：
 
 1. `compile_3000_functions` / 编译3000个函数：探索 compile-only streaming 简单函数声明路径。目标是跳过公开

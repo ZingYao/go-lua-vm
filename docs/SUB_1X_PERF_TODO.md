@@ -48,14 +48,26 @@
 ## 1. `compile_3000_functions` / 编译3000个函数
 
 - [x] 跑三轮完整 benchmark，确认该项稳定 `> 1.00x`。
-- [ ] 跑 `BenchmarkCompileSource3000Functions` 五轮和 CPU/memory profile。
-- [ ] 设计 compile-only streaming 简单函数声明路径，明确普通 parser、semantic、debug、`luac -l -l`、
+- [x] 跑 `BenchmarkCompileSource3000Functions` 五轮和 CPU/memory profile。
+- [ ] 设计顶层简单 function 声明 compact/streaming 路径，明确普通 parser、semantic、debug、`luac -l -l`、
   错误位置和非目标回退边界。
 - [ ] 先补 guard 测试：普通 parser 仍返回完整 AST、target Proto/list 与普通路径一致、非目标形态回退、
   语法错误位置一致。
 - [ ] 实现最小 prototype。
 - [ ] 五轮 micro wall-clock 稳定下降至少 `5%`，且 B/op 不高于当前约 `3.50 MB`。
 - [ ] 重建 CLI 并跑完整 benchmark 三轮；未稳定低于 `1.00x` 时必须记录原因或回退。
+
+2026-07-05 profile 结果：
+
+- 五轮 micro：`2.408 / 2.410 / 2.408 / 2.417 / 2.414 ms/op`，约 `3.50 MB/op`，`72 allocs/op`。
+- GOGC=off CPU profile：`Parser.newFunctionStatement` flat `50.37%`、cum `57.78%`；
+  `parseFunctionStatement` / `parseStatement` cum `67.41%`；`codegen.borrowChildProto` flat `14.81%`；
+  lexer/number/identifier 扫描已不是主因。
+- alloc_space：`newFunctionStatement` 约 `42.59%`，`prepareDirectFunctionBlockCapacity` 约 `28.30%`，
+  `newCompactSimpleFunctionBody` 约 `9.33%`。
+- 结论：继续做 lexer、常量索引、页大小、局部字段或普通表达式微调不满足门禁。下一小切口必须先设计并补
+  guard 测试，目标是顶层简单函数声明 compact/streaming 表示；若不能证明普通 parser、debug、`luac -l -l`
+  和错误位置完全回退，则不得实现生产改动。
 
 ## 2. `recursion` / 递归
 
