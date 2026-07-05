@@ -113,6 +113,11 @@ binary chunk，再由 VM 执行并断言 `debug.getinfo(f0, "Slu")` 的行号、
 `debug.getlocal(f0, 1)` 的参数名；同时用 `Run -l -l` 固定子 Proto 行号、locals 生命周期、
 debug dump 关键片段。该切口只补 compact fast path 前置语义门禁，不启用生产优化。
 
+2026-07-05 已补第一批非目标回退 guard：`TestCompileSourceSimpleFunctionBodySignatureFallbackGuards`
+覆盖 table 字段函数名、method 隐式 `self`、vararg、多参数、local upvalue operand 和嵌套 closure body。
+这些样例必须保留各自的顶层赋值/SELF、参数表、vararg 标记、upvalue 捕获、CLOSURE/TAILCALL 等普通路径特征。
+复杂表达式、label/goto 和语法错误位置仍待后续小切口补齐。
+
 ## 2. `function_call` batch guard 冻结候选
 
 - [ ] 仅在 `function_call` 完整三轮稳定高于 `1.05x` 时进入本项。

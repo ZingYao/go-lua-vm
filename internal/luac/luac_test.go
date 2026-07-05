@@ -221,6 +221,131 @@ assert(simpleResult == 42, simpleResult)
 	}
 }
 
+// TestCompileSourceSimpleFunctionBodySignatureFallbackGuards 固定非目标函数签名与命名形态必须回退普通路径。
+func TestCompileSourceSimpleFunctionBodySignatureFallbackGuards(t *testing.T) {
+	// 表驱动覆盖 compactSimpleFunctionBody 第一批禁止进入的函数头和函数名形态。
+	tests := []struct {
+		name   string
+		source string
+		check  func(t *testing.T, proto *bytecode.Proto, child *bytecode.Proto)
+	}{
+		{
+			name: "table field function name",
+			source: `local t = {}
+function t.f(x) return x + 7 end
+return t.f(1)
+`,
+			check: func(t *testing.T, proto *bytecode.Proto, child *bytecode.Proto) {
+				// table 字段函数定义必须保留顶层 SETTABLE，而不是被误当成普通全局 function 声明。
+				if !containsInstructionOp(proto, bytecode.OpSetTable) {
+					t.Fatalf("table field function should assign through SETTABLE, code=%v", proto.Code)
+				}
+				if child.NumParams != 1 || child.IsVararg || len(child.LocalVars) != 1 || child.LocalVars[0].Name != "x" {
+					t.Fatalf("table field child header/locals changed: params=%d vararg=%v locals=%+v", child.NumParams, child.IsVararg, child.LocalVars)
+				}
+			},
+		},
+		{
+			name: "method receiver",
+			source: `local t = {}
+function t:f(x) return x + 7 end
+return t:f(1)
+`,
+			check: func(t *testing.T, proto *bytecode.Proto, child *bytecode.Proto) {
+				// method 定义会注入 self 参数，紧凑路径不能按单参数函数体处理。
+				if child.NumParams != 2 || child.IsVararg || len(child.LocalVars) < 2 {
+					t.Fatalf("method child header/locals changed: params=%d vararg=%v locals=%+v", child.NumParams, child.IsVararg, child.LocalVars)
+				}
+				if child.LocalVars[0].Name != "self" || child.LocalVars[1].Name != "x" {
+					t.Fatalf("method locals should keep self/x: %+v", child.LocalVars)
+				}
+				assertInstructionFields(t, child.Code[0], bytecode.OpAdd, 2, 1, bytecode.BitRK)
+				if !containsInstructionOp(proto, bytecode.OpSelf) {
+					t.Fatalf("method call should keep SELF opcode, code=%v", proto.Code)
+				}
+			},
+		},
+		{
+			name: "vararg parameter",
+			source: `function f0(x, ...) return x + 7 end
+return f0(1)
+`,
+			check: func(t *testing.T, proto *bytecode.Proto, child *bytecode.Proto) {
+				// vararg 标记必须保留，compact 候选只允许非 vararg。
+				if child.NumParams != 1 || !child.IsVararg {
+					t.Fatalf("vararg child header changed: params=%d vararg=%v", child.NumParams, child.IsVararg)
+				}
+			},
+		},
+		{
+			name: "multiple parameters",
+			source: `function f0(x, y) return x + 7 end
+return f0(1, 2)
+`,
+			check: func(t *testing.T, proto *bytecode.Proto, child *bytecode.Proto) {
+				// 多参数函数必须保留两个形参和额外返回临时寄存器。
+				if child.NumParams != 2 || child.IsVararg || child.MaxStackSize != 3 || len(child.LocalVars) < 2 {
+					t.Fatalf("multi-param child header/locals changed: params=%d vararg=%v maxstack=%d locals=%+v", child.NumParams, child.IsVararg, child.MaxStackSize, child.LocalVars)
+				}
+				if child.LocalVars[0].Name != "x" || child.LocalVars[1].Name != "y" {
+					t.Fatalf("multi-param locals should keep x/y: %+v", child.LocalVars)
+				}
+				assertInstructionFields(t, child.Code[0], bytecode.OpAdd, 2, 0, bytecode.BitRK)
+			},
+		},
+		{
+			name: "local upvalue operand",
+			source: `local y = 7
+function f0(x) return x + y end
+return f0(1)
+`,
+			check: func(t *testing.T, proto *bytecode.Proto, child *bytecode.Proto) {
+				// 读取外层 local y 必须保留 upvalue 捕获和 GETUPVAL 指令。
+				if len(child.Upvalues) != 1 || child.Upvalues[0].Name != "y" {
+					t.Fatalf("upvalue child should capture y: %+v", child.Upvalues)
+				}
+				if !containsInstructionOp(child, bytecode.OpGetUpval) {
+					t.Fatalf("upvalue child should read GETUPVAL, code=%v", child.Code)
+				}
+			},
+		},
+		{
+			name: "nested closure body",
+			source: `function f0(x)
+  local function g() return x + 7 end
+  return g()
+end
+return f0(1)
+`,
+			check: func(t *testing.T, proto *bytecode.Proto, child *bytecode.Proto) {
+				// 嵌套函数体必须保留子 Proto、CLOSURE 和尾调用，不能折叠成直接 ADD/RETURN。
+				if len(child.Protos) != 1 {
+					t.Fatalf("nested body should keep child proto: children=%d", len(child.Protos))
+				}
+				if !containsInstructionOp(child, bytecode.OpClosure) || !containsInstructionOp(child, bytecode.OpTailCall) {
+					t.Fatalf("nested body should keep CLOSURE/TAILCALL, code=%v", child.Code)
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		// 每个非目标样例都必须独立编译并保留自身普通路径特征。
+		t.Run(test.name, func(t *testing.T) {
+			proto, err := CompileSource(test.source, "@simple-function-fallback-"+test.name+".lua")
+			if err != nil {
+				// 合法非目标样例必须仍能编译。
+				t.Fatalf("CompileSource fallback sample failed: %v", err)
+			}
+			if len(proto.Protos) == 0 {
+				// 每个样例都至少定义一个函数，用于验证子 Proto 普通形态。
+				t.Fatalf("missing child proto")
+			}
+			test.check(t, proto, proto.Protos[0])
+		})
+	}
+}
+
 // TestCompileSourceSimpleFunctionBodyNonTargetKeepsOrdinaryShape 固定非目标函数体必须回退普通 AST/codegen。
 func TestCompileSourceSimpleFunctionBodyNonTargetKeepsOrdinaryShape(t *testing.T) {
 	// 引入局部变量 y，使函数体不再满足 `return <param> + <integer>` 紧凑候选形态。
@@ -254,6 +379,18 @@ func TestCompileSourceSimpleFunctionBodyNonTargetKeepsOrdinaryShape(t *testing.T
 		// 局部变量生命周期必须覆盖当前普通 codegen 指令区间。
 		t.Fatalf("unexpected child local ranges=%+v", child.LocalVars)
 	}
+}
+
+// containsInstructionOp 判断 Proto 指令区是否包含指定 opcode。
+func containsInstructionOp(proto *bytecode.Proto, opCode bytecode.OpCode) bool {
+	// 线性扫描足够测试断言使用，保持辅助函数无额外索引状态。
+	for _, instruction := range proto.Code {
+		// 命中目标 opcode 时立即返回，便于调用方表达普通路径特征。
+		if instruction.OpCode() == opCode {
+			return true
+		}
+	}
+	return false
 }
 
 // assertInstructionFields 校验 Lua 5.3 ABC 指令的 opcode 与 A/B/C 字段。
