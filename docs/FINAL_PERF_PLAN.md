@@ -287,6 +287,32 @@ closure 和自递归 upvalue cell。激进方向只能是“非逃逸 local func
 - 完整 benchmark `recursion` 稳定低于 `1.00x`。
 - debug/upvalue/closure identity 定向测试全绿。
 
+### 2026-07-05 recursion 门槛复核 profile
+
+在 `compile_3000_functions` prototype 2 证伪后，按 TODO 复核 `BenchmarkPreparedRecursion`：
+
+- 单轮 profile：`1775 ns/op`、`224 B/op`、`2 allocs/op`。
+- 五轮 micro：`1770 / 1769 / 1769 / 1768 / 1770 ns/op`，稳定 `224 B/op`、`2 allocs/op`。
+- CPU profile 中 `executePreparedLuaClosureWithDebugNameTailFromArgs` 累计约 `67.32%`，
+  `VM.Step` 累计约 `23.00%`，固定签名 `fastSelfRecursiveIntegerFib` 本体仅约 `2.72%`。
+- alloc_space 中 `runtime.NewLuaClosure` 约 `70.56%`，`runtime.NewOpenUpvalueCell` 约 `28.77%`。
+- alloc_objects 中 `runtime.NewOpenUpvalueCell` 约 `50.45%`，`runtime.NewLuaClosure` 约 `49.49%`。
+
+结论：prepared 口径再次证明剩余稳定分配来自每次顶层 chunk 执行时创建 local `fib` closure 和自递归
+open upvalue cell，而不是递归 fast path 本体。该 profile 只证明候选主因，不足以直接改生产代码；
+下一步若完整 benchmark 三轮仍稳定触达 `1.08x` 门槛，必须先补非逃逸 local function descriptor 的
+guard 测试，再实现最小 prototype。
+
+非逃逸 descriptor 的必要边界：
+
+- 只允许目标形态中顶层 `local function fib(n)`，且函数值只被自身递归和固定调用点读取。
+- 任何返回 closure、传参、存表、赋给 upvalue/global、闭包身份比较、`debug.getupvalue`、
+  `debug.setupvalue`、`debug.upvalueid`、`debug.upvaluejoin`、line/call hook、pcall/error traceback、
+  coroutine/yield 或 metatable/debug 可见路径都必须回退普通 closure/upvalue 生命周期。
+- descriptor 不得复用 Lua 可观察的 closure identity；如果执行路径能观察函数对象身份，必须创建普通
+  closure 与 open upvalue cell。
+- 错误路径和 traceback 必须仍指向普通 `fib` 子 Proto 的源码行与函数名。
+
 ## 方案 D：噪声带项目只做回归
 
 `string_concat` 和 `arith_mix_loop` 已完成主要收益切口，当前倍率分别约 `1.04x` 和 `1.03x`。这两项后续

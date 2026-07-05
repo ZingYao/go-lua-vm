@@ -241,13 +241,40 @@ CGO_ENABLED=0 go test ./internal/luac -run '^$' \
 ## 3. `recursion` closure/upvalue 生命周期候选
 
 - [ ] 仅在 `recursion` 完整三轮稳定高于 `1.08x` 时进入本项。
-- [ ] 运行 `BenchmarkPreparedRecursion` 五轮和 CPU/memory profile。
-- [ ] 证明剩余成本仍为 local `fib` closure 和 self upvalue cell 分配。
-- [ ] 设计非逃逸 local function descriptor，列出返回、传参、存表、闭包身份比较、`debug.getupvalue`、hook、traceback、pcall/error、coroutine/yield 的回退边界。
+- [x] 运行 `BenchmarkPreparedRecursion` 五轮和 CPU/memory profile。
+- [x] 证明剩余成本仍为 local `fib` closure 和 self upvalue cell 分配。
+- [x] 设计非逃逸 local function descriptor，列出返回、传参、存表、闭包身份比较、`debug.getupvalue`、hook、traceback、pcall/error、coroutine/yield 的回退边界。
 - [ ] 补 guard 测试：闭包返回、闭包存表、闭包传参、`debug.getupvalue`、错误 traceback、line hook、call hook、yield。
 - [ ] 实现最小 prototype。
 - [ ] 运行 `BenchmarkPreparedRecursion` 五轮；未去掉当前 `2 allocs/op` 或 wall-clock 不降则回退。
 - [ ] 运行完整 benchmark 三轮；`recursion` 未稳定低于 `1.00x` 则不保留生产改动。
+
+2026-07-05 在 `compile_3000_functions` prototype 2 证伪后，复核 `recursion` prepared profile：
+
+```bash
+CGO_ENABLED=0 go test ./lua -run '^$' \
+  -bench '^BenchmarkPreparedRecursion$' \
+  -benchmem -benchtime=5s -count=1 \
+  -cpuprofile /tmp/go-lua-vm-final-profiles/recursion/recursion_cpu.pprof \
+  -memprofile /tmp/go-lua-vm-final-profiles/recursion/recursion_mem.pprof
+CGO_ENABLED=0 go test ./lua -run '^$' \
+  -bench '^BenchmarkPreparedRecursion$' \
+  -benchmem -benchtime=3s -count=5
+```
+
+结果：
+
+- profile 单轮：`1775 ns/op`、`224 B/op`、`2 allocs/op`。
+- 五轮 micro：`1770 / 1769 / 1769 / 1768 / 1770 ns/op`，稳定 `224 B/op`、`2 allocs/op`。
+- CPU profile 中 `executePreparedLuaClosureWithDebugNameTailFromArgs` 累计约 `67.32%`，
+  `VM.Step` 累计约 `23.00%`，`fastSelfRecursiveIntegerFib` 本体约 `2.72%`。
+- alloc_space 中 `runtime.NewLuaClosure` 约 `70.56%`，`runtime.NewOpenUpvalueCell` 约 `28.77%`。
+- alloc_objects 中 `runtime.NewOpenUpvalueCell` 约 `50.45%`，`runtime.NewLuaClosure` 约 `49.49%`。
+
+结论：prepared 口径稳定证明剩余分配来自 local `fib` closure 和自递归 open upvalue cell。生产实现仍需
+等待完整 benchmark 三轮稳定触达 `1.08x` 门槛，并且必须先补 guard：闭包返回、闭包存表、闭包传参、
+闭包身份比较、`debug.getupvalue`、`debug.setupvalue`、`debug.upvalueid`、`debug.upvaluejoin`、
+错误 traceback、line/call hook、pcall/error 和 coroutine/yield。未补齐前禁止直接实现 descriptor。
 
 ## 4. 噪声带回归复核
 
