@@ -30,6 +30,8 @@ type Parser struct {
 	current lexer.Token
 	// syntax 保存当前 parser 启用的扩展语法集合。
 	syntax extensions.SyntaxSet
+	// compactFunctionBodies 表示当前 parser 是否允许生成编译专用函数体摘要。
+	compactFunctionBodies bool
 	// syntaxDepth 保存当前 parser 递归层级，用于模拟 Lua 5.3 的 C 调用深度限制。
 	syntaxDepth int
 	// nameExpressionPage 保存当前页内紧凑分配的名称表达式节点。
@@ -42,6 +44,8 @@ type Parser struct {
 	functionStatementPage []FunctionStatement
 	// localFunctionStatementPage 保存当前页内紧凑分配的 local function 语句节点。
 	localFunctionStatementPage []LocalFunctionStatement
+	// compactSimpleFunctionBodyPage 保存当前页内紧凑分配的简单函数体摘要。
+	compactSimpleFunctionBodyPage []compactSimpleFunctionBody
 }
 
 // parserMark 保存 parser 局部试探解析前的前瞻 token 和 lexer 位置。
@@ -67,9 +71,30 @@ func New(input string) *Parser {
 // input 是完整 Lua 源码文本；syntax 会裁剪到当前构建产物已编译的扩展集合，未编译扩展不会生效。
 // Parser 会立即读取第一个 token 作为前瞻。
 func NewWithSyntax(input string, syntax extensions.SyntaxSet) *Parser {
+	// 普通 parser 入口必须保持完整 AST，不启用编译专用 compact summary。
+	return newWithSyntax(input, syntax, false)
+}
+
+// NewCompactWithSyntax 创建启用编译专用函数体摘要的 Parser。
+//
+// input 是完整 Lua 源码文本；syntax 会裁剪到当前构建产物已编译的扩展集合。该入口只服务
+// luac/codegen 热路径，parser.New 和 parser.NewWithSyntax 仍保持完整 AST 可见性。
+func NewCompactWithSyntax(input string, syntax extensions.SyntaxSet) *Parser {
+	// compact parser 只改变目标函数体的内部表示，失败时仍回退普通解析。
+	return newWithSyntax(input, syntax, true)
+}
+
+// newWithSyntax 创建 parser，并按调用方要求决定是否启用 compact 函数体摘要。
+func newWithSyntax(input string, syntax extensions.SyntaxSet, compactFunctionBodies bool) *Parser {
 	// 初始化 lexer 并读取首个 token，后续 parse 方法只消费 current。
 	tokenLexer := lexer.New(input)
-	return &Parser{input: input, lexer: tokenLexer, current: tokenLexer.NextToken(), syntax: syntax & extensions.Compiled()}
+	return &Parser{
+		input:                 input,
+		lexer:                 tokenLexer,
+		current:               tokenLexer.NextToken(),
+		syntax:                syntax & extensions.Compiled(),
+		compactFunctionBodies: compactFunctionBodies,
+	}
 }
 
 // mark 返回当前 parser 试探解析恢复点。
@@ -150,6 +175,19 @@ func (parser *Parser) newLocalFunctionStatement(name string, position lexer.Posi
 	}
 	parser.localFunctionStatementPage = append(parser.localFunctionStatementPage, LocalFunctionStatement{Name: name, Position: position})
 	return &parser.localFunctionStatementPage[len(parser.localFunctionStatementPage)-1]
+}
+
+// newCompactSimpleFunctionBody 创建简单函数体 compact summary。
+//
+// summary 来自已经完整识别的 `return <param> + <integer> end` token 序列，返回指针在当前
+// parser 生命周期内稳定，供后续 FunctionBody 只读引用。
+func (parser *Parser) newCompactSimpleFunctionBody(summary compactSimpleFunctionBody) *compactSimpleFunctionBody {
+	// 当前页满时分配新页，保持已挂到 FunctionBody 上的 summary 指针稳定。
+	if len(parser.compactSimpleFunctionBodyPage) == cap(parser.compactSimpleFunctionBodyPage) {
+		parser.compactSimpleFunctionBodyPage = make([]compactSimpleFunctionBody, 0, parserStatementArenaPageSize)
+	}
+	parser.compactSimpleFunctionBodyPage = append(parser.compactSimpleFunctionBodyPage, summary)
+	return &parser.compactSimpleFunctionBodyPage[len(parser.compactSimpleFunctionBodyPage)-1]
 }
 
 // ParseChunk 解析完整 Lua chunk。
@@ -547,7 +585,7 @@ func (parser *Parser) parseLocalAssignmentStatement() (Statement, error) {
 		}
 		statement := parser.newLocalFunctionStatement(name, startPosition)
 		statement.Body = &statement.inlineBody
-		if err := parser.parseFunctionBodyInto(statement.Body); err != nil {
+		if err := parser.parseFunctionBodyInto(statement.Body, false); err != nil {
 			// 函数体解析失败时无法构造 local function。
 			return nil, err
 		}
@@ -598,7 +636,7 @@ func (parser *Parser) parseFunctionStatement() (Statement, error) {
 		// 简单函数名保留原有 AST，函数体直接内嵌在 FunctionStatement 中。
 		statement := parser.newFunctionStatement(simpleName, startPosition)
 		statement.Body = &statement.inlineBody
-		if err := parser.parseFunctionBodyInto(statement.Body); err != nil {
+		if err := parser.parseFunctionBodyInto(statement.Body, true); err != nil {
 			// 函数体解析失败时无法构造 function 语句。
 			return nil, err
 		}
@@ -608,7 +646,7 @@ func (parser *Parser) parseFunctionStatement() (Statement, error) {
 
 	expression := &FunctionExpression{Position: startPosition}
 	expression.Body = &expression.inlineBody
-	if err := parser.parseFunctionBodyInto(expression.Body); err != nil {
+	if err := parser.parseFunctionBodyInto(expression.Body, false); err != nil {
 		// 函数体解析失败时无法构造 function 语句。
 		return nil, err
 	}
@@ -985,7 +1023,7 @@ func (parser *Parser) parseLabelStatement() (Statement, error) {
 // 当前阶段支持普通参数名列表和空参数；函数体以 end 结束。
 func (parser *Parser) parseFunctionBody() (*FunctionBody, error) {
 	functionBody := &FunctionBody{}
-	if err := parser.parseFunctionBodyInto(functionBody); err != nil {
+	if err := parser.parseFunctionBodyInto(functionBody, false); err != nil {
 		// 调用方仍需要独立函数体对象时，解析失败直接返回错误。
 		return nil, err
 	}
@@ -994,9 +1032,10 @@ func (parser *Parser) parseFunctionBody() (*FunctionBody, error) {
 
 // parseFunctionBodyInto 将函数体解析到调用方提供的 FunctionBody。
 //
-// body 必须是当前 AST 宿主节点独占的可写对象；该函数会重置 body 内容，并保持 Params、Body、
+// body 必须是当前 AST 宿主节点独占的可写对象；allowCompact 表示调用点已证明这是普通简单 function
+// 声明，可在 compact parser 模式中尝试生成编译专用摘要。该函数会重置 body 内容，并保持 Params、Body、
 // inlineBody、行号和位置信息与 parseFunctionBody 的对外语义一致。
-func (parser *Parser) parseFunctionBodyInto(body *FunctionBody) error {
+func (parser *Parser) parseFunctionBodyInto(body *FunctionBody, allowCompact bool) error {
 	startPosition := parser.current.Position
 	if err := parser.expectOperator("("); err != nil {
 		// 函数体必须以左括号开始参数列表。
@@ -1050,6 +1089,19 @@ func (parser *Parser) parseFunctionBodyInto(body *FunctionBody) error {
 		// 参数列表必须用右括号关闭。
 		return err
 	}
+	if allowCompact && parser.compactFunctionBodies && paramCount == 1 && !vararg {
+		// 编译专用入口只对单参数、非 vararg 的函数体做局部试探。
+		if summary, blockPosition, endPosition, ok := parser.tryParseCompactSimpleFunctionBody(singleParam); ok {
+			// 成功识别精确目标形态时，只保留最小 block 与 summary，避免构造 return/binary/name/literal AST。
+			*body = FunctionBody{Vararg: false, Position: startPosition, LastLineDefined: endPosition.Line}
+			body.inlineParams[0] = singleParam
+			body.Params = body.inlineParams[:1]
+			body.inlineBody = Block{Position: blockPosition}
+			body.Body = &body.inlineBody
+			body.compactSimple = summary
+			return nil
+		}
+	}
 	*body = FunctionBody{Vararg: vararg, Position: startPosition}
 	body.Body = &body.inlineBody
 	if err := parser.parseBlockUntilInto(body.Body, nil); err != nil {
@@ -1073,6 +1125,62 @@ func (parser *Parser) parseFunctionBodyInto(body *FunctionBody) error {
 		body.Params = params
 	}
 	return nil
+}
+
+// tryParseCompactSimpleFunctionBody 试探解析 `return <param> + <integer> end` 函数体。
+//
+// paramName 是已解析出的唯一参数名；返回 ok=false 时 parser 会恢复到试探前 token 流，调用方必须继续
+// 普通 parseBlockUntilInto 路径，以保持复杂函数体 AST、错误位置和语义校验不变。
+func (parser *Parser) tryParseCompactSimpleFunctionBody(paramName string) (*compactSimpleFunctionBody, lexer.Position, lexer.Position, bool) {
+	mark := parser.mark()
+	returnToken := parser.current
+	if returnToken.Kind != lexer.TokenKeyword || returnToken.Text != "return" {
+		// 目标函数体必须以 return 起始；其他语句交给普通 parser。
+		parser.reset(mark)
+		return nil, lexer.Position{}, lexer.Position{}, false
+	}
+	parser.advance()
+
+	nameToken := parser.current
+	if nameToken.Kind != lexer.TokenIdentifier || nameToken.Text != paramName {
+		// return 左操作数必须精确读取唯一参数名，否则可能涉及 local/upvalue/global 语义。
+		parser.reset(mark)
+		return nil, lexer.Position{}, lexer.Position{}, false
+	}
+	parser.advance()
+
+	operatorToken := parser.current
+	if operatorToken.Kind != lexer.TokenOperator || operatorToken.Text != "+" {
+		// 当前 prototype 只覆盖整数加法；其他操作符必须保留普通表达式 AST。
+		parser.reset(mark)
+		return nil, lexer.Position{}, lexer.Position{}, false
+	}
+	parser.advance()
+
+	literalToken := parser.current
+	if literalToken.Kind != lexer.TokenNumber || (literalToken.Number.Kind != lexer.NumberDecimalInteger && literalToken.Number.Kind != lexer.NumberHexInteger) {
+		// 右操作数必须是 integer 字面量，浮点、字符串或非法数字都需要普通路径处理。
+		parser.reset(mark)
+		return nil, lexer.Position{}, lexer.Position{}, false
+	}
+	parser.advance()
+
+	endToken := parser.current
+	if endToken.Kind != lexer.TokenKeyword || endToken.Text != "end" {
+		// integer 后必须直接关闭函数体；分号、逗号或后续语句均不属于精确目标形态。
+		parser.reset(mark)
+		return nil, lexer.Position{}, lexer.Position{}, false
+	}
+	parser.advance()
+
+	summary := parser.newCompactSimpleFunctionBody(compactSimpleFunctionBody{
+		paramName:        paramName,
+		integer:          literalToken.Number.Integer,
+		returnPosition:   returnToken.Position,
+		operatorPosition: operatorToken.Position,
+		literalPosition:  literalToken.Position,
+	})
+	return summary, returnToken.Position, endToken.Position, true
 }
 
 // parseReturnStatement 解析 return 语句。
@@ -1450,7 +1558,7 @@ func (parser *Parser) parseFunctionExpression() (Expression, error) {
 	}
 	expression := &FunctionExpression{Position: position}
 	expression.Body = &expression.inlineBody
-	if err := parser.parseFunctionBodyInto(expression.Body); err != nil {
+	if err := parser.parseFunctionBodyInto(expression.Body, false); err != nil {
 		// 函数体解析失败时无法构造匿名函数表达式。
 		return nil, err
 	}

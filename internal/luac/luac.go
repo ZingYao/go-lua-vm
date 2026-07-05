@@ -392,7 +392,7 @@ func CompileSource(source string, chunkName string) (*bytecode.Proto, error) {
 // source 是完整 Lua chunk；chunkName 写入 Proto.Source；syntax 会裁剪到当前二进制已编译集合。
 func CompileSourceWithSyntax(source string, chunkName string, syntax extensions.SyntaxSet) (*bytecode.Proto, error) {
 	// 先解析源码为 AST，再交给 codegen 生成 Proto。
-	chunkParser := parser.NewWithSyntax(source, syntax)
+	chunkParser := parser.NewCompactWithSyntax(source, syntax)
 	chunk, err := chunkParser.ParseChunk()
 	if err != nil {
 		// 语法或基础语义错误直接返回，不进入 codegen。

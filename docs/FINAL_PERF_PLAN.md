@@ -138,6 +138,19 @@ codegen 直发流程：
 该设计的首个可实现切口是“parser mark/reset + compile-only compact summary + codegen direct child proto”。
 它必须证明同时减少 AST 构造和 codegen arena 分配；如果只复现前序 codegen-only 直发，必须回退。
 
+### 2026-07-05 prototype 1 结果
+
+本轮已实现 compile-only compact summary：`internal/luac` 使用 `parser.NewCompactWithSyntax`，普通
+`parser.New` / `parser.NewWithSyntax` 继续输出完整 AST。compact 只覆盖普通简单函数声明中的
+`return <param> + <integer> end`，并通过 parser mark/reset 保证失败后回退普通 parser；method、
+table field、local function、匿名 function、复杂表达式、label/goto 和语法错误位置已由 guard 测试固定。
+
+Go micro 五轮从约 `2.65-2.71 ms/op`、`3.781 MB/op`、`87 allocs/op` 降到
+`2.35 ms/op`、`3.50 MB/op`、`64-65 allocs/op`。重建 CLI 后默认完整 benchmark 三轮中
+`compile_3000_functions` 为 `1.23x / 1.20x / 1.20x`，低于最终分支基线约 `1.31x`，
+但仍未达到长期目标 `1.15x`。下一步必须重新 profile prototype 后剩余成本，再决定是否继续扩张
+parser/codegen 结构性优化。
+
 ## 方案 B：`function_call` batch guard 冻结
 
 目标源码形态：

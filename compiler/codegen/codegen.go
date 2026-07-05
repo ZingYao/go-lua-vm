@@ -2950,7 +2950,12 @@ func (generator *generator) compileChildProto(body *parser.FunctionBody) (int, e
 		register := child.allocateRegister()
 		child.defineLocal(paramName, register, body.Position)
 	}
-	if err := child.compileBlock(body.Body); err != nil {
+	if handled, err := child.compileCompactSimpleFunctionBody(body); handled || err != nil {
+		// compact summary 命中时已生成完整显式 return；错误则保持原 codegen 错误语义。
+		if err != nil {
+			return 0, err
+		}
+	} else if err := child.compileBlock(body.Body); err != nil {
 		// 子函数 block 编译失败时返回错误。
 		return 0, err
 	}
@@ -2973,6 +2978,59 @@ func (generator *generator) compileChildProto(body *parser.FunctionBody) (int, e
 
 	// 追加子 Proto 并返回索引。
 	return generator.proto.AddChild(child.proto), nil
+}
+
+// compileCompactSimpleFunctionBody 编译 parser compact summary 记录的简单函数体。
+//
+// body 必须来自 compile-only parser 入口；该 helper 会重新核对参数、vararg 与局部变量绑定。返回
+// handled=false 表示 summary 缺失或校验失败，调用方必须继续普通 compileBlock 路径。
+func (generator *generator) compileCompactSimpleFunctionBody(body *parser.FunctionBody) (bool, error) {
+	paramName, integerValue, returnPosition, operatorPosition, _, ok := body.CompactSimpleAddInteger()
+	if !ok {
+		// 没有 compact summary 的函数体保持普通 codegen。
+		return false, nil
+	}
+	if body.Vararg || len(body.Params) != 1 || body.Params[0] != paramName {
+		// 参数形态被 method/self 注入或其他路径改写时，不能使用 summary。
+		return false, nil
+	}
+	binding, ok := generator.lookupLocal(paramName)
+	if !ok {
+		// 参数 local 尚未登记时回退普通路径，避免生成读取未知寄存器的字节码。
+		return false, nil
+	}
+
+	resultRegister := generator.allocateRegister()
+	constantIndex := generator.addConstant(bytecode.IntegerConstant(integerValue))
+	constantOperand, constantRegister, err := generator.rkOperandForConstantIndex(constantIndex)
+	if err != nil {
+		// 常量无法编码时释放结果寄存器并返回原错误。
+		generator.releaseRegister(resultRegister)
+		return true, err
+	}
+	if err := generator.withSourceLine(operatorPosition, func() error {
+		// ADD 行号必须归因到 `+`，与普通二元 return codegen 保持一致。
+		generator.emitABC(bytecode.OpAdd, resultRegister, binding.register, constantOperand)
+		return nil
+	}); err != nil {
+		// 当前 emit 不会返回错误；保留释放路径以匹配 withSourceLine 签名。
+		generator.releaseOptionalRegister(constantRegister)
+		generator.releaseRegister(resultRegister)
+		return true, err
+	}
+	generator.releaseOptionalRegister(constantRegister)
+	if err := generator.withSourceLine(returnPosition, func() error {
+		// RETURN 行号必须归因到 return 关键字，供 debug hook 与 luac -l -l 展示。
+		generator.emitABC(bytecode.OpReturn, resultRegister, 2, 0)
+		return nil
+	}); err != nil {
+		// 当前 emit 不会返回错误；保留释放路径以匹配 withSourceLine 签名。
+		generator.releaseRegister(resultRegister)
+		return true, err
+	}
+	generator.releaseRegister(resultRegister)
+	generator.returned = true
+	return true, nil
 }
 
 // compileReturn 编译 return 语句。

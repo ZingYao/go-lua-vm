@@ -272,6 +272,8 @@ type FunctionBody struct {
 	Body *Block
 	// inlineBody 保存函数体自身 block，避免为每个函数体单独分配 Block 对象。
 	inlineBody Block
+	// compactSimple 保存编译专用的简单函数体摘要；默认 parser 入口保持 nil。
+	compactSimple *compactSimpleFunctionBody
 	// Position 保存左括号位置。
 	Position lexer.Position
 	// LineDefined 保存 function 关键字所在源码行，供 Proto debug 信息使用。
@@ -280,12 +282,41 @@ type FunctionBody struct {
 	LastLineDefined int
 }
 
+// compactSimpleFunctionBody 保存 `return <param> + <integer>` 的编译专用摘要。
+//
+// 该结构只由 parser compact 模式生成；普通 AST 调用方通过 FunctionBody 仍看到完整 block。
+type compactSimpleFunctionBody struct {
+	// paramName 保存唯一参数名，codegen 必须重新核对当前参数 local。
+	paramName string
+	// integer 保存右操作数 integer 字面量的精确值。
+	integer int64
+	// returnPosition 保存 return 关键字位置，用于 RETURN 行号。
+	returnPosition lexer.Position
+	// operatorPosition 保存 `+` 操作符位置，用于 ADD 行号。
+	operatorPosition lexer.Position
+	// literalPosition 保存 integer 字面量位置，用于后续错误或调试扩展。
+	literalPosition lexer.Position
+}
+
 // Pos 返回函数体起始位置。
 //
 // 返回值指向函数体左括号。
 func (body *FunctionBody) Pos() lexer.Position {
 	// 函数体位置在构造时固定。
 	return body.Position
+}
+
+// CompactSimpleAddInteger 返回编译专用的简单加法函数体摘要。
+//
+// ok=false 表示该函数体不是 compact summary，调用方必须按普通 AST/codegen 路径处理。返回值只读，
+// 调用方不得据此跳过参数、vararg、debug 或其他 Lua 5.3 语义校验。
+func (body *FunctionBody) CompactSimpleAddInteger() (paramName string, integer int64, returnPosition lexer.Position, operatorPosition lexer.Position, literalPosition lexer.Position, ok bool) {
+	if body == nil || body.compactSimple == nil {
+		// nil 函数体或普通 parser 入口都没有 compact summary。
+		return "", 0, lexer.Position{}, lexer.Position{}, lexer.Position{}, false
+	}
+	summary := body.compactSimple
+	return summary.paramName, summary.integer, summary.returnPosition, summary.operatorPosition, summary.literalPosition, true
 }
 
 // FunctionExpression 表示 Lua 匿名函数表达式。
