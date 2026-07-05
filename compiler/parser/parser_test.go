@@ -11,6 +11,45 @@ import (
 	"github.com/zing/go-lua-vm/extensions"
 )
 
+// TestParserMarkResetRestoresTokenStream 验证 parser 局部试探可恢复前瞻 token 和后续 token 流。
+//
+// 该能力是 compile_3000_functions 紧凑函数体试探解析的前置门禁；失败回退必须保持普通 parser 行为。
+func TestParserMarkResetRestoresTokenStream(t *testing.T) {
+	parser := New("return x + 7 end")
+
+	firstToken := parser.current
+	mark := parser.mark()
+	parser.advance()
+	secondToken := parser.current
+	parser.advance()
+	thirdToken := parser.current
+
+	parser.reset(mark)
+	assertParserTokenEqual(t, parser.current, firstToken)
+	parser.advance()
+	assertParserTokenEqual(t, parser.current, secondToken)
+	parser.advance()
+	assertParserTokenEqual(t, parser.current, thirdToken)
+}
+
+// assertParserTokenEqual 校验两个 token 的词法内容和源码位置一致。
+func assertParserTokenEqual(t *testing.T, got lexer.Token, want lexer.Token) {
+	// 标记 helper 后，失败行会指向调用方 token 序列断言。
+	t.Helper()
+	if got.Kind != want.Kind || got.Text != want.Text || got.Literal != want.Literal || got.Number != want.Number || got.Position != want.Position {
+		// token 内容不同说明 reset 后的前瞻或 lexer 后继序列已经偏移。
+		t.Fatalf("token mismatch got=%+v want=%+v", got, want)
+	}
+	if (got.Err == nil) != (want.Err == nil) {
+		// 错误 token 的有无也属于词法流语义，必须保持一致。
+		t.Fatalf("token error mismatch got=%v want=%v", got.Err, want.Err)
+	}
+	if got.Err != nil && want.Err != nil && got.Err.Error() != want.Err.Error() {
+		// 错误文本不同会影响 parser 兼容错误输出。
+		t.Fatalf("token error text mismatch got=%v want=%v", got.Err, want.Err)
+	}
+}
+
 // TestParserParseChunkAndBlock 验证 chunk 和 block 会保留顺序语句。
 //
 // 输入包含空语句、local 赋值和普通赋值，用于覆盖当前 parser 的最小语句集合。

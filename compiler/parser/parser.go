@@ -44,6 +44,16 @@ type Parser struct {
 	localFunctionStatementPage []LocalFunctionStatement
 }
 
+// parserMark 保存 parser 局部试探解析前的前瞻 token 和 lexer 位置。
+//
+// 该结构仅供 parser 内部使用，避免 compact 解析试探失败后破坏普通 AST 与错误位置。
+type parserMark struct {
+	// current 保存试探开始前的前瞻 token。
+	current lexer.Token
+	// lexerPosition 保存试探开始前 lexer 下一次扫描位置。
+	lexerPosition lexer.Position
+}
+
 // New 创建新的 Parser。
 //
 // input 是完整 Lua 源码文本；Parser 会立即读取第一个 token 作为前瞻。
@@ -60,6 +70,23 @@ func NewWithSyntax(input string, syntax extensions.SyntaxSet) *Parser {
 	// 初始化 lexer 并读取首个 token，后续 parse 方法只消费 current。
 	tokenLexer := lexer.New(input)
 	return &Parser{input: input, lexer: tokenLexer, current: tokenLexer.NextToken(), syntax: syntax & extensions.Compiled()}
+}
+
+// mark 返回当前 parser 试探解析恢复点。
+//
+// 恢复点包含当前前瞻 token 和 lexer 输入位置；调用方只应在局部语法试探中使用。
+func (parser *Parser) mark() parserMark {
+	// current 已经从 lexer 消费，因此必须同时保存 lexer 后续扫描位置。
+	return parserMark{current: parser.current, lexerPosition: parser.lexer.Mark()}
+}
+
+// reset 将 parser 恢复到 mark 返回的位置。
+//
+// 恢复后当前前瞻 token 与后续 lexer 扫描序列都应与打标时一致。
+func (parser *Parser) reset(mark parserMark) {
+	// 同步恢复 parser 前瞻和 lexer 输入位置，保证下一次 advance 读取同一个后继 token。
+	parser.current = mark.current
+	parser.lexer.Reset(mark.lexerPosition)
 }
 
 // newNameExpression 创建名称表达式节点。

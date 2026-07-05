@@ -57,6 +57,22 @@ func (lexer *Lexer) Position() Position {
 	return lexer.source.Position()
 }
 
+// Mark 返回当前 lexer 输入位置标记。
+//
+// 标记只应在局部语法试探中使用；调用方必须把返回值交回同一个 Lexer 的 Reset。
+func (lexer *Lexer) Mark() Position {
+	// Source 的位置快照足以恢复后续 token 扫描状态。
+	return lexer.source.Mark()
+}
+
+// Reset 将 lexer 恢复到 Mark 返回的位置。
+//
+// mark 必须来自同一个 Lexer；恢复后下一次 NextToken 会从标记位置重新扫描。
+func (lexer *Lexer) Reset(mark Position) {
+	// 直接委托 Source 恢复 offset、line 和 column。
+	lexer.source.Reset(mark)
+}
+
 // PeekRune 查看下一个 rune 但不推进 lexer。
 //
 // 返回 ok=false 表示已经到达 EOF。
