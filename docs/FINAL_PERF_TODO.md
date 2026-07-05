@@ -271,6 +271,30 @@ CGO_ENABLED=0 go test ./internal/luac -run '^$' \
 `FunctionStatement`”这一小切口。若继续 `compile_3000_functions`，必须先提出能减少整段顶层函数声明
 对象数量或 codegen 生命周期成本的新结构设计；否则优先转向 `recursion` 门槛复核 profile。
 
+2026-07-05 在 `d0edce9` 后再次复核 `compile_3000_functions`：
+
+```bash
+CGO_ENABLED=0 go test ./internal/luac -run '^$' \
+  -bench '^BenchmarkCompileSource3000Functions$' \
+  -benchmem -benchtime=8s -count=1 \
+  -cpuprofile /tmp/go-lua-vm-final-profiles/post-d0edce9/compile_3000_cpu.pprof \
+  -memprofile /tmp/go-lua-vm-final-profiles/post-d0edce9/compile_3000_mem.pprof
+```
+
+结果：
+
+- profile 单轮：`2.257243 ms/op`、`3,497,329 B/op`、`62 allocs/op`。
+- CPU profile 仍主要由 Go runtime/GC/调度采样占据；源码侧 `ParseChunk` 约 `2.99%`，
+  `tryParseCompactSimpleFunctionBody` 约 `1.40%`，`CompileChunk` 约 `1.12%`。
+- `alloc_space` 主项仍为 `newFunctionStatement` 约 `42.31%`、
+  `prepareDirectFunctionBlockCapacity` 约 `28.30%`、`newCompactSimpleFunctionBody` 约 `9.44%`。
+- `alloc_objects` 主项仍为 `prepareDirectFunctionBlockCapacity` 约 `20.56%`、
+  `newCompactSimpleFunctionBody` 约 `18.45%`、`newFunctionStatement` 约 `18.34%`。
+
+结论：最终 profile 没有证明新的五分钟级生产小切口。`FunctionStatement` 等价私有替换已证伪；
+direct child Proto 生命周期继续压缩会触及 Proto/lineinfo/locals/luac/debug 输出语义，缺少可回退的小范围
+设计。后续不应继续堆 parser/codegen 局部调参；如果没有新的结构设计，应转为最终收敛总结或长期专项。
+
 ## 2. `function_call` batch guard 冻结候选
 
 - [ ] 仅在 `function_call` 完整三轮稳定高于 `1.05x` 时进入本项。

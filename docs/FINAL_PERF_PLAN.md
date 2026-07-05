@@ -248,6 +248,24 @@ B/op 不高于当前约 `3.50 MB/op`，并且完整 benchmark `compile_3000_func
 “私有语句等价替换”形态；若继续 `compile_3000_functions`，必须先证明能减少整段顶层函数声明的
 对象数量或 codegen 生命周期成本，否则应转向 `recursion` 的门槛复核 profile。
 
+### 2026-07-05 最终 profile 复核
+
+在 `d0edce9` 后重新对当前 `compile_3000_functions` 做 8 秒 profile，单轮结果为
+`2.257243 ms/op`、`3,497,329 B/op`、`62 allocs/op`。CPU profile 仍主要由 Go runtime/GC/调度采样占据，
+源码侧最高累计项只有 `ParseChunk` 约 `2.99%`、`tryParseCompactSimpleFunctionBody` 约 `1.40%`、
+`CompileChunk` 约 `1.12%`。
+
+memory profile 的主项仍与 prototype 1 后一致：
+
+- `newFunctionStatement`：`alloc_space` 约 `42.31%`，`alloc_objects` 约 `18.34%`。
+- `prepareDirectFunctionBlockCapacity`：`alloc_space` 约 `28.30%`，`alloc_objects` 约 `20.56%`。
+- `newCompactSimpleFunctionBody`：`alloc_space` 约 `9.44%`，`alloc_objects` 约 `18.45%`。
+
+结论：最终 profile 没有证明新的可执行低风险生产小切口。继续压缩需要跨越现有结构边界，例如消除
+完整 `FunctionStatement` 可观察 AST 或重写 direct child Proto 生命周期；前者已被 prototype 2 证伪，
+后者会触及 debug/luac/Proto 结构语义，不适合作为五分钟小切口。最终阶段应停止无证据调参，只保留
+`compile_3000_functions` 的长期结构专项。
+
 ## 方案 B：`function_call` batch guard 冻结
 
 目标源码形态：
