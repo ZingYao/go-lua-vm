@@ -129,7 +129,7 @@
 ## 第七阶段：平台闭环
 
 - [ ] 真实第三方模块验收：
-  - [ ] 明确自编 fixture 只作为 loader smoke，不作为最终兼容性依据。
+  - [x] 明确自编 fixture 只作为 loader smoke，不作为最终兼容性依据。
   - [x] 固定 `lua-cjson` 源码到仓库或 `third_party/`，记录来源、版本和许可证，构建不得联网下载。
   - [x] `lua-cjson` 源码编译验收：`require("cjson")`、`encode/decode`、错误输入 `pcall`。
     - [x] 新增 `scripts/build-native-cjson.sh`，使用仓库内 Lua 5.3 public headers 和固定源码编译当前平台 `cjson` 动态模块。
@@ -261,3 +261,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：更新 `docs/API.md`；补充 `PackageDynamicLibraryLoaderForState` 对外配置口径，说明默认 no-CGO 嵌入保持纯 Go，`native_modules` 下 Lua C 模块必须通过 state-aware loader 绑定当前 VM state，并明确仓库内 `internal/native` 不是外部 module 可直接 import 的公开 Go API。
 - 2026-07-06：更新 `docs/RELEASE_LIMITS.md`；将 Lua C 原生模块从未立项旧口径改为显式 `native_modules` 可选构建口径，补充 macOS arm64 `lua-cjson` 验收状态、Linux/Windows/官方 ABI 未闭环限制，并新增 native 模块本机代码执行、`package.cpath` 搜索路径和 C 级崩溃不可由 `pcall` 隔离的安全边界。
 - 2026-07-06：更新 `README.md`；将动态库与 `require` 边界改为默认 no-CGO 与显式 `native_modules` 可选构建并列口径，并在对外文档列表中加入 `NATIVE_MODULES_PLAN.md`、`NATIVE_MODULES_BUILD.md` 和 `NATIVE_MODULES_SOURCE_INVENTORY.md`。
+- 2026-07-06：收敛 fixture 兼容边界 TODO；`docs/NATIVE_MODULES_BUILD.md` 已说明 fixture 只验证 loader smoke、不作为最终兼容结论，`docs/NATIVE_MODULES_SOURCE_INVENTORY.md` 已说明自编 fixture 只证明 loader、opaque `lua_State*`、基础 C API shim 和 require 链路贯通，不能解释为任意第三方 Lua C 模块兼容。
