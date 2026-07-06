@@ -284,6 +284,23 @@ func nativeLuaPushString(luaState unsafe.Pointer, text unsafe.Pointer) unsafe.Po
 	return text
 }
 
+// nativeLuaPushFormattedString 压入 C 层已经格式化完成的 Lua string。
+func nativeLuaPushFormattedString(luaState unsafe.Pointer, text unsafe.Pointer) unsafe.Pointer {
+	// C wrapper 负责处理 varargs 和格式化；Go 侧只复制最终 NUL 结尾字符串。
+	value := ""
+	if text != nil {
+		// 非空格式化结果按 C 字符串复制为 Go-owned string。
+		value = nativeLuaCString(text)
+	}
+	buffer, _, ok := nativeLuaAllocCString(luaState, value)
+	if !ok {
+		// 无效 State 或分配失败时不能向 C 模块返回可用指针。
+		return nil
+	}
+	nativeLuaPushValue(luaState, runtime.StringValue(value))
+	return buffer
+}
+
 // nativeLuaPushLightUserdata 把 C 裸指针作为 lightuserdata 压入栈顶。
 func nativeLuaPushLightUserdata(luaState unsafe.Pointer, pointer unsafe.Pointer) {
 	// 同一个 lua_State 内同一裸指针必须映射为稳定 Lua identity。
@@ -420,6 +437,14 @@ func lua_pushlstring(luaState *C.lua_State, text *C.char, length C.size_t) *C.ch
 func lua_pushstring(luaState *C.lua_State, text *C.char) *C.char {
 	// C API 入口只做类型转换，具体 NUL 结尾字符串语义由 Go helper 统一维护。
 	return (*C.char)(nativeLuaPushString(unsafe.Pointer(luaState), unsafe.Pointer(text)))
+}
+
+// glua_lua_pushfstring_message 接收 C wrapper 已经格式化完成的 lua_pushfstring 文本。
+//
+//export glua_lua_pushfstring_message
+func glua_lua_pushfstring_message(luaState *C.lua_State, text *C.char) *C.char {
+	// 函数名加 glua 前缀避免与 variadic lua_pushfstring ABI 冲突。
+	return (*C.char)(nativeLuaPushFormattedString(unsafe.Pointer(luaState), unsafe.Pointer(text)))
 }
 
 // lua_pushlightuserdata 导出 Lua 5.3 C API lightuserdata 压栈入口。

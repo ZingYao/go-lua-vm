@@ -112,6 +112,44 @@ func TestNativeCAPIStackPrimitives(t *testing.T) {
 	}
 }
 
+// TestNativeLuaPushFormattedString 验证 lua_pushfstring C wrapper 使用的 Go 压栈 helper。
+func TestNativeLuaPushFormattedString(t *testing.T) {
+	// C wrapper 负责 varargs 格式化；Go helper 负责压栈和返回 C 可见稳定字符串。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+	formatted := []byte{'h', 'e', 'l', 'l', 'o', ' ', 'l', 'p', 'e', 'g', 0}
+
+	result := nativeLuaPushFormattedString(luaState, unsafe.Pointer(&formatted[0]))
+	if result == nil {
+		// 有效 State 和格式化文本必须返回可被 C 模块读取的字符串指针。
+		t.Fatalf("nativeLuaPushFormattedString returned nil")
+	}
+	if got := unsafe.String((*byte)(result), len("hello lpeg")); got != "hello lpeg" {
+		// 返回的 C buffer 内容必须等于格式化文本。
+		t.Fatalf("nativeLuaPushFormattedString result = %q, want hello lpeg", got)
+	}
+	if got := nativeLuaStackTop(luaState); got != 1 {
+		// 格式化字符串必须压入 Lua 栈顶。
+		t.Fatalf("top after nativeLuaPushFormattedString = %d, want 1", got)
+	}
+	value := state.ValueAt(-1)
+	if value.Kind != runtime.KindString || value.String != "hello lpeg" {
+		// Go VM 栈顶必须保存相同文本值。
+		t.Fatalf("stack value = %#v, want formatted string", value)
+	}
+	if got := nativeLuaPushFormattedString(nil, unsafe.Pointer(&formatted[0])); got != nil {
+		// 无效 State 不能返回悬空 C 字符串指针。
+		t.Fatalf("nativeLuaPushFormattedString nil state = %p, want nil", got)
+	}
+}
+
 // TestNativeCAPILightUserdataStableIdentity 验证 lightuserdata 指针 identity 可稳定往返。
 func TestNativeCAPILightUserdataStableIdentity(t *testing.T) {
 	// cjson 会用 lightuserdata 表达 cjson.null 等哨兵值，同一指针必须 raw equal。

@@ -14,6 +14,7 @@ typedef int (*lua_CFunction)(lua_State *L);
 extern int glua_lua_error_record(lua_State *L);
 extern int glua_luaL_argerror_record(lua_State *L, int arg, const char *extra);
 extern int glua_luaL_error_message(lua_State *L, const char *message);
+extern const char* glua_lua_pushfstring_message(lua_State *L, const char *message);
 
 #if defined(_MSC_VER)
 #define GLUA_THREAD_LOCAL __declspec(thread)
@@ -93,6 +94,52 @@ int luaL_error(lua_State *L, const char *fmt, ...) {
 	free(heap_buffer);
 	glua_lua_error_jump();
 	return 0;
+}
+
+static const char* glua_push_formatted_string(lua_State *L, const char *fmt, va_list args) {
+	char stack_buffer[512];
+	if (fmt == NULL) {
+		return glua_lua_pushfstring_message(L, "");
+	}
+	va_list count_args;
+	va_copy(count_args, args);
+	int required = vsnprintf(NULL, 0, fmt, count_args);
+	va_end(count_args);
+	if (required < 0) {
+		return glua_lua_pushfstring_message(L, "native lua_pushfstring formatting failed");
+	}
+	if ((size_t)required < sizeof(stack_buffer)) {
+		va_list format_args;
+		va_copy(format_args, args);
+		vsnprintf(stack_buffer, sizeof(stack_buffer), fmt, format_args);
+		va_end(format_args);
+		stack_buffer[sizeof(stack_buffer) - 1] = '\0';
+		return glua_lua_pushfstring_message(L, stack_buffer);
+	}
+	char *heap_buffer = (char*)malloc((size_t)required + 1);
+	if (heap_buffer == NULL) {
+		return glua_lua_pushfstring_message(L, "native lua_pushfstring memory allocation failed");
+	}
+	va_list format_args;
+	va_copy(format_args, args);
+	vsnprintf(heap_buffer, (size_t)required + 1, fmt, format_args);
+	va_end(format_args);
+	heap_buffer[required] = '\0';
+	const char *result = glua_lua_pushfstring_message(L, heap_buffer);
+	free(heap_buffer);
+	return result;
+}
+
+const char *lua_pushvfstring(lua_State *L, const char *fmt, va_list argp) {
+	return glua_push_formatted_string(L, fmt, argp);
+}
+
+const char *lua_pushfstring(lua_State *L, const char *fmt, ...) {
+	va_list args;
+	va_start(args, fmt);
+	const char *result = glua_push_formatted_string(L, fmt, args);
+	va_end(args);
+	return result;
 }
 */
 import "C"
