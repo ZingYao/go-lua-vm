@@ -49,14 +49,14 @@
 
 - [x] 设计 opaque `lua_State*` handle 与 Go State 映射。
 - [ ] 实现 C API 栈基本操作：
-  - [ ] `lua_gettop`
-  - [ ] `lua_settop`
-  - [ ] `lua_pushnil`
-  - [ ] `lua_pushboolean`
-  - [ ] `lua_pushinteger`
-  - [ ] `lua_pushnumber`
-  - [ ] `lua_pushlstring`
-  - [ ] `lua_pushstring`
+  - [x] `lua_gettop`
+  - [x] `lua_settop`
+  - [x] `lua_pushnil`
+  - [x] `lua_pushboolean`
+  - [x] `lua_pushinteger`
+  - [x] `lua_pushnumber`
+  - [x] `lua_pushlstring`
+  - [x] `lua_pushstring`
 - [ ] 实现 table 和 newlib 基础：
   - [ ] `lua_createtable`
   - [ ] `lua_setfield`
@@ -190,3 +190,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：补充真实第三方模块验收门禁；明确自编 fixture 只作为 loader smoke，最终兼容验收以 `lua-cjson` 为第一真实模块，并区分源码编译模块和官方 Lua 5.3 ABI 二进制模块。
 - 2026-07-06：新增 `PackageDynamicLibraryLoaderForState` 状态感知 loader 工厂；`lua.OpenLibs` 注册 package 库时会优先绑定当前 State，为后续 `lua_State*` opaque handle 和 `luaopen_*` 调用提供正确 VM 上下文。
 - 2026-07-06：新增 native opaque `lua_State*` handle 注册表；handle 使用 C 分配 token 作为 C 可见身份，Go 侧只保存 token 到 `runtime.State` 的映射，避免把 Go 指针传入 C，并覆盖 nil/closed State、查找和重复关闭测试。
+- 2026-07-06：新增最小 C API 栈 shim：`lua_gettop`、`lua_settop` 和基础 `lua_push*` 可通过 opaque handle 操作 Go State 栈；当前对无效/关闭 State 采取 no-op/0 的失败安全策略，`lua_error`/longjmp 错误边界后续阶段补齐。

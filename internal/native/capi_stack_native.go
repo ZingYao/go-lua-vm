@@ -1,0 +1,216 @@
+//go:build native_modules
+
+package native
+
+/*
+#include <stddef.h>
+
+typedef struct lua_State lua_State;
+typedef long long lua_Integer;
+typedef double lua_Number;
+*/
+import "C"
+
+import (
+	"unsafe"
+
+	"github.com/zing/go-lua-vm/runtime"
+)
+
+const nativeMaxInt = int(^uint(0) >> 1)
+
+// nativeLuaStackTop 读取 C API shim 视角下的当前栈顶。
+func nativeLuaStackTop(luaState unsafe.Pointer) int {
+	// 入口先把 opaque token 映射回 Go State，失效 handle 按 Lua C API 防御边界返回空栈。
+	state, ok := lookupNativeStateHandle(luaState)
+	if !ok {
+		// 无效或已关闭 State 没有可读栈，返回 0 让 C 模块留在失败安全路径。
+		return 0
+	}
+	return state.StackTop()
+}
+
+// nativeLuaSetTop 按 Lua 5.3 lua_settop 语义调整栈顶。
+func nativeLuaSetTop(luaState unsafe.Pointer, index int) {
+	// 入口先解析 State，失效 handle 不能修改任何 Go VM 状态。
+	state, ok := lookupNativeStateHandle(luaState)
+	if !ok {
+		// native 模块持有的 State 已失效，当前最小 shim 选择 no-op，错误边界后续由 lua_error 阶段补齐。
+		return
+	}
+	currentTop := state.StackTop()
+	targetTop := index
+	if index < 0 {
+		// Lua 负索引从当前栈顶计算目标位置，-1 表示保持原栈顶，-2 表示弹出一个值。
+		targetTop = currentTop + index + 1
+	}
+	if targetTop < 0 {
+		// 官方 API 对无效负索引有 api_check；本 shim 暂不 panic/longjmp，保持原栈不变。
+		return
+	}
+	for currentTop > targetTop {
+		// 目标栈顶更低时逐个弹出，Pop 会清理槽位避免保留引用。
+		if _, err := state.Pop(); err != nil {
+			// Pop 失败只可能来自关闭或下溢；此处停止调整，避免扩大副作用。
+			return
+		}
+		currentTop--
+	}
+	for currentTop < targetTop {
+		// 目标栈顶更高时按 Lua 语义用 nil 填充新增槽位。
+		if err := state.Push(runtime.NilValue()); err != nil {
+			// 栈上限错误暂时停止扩展，后续错误阶段会把该状态转换成 Lua 错误。
+			return
+		}
+		currentTop++
+	}
+}
+
+// nativeLuaPushValue 把一个运行期值压入 native C API 对应的 Go State 栈。
+func nativeLuaPushValue(luaState unsafe.Pointer, value runtime.Value) {
+	// 入口先解析 State，失效 handle 不能修改任何 Go VM 状态。
+	state, ok := lookupNativeStateHandle(luaState)
+	if !ok {
+		// native 模块持有无效 State 时保持 no-op，避免对已关闭 VM 产生副作用。
+		return
+	}
+	_ = state.Push(value)
+}
+
+// nativeLuaPushNil 把 Lua nil 压入 native C API 对应的 Go State 栈。
+func nativeLuaPushNil(luaState unsafe.Pointer) {
+	// nil 没有负载，直接压入运行期 nil 值。
+	nativeLuaPushValue(luaState, runtime.NilValue())
+}
+
+// nativeLuaPushBoolean 把 Lua boolean 压入 native C API 对应的 Go State 栈。
+func nativeLuaPushBoolean(luaState unsafe.Pointer, value bool) {
+	// boolean 值直接映射 Go bool 负载。
+	nativeLuaPushValue(luaState, runtime.BooleanValue(value))
+}
+
+// nativeLuaPushInteger 把 Lua integer 压入 native C API 对应的 Go State 栈。
+func nativeLuaPushInteger(luaState unsafe.Pointer, value int64) {
+	// integer 值直接映射 Go int64 负载。
+	nativeLuaPushValue(luaState, runtime.IntegerValue(value))
+}
+
+// nativeLuaPushNumber 把 Lua number 压入 native C API 对应的 Go State 栈。
+func nativeLuaPushNumber(luaState unsafe.Pointer, value float64) {
+	// number 值直接映射 Go float64 负载。
+	nativeLuaPushValue(luaState, runtime.NumberValue(value))
+}
+
+// nativeLuaPushLString 把指定长度 C 字符串片段压入 native C API 对应的 Go State 栈。
+func nativeLuaPushLString(luaState unsafe.Pointer, text unsafe.Pointer, length uintptr) unsafe.Pointer {
+	// 指定长度字符串允许内嵌 NUL，必须按长度复制而不能按 NUL 结尾截断。
+	value, ok := nativeLuaCStringN(text, length)
+	if !ok {
+		// 无效指针或长度暂不抛出 longjmp，保持 no-op 并返回 nil。
+		return nil
+	}
+	nativeLuaPushValue(luaState, runtime.StringValue(value))
+	return text
+}
+
+// nativeLuaPushString 把 NUL 结尾 C 字符串压入 native C API 对应的 Go State 栈。
+func nativeLuaPushString(luaState unsafe.Pointer, text unsafe.Pointer) unsafe.Pointer {
+	// 官方语义中 NULL 会压入 nil，并返回 NULL。
+	if text == nil {
+		// NULL 字符串不表示空字符串，而是 Lua nil。
+		nativeLuaPushNil(luaState)
+		return nil
+	}
+	value := nativeLuaCString(text)
+	nativeLuaPushValue(luaState, runtime.StringValue(value))
+	return text
+}
+
+// nativeLuaCStringN 把 C 字符串片段复制成 Go 字符串。
+func nativeLuaCStringN(text unsafe.Pointer, length uintptr) (string, bool) {
+	// nil 指针只允许空长度字符串；非空长度说明 C 模块传入了无效指针。
+	if text == nil {
+		// 空指针加 0 长度按空字符串处理，便于支持 lua_pushlstring(L, NULL, 0) 的防御场景。
+		return "", length == 0
+	}
+	if length > uintptr(nativeMaxInt) {
+		// Go 字符串长度不能超过 int 上限，拒绝复制避免整数截断。
+		return "", false
+	}
+	return unsafe.String((*byte)(text), int(length)), true
+}
+
+// nativeLuaCString 把 NUL 结尾 C 字符串复制成 Go 字符串。
+func nativeLuaCString(text unsafe.Pointer) string {
+	// 调用方保证 text 非 nil；循环扫描到首个 NUL，保持 lua_pushstring 的 C 字符串语义。
+	length := 0
+	for *(*byte)(unsafe.Add(text, length)) != 0 {
+		// 每次迭代只前进一个字节，直到 C 字符串终止符。
+		length++
+	}
+	return unsafe.String((*byte)(text), length)
+}
+
+// lua_gettop 导出 Lua 5.3 C API 栈顶查询入口。
+//
+//export lua_gettop
+func lua_gettop(luaState *C.lua_State) C.int {
+	// C API 入口只做 token 转发，实际生命周期校验集中在 Go helper。
+	return C.int(nativeLuaStackTop(unsafe.Pointer(luaState)))
+}
+
+// lua_settop 导出 Lua 5.3 C API 栈顶调整入口。
+//
+//export lua_settop
+func lua_settop(luaState *C.lua_State, index C.int) {
+	// C API 入口只做类型转换，具体正负索引语义由 Go helper 统一维护。
+	nativeLuaSetTop(unsafe.Pointer(luaState), int(index))
+}
+
+// lua_pushnil 导出 Lua 5.3 C API nil 压栈入口。
+//
+//export lua_pushnil
+func lua_pushnil(luaState *C.lua_State) {
+	// C API 入口只做类型转换，具体压栈语义由 Go helper 统一维护。
+	nativeLuaPushNil(unsafe.Pointer(luaState))
+}
+
+// lua_pushboolean 导出 Lua 5.3 C API boolean 压栈入口。
+//
+//export lua_pushboolean
+func lua_pushboolean(luaState *C.lua_State, value C.int) {
+	// Lua C API 中 0 为 false，非 0 为 true。
+	nativeLuaPushBoolean(unsafe.Pointer(luaState), value != 0)
+}
+
+// lua_pushinteger 导出 Lua 5.3 C API integer 压栈入口。
+//
+//export lua_pushinteger
+func lua_pushinteger(luaState *C.lua_State, value C.lua_Integer) {
+	// C API 入口只做类型转换，具体 integer 压栈语义由 Go helper 统一维护。
+	nativeLuaPushInteger(unsafe.Pointer(luaState), int64(value))
+}
+
+// lua_pushnumber 导出 Lua 5.3 C API number 压栈入口。
+//
+//export lua_pushnumber
+func lua_pushnumber(luaState *C.lua_State, value C.lua_Number) {
+	// C API 入口只做类型转换，具体 number 压栈语义由 Go helper 统一维护。
+	nativeLuaPushNumber(unsafe.Pointer(luaState), float64(value))
+}
+
+// lua_pushlstring 导出 Lua 5.3 C API 指定长度字符串压栈入口。
+//
+//export lua_pushlstring
+func lua_pushlstring(luaState *C.lua_State, text *C.char, length C.size_t) *C.char {
+	// C API 入口只做类型转换，具体字符串复制语义由 Go helper 统一维护。
+	return (*C.char)(nativeLuaPushLString(unsafe.Pointer(luaState), unsafe.Pointer(text), uintptr(length)))
+}
+
+// lua_pushstring 导出 Lua 5.3 C API NUL 结尾字符串压栈入口。
+//
+//export lua_pushstring
+func lua_pushstring(luaState *C.lua_State, text *C.char) *C.char {
+	// C API 入口只做类型转换，具体 NUL 结尾字符串语义由 Go helper 统一维护。
+	return (*C.char)(nativeLuaPushString(unsafe.Pointer(luaState), unsafe.Pointer(text)))
+}
