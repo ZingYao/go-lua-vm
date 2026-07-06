@@ -27,6 +27,9 @@ echo "PREFIX_LINE=${prefix_line}"
 echo "GOOD_RESULT=${good_result}"
 echo "PROBE_PREBUILD_PATTERN=${PROBE_PREBUILD_PATTERN:-0}"
 echo "PROBE_PREBUILD_PARTS=${PROBE_PREBUILD_PARTS:-0}"
+echo "PROBE_PREBUILD_OPEN=${PROBE_PREBUILD_OPEN:-0}"
+echo "PROBE_PREBUILD_CLOSE=${PROBE_PREBUILD_CLOSE:-0}"
+echo "PROBE_PREBUILD_ANY=${PROBE_PREBUILD_ANY:-0}"
 
 expected_go_version="go1.26.4"
 actual_go_version="$(go version | awk '{print $3}')"
@@ -112,6 +115,51 @@ LUA
 emit_probe_prebuilt_parts_tail() {
   cat <<'LUA'
 attempts = {}
+c = probe_open * { probe_close + probe_any * m.V(1) } / 0
+print("PROBE", c:match'[==[]]====]]]]==]===[]', table.concat(attempts, ","))
+LUA
+}
+
+emit_probe_prebuild_selected_parts() {
+  cat <<'LUA'
+local attempts = {}
+local probe_open
+local probe_close
+local probe_any
+LUA
+  if [[ "${PROBE_PREBUILD_OPEN:-0}" == "1" ]]; then
+    cat <<'LUA'
+probe_open = '[' * m.Cg(m.P'='^0, "init") * '['
+LUA
+  fi
+  if [[ "${PROBE_PREBUILD_CLOSE:-0}" == "1" ]]; then
+    cat <<'LUA'
+probe_close = m.Cmt(']' * m.C(m.P'='^0) * ']' * m.Cb("init"), function (_, pos, s1, s2)
+                                               attempts[#attempts + 1] = pos .. ':' .. s1 .. ':' .. s2
+                                               return s1 == s2 end)
+LUA
+  fi
+  if [[ "${PROBE_PREBUILD_ANY:-0}" == "1" ]]; then
+    cat <<'LUA'
+probe_any = m.P(1)
+LUA
+  fi
+}
+
+emit_probe_selected_parts_tail() {
+  cat <<'LUA'
+attempts = {}
+if probe_open == nil then
+  probe_open = '[' * m.Cg(m.P'='^0, "init") * '['
+end
+if probe_close == nil then
+  probe_close = m.Cmt(']' * m.C(m.P'='^0) * ']' * m.Cb("init"), function (_, pos, s1, s2)
+                                               attempts[#attempts + 1] = pos .. ':' .. s1 .. ':' .. s2
+                                               return s1 == s2 end)
+end
+if probe_any == nil then
+  probe_any = m.P(1)
+end
 c = probe_open * { probe_close + probe_any * m.V(1) } / 0
 print("PROBE", c:match'[==[]]====]]]]==]===[]', table.concat(attempts, ","))
 LUA
@@ -987,12 +1035,16 @@ probe_mode() {
       emit_probe_prebuild
     elif [[ "${PROBE_PREBUILD_PARTS:-0}" == "1" ]]; then
       emit_probe_prebuild_parts
+    elif [[ "${PROBE_PREBUILD_OPEN:-0}" == "1" || "${PROBE_PREBUILD_CLOSE:-0}" == "1" || "${PROBE_PREBUILD_ANY:-0}" == "1" ]]; then
+      emit_probe_prebuild_selected_parts
     fi
     emit_mode_body "${mode}"
     if [[ "${PROBE_PREBUILD_PATTERN:-0}" == "1" ]]; then
       emit_probe_prebuilt_match_tail
     elif [[ "${PROBE_PREBUILD_PARTS:-0}" == "1" ]]; then
       emit_probe_prebuilt_parts_tail
+    elif [[ "${PROBE_PREBUILD_OPEN:-0}" == "1" || "${PROBE_PREBUILD_CLOSE:-0}" == "1" || "${PROBE_PREBUILD_ANY:-0}" == "1" ]]; then
+      emit_probe_selected_parts_tail
     else
       emit_probe_tail
     fi
