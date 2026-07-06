@@ -283,6 +283,120 @@ lua_value_expr_for_kind() {
   esac
 }
 
+emit_fixed_result_source() {
+  case "$1" in
+    select-count)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+if count ~= 2 then
+  error("unexpected select-count fixed result")
+end
+LUA
+      ;;
+    literal-two)
+      cat <<'LUA'
+local count = 2
+if count ~= 2 then
+  error("unexpected literal fixed result")
+end
+LUA
+      ;;
+    literal-false)
+      cat <<'LUA'
+local count = false
+if count ~= false then
+  error("unexpected literal false fixed result")
+end
+LUA
+      ;;
+    literal-nil)
+      cat <<'LUA'
+local count = nil
+if count ~= nil then
+  error("unexpected literal nil fixed result")
+end
+LUA
+      ;;
+    table-length)
+      cat <<'LUA'
+local count = #{"alpha", "beta"}
+if count ~= 2 then
+  error("unexpected table length fixed result")
+end
+LUA
+      ;;
+    lua-return-two)
+      cat <<'LUA'
+local function diag()
+  return 2
+end
+local count = diag()
+if count ~= 2 then
+  error("unexpected lua fixed result")
+end
+LUA
+      ;;
+    lua-return-vararg-two)
+      cat <<'LUA'
+local function diag(...)
+  return 2
+end
+local count = diag("alpha", "beta")
+if count ~= 2 then
+  error("unexpected lua vararg fixed result")
+end
+LUA
+      ;;
+    lua-return-select-count)
+      cat <<'LUA'
+local function diag(...)
+  return select("#", ...)
+end
+local count = diag("alpha", "beta")
+if count ~= 2 then
+  error("unexpected lua select-count fixed result")
+end
+LUA
+      ;;
+    builtin-assert-two)
+      cat <<'LUA'
+local count = assert(2)
+if count ~= 2 then
+  error("unexpected assert fixed result")
+end
+LUA
+      ;;
+    builtin-tonumber)
+      cat <<'LUA'
+local count = tonumber("17", 10)
+if count ~= 17 then
+  error("unexpected tonumber fixed result")
+end
+LUA
+      ;;
+    builtin-rawget)
+      cat <<'LUA'
+local count = rawget({key = 2}, "key")
+if count ~= 2 then
+  error("unexpected rawget fixed result")
+end
+LUA
+      ;;
+    builtin-rawequal)
+      cat <<'LUA'
+local count = rawequal("alpha", "beta")
+if count ~= false then
+  error("unexpected rawequal fixed result")
+end
+LUA
+      ;;
+    *)
+      echo "unknown fixed result source: $1" >&2
+      return 1
+      ;;
+  esac
+}
+
 emit_mode_body() {
   local mode="$1"
 
@@ -442,6 +556,24 @@ LUA
 
       cat <<LUA
 local count = select("#", "alpha", "beta")
+local skipped = _G["${global_name}"]
+local payload = ${value_expr}
+LUA
+      ;;
+    fixed-result-global-value-*)
+      local payload="${mode#fixed-result-global-value-}"
+      local value_kind="${payload##*-}"
+      local rest="${payload%-*}"
+      local global_name="${rest##*-}"
+      local source_kind="${rest%-*}"
+      local value_expr
+
+      if ! value_expr="$(lua_value_expr_for_kind "${value_kind}")"; then
+        return 1
+      fi
+
+      emit_fixed_result_source "${source_kind}"
+      cat <<LUA
 local skipped = _G["${global_name}"]
 local payload = ${value_expr}
 LUA
