@@ -97,6 +97,17 @@ func nativeLuaPushValue(luaState unsafe.Pointer, value runtime.Value) {
 	_ = state.Push(value)
 }
 
+// nativeLuaPushValueAt 复制指定索引处的 Lua 值到栈顶。
+func nativeLuaPushValueAt(luaState unsafe.Pointer, index int) {
+	// 通过统一索引读取逻辑复制值，确保 C function 内正索引相对当前调用帧。
+	value, ok := nativeLuaValueAt(luaState, index)
+	if !ok {
+		// 无效索引在当前最小 shim 中保持 no-op，后续 api_check 阶段补齐错误边界。
+		return
+	}
+	nativeLuaPushValue(luaState, value)
+}
+
 // nativeLuaPushNil 把 Lua nil 压入 native C API 对应的 Go State 栈。
 func nativeLuaPushNil(luaState unsafe.Pointer) {
 	// nil 没有负载，直接压入运行期 nil 值。
@@ -185,6 +196,14 @@ func lua_gettop(luaState *C.lua_State) C.int {
 func lua_settop(luaState *C.lua_State, index C.int) {
 	// C API 入口只做类型转换，具体正负索引语义由 Go helper 统一维护。
 	nativeLuaSetTop(unsafe.Pointer(luaState), int(index))
+}
+
+// lua_pushvalue 导出 Lua 5.3 C API 值复制入口。
+//
+//export lua_pushvalue
+func lua_pushvalue(luaState *C.lua_State, index C.int) {
+	// C API 入口只做类型转换，具体索引解析和压栈语义由 Go helper 统一维护。
+	nativeLuaPushValueAt(unsafe.Pointer(luaState), int(index))
 }
 
 // lua_pushnil 导出 Lua 5.3 C API nil 压栈入口。

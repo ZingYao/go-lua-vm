@@ -76,6 +76,20 @@ func TestNativeCAPIStackPrimitives(t *testing.T) {
 		// 第七项由 lua_pushlstring 压入，必须保留内嵌 NUL 字节。
 		t.Fatalf("stack[7] = %#v, want binary string", value)
 	}
+	nativeLuaPushValueAt(luaState, 4)
+	if got := nativeLuaStackTop(luaState); got != 8 {
+		// pushvalue 必须把指定索引的值复制到栈顶。
+		t.Fatalf("lua_pushvalue top = %d, want 8", got)
+	}
+	if value := state.ValueAt(-1); value.Kind != runtime.KindInteger || value.Integer != 53 {
+		// 第四项 integer 53 应被复制到新栈顶。
+		t.Fatalf("lua_pushvalue copied value = %#v, want integer 53", value)
+	}
+	nativeLuaPushValueAt(luaState, 99)
+	if got := nativeLuaStackTop(luaState); got != 8 {
+		// 无效索引复制保持 no-op，避免破坏 C 模块当前栈。
+		t.Fatalf("invalid lua_pushvalue top = %d, want 8", got)
+	}
 
 	nativeLuaSetTop(luaState, 10)
 	if got := nativeLuaStackTop(luaState); got != 10 {

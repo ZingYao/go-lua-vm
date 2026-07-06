@@ -108,6 +108,11 @@ assert(mod.add(20, 22) == 42)
 assert(mod.echo("hello") == "hello")
 local a, b, c = mod.multi()
 assert(a == 1 and b == "two" and c == true)
+local counter = mod.new_counter(10)
+assert(counter:add(5) == 15)
+assert(counter:get() == 15)
+assert(counter:add(-2) == 13)
+assert(counter:get() == 13)
 local ok, message = pcall(mod.fail, "boom")
 assert(ok == false and string.find(message, "native failure: boom", 1, true), message)
 local raised, object = pcall(mod.raise)
@@ -313,10 +318,53 @@ static int glua_native_raise(lua_State *L) {
 	return lua_error(L);
 }
 
+typedef struct glua_native_counter {
+	lua_Integer value;
+} glua_native_counter;
+
+static int glua_native_counter_add(lua_State *L) {
+	glua_native_counter *counter = (glua_native_counter*)luaL_checkudata(L, 1, "glua_native_counter");
+	lua_Integer delta = luaL_checkinteger(L, 2);
+	counter->value += delta;
+	lua_pushinteger(L, counter->value);
+	return 1;
+}
+
+static int glua_native_counter_get(lua_State *L) {
+	glua_native_counter *counter = (glua_native_counter*)luaL_checkudata(L, 1, "glua_native_counter");
+	lua_pushinteger(L, counter->value);
+	return 1;
+}
+
+static const luaL_Reg glua_native_counter_methods[] = {
+	{"add", glua_native_counter_add},
+	{"get", glua_native_counter_get},
+	{NULL, NULL},
+};
+
+static void glua_native_register_counter(lua_State *L) {
+	if (luaL_newmetatable(L, "glua_native_counter")) {
+		lua_pushvalue(L, -1);
+		lua_setfield(L, -2, "__index");
+		luaL_setfuncs(L, glua_native_counter_methods, 0);
+	}
+	lua_settop(L, -2);
+}
+
+static int glua_native_new_counter(lua_State *L) {
+	lua_Integer initial = luaL_checkinteger(L, 1);
+	glua_native_counter *counter = (glua_native_counter*)lua_newuserdata(L, sizeof(glua_native_counter));
+	counter->value = initial;
+	luaL_getmetatable(L, "glua_native_counter");
+	lua_setmetatable(L, -2);
+	return 1;
+}
+
 static const luaL_Reg glua_native_smoke_funcs[] = {
 	{"add", glua_native_add},
 	{"echo", glua_native_echo},
 	{"multi", glua_native_multi},
+	{"new_counter", glua_native_new_counter},
 	{"fail", glua_native_fail},
 	{"raise", glua_native_raise},
 	{NULL, NULL},
@@ -324,6 +372,7 @@ static const luaL_Reg glua_native_smoke_funcs[] = {
 
 int luaopen_glua_native_smoke(lua_State *L) {
 	luaL_newlib(L, glua_native_smoke_funcs);
+	glua_native_register_counter(L);
 	return 1;
 }
 

@@ -56,6 +56,7 @@
 - [ ] 实现 C API 栈基本操作：
   - [x] `lua_gettop`
   - [x] `lua_settop`
+  - [x] `lua_pushvalue`
   - [x] `lua_pushnil`
   - [x] `lua_pushboolean`
   - [x] `lua_pushinteger`
@@ -107,7 +108,7 @@
   - [x] `luaL_unref`
   - [x] `lua_rawgeti`
   - [x] `lua_rawseti`
-- [ ] fixture：C 模块创建 userdata，方法调用后能保持状态。
+- [x] fixture：C 模块创建 userdata，方法调用后能保持状态。
 
 ## 第六阶段：错误、pcall、traceback
 
@@ -227,3 +228,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：新增 `luaL_checkudata` 最小类型检查；成功路径按 Lua 5.3 规则比较 userdata raw metatable 与 `registry[tname]` identity，并返回 native full userdata 的 C 数据区指针。失败路径当前记录 pending error 并返回 nil，等待 C function 返回边界传播；尚未实现 C 层 longjmp，因此不应把失败返回 nil 的行为视为完整 lauxlib 错误语义。
 - 2026-07-06：新增 `lua_rawgeti` / `lua_rawseti` 最小 raw integer API；支持普通 table 和 registry pseudo-index，按 integer key 直接读写且不触发元方法，`rawseti` 成功时弹出栈顶 value。当前无效目标仍保持 no-op/none，后续 api_check/错误边界统一收口。
 - 2026-07-06：新增 `luaL_ref` / `luaL_unref` 最小 registry 引用 API；按 Lua 5.3 lauxlib 语义处理 `LUA_REFNIL` / `LUA_NOREF`、`t[0]` freelist 复用和 `#t+1` 追加分配。当前非法 table 目标返回 no-ref/no-op，后续 api_check/longjmp 阶段统一收口。
+- 2026-07-06：补齐 `lua_pushvalue` 最小栈复制 API，并扩展 Unix smoke fixture 的 `glua_native_counter` userdata；fixture 通过 `luaL_newmetatable`、`lua_pushvalue`、`lua_setfield("__index")`、`luaL_setfuncs` 和 `luaL_checkudata` 验证 `counter:add()` / `counter:get()` 方法调用后状态可持续保存。
