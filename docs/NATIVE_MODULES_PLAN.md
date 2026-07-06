@@ -177,6 +177,7 @@ state := lua.NewStateWithOptions(options)
 - `lua_pushvfstring`
 - `lua_createtable`
 - `lua_gettable`
+- `lua_settable`
 - `lua_setfield`
 - `lua_getfield`
 - `luaL_newlib`
@@ -209,7 +210,7 @@ state := lua.NewStateWithOptions(options)
 - `lua_rawequal`
 - `lua_rawlen`
 - `lua_is*` 系列常用入口
-  - `lua_isstring` 已覆盖 Lua 5.3 对 string 和 number 的可转换性判断；LPeg 1.1.0 下一阻塞点已前移到 `lua_rawlen`。
+  - `lua_isstring` 已覆盖 Lua 5.3 对 string 和 number 的可转换性判断；LPeg 1.1.0 下一阻塞点已前移到 `lua_settable`。
 
 ### Phase 3：userdata、metatable、registry
 

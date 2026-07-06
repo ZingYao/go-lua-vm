@@ -319,6 +319,67 @@ func TestNativeCAPIRawSetAndNext(t *testing.T) {
 	}
 }
 
+// TestNativeCAPIRawLen 验证 lua_rawlen 的 string/table/full userdata 原始长度语义。
+func TestNativeCAPIRawLen(t *testing.T) {
+	// rawlen 只读取原始长度，不触发元方法，也不改变栈顶。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	text := []byte{'a', 0, 'b'}
+	nativeLuaPushLString(luaState, unsafe.Pointer(&text[0]), uintptr(len(text)))
+	nativeLuaCreateTable(luaState, 0, 0)
+	tableValue := state.ValueAt(2)
+	tableRef, ok := tableValue.Ref.(*runtime.Table)
+	if tableValue.Kind != runtime.KindTable || !ok || tableRef == nil {
+		// 第二个栈槽必须是用于 rawlen 的 table。
+		t.Fatalf("table value = %#v, want table", tableValue)
+	}
+	tableRef.RawSetInteger(1, runtime.StringValue("x"))
+	tableRef.RawSetInteger(2, runtime.StringValue("y"))
+	tableRef.RawSetInteger(3, runtime.StringValue("z"))
+	if pointer := nativeLuaNewUserdata(luaState, 12); pointer == nil {
+		// full userdata 分配失败时无法验证 userdata rawlen。
+		t.Fatal("nativeLuaNewUserdata returned nil")
+	}
+	nativeLuaPushBoolean(luaState, true)
+
+	if got := nativeLuaRawLen(luaState, 1); got != uintptr(len(text)) {
+		// string raw length 必须按字节数统计，内嵌 NUL 也计入。
+		t.Fatalf("lua_rawlen string = %d, want %d", got, len(text))
+	}
+	if got := nativeLuaRawLen(luaState, 2); got != 3 {
+		// table raw length 使用基础数组边界。
+		t.Fatalf("lua_rawlen table = %d, want 3", got)
+	}
+	if got := nativeLuaRawLen(luaState, 3); got != 12 {
+		// full userdata raw length 返回 lua_newuserdata 请求的逻辑字节数。
+		t.Fatalf("lua_rawlen userdata = %d, want 12", got)
+	}
+	if got := nativeLuaRawLen(luaState, 4); got != 0 {
+		// boolean 没有 raw length。
+		t.Fatalf("lua_rawlen boolean = %d, want 0", got)
+	}
+	if got := nativeLuaRawLen(luaState, 99); got != 0 {
+		// 无效索引按 Lua C API 返回 0。
+		t.Fatalf("lua_rawlen missing = %d, want 0", got)
+	}
+	if got := nativeLuaStackTop(luaState); got != 4 {
+		// rawlen 不能压栈或弹栈。
+		t.Fatalf("lua_rawlen top = %d, want 4", got)
+	}
+	if errorObject, hasError := takeNativeStatePendingError(luaState); hasError {
+		// rawlen 查询不应留下 pending error。
+		t.Fatalf("lua_rawlen pending error = %#v", errorObject)
+	}
+}
+
 // TestNativeCAPIRawIntegerRegistry 验证 rawgeti/rawseti 可操作 registry pseudo-index。
 func TestNativeCAPIRawIntegerRegistry(t *testing.T) {
 	// registry pseudo-index 是 luaL_ref 的底层存储位置，必须支持 integer key。

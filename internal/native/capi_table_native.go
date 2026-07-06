@@ -3,6 +3,8 @@
 package native
 
 /*
+#include <stddef.h>
+
 typedef struct lua_State lua_State;
 typedef long long lua_Integer;
 */
@@ -240,6 +242,50 @@ func nativeLuaRawSet(luaState unsafe.Pointer, index int) {
 	}
 }
 
+// nativeLuaRawLen 实现 Lua 5.3 C API 的 lua_rawlen。
+func nativeLuaRawLen(luaState unsafe.Pointer, index int) uintptr {
+	// rawlen 不触发 __len 元方法，只读取 string/table/full userdata 的原始长度。
+	value, ok := nativeLuaValueAt(luaState, index)
+	if !ok {
+		// 无效索引按 Lua C API 返回 0，不产生错误。
+		return 0
+	}
+	switch value.Kind {
+	case runtime.KindString:
+		// Lua string 长度按字节数返回，允许内嵌 NUL。
+		return uintptr(len(value.String))
+	case runtime.KindTable:
+		// table raw length 使用 runtime.Table 的基础边界搜索，不触发 __len。
+		table, ok := value.Ref.(*runtime.Table)
+		if !ok || table == nil {
+			// 损坏的 table 引用不能提供可靠长度。
+			return 0
+		}
+		length := table.Len()
+		if length < 0 {
+			// 防御异常边界，size_t 不能表达负数。
+			return 0
+		}
+		return uintptr(length)
+	case runtime.KindUserdata:
+		// Lua 5.3 full userdata rawlen 返回分配块大小；lightuserdata 和 Go userdata 返回 0。
+		userdata, ok := value.Ref.(*runtime.Userdata)
+		if !ok || userdata == nil {
+			// 损坏的 userdata 引用不能暴露长度。
+			return 0
+		}
+		block, ok := userdata.Data.(*nativeUserdataBlock)
+		if !ok || block == nil {
+			// lightuserdata 或非 native full userdata 没有 C 分配块大小。
+			return 0
+		}
+		return block.size
+	default:
+		// 其他类型没有 raw length。
+		return 0
+	}
+}
+
 // nativeLuaNext 实现 Lua 5.3 C API 的 raw next 迭代。
 func nativeLuaNext(luaState unsafe.Pointer, index int) int {
 	// lua_next 会弹出栈顶当前 key，命中后压入下一组 key/value。
@@ -385,6 +431,14 @@ func lua_rawseti(luaState *C.lua_State, index C.int, key C.lua_Integer) {
 func lua_rawset(luaState *C.lua_State, index C.int) {
 	// C API 入口只做类型转换，具体写入和弹栈语义由 Go helper 维护。
 	nativeLuaRawSet(unsafe.Pointer(luaState), int(index))
+}
+
+// lua_rawlen 导出 Lua 5.3 C API raw length 查询入口。
+//
+//export lua_rawlen
+func lua_rawlen(luaState *C.lua_State, index C.int) C.size_t {
+	// C API 入口只做类型转换，raw length 不触发元方法且不改动栈。
+	return C.size_t(nativeLuaRawLen(unsafe.Pointer(luaState), int(index)))
 }
 
 // lua_next 导出 Lua 5.3 C API table 迭代入口。
