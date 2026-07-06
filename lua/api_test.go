@@ -5364,6 +5364,103 @@ __call_temp_checks = checks
 	}
 }
 
+// TestDoStringCallTemporaryCleanupTraceHookGuards 验证 CALL 临时区清理不得破坏 hook 与 traceback。
+//
+// 固定返回 CALL 后的非结果临时槽若被未来生产修复清理，仍必须保留 count hook、return hook 与
+// traceback 在当前 Lua 帧中观察活动 local 和错误现场的 Lua 5.3 语义。
+func TestDoStringCallTemporaryCleanupTraceHookGuards(t *testing.T) {
+	// 创建完整标准库 State，确保 debug hook、traceback、select 和 xpcall 可用。
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库打开不应失败，否则无法覆盖 debug hook 与 traceback 语义。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+
+	source := `
+local phase = ""
+local checks = {}
+
+debug.sethook(function(event)
+  if event == "count" and phase == "count_guard" and not checks.count_hook then
+    local values = {}
+    for index = 1, 8 do
+      local name, value = debug.getlocal(2, index)
+      if not name then break end
+      values[name] = value
+    end
+    checks.count_hook = values.f == select and values.count == 1
+  elseif event == "return" and phase == "return_guard" and not checks.return_hook then
+    local values = {}
+    for index = 1, 8 do
+      local name, value = debug.getlocal(2, index)
+      if not name then break end
+      values[name] = value
+    end
+    checks.return_hook = values.f == select and values.count == 1
+    phase = ""
+  end
+end, "cr", 1)
+
+local function count_guard()
+  local f = select
+  local count = f("#", "alpha")
+  phase = "count_guard"
+  local marker = count
+  phase = ""
+  return marker
+end
+assert(count_guard() == 1)
+
+local function return_guard()
+  local f = select
+  local count = f("#", "alpha")
+  phase = "return_guard"
+  return count
+end
+assert(return_guard() == 1)
+
+debug.sethook()
+
+local function trace_guard()
+  local f = select
+  local count = f("#", "alpha")
+  local preserved = f
+  assert(preserved == select and count == 1)
+  error("call-temp-trace-guard")
+end
+
+local ok, trace = xpcall(trace_guard, debug.traceback)
+checks.traceback = (not ok) and
+  string.find(trace, "call-temp-trace-guard", 1, true) ~= nil and
+  string.find(trace, "stack traceback:", 1, true) ~= nil
+
+__call_temp_trace_hook_checks = checks
+`
+	if err := DoString(state, source); err != nil {
+		// 任一断言或 hook 运行失败都说明 CALL 临时区 hook/traceback 门禁不成立。
+		t.Fatalf("DoString call temporary trace hook guard failed: %v", err)
+	}
+	checksValue, err := GetGlobal(state, "__call_temp_trace_hook_checks")
+	if err != nil {
+		// 全局读取失败说明脚本未能暴露 hook/traceback 检查结果。
+		t.Fatalf("read call temporary trace hook checks failed: %v", err)
+	}
+	checksTable, ok := checksValue.Ref.(*runtime.Table)
+	if checksValue.Kind != runtime.KindTable || !ok || checksTable == nil {
+		// 检查结果必须是 Lua table，便于逐项报告失败门禁。
+		t.Fatalf("call temporary trace hook checks kind = %v, want table", checksValue.Kind)
+	}
+	for _, checkName := range []string{"count_hook", "return_hook", "traceback"} {
+		// 每个门禁项必须由 hook 或 traceback 实际确认。
+		checkValue := checksTable.RawGetString(checkName)
+		if checkValue.Kind != runtime.KindBoolean || !checkValue.Bool {
+			// 逐项报告失败名称，避免 Lua error 抹掉具体门禁。
+			t.Fatalf("call temporary trace hook guard %s = %#v, want true", checkName, checkValue)
+		}
+	}
+}
+
 // TestDoStringDebugDumpedLocalFunctionCallName 验证 dumped chunk 仍能反查局部函数调用名。
 //
 // 官方 all.lua 会将 db.lua 通过 string.dump/load 后执行；binary chunk 不保存 locvar 寄存器号，
