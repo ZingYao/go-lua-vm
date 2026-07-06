@@ -7,6 +7,7 @@ assert(mod.echo("hello") == "hello")
 
 local a, b, c = mod.multi()
 assert(a == 1 and b == "two" and c == true)
+assert(mod.alloc_roundtrip() == true)
 
 local counter = mod.new_counter(10)
 assert(counter:add(5) == 15)

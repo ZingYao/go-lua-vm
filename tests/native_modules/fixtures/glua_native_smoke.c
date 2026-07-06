@@ -1,5 +1,6 @@
 #include "lua.h"
 #include "lauxlib.h"
+#include <string.h>
 
 static int glua_native_add(lua_State *L) {
 	lua_Integer a = luaL_checkinteger(L, 1);
@@ -30,6 +31,35 @@ static int glua_native_fail(lua_State *L) {
 static int glua_native_raise(lua_State *L) {
 	lua_pushstring(L, "native lua_error object");
 	return lua_error(L);
+}
+
+static int glua_native_alloc_roundtrip(lua_State *L) {
+	void *ud = NULL;
+	lua_Alloc alloc = lua_getallocf(L, &ud);
+	if (alloc == NULL) {
+		return luaL_error(L, "native allocator missing");
+	}
+	char *block = (char*)alloc(ud, NULL, 0, 16);
+	if (block == NULL) {
+		return luaL_error(L, "native allocator malloc failed");
+	}
+	memset(block, 0x2a, 16);
+	char *grown = (char*)alloc(ud, block, 16, 32);
+	if (grown == NULL) {
+		alloc(ud, block, 16, 0);
+		return luaL_error(L, "native allocator realloc failed");
+	}
+	int preserved = 1;
+	for (int i = 0; i < 16; i++) {
+		if ((unsigned char)grown[i] != 0x2a) {
+			preserved = 0;
+			break;
+		}
+	}
+	memset(grown + 16, 0x7f, 16);
+	alloc(ud, grown, 32, 0);
+	lua_pushboolean(L, preserved && ud == NULL);
+	return 1;
 }
 
 typedef struct glua_native_counter {
@@ -81,6 +111,7 @@ static const luaL_Reg glua_native_smoke_funcs[] = {
 	{"new_counter", glua_native_new_counter},
 	{"fail", glua_native_fail},
 	{"raise", glua_native_raise},
+	{"alloc_roundtrip", glua_native_alloc_roundtrip},
 	{NULL, NULL},
 };
 

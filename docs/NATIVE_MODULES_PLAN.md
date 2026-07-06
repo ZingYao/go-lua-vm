@@ -174,6 +174,7 @@ state := lua.NewStateWithOptions(options)
 - `lua_pushlstring`
 - `lua_pushstring`
 - `lua_createtable`
+- `lua_gettable`
 - `lua_setfield`
 - `lua_getfield`
 - `luaL_newlib`
