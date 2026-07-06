@@ -365,9 +365,9 @@ func nativeLuaLRef(luaState unsafe.Pointer, index int) int {
 		// 非 table 目标保持栈不变，后续 api_check 阶段再收口错误边界。
 		return nativeLuaNoRef
 	}
-	value, err := state.Pop()
-	if err != nil {
-		// 空栈无法取得待引用值。
+	value, ok := nativeLuaPopVisible(luaState, state)
+	if !ok {
+		// 当前 C 帧没有可见待引用值时保持外层栈不变。
 		return nativeLuaNoRef
 	}
 	if value.IsNil() {

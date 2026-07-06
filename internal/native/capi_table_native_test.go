@@ -873,3 +873,49 @@ func TestNativeCAPILRefNilAndInvalidTargets(t *testing.T) {
 		t.Fatalf("invalid luaL_ref top = %d, want 2", got)
 	}
 }
+
+// TestNativeLuaLRefRespectsCurrentCFrameBase 验证 luaL_ref 不会引用当前 C 帧之前的外层栈值。
+func TestNativeLuaLRefRespectsCurrentCFrameBase(t *testing.T) {
+	// registry 目标在当前 C 帧无可见 value 时，最容易暴露 luaL_ref 是否误弹并保存调用者栈。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 C frame 边界。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+	registry := state.Registry()
+	registryLenBefore := registry.Len()
+	registryFreeBefore := registry.RawGetInteger(nativeLuaRefFreeIndex)
+
+	valueBytes := []byte{'o', 'u', 't', 'e', 'r', '_', 'v', 'a', 'l', 'u', 'e', 0}
+	nativeLuaPushString(luaState, unsafe.Pointer(&valueBytes[0]))
+	if !pushNativeStateCallFrame(luaState, state.StackTop(), nil) {
+		// 无法建立 C 调用帧时，后续索引语义不可验证。
+		t.Fatal("pushNativeStateCallFrame failed")
+	}
+	defer popNativeStateCallFrame(luaState)
+
+	if ref := nativeLuaLRef(luaState, runtime.RegistryPseudoIndex); ref != nativeLuaNoRef {
+		// 当前 C 帧没有可见 value 时，luaL_ref 必须返回 LUA_NOREF。
+		t.Fatalf("luaL_ref = %d, want %d", ref, nativeLuaNoRef)
+	}
+	if got := state.StackTop(); got != 1 {
+		// 当前 C 帧没有可见 value 时，luaL_ref 不得弹掉外层 sentinel。
+		t.Fatalf("luaL_ref global top = %d, want 1", got)
+	}
+	if value := state.ValueAt(1); value.Kind != runtime.KindString || value.String != "outer_value" {
+		// 外层 value sentinel 必须原样保留给调用者。
+		t.Fatalf("outer stack value = %#v, want outer_value", value)
+	}
+	if got := registry.Len(); got != registryLenBefore {
+		// 缺少可见 value 时不得分配新的 registry 引用槽。
+		t.Fatalf("registry len = %d, want %d", got, registryLenBefore)
+	}
+	if value := registry.RawGetInteger(nativeLuaRefFreeIndex); !value.RawEqual(registryFreeBefore) {
+		// 缺少可见 value 时不得修改 registry freelist。
+		t.Fatalf("registry freelist = %#v, want %#v", value, registryFreeBefore)
+	}
+}
