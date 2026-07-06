@@ -293,6 +293,30 @@ if count ~= 2 then
 end
 LUA
       ;;
+    select-count-one-string)
+      cat <<'LUA'
+local count = select("#", "alpha")
+if count ~= 1 then
+  error("unexpected one-string select-count fixed result")
+end
+LUA
+      ;;
+    select-count-two-numbers)
+      cat <<'LUA'
+local count = select("#", 17, 25)
+if count ~= 2 then
+  error("unexpected numeric select-count fixed result")
+end
+LUA
+      ;;
+    select-count-two-booleans)
+      cat <<'LUA'
+local count = select("#", true, false)
+if count ~= 2 then
+  error("unexpected boolean select-count fixed result")
+end
+LUA
+      ;;
     literal-two)
       cat <<'LUA'
 local count = 2
@@ -387,6 +411,38 @@ LUA
 local count = rawequal("alpha", "beta")
 if count ~= false then
   error("unexpected rawequal fixed result")
+end
+LUA
+      ;;
+    builtin-rawequal-numbers)
+      cat <<'LUA'
+local count = rawequal(17, 25)
+if count ~= false then
+  error("unexpected numeric rawequal fixed result")
+end
+LUA
+      ;;
+    builtin-rawequal-booleans)
+      cat <<'LUA'
+local count = rawequal(true, false)
+if count ~= false then
+  error("unexpected boolean rawequal fixed result")
+end
+LUA
+      ;;
+    builtin-rawequal-same-strings)
+      cat <<'LUA'
+local count = rawequal("alpha", "alpha")
+if count ~= true then
+  error("unexpected same-string rawequal fixed result")
+end
+LUA
+      ;;
+    builtin-rawequal-same-numbers)
+      cat <<'LUA'
+local count = rawequal(17, 17)
+if count ~= true then
+  error("unexpected same-number rawequal fixed result")
 end
 LUA
       ;;
