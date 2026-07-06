@@ -135,6 +135,37 @@ static int glua_native_runtimecap_sequence_probe(lua_State *L) {
 	return 3;
 }
 
+static int glua_native_doublestack_overflow_probe(lua_State *L) {
+	static char capture_sentinel;
+	static char stackbase_sentinel;
+	lua_Integer iterations = luaL_optinteger(L, 1, 32);
+	if (iterations < 1) {
+		iterations = 1;
+	}
+	int ptop = lua_gettop(L);
+
+	lua_pushnil(L);
+	lua_pushlightuserdata(L, &capture_sentinel);
+	lua_createtable(L, 0, 1);
+	lua_pushstring(L, "ktable");
+	lua_setfield(L, -2, "kind");
+	lua_pushlightuserdata(L, &stackbase_sentinel);
+	int stack_index = ptop + 4;
+
+	for (lua_Integer i = 0; i < iterations; i++) {
+		unsigned char *replacement = (unsigned char*)lua_newuserdata(L, 8);
+		for (int byte_index = 0; byte_index < 8; byte_index++) {
+			replacement[byte_index] = (unsigned char)((i + byte_index) & 0xff);
+		}
+		lua_replace(L, stack_index);
+		if (lua_gettop(L) != ptop + 4) {
+			return luaL_error(L, "native doublestack top drift: %d", lua_gettop(L));
+		}
+	}
+
+	return luaL_error(L, "native doublestack overflow after %d replacements", (int)iterations);
+}
+
 typedef struct glua_native_counter {
 	lua_Integer value;
 } glua_native_counter;
@@ -187,6 +218,7 @@ static const luaL_Reg glua_native_smoke_funcs[] = {
 	{"alloc_roundtrip", glua_native_alloc_roundtrip},
 	{"runtimecap_cleanup_probe", glua_native_runtimecap_cleanup_probe},
 	{"runtimecap_sequence_probe", glua_native_runtimecap_sequence_probe},
+	{"doublestack_overflow_probe", glua_native_doublestack_overflow_probe},
 	{NULL, NULL},
 };
 

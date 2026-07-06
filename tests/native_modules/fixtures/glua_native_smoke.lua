@@ -33,6 +33,21 @@ assert(sequence_matches == 1, sequence_matches)
 assert(sequence_top == 8, sequence_top)
 assert(sentinel_stable == true)
 
+local overflow_ok, overflow_message = pcall(mod.doublestack_overflow_probe, 64)
+assert(overflow_ok == false, "doublestack overflow probe unexpectedly succeeded")
+assert(string.find(overflow_message, "native doublestack overflow after 64 replacements", 1, true), overflow_message)
+
+local after_overflow_positions = {}
+local after_overflow_matches, after_overflow_top, after_overflow_sentinel = mod.runtimecap_sequence_probe(function(subject, position, s1, s2)
+	assert(subject == "subject")
+	after_overflow_positions[#after_overflow_positions + 1] = tostring(position)
+	return s1 == s2
+end)
+assert(table.concat(after_overflow_positions, ",") == "7,12,13,14,15,18", table.concat(after_overflow_positions, ","))
+assert(after_overflow_matches == 1, after_overflow_matches)
+assert(after_overflow_top == 8, after_overflow_top)
+assert(after_overflow_sentinel == true)
+
 local counter = mod.new_counter(10)
 assert(counter:add(5) == 15)
 assert(counter:get() == 15)
