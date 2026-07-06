@@ -1688,6 +1688,10 @@ func packageLuaFileLoader(state *State) packagelib.LuaFileLoader {
 // 执行 loader，保持 loader 参数、错误传播和 package.loaded 写回语义与 Lua 5.3 一致。
 func openPackageWithStateCaller(state *State) error {
 	environment := packagelib.NewEnvironmentWithOptions(packageLuaFileLoader(state), state.Options())
+	if stateAwareLoader := state.Options().PackageDynamicLibraryLoaderForState; stateAwareLoader != nil {
+		// native_modules 需要把 luaopen_* 调用绑定到当前 State；状态感知 loader 优先于无状态 loader。
+		environment.SetDynamicLibraryLoader(stateAwareLoader((*runtime.State)(state)))
+	}
 	environment.SetLoaderCaller(func(loader runtime.Value, args ...runtime.Value) ([]runtime.Value, error) {
 		// Go 和 Lua closure loader 都复用 lua.Call，避免 package 包直接依赖执行循环。
 		return Call(state, loader, args...)

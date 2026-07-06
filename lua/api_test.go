@@ -1198,6 +1198,67 @@ func TestPackageDynamicLibraryLoaderOption(t *testing.T) {
 	}
 }
 
+// TestPackageDynamicLibraryLoaderForStateOption 验证 lua.Options 可为当前 State 创建动态库 loader。
+//
+// Lua C API shim 需要在 luaopen_* loader 执行时访问真实 State；该入口让 native_modules 构建
+// 可以在 package 库注册阶段绑定当前 State，同时保留默认无 CGO 构建不启用动态库加载。
+func TestPackageDynamicLibraryLoaderForStateOption(t *testing.T) {
+	// 创建带状态感知动态库 loader 的 State，并同时设置无状态 loader 以验证优先级。
+	statefulLoadCount := 0
+	fallbackLoadCount := 0
+	var capturedState *runtime.State
+	var state *State
+	state = NewStateWithOptions(Options{
+		PackageDynamicLibraryLoader: func(filename string, symbol string) (runtime.Value, error) {
+			// 状态感知 loader 存在时不应落回无状态 loader。
+			fallbackLoadCount++
+			return runtime.NilValue(), fmt.Errorf("fallback dynamic loader should not be used")
+		},
+		PackageDynamicLibraryLoaderForState: func(loaderState *runtime.State) func(filename string, symbol string) (runtime.Value, error) {
+			// 工厂必须接收当前正在注册 package 库的 State。
+			capturedState = loaderState
+			return func(filename string, symbol string) (runtime.Value, error) {
+				if filename != "libstateful.so" || symbol != "luaopen_stateful" {
+					// 参数不符合预期时返回普通错误，loadlib 会转换为 nil,error,open。
+					return runtime.NilValue(), fmt.Errorf("unexpected stateful dynamic library request")
+				}
+				statefulLoadCount++
+				loader := runtime.GoResultsFunction(func(args ...runtime.Value) ([]runtime.Value, error) {
+					// 模拟状态绑定的 luaopen_* loader 返回模块值。
+					return []runtime.Value{runtime.StringValue("stateful-dynamic-loader")}, nil
+				})
+				return runtime.ReferenceValue(runtime.KindGoClosure, loader), nil
+			}
+		},
+	})
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库注册失败时无法验证 Options 注入链路。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+	if capturedState != (*runtime.State)(state) {
+		// 工厂必须拿到当前 State，后续 native lua_State* handle 才能绑定正确运行时。
+		t.Fatalf("captured state = %p, want %p", capturedState, (*runtime.State)(state))
+	}
+
+	err := DoString(state, `
+		local loader = assert(package.loadlib("libstateful.so", "luaopen_stateful"))
+		assert(loader() == "stateful-dynamic-loader")
+	`)
+	if err != nil {
+		// Lua 侧必须能通过状态感知 Options loader 获取动态库入口。
+		t.Fatalf("DoString stateful dynamic loader failed: %v", err)
+	}
+	if statefulLoadCount != 1 {
+		// 状态感知 loader 必须被调用一次。
+		t.Fatalf("stateful dynamic loader call count = %d, want 1", statefulLoadCount)
+	}
+	if fallbackLoadCount != 0 {
+		// 状态感知 loader 优先时，无状态 loader 不应被调用。
+		t.Fatalf("fallback dynamic loader call count = %d, want 0", fallbackLoadCount)
+	}
+}
+
 // TestPushAndToWrappers 验证 lua 包栈压入和类型转换 API。
 //
 // Push 系列必须把值写入 State 栈；To 系列必须按 Lua 5.3 基础类型语义读取栈值。

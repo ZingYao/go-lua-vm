@@ -39,6 +39,7 @@
 - [x] Linux/macOS 实现 `dlopen` / `dlsym` / `dlclose` 封装。
 - [x] Windows 实现 `LoadLibraryW` / `GetProcAddress` / `FreeLibrary` 封装。
 - [ ] 动态库 loader 返回 Lua 可调用 loader，接入 `PackageDynamicLibraryLoader`。
+  - [x] 已新增 State-aware loader 工厂入口，后续 native shim 可绑定当前 State 后返回 Lua callable。
 - [ ] `package.loadlib(path, symbol)` 在 native 构建下可加载 fixture 入口。
   - [x] 已验证 Linux/macOS 真实 fixture 可解析到 `luaopen_*`，并在 C API shim 未实现时返回 `init` 分类。
 - [ ] `require("mod")` 在 native 构建下可通过 `package.cpath` 命中 fixture。
@@ -187,3 +188,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：新增 Windows `LoadLibraryW` / `GetProcAddress` / `FreeLibrary` 封装和系统 DLL smoke 测试；本机非 Windows 环境通过 `GOOS=windows go test -c -tags native_modules ./internal/native` 做交叉编译验证，运行时 fixture 留到 Windows 平台闭环阶段。
 - 2026-07-06：新增 Unix `package.loadlib` 真实 Lua C fixture 测试；fixture 使用 Lua 5.3 public `lua.h` 编译并导出 `luaopen_glua_native_smoke`，当前可证明动态库与符号解析已贯通到 package.loadlib，返回值停在 C API shim 未实现的 `init` 分类。
 - 2026-07-06：补充真实第三方模块验收门禁；明确自编 fixture 只作为 loader smoke，最终兼容验收以 `lua-cjson` 为第一真实模块，并区分源码编译模块和官方 Lua 5.3 ABI 二进制模块。
+- 2026-07-06：新增 `PackageDynamicLibraryLoaderForState` 状态感知 loader 工厂；`lua.OpenLibs` 注册 package 库时会优先绑定当前 State，为后续 `lua_State*` opaque handle 和 `luaopen_*` 调用提供正确 VM 上下文。

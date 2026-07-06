@@ -37,6 +37,11 @@ type Options struct {
 	// 打开外部动态库并返回 Lua 可调用函数。该回调不要求也不引入 CGO，宿主可自行选择插件、
 	// 系统动态库、CGO 或纯 Go 适配层。
 	PackageDynamicLibraryLoader func(filename string, symbol string) (Value, error)
+	// PackageDynamicLibraryLoaderForState 为指定 State 创建 package.loadlib 使用的动态库 loader。
+	//
+	// native_modules 这类 Lua C API shim 需要把 luaopen_* 调用绑定到真实 State；该工厂在 package
+	// 库注册时执行，返回值优先于 PackageDynamicLibraryLoader。nil 表示沿用无状态 loader。
+	PackageDynamicLibraryLoaderForState func(state *State) func(filename string, symbol string) (Value, error)
 	// VirtualFilesystem 保存只读 Go fs.FS 虚拟文件系统。
 	VirtualFilesystem fs.FS
 	// PreferHostFilesystem 表示只读路径查找时是否优先尝试宿主文件系统。
