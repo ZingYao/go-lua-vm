@@ -5542,6 +5542,91 @@ __call_temp_metamethod_argument_checks = checks
 	}
 }
 
+// TestDoStringCallTemporaryCleanupTForCallResultGuards 验证 TFORCALL 结果区不会被普通 CALL 清理误伤。
+//
+// 泛型 for 的 TFORCALL 会把迭代结果写入循环变量区，普通 fixed-result CALL 后续清理临时槽时，
+// 不能清掉这些仍活跃的循环变量，也不能破坏 TFORLOOP 下一轮使用的控制变量。
+func TestDoStringCallTemporaryCleanupTForCallResultGuards(t *testing.T) {
+	// 创建完整标准库 State，确保泛型 for、debug.getlocal、table length 和字符串拼接可用。
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库打开不应失败，否则无法覆盖泛型 for 与 debug local 语义。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+
+	source := `
+local checks = {}
+
+local function ordinary(left, right)
+  return left .. right
+end
+
+local function iter(state, control)
+  local next_index = control + 1
+  if next_index > #state then
+    return nil
+  end
+  return next_index, state[next_index], "extra-" .. next_index
+end
+
+local function run()
+  local rows = { "a", "b" }
+  local seen = {}
+  local debug_ok = true
+
+  for key, value, extra in iter, rows, 0 do
+    local fixed_result = ordinary("x", "y")
+    local values = {}
+    for index = 1, 20 do
+      local name, local_value = debug.getlocal(1, index)
+      if not name then break end
+      values[name] = local_value
+    end
+    debug_ok =
+      debug_ok and
+      values.key == key and
+      values.value == value and
+      values.extra == extra and
+      values.fixed_result == fixed_result
+    seen[#seen + 1] = key .. ":" .. value .. ":" .. extra .. ":" .. fixed_result
+  end
+
+  checks.iteration =
+    seen[1] == "1:a:extra-1:xy" and
+    seen[2] == "2:b:extra-2:xy" and
+    seen[3] == nil
+  checks.debug_locals = debug_ok
+  checks.control_progress = #seen == 2
+end
+
+run()
+__call_temp_tforcall_result_checks = checks
+`
+	if err := DoString(state, source); err != nil {
+		// 任一断言或泛型 for 执行失败都说明 TFORCALL 结果区门禁不成立。
+		t.Fatalf("DoString TFORCALL result guard failed: %v", err)
+	}
+	checksValue, err := GetGlobal(state, "__call_temp_tforcall_result_checks")
+	if err != nil {
+		// 全局读取失败说明脚本未能暴露 TFORCALL 结果检查。
+		t.Fatalf("read TFORCALL result checks failed: %v", err)
+	}
+	checksTable, ok := checksValue.Ref.(*runtime.Table)
+	if checksValue.Kind != runtime.KindTable || !ok || checksTable == nil {
+		// 检查结果必须是 Lua table，便于逐项报告失败门禁。
+		t.Fatalf("TFORCALL result checks kind = %v, want table", checksValue.Kind)
+	}
+	for _, checkName := range []string{"iteration", "debug_locals", "control_progress"} {
+		// 每个门禁项必须由迭代结果、debug local 或控制变量推进实际确认。
+		checkValue := checksTable.RawGetString(checkName)
+		if checkValue.Kind != runtime.KindBoolean || !checkValue.Bool {
+			// 逐项报告失败名称，避免 Lua error 抹掉具体门禁。
+			t.Fatalf("TFORCALL result guard %s = %#v, want true", checkName, checkValue)
+		}
+	}
+}
+
 // TestDoStringDebugDumpedLocalFunctionCallName 验证 dumped chunk 仍能反查局部函数调用名。
 //
 // 官方 all.lua 会将 db.lua 通过 string.dump/load 后执行；binary chunk 不保存 locvar 寄存器号，
