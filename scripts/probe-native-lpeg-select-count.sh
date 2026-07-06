@@ -152,6 +152,24 @@ if count ~= 2 or clear1 ~= false or clear2 ~= false then
 end
 LUA
       ;;
+    select-count-overwrite-three-nil)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+local clear1, clear2, clear3 = nil, nil, nil
+if count ~= 2 or clear1 ~= nil or clear2 ~= nil or clear3 ~= nil then
+  error("unexpected three-nil overwrite select count")
+end
+LUA
+      ;;
+    select-count-overwrite-three-false)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+local clear1, clear2, clear3 = false, false, false
+if count ~= 2 or clear1 ~= false or clear2 ~= false or clear3 ~= false then
+  error("unexpected three-false overwrite select count")
+end
+LUA
+      ;;
     select-count-nonempty-discard)
       cat <<'LUA'
 select("#", "alpha", "beta")
@@ -452,6 +470,8 @@ modes=(
   select-count-nil-after-use
   select-count-overwrite-args-nil
   select-count-overwrite-args-false
+  select-count-overwrite-three-nil
+  select-count-overwrite-three-false
   select-count-nonempty-discard
   select-count-two-nil
   select-count-first-string-second-nil
