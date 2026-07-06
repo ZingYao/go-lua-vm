@@ -162,6 +162,34 @@ func nativeLuaBufferValueString(value runtime.Value) (string, bool) {
 	return "", false
 }
 
+// nativeLuaBufferAddVisibleValue 追加当前 C API 可见栈顶值，并按 luaL_addvalue 语义弹出该值。
+func nativeLuaBufferAddVisibleValue(luaState unsafe.Pointer, appendString func(string)) bool {
+	// 先解析 State，失效 handle 不能读取或弹出任何 Go VM 栈值。
+	state, ok := lookupNativeStateHandle(luaState)
+	if !ok {
+		// 非 glua 管理的 lua_State 不可操作。
+		return false
+	}
+	value, ok := nativeLuaValueAt(luaState, -1)
+	// 当前 C API 可见栈为空时没有可追加值，不能穿透读取外层 Go VM 栈。
+	if !ok {
+		return false
+	}
+	text, convertible := nativeLuaBufferValueString(value)
+	// 不可转字符串时保持 Lua 5.3 的错误语义边界：记录 pending error 并弹出消费的栈顶值。
+	if !convertible {
+		setNativeStatePendingError(luaState, runtime.StringValue("string expected"))
+		_, _ = nativeLuaPopVisible(luaState, state)
+		return false
+	}
+	if appendString != nil {
+		// 可转换值先追加到 buffer，再按 luaL_addvalue 语义消费栈顶。
+		appendString(text)
+	}
+	_, _ = nativeLuaPopVisible(luaState, state)
+	return true
+}
+
 // luaL_buffinit 初始化 Lua C API 的 luaL_Buffer；L 为原生 shim 状态句柄，B 由 C 模块分配。
 //
 //export luaL_buffinit
@@ -206,25 +234,11 @@ func luaL_addvalue(buffer *C.luaL_Buffer) {
 	if buffer == nil || buffer.L == nil {
 		return
 	}
-	state, ok := lookupNativeStateHandle(unsafe.Pointer(buffer.L))
-	// 未找到状态句柄说明 C 模块传入了非 glua 管理的 lua_State。
-	if !ok {
-		return
-	}
-	top := state.StackTop()
-	// 空栈没有可追加值。
-	if top <= 0 {
-		return
-	}
-	text, convertible := nativeLuaBufferValueString(state.ValueAt(top))
-	// 不可转字符串时保持 Lua 5.3 的错误语义边界：记录 pending error 并弹出消费的栈顶值。
-	if !convertible {
-		setNativeStatePendingError(unsafe.Pointer(buffer.L), runtime.StringValue("string expected"))
-		state.Pop()
-		return
-	}
-	nativeLuaBufferAppendString(buffer, text)
-	state.Pop()
+	luaState := unsafe.Pointer(buffer.L)
+	nativeLuaBufferAddVisibleValue(luaState, func(text string) {
+		// C buffer 写入仍由现有 append helper 负责容量扩展和原始字节复制。
+		nativeLuaBufferAppendString(buffer, text)
+	})
 }
 
 // luaL_pushresult 将 luaL_Buffer 当前内容压入 Lua 栈，并释放可能分配的堆缓冲。
