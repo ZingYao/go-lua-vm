@@ -626,6 +626,57 @@ LUA
   rg '^PROBE' "${output}" || tail -n 3 "${output}"
 }
 
+run_prefix620_lua_call_frame_probe() {
+  local mode="$1"
+  local label="$2"
+  local source="${work_dir}/${label}.lua"
+  local output="${work_dir}/${label}.out"
+
+  {
+    printf 'package.path = "%s"\n' "${repo_root}/third_party/lpeg/?.lua"
+    printf 'package.cpath = "%s"\n' "${build_dir}/?${module_extension}"
+    sed "1,4d;621,\$d" "${repo_root}/third_party/lpeg/test.lua"
+    cat <<LUA
+if "${mode}" == "empty-noargs" then
+  local function diag()
+  end
+  diag()
+elseif "${mode}" == "read-args-no-return" then
+  local function diag(a, b)
+    local first = a
+    local second = b
+    assert(first == "alpha" and second == "beta")
+  end
+  diag("alpha", "beta")
+elseif "${mode}" == "return-no-read" then
+  local function diag()
+    return "ok"
+  end
+  assert(diag() == "ok")
+elseif "${mode}" == "local-only" then
+  local function diag()
+    local first = 17
+    local second = first + 25
+    assert(second == 42)
+  end
+  diag()
+elseif "${mode}" == "pcall-empty" then
+  local ok, err = pcall(function()
+  end)
+  assert(ok and err == nil)
+else
+  error("unknown lua call frame probe mode: ${mode}")
+end
+LUA
+    emit_probe_tail
+  } >"${source}"
+
+  echo "run prefix620 + Lua call frame ${mode} probe"
+  "${glua_bin}" "${source}" >"${output}"
+  printf '%s ' "${label}"
+  rg '^PROBE' "${output}" || tail -n 3 "${output}"
+}
+
 run_prefix620_loadlib_existing_symbol_probe() {
   local source="${work_dir}/prefix620_loadlib_existing_symbol.lua"
   local output="${work_dir}/prefix620_loadlib_existing_symbol.out"
@@ -717,6 +768,11 @@ run_prefix620_lua_closure_probe empty-return prefix620_lua_closure_empty_return 
 run_prefix620_lua_closure_probe one-return prefix620_lua_closure_one_return 1 nil
 run_prefix620_lua_closure_probe three-return prefix620_lua_closure_three_return 3 nil
 run_prefix620_lua_closure_probe callable-return prefix620_lua_closure_callable_return 1 function
+run_prefix620_lua_call_frame_probe empty-noargs prefix620_lua_call_empty_noargs
+run_prefix620_lua_call_frame_probe read-args-no-return prefix620_lua_call_read_args_no_return
+run_prefix620_lua_call_frame_probe return-no-read prefix620_lua_call_return_no_read
+run_prefix620_lua_call_frame_probe local-only prefix620_lua_call_local_only
+run_prefix620_lua_call_frame_probe pcall-empty prefix620_lua_call_pcall_empty
 run_prefix620_loadlib_existing_symbol_probe
 run_prefix620_parity_matches_loadlib_missing_file_probe
 
