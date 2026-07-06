@@ -550,6 +550,41 @@ func TestNativeCAPIRawIntegerRegistry(t *testing.T) {
 	}
 }
 
+// TestNativeLuaRawSetIRespectsCurrentCFrameBase 验证 lua_rawseti 不会弹出当前 C 帧之前的外层栈值。
+func TestNativeLuaRawSetIRespectsCurrentCFrameBase(t *testing.T) {
+	// registry 目标在当前 C 帧无可见 value 时，最容易暴露 rawseti 是否误弹调用者栈。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 C frame 边界。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'o', 'u', 't', 'e', 'r', 0}[0]))
+	if !pushNativeStateCallFrame(luaState, state.StackTop(), nil) {
+		// 无法建立 C 调用帧时，后续索引语义不可验证。
+		t.Fatal("pushNativeStateCallFrame failed")
+	}
+	defer popNativeStateCallFrame(luaState)
+
+	nativeLuaRawSetI(luaState, runtime.RegistryPseudoIndex, 77)
+	if got := state.StackTop(); got != 1 {
+		// 当前 C 帧没有可见 value 时，rawseti 不得弹掉外层 sentinel。
+		t.Fatalf("lua_rawseti global top = %d, want 1", got)
+	}
+	if value := state.ValueAt(1); value.Kind != runtime.KindString || value.String != "outer" {
+		// 外层栈值必须原样保留给调用者。
+		t.Fatalf("outer stack value = %#v, want outer", value)
+	}
+	if value := state.Registry().RawGetInteger(77); !value.IsNil() {
+		// 缺少可见 value 时不得向 registry 写入错误值。
+		t.Fatalf("registry[77] = %#v, want nil", value)
+	}
+}
+
 // TestNativeCAPIRawIntegerRejectsInvalidTarget 验证 raw integer API 的失败安全边界。
 func TestNativeCAPIRawIntegerRejectsInvalidTarget(t *testing.T) {
 	// 当前最小 shim 不做 api_check；无效目标保持 no-op/none。
