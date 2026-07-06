@@ -149,7 +149,7 @@
 - [ ] 更新 README，对外链接 native module 文档。
 - [ ] 增加脚本：
   - [x] `scripts/build-native-fixtures.sh`
-  - [ ] `scripts/test-native-modules.sh`
+  - [x] `scripts/test-native-modules.sh`
 - [ ] 增加最终验收记录。
 
 ## 每轮推进规则
@@ -234,3 +234,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：将 Unix smoke fixture 的 C 源码从 Go 测试内嵌字符串迁移到 `tests/native_modules/fixtures/glua_native_smoke.c`；`internal/native/loadlib_fixture_unix_test.go` 现在直接编译仓库内固定 C 文件，减少后续脚本和跨平台 fixture 复用前的重复源码入口。
 - 2026-07-06：将 Unix require smoke 的 Lua 脚本从 Go 测试内嵌字符串迁移到 `tests/native_modules/fixtures/glua_native_smoke.lua`；Go 测试通过占位符注入 `package.path` / `package.cpath`，后续 CLI smoke 和跨平台脚本可复用同一份 Lua 验收逻辑。
 - 2026-07-06：新增 `scripts/build-native-fixtures.sh`，使用仓库内 `native/lua53/include/` 和 `tests/native_modules/fixtures/glua_native_smoke.c` 构建当前平台 `glua_native_smoke` / `glua_native_failopen` 动态库，并显式输出 `GOOS`、`GOARCH`、`CC`、`CGO_ENABLED`、源码路径和产物路径；Windows 目标在 `lua53.dll` shim/import library 落地前明确 skip。
+- 2026-07-06：新增 `scripts/test-native-modules.sh`，默认构建 native tag 的 `glua`，调用 `scripts/build-native-fixtures.sh` 生成当前平台 fixture，并实际执行 `glua_native_smoke.lua` require 成功路径和 `glua_native_failopen` 初始化失败路径；Windows CLI smoke 在 `lua53.dll` shim/import library 落地前明确 skip。
