@@ -27,6 +27,15 @@ func nativeLuaStackTop(luaState unsafe.Pointer) int {
 		// 无效或已关闭 State 没有可读栈，返回 0 让 C 模块留在失败安全路径。
 		return 0
 	}
+	if baseTop, ok := currentNativeStateCallBase(luaState); ok {
+		// C function 内的 lua_gettop 返回当前调用帧可见槽位数，即参数和后续压入值数量。
+		visibleTop := state.StackTop() - baseTop
+		if visibleTop < 0 {
+			// 栈基址损坏时返回 0，避免 C 模块继续误读。
+			return 0
+		}
+		return visibleTop
+	}
 	return state.StackTop()
 }
 
@@ -38,17 +47,28 @@ func nativeLuaSetTop(luaState unsafe.Pointer, index int) {
 		// native 模块持有的 State 已失效，当前最小 shim 选择 no-op，错误边界后续由 lua_error 阶段补齐。
 		return
 	}
+	baseTop := 0
+	if currentBaseTop, ok := currentNativeStateCallBase(luaState); ok {
+		// C function 内的正索引和 top 都相对当前调用帧参数区。
+		baseTop = currentBaseTop
+	}
 	currentTop := state.StackTop()
+	currentVisibleTop := currentTop - baseTop
+	if currentVisibleTop < 0 {
+		// 基址异常时不调整栈，避免破坏外层 VM 栈。
+		return
+	}
 	targetTop := index
 	if index < 0 {
 		// Lua 负索引从当前栈顶计算目标位置，-1 表示保持原栈顶，-2 表示弹出一个值。
-		targetTop = currentTop + index + 1
+		targetTop = currentVisibleTop + index + 1
 	}
 	if targetTop < 0 {
 		// 官方 API 对无效负索引有 api_check；本 shim 暂不 panic/longjmp，保持原栈不变。
 		return
 	}
-	for currentTop > targetTop {
+	globalTargetTop := baseTop + targetTop
+	for currentTop > globalTargetTop {
 		// 目标栈顶更低时逐个弹出，Pop 会清理槽位避免保留引用。
 		if _, err := state.Pop(); err != nil {
 			// Pop 失败只可能来自关闭或下溢；此处停止调整，避免扩大副作用。
@@ -56,7 +76,7 @@ func nativeLuaSetTop(luaState unsafe.Pointer, index int) {
 		}
 		currentTop--
 	}
-	for currentTop < targetTop {
+	for currentTop < globalTargetTop {
 		// 目标栈顶更高时按 Lua 语义用 nil 填充新增槽位。
 		if err := state.Push(runtime.NilValue()); err != nil {
 			// 栈上限错误暂时停止扩展，后续错误阶段会把该状态转换成 Lua 错误。

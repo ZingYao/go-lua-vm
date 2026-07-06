@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	glualua "github.com/zing/go-lua-vm/lua"
 	luaruntime "github.com/zing/go-lua-vm/runtime"
 	packagelib "github.com/zing/go-lua-vm/stdlib/package"
 )
@@ -80,6 +81,41 @@ func TestUnixPackageLoadLibReturnsCallableNativeFixture(t *testing.T) {
 	}
 }
 
+// TestUnixRequireLoadsNativeFixtureThroughCPath 验证 Lua 侧 require 可通过 package.cpath 加载原生模块。
+func TestUnixRequireLoadsNativeFixtureThroughCPath(t *testing.T) {
+	// 构建真实 Lua C 动态库，并让标准 package.searchers[3] 通过 cpath 命中它。
+	fixturePath := buildUnixNativeFixture(t)
+	cpathPattern := filepath.Join(filepath.Dir(fixturePath), "?"+dynamicLibraryExtension())
+	missingLuaPattern := filepath.Join(t.TempDir(), "missing", "?.lua")
+	state := glualua.NewStateWithOptions(glualua.Options{
+		AllowHostFilesystem: true,
+		PackageDynamicLibraryLoaderForState: func(loaderState *luaruntime.State) func(filename string, symbol string) (luaruntime.Value, error) {
+			// native loader 必须绑定当前 State，确保 luaopen_* 与后续 C function 看到同一个 VM 栈。
+			return LoaderForState(loaderState)
+		},
+	})
+	defer state.Close()
+	if err := glualua.OpenLibs(state); err != nil {
+		// require 依赖 package/base 标准库完成注册。
+		t.Fatalf("OpenLibs native require failed: %v", err)
+	}
+
+	source := `
+package.path = ` + nativeLuaStringLiteral(missingLuaPattern) + `
+package.cpath = ` + nativeLuaStringLiteral(cpathPattern) + `
+local mod = require("glua_native_smoke")
+assert(mod.add(20, 22) == 42)
+assert(mod.echo("hello") == "hello")
+local a, b, c = mod.multi()
+assert(a == 1 and b == "two" and c == true)
+assert(require("glua_native_smoke") == mod)
+`
+	if err := glualua.DoString(state, source); err != nil {
+		// Lua 侧 require、模块函数调用和 require 缓存都必须成功。
+		t.Fatalf("native require script failed: %v", err)
+	}
+}
+
 // assertNativeSmokeModule 验证 fixture 模块 table 及其中 C function 的调用语义。
 func assertNativeSmokeModule(t *testing.T, value luaruntime.Value) {
 	// 先确认 luaopen_* 的返回值是 table，再逐个调用由 luaL_newlib 注册的函数。
@@ -146,6 +182,13 @@ func nativeSmokeFunction(t *testing.T, table *luaruntime.Table, name string) lua
 		t.Fatalf("native smoke function %s = %#v, want GoResultsFunction", name, value)
 	}
 	return function
+}
+
+// nativeLuaStringLiteral 返回可嵌入测试 Lua 源码的字符串字面量。
+func nativeLuaStringLiteral(text string) string {
+	// 测试路径只需要覆盖常见转义字符，避免 package.path/cpath 中的引号或反斜杠破坏源码。
+	replacer := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`, "\r", `\r`)
+	return `"` + replacer.Replace(text) + `"`
 }
 
 // buildUnixNativeFixture 构建导出 luaopen_glua_native_smoke 的 Lua C 动态库。

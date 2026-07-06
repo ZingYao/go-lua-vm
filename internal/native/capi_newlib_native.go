@@ -70,7 +70,7 @@ func nativeLuaLSetFuncs(luaState unsafe.Pointer, functions []nativeLuaLibraryFun
 		// 无效 State 不能注册任何函数。
 		return false
 	}
-	table, ok := nativeLuaTableAt(state, -1)
+	table, ok := nativeLuaTableAt(luaState, -1)
 	if !ok {
 		// luaL_setfuncs 要求栈顶是目标 table；当前错误 longjmp 尚未接入，失败时保持 no-op。
 		return false

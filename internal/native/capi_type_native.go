@@ -63,6 +63,13 @@ func nativeLuaValueAt(luaState unsafe.Pointer, index int) (runtime.Value, bool) 
 		return value, true
 	}
 	absoluteIndex := state.AbsIndex(index)
+	if index > 0 {
+		// C function 内正索引从当前 C 调用帧参数区开始，而不是整个 Go State 栈底。
+		if baseTop, ok := currentNativeStateCallBase(luaState); ok {
+			// index 是 1-based 可见槽位，因此全局绝对索引需要加上调用进入前栈顶。
+			absoluteIndex = baseTop + index
+		}
+	}
 	if absoluteIndex <= 0 || absoluteIndex > state.StackTop() {
 		// 栈索引 0、越界正索引和越界负索引都属于 LUA_TNONE。
 		return runtime.NilValue(), false

@@ -40,6 +40,8 @@ var (
 	nativeStateHandles = make(map[uintptr]*runtime.State)
 	// nativeStateBuffers 保存 C API 返回给 C 模块的临时 C buffer，并绑定到 lua_State handle 生命周期。
 	nativeStateBuffers = make(map[uintptr][]unsafe.Pointer)
+	// nativeStateCallBases 保存当前 lua_State handle 上嵌套 C function 调用的 Go State 栈基址。
+	nativeStateCallBases = make(map[uintptr][]int)
 )
 
 // newNativeStateHandle 为当前 State 创建 C 可见的 opaque lua_State* handle。
@@ -94,12 +96,72 @@ func (handle *nativeStateHandle) close() {
 	delete(nativeStateHandles, uintptr(token))
 	buffers := nativeStateBuffers[uintptr(token)]
 	delete(nativeStateBuffers, uintptr(token))
+	delete(nativeStateCallBases, uintptr(token))
 	nativeStateHandlesMu.Unlock()
 	for _, buffer := range buffers {
 		// buffer 都由 C malloc 分配，可安全在 handle 生命周期结束时统一释放。
 		C.glua_free_native_buffer(buffer)
 	}
 	C.glua_free_state_token(token)
+}
+
+// pushNativeStateCallBase 记录一次 C function 调用进入时的 Go State 栈基址。
+func pushNativeStateCallBase(token unsafe.Pointer, baseTop int) bool {
+	// C API 正索引需要相对当前 C function 参数区，而不是整个 Go State 栈底。
+	if token == nil {
+		// nil token 无法记录调用帧。
+		return false
+	}
+	nativeStateHandlesMu.Lock()
+	defer nativeStateHandlesMu.Unlock()
+	key := uintptr(token)
+	state := nativeStateHandles[key]
+	if state == nil || state.IsClosed() {
+		// State 已失效时不能建立 C 调用帧。
+		return false
+	}
+	nativeStateCallBases[key] = append(nativeStateCallBases[key], baseTop)
+	return true
+}
+
+// popNativeStateCallBase 弹出当前 C function 调用基址。
+func popNativeStateCallBase(token unsafe.Pointer) {
+	// 调用退出时恢复上一层 C function 基址，支持后续 lua_call/pcall 阶段的嵌套 C 调用。
+	if token == nil {
+		// nil token 没有可清理状态。
+		return
+	}
+	nativeStateHandlesMu.Lock()
+	defer nativeStateHandlesMu.Unlock()
+	key := uintptr(token)
+	bases := nativeStateCallBases[key]
+	if len(bases) == 0 {
+		// 没有活动调用帧时保持 no-op。
+		return
+	}
+	if len(bases) == 1 {
+		// 最后一层退出后删除 map 项，避免长期保留空切片。
+		delete(nativeStateCallBases, key)
+		return
+	}
+	nativeStateCallBases[key] = bases[:len(bases)-1]
+}
+
+// currentNativeStateCallBase 返回当前 C function 调用的 Go State 栈基址。
+func currentNativeStateCallBase(token unsafe.Pointer) (int, bool) {
+	// 没有活动 C function 时，C API helper 继续使用全局 State 栈索引。
+	if token == nil {
+		// nil token 没有活动调用帧。
+		return 0, false
+	}
+	nativeStateHandlesMu.Lock()
+	defer nativeStateHandlesMu.Unlock()
+	bases := nativeStateCallBases[uintptr(token)]
+	if len(bases) == 0 {
+		// 未处于 C function 调用中。
+		return 0, false
+	}
+	return bases[len(bases)-1], true
 }
 
 // lookupNativeStateHandle 按 C token 查找对应 Go State。

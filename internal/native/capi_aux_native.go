@@ -35,13 +35,12 @@ import (
 
 // nativeLuaToInteger 按当前最小 Lua C API shim 读取 integer。
 func nativeLuaToInteger(luaState unsafe.Pointer, index int) (int64, bool) {
-	// 入口先解析 State；失效 handle 不能读取任何栈值。
-	state, ok := lookupNativeStateHandle(luaState)
+	// 入口通过统一 helper 区分 none 与 nil，并处理 C function 当前调用帧基址。
+	value, ok := nativeLuaValueAt(luaState, index)
 	if !ok {
-		// 无效 State 返回转换失败，避免 C 模块误读旧栈。
+		// 无效索引或无效 State 返回转换失败，避免 C 模块误读旧栈。
 		return 0, false
 	}
-	value := state.ValueAt(index)
 	integerValue, ok := value.ToInteger()
 	if !ok {
 		// 当前阶段只覆盖 runtime.Value 的 number/integer 转换；字符串转数字留到完整 C API 兼容阶段。
@@ -83,15 +82,10 @@ func nativeLuaAllocCString(luaState unsafe.Pointer, text string) (unsafe.Pointer
 
 // nativeLuaToLString 按当前最小 Lua C API shim 读取字符串。
 func nativeLuaToLString(luaState unsafe.Pointer, index int) (unsafe.Pointer, uintptr, bool) {
-	// 入口先解析 State；失效 handle 不能读取任何栈值。
-	state, ok := lookupNativeStateHandle(luaState)
+	// 入口通过统一 helper 区分 none 与 nil，并处理 C function 当前调用帧基址。
+	value, ok := nativeLuaValueAt(luaState, index)
 	if !ok {
-		// 无效 State 返回转换失败，避免 C 模块误读旧栈。
-		return nil, 0, false
-	}
-	value := state.ValueAt(index)
-	if value.Kind == 0 && index != 0 {
-		// ValueAt 对越界和 nil 都返回 nil；当前无法区分 none/nil，统一让 nil 失败。
+		// 无效索引或 nil 不能按 string 转换。
 		return nil, 0, false
 	}
 	switch value.Kind {

@@ -46,7 +46,7 @@
 - [ ] `package.loadlib(path, symbol)` 在 native 构建下可加载 fixture 入口。
   - [x] 已验证 Linux/macOS 真实 fixture 可解析到 `luaopen_*`，无状态 loader 仍返回 `init` 分类。
   - [x] 已验证 State-aware loader 可返回 callable 并实际调用 fixture `luaopen_*`。
-- [ ] `require("mod")` 在 native 构建下可通过 `package.cpath` 命中 fixture。
+- [x] `require("mod")` 在 native 构建下可通过 `package.cpath` 命中 fixture。
 - [ ] 保持默认构建 `package.loadlib` 禁用说明不变。
 
 ## 第三阶段：最小 Lua C API shim
@@ -214,3 +214,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：新增 `luaL_setfuncs` 与兼容 `luaL_newlib` 符号；Lua 5.3 public header 的 `luaL_newlib` 宏会展开为 `lua_createtable` + `luaL_setfuncs`，因此当前 C 模块可把 `nup==0` 的 `luaL_Reg` 函数表注册到 table。带 upvalue 的 `luaL_setfuncs` 仍保持 no-op，等待 C closure upvalue/registry 阶段补齐。
 - 2026-07-06：新增 `LoaderForState`，动态库符号解析后会保留库句柄并返回可调用 Go closure，调用时通过当前 State 的 opaque `lua_State*` 执行 `luaopen_*`。Unix fixture 已验证 `package.loadlib(path, "luaopen_glua_native_smoke")` 可返回 callable 并实际调用入口；无状态 `Loader()` 仍只做解析验证并返回 `init` 边界，防止误用错误 State。
 - 2026-07-06：扩展 Unix native smoke fixture；C 模块现在通过真实 Lua 5.3 public header 的 `luaL_newlib` 宏返回模块 table，并暴露 `add(a,b)`、`echo(s)`、`multi()` 三个 C function，覆盖 integer/string 参数读取、`lua_push*` 返回值和 C function 多返回值搬运。为支持 `luaL_newlib` 宏补充 `luaL_checkversion_` 最小 no-op shim；版本不匹配错误与 longjmp 仍留到错误边界阶段。
+- 2026-07-06：补齐 C function 调用基址和 Unix `require` 端到端测试；native shim 现在会在进入 C function 时记录 Go State 栈基址，使 `luaL_checkinteger(L, 1)` 等正索引相对当前 C 调用帧，而不是误读外层 Lua 栈。Lua 源码层已验证 `package.cpath` 命中 `glua_native_smoke` fixture、`require` 返回模块 table、`add/echo/multi` 可调用且二次 `require` 命中缓存。

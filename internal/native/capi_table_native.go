@@ -64,9 +64,13 @@ func nativeLuaTypeCode(value runtime.Value, missing bool) int {
 }
 
 // nativeLuaTableAt 读取指定索引处的 table 引用。
-func nativeLuaTableAt(state *runtime.State, index int) (*runtime.Table, bool) {
-	// ValueAt 会处理正负索引和越界，非 table 值不能用于字段读写。
-	value := state.ValueAt(index)
+func nativeLuaTableAt(luaState unsafe.Pointer, index int) (*runtime.Table, bool) {
+	// 通过统一 C API 视角取值，确保正索引遵守当前 C function 调用帧基址。
+	value, ok := nativeLuaValueAt(luaState, index)
+	if !ok {
+		// 无效索引不能用于字段读写。
+		return nil, false
+	}
 	if value.Kind != runtime.KindTable {
 		// 只有 table 类型可进入当前最小字段 API；元方法和错误边界后续阶段补齐。
 		return nil, false
@@ -94,8 +98,7 @@ func nativeLuaSetField(luaState unsafe.Pointer, index int, keyPointer unsafe.Poi
 		// 无效 State 或 key 暂不抛出错误，后续 lua_error 边界补齐。
 		return
 	}
-	absoluteIndex := state.AbsIndex(index)
-	table, ok := nativeLuaTableAt(state, absoluteIndex)
+	table, ok := nativeLuaTableAt(luaState, index)
 	if !ok {
 		// 非 table 目标暂不触发元方法或错误，保持栈不变便于定位语义缺口。
 		return
@@ -111,12 +114,12 @@ func nativeLuaSetField(luaState unsafe.Pointer, index int, keyPointer unsafe.Poi
 // nativeLuaGetField 按 string key 读取 table 字段并压入栈顶。
 func nativeLuaGetField(luaState unsafe.Pointer, index int, keyPointer unsafe.Pointer) int {
 	// 入口先解析 State；失效 handle 无可读栈，返回 LUA_TNONE。
-	state, ok := lookupNativeStateHandle(luaState)
+	_, ok := lookupNativeStateHandle(luaState)
 	if !ok || keyPointer == nil {
 		// 无效 State 或 key 暂不产生 Lua 值。
 		return nativeLuaTypeNone
 	}
-	table, ok := nativeLuaTableAt(state, index)
+	table, ok := nativeLuaTableAt(luaState, index)
 	if !ok {
 		// 非 table 目标在当前最小 shim 中返回 none，后续元方法阶段会补完整错误语义。
 		return nativeLuaTypeNone

@@ -51,6 +51,11 @@ func nativeLuaCallCFunction(luaState unsafe.Pointer, function unsafe.Pointer, ar
 		return nil, runtime.NewRuntimeError(runtime.StringValue(runtime.ErrClosedState.Error()), runtime.ErrClosedState)
 	}
 	baseTop := state.StackTop()
+	if !pushNativeStateCallBase(luaState, baseTop) {
+		// 无法建立调用帧时不能进入 C 函数，否则 C API 正索引会读到错误槽位。
+		return nil, runtime.NewRuntimeError(runtime.StringValue(runtime.ErrClosedState.Error()), runtime.ErrClosedState)
+	}
+	defer popNativeStateCallBase(luaState)
 	for argumentIndex := range args {
 		// C API 约定函数入口栈上从 1 开始排列实参；这里把 Go 调用参数临时压入 State 栈。
 		if err := state.Push(args[argumentIndex]); err != nil {
