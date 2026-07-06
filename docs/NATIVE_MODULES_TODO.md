@@ -196,7 +196,8 @@
         - [x] 2026-07-06 复核：继续扩展 `scripts/probe-native-lpeg-1159.sh`；将 `test.lua:647` 的 `checkerr` 拆为只执行 `pcall(m.match, p, ...)` 并检查错误文本，probe 仍退化为 `12`。因此 LPeg 错误文本上的后续 `m.match({ m.P(msg) + 1 * m.V(1) }, err)` 不是根因，污染发生在 overflow protected call 本身或其恢复边界。
         - [x] 2026-07-06 复核：在前缀跑到 `test.lua:620` 后只构造 `630-635` 的 parity grammar、不执行 `637-641` 的任一匹配，再执行 overflow `pcall`，probe 仍返回 `18`；补上 `637-641` 的 parity grammar 成功/失败匹配后，再执行同一个 pcall-only overflow，probe 才退化为 `12`。新窗口收敛为 `1-620` 前序状态 + parity grammar 多轮匹配 + overflow protected call；parity grammar 构造本身不是必要充分条件。
         - [x] 2026-07-06 复核：新增 native smoke fixture 模拟 LPeg `doublestack` overflow：按 `lp_match` 的 `ptop+1` nil、`ptop+2` capture lightuserdata、`ptop+3` ktable、`ptop+4` stackbase lightuserdata 形态，循环 `lua_newuserdata` + `lua_replace(stackidx)` 后 `luaL_error`，并在 Lua `pcall` 捕获后复跑 runtimecap sequence。macOS `.dylib`/`.so` 均通过，说明通用临时栈槽替换、full userdata 创建和 `luaL_error` 恢复未单独复现 1159 污染。
-        - [ ] 下一轮优先继续收窄 LPeg 持久 pattern/userdata/registry 状态与 overflow 恢复的组合：对比 parity grammar 多轮匹配后遗留的 native full userdata、user value ktable、registry 引用或 lightuserdata identity 是否与后续 `doublestack` overflow 恢复发生交互。
+        - [x] 2026-07-06 复核：继续扩展 `scripts/probe-native-lpeg-1159.sh` 的跨模块控制组；`1-620` 前序状态后直接 `require("glua_native_smoke")` 仍返回 `18`，但 `1-620` 前序状态 + parity grammar 多轮匹配后仅 `require("glua_native_smoke")` 即退化为 `12`，不需要再触发 LPeg overflow 或 smoke `doublestack_overflow_probe`。根因窗口进一步前移为 parity grammar 多轮匹配后加载第二个 native C 模块时的跨模块 native 状态/registry/lightuserdata/full userdata 交互。
+        - [ ] 下一轮优先继续收窄 parity grammar 多轮匹配后遗留状态：对比 `package.loaded`、registry 引用、LPeg pattern full userdata user value ktable、lightuserdata identity 表，以及加载第二 native 模块时是否重用/覆盖了与 LPeg capture/backtrack 相关的 native handle 状态。
   - [ ] LuaSocket 或等价网络库验收：仅在 userdata/metatable/registry/错误边界稳定后进入平台闭环。
 - [ ] 增加交叉编译验证脚本：
   - [x] `scripts/check-native-cross-compile.sh`：显式输出 `GOOS`、`GOARCH`、`CC`、产物路径和缺失 toolchain 时的 skip 原因。

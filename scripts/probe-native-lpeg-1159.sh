@@ -54,11 +54,17 @@ elif [[ ! -x "${glua_bin}" ]]; then
 fi
 
 BUILD_DIR="${build_dir}" CGO_ENABLED=1 "${repo_root}/scripts/build-native-lpeg.sh" >/dev/null
+BUILD_DIR="${build_dir}" CGO_ENABLED=1 "${repo_root}/scripts/build-native-fixtures.sh" >/dev/null
 
 module_extension=".so"
 module_path="${build_dir}/lpeg${module_extension}"
 if [[ ! -f "${module_path}" ]]; then
   echo "LPeg module output missing: ${module_path}" >&2
+  exit 1
+fi
+smoke_module_path="${build_dir}/glua_native_smoke${module_extension}"
+if [[ ! -f "${smoke_module_path}" ]]; then
+  echo "native smoke module output missing: ${smoke_module_path}" >&2
   exit 1
 fi
 
@@ -240,8 +246,61 @@ LUA
   rg '^PROBE' "${output}" || tail -n 3 "${output}"
 }
 
+run_prefix620_require_smoke_probe() {
+  local source="${work_dir}/prefix620_require_smoke.lua"
+  local output="${work_dir}/prefix620_require_smoke.out"
+
+  {
+    printf 'package.path = "%s"\n' "${repo_root}/third_party/lpeg/?.lua"
+    printf 'package.cpath = "%s"\n' "${build_dir}/?${module_extension}"
+    sed "1,4d;621,\$d" "${repo_root}/third_party/lpeg/test.lua"
+    cat <<'LUA'
+assert(require("glua_native_smoke"))
+LUA
+    emit_probe_tail
+  } >"${source}"
+
+  echo "run prefix620 + require native smoke probe"
+  "${glua_bin}" "${source}" >"${output}"
+  printf 'prefix620_require_smoke '
+  rg '^PROBE' "${output}" || tail -n 3 "${output}"
+}
+
+run_prefix620_parity_matches_require_smoke_probe() {
+  local source="${work_dir}/prefix620_parity_matches_require_smoke.lua"
+  local output="${work_dir}/prefix620_parity_matches_require_smoke.out"
+
+  {
+    printf 'package.path = "%s"\n' "${repo_root}/third_party/lpeg/?.lua"
+    printf 'package.cpath = "%s"\n' "${build_dir}/?${module_extension}"
+    sed "1,4d;621,\$d" "${repo_root}/third_party/lpeg/test.lua"
+    cat <<'LUA'
+p = m.P{
+  [1] = '0' * m.V(2) + '1' * m.V(3) + -1,
+  [2] = '0' * m.V(1) + '1' * m.V(4),
+  [3] = '0' * m.V(4) + '1' * m.V(1),
+  [4] = '0' * m.V(3) + '1' * m.V(2),
+}
+assert(p:match(string.rep("00", 10000)))
+assert(p:match(string.rep("01", 10000)))
+assert(p:match(string.rep("011", 10000)))
+assert(not p:match(string.rep("011", 10000) .. "1"))
+assert(not p:match(string.rep("011", 10001)))
+assert(require("glua_native_smoke"))
+LUA
+    emit_probe_tail
+  } >"${source}"
+
+  echo "run prefix620 + parity matches + require native smoke probe"
+  "${glua_bin}" "${source}" >"${output}"
+  printf 'prefix620_parity_matches_require_smoke '
+  rg '^PROBE' "${output}" || tail -n 3 "${output}"
+}
+
 run_prefix646_pcall_only_probe
 run_prefix620_parity_construct_overflow_probe
 run_prefix620_parity_matches_overflow_probe
+run_prefix620_require_smoke_probe
+run_prefix620_parity_matches_require_smoke_probe
 
 echo "diagnostic note: PROBE result below 18 marks the current LPeg 1159 narrowing point; this script reports evidence and does not assert the known mismatch."
