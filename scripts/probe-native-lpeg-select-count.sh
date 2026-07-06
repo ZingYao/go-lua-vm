@@ -225,6 +225,43 @@ local skipped = dofile
 local message = "unexpected falsy select count"
 LUA
       ;;
+    select-count-global-value-*)
+      local payload="${mode#select-count-global-value-}"
+      local global_name="${payload%-*}"
+      local value_kind="${payload##*-}"
+      local value_expr
+
+      case "${value_kind}" in
+        string)
+          value_expr='"unexpected falsy select count"'
+          ;;
+        number)
+          value_expr='17'
+          ;;
+        boolean)
+          value_expr='true'
+          ;;
+        nil)
+          value_expr='nil'
+          ;;
+        table)
+          value_expr='{}'
+          ;;
+        function)
+          value_expr='function() return 1 end'
+          ;;
+        *)
+          echo "unknown select-count global value kind: ${value_kind}" >&2
+          return 1
+          ;;
+      esac
+
+      cat <<LUA
+local count = select("#", "alpha", "beta")
+local skipped = _G["${global_name}"]
+local payload = ${value_expr}
+LUA
+      ;;
     select-count-global-message-*)
       local global_name="${mode#select-count-global-message-}"
       cat <<LUA
