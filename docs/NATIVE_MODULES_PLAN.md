@@ -226,6 +226,16 @@ state := lua.NewStateWithOptions(options)
 - protected call 边界
 - C frame traceback 展示
 
+### C frame traceback 策略
+
+`native_modules` 不伪造 Lua 官方 C VM 的 `CallInfo` 或 C 源码位置。C 模块函数在本项目中会被包装为 Go VM callable，因此 traceback 中的 C frame 展示遵循以下策略：
+
+- C function 调用帧使用现有 Go closure 调试帧承载，帧类型仍显示为 Go/C 边界的 `[go]`。
+- 函数名优先来自 Lua 调用点推断的 `name` / `namewhat`，例如 `mod.fail()` 展示为 field `fail`，全局或局部调用按既有 Lua 调用点规则展示。
+- `luaopen_*` 初始化错误通过 require/package loader 的 protected call 边界传播，错误对象和 traceback 由现有 `runtime.RaiseError` 与 debug 库处理。
+- 不展示 C 源码文件名、C 行号、C 栈地址或动态库内部调用栈；这些信息不属于 Lua 5.3 public C API 可移植语义，也会在不同平台和编译器下不稳定。
+- 后续若引入专用 native frame 名称，只能作为附加调试元信息，不能改变默认 Lua 层错误对象、`pcall`/`xpcall` 捕获语义或默认 no-CGO 行为。
+
 ### Phase 5：平台完整性
 
 目标：Linux、macOS、Windows 均可通过 fixture 和至少一个外部示例模块验收。
