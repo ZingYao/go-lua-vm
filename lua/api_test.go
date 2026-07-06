@@ -4259,6 +4259,39 @@ assert(type(message) == "string" and string.find(message, "expected"))
 	}
 }
 
+// TestDoStringSelectCountFixedResultDoesNotLeakArguments 验证 select 计数固定返回不会泄漏实参。
+//
+// 顶层 `select("#", ...)` 会编译成固定单返回 CALL；后续调用必须只读取显式传入的
+// 实参，不能复用上一条 CALL 的参数槽、开放返回状态或未清理栈顶。
+func TestDoStringSelectCountFixedResultDoesNotLeakArguments(t *testing.T) {
+	// 创建带标准库的 State，执行顶层 select 计数后继续调用 vararg 函数。
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库打开不应失败。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+	source := `
+local count = select("#", "alpha", "beta")
+local function diag(...)
+  return select("#", ...), ...
+end
+local n, first, second = diag(count, "tail")
+assert(count == 2)
+assert(n == 2 and first == 2 and second == "tail")
+local packed = {select("#", "alpha", "beta")}
+assert(#packed == 1 and packed[1] == 2)
+`
+	if err := DoString(state, source); err != nil {
+		// 固定单返回 CALL 不应污染后续 vararg 调用或 table constructor。
+		t.Fatalf("DoString select count fixed result failed: %v", err)
+	}
+	if state.StackTop() != 0 {
+		// chunk 执行结束后公开 State 栈应保持清空。
+		t.Fatalf("DoString select count left stack values: top=%d", state.StackTop())
+	}
+}
+
 // TestDoStringPrintUsesGlobalToString 验证 print 按 Lua 5.3 调用当前全局 tostring。
 //
 // 官方 calls.lua 会临时把 `_G.tostring` 设为 nil 或返回非 string 的函数；print 必须抛错，
