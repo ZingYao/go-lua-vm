@@ -71,7 +71,7 @@
 - [ ] 实现基础参数检查：
   - [x] `luaL_checkinteger`
   - [x] `luaL_checklstring`
-  - [ ] `luaL_error`
+  - [x] `luaL_error`
 - [x] fixture：C 模块 `luaopen_glua_native_smoke` 返回 table，并暴露一个简单函数。
 
 ## 第四阶段：C function 调用
@@ -111,7 +111,7 @@
 
 ## 第六阶段：错误、pcall、traceback
 
-- [ ] 将 `lua_error` / `luaL_error` 转换为 Go VM runtime error。
+- [x] 将 `lua_error` / `luaL_error` 转换为 Go VM runtime error。
 - [ ] 验证 `pcall(require, "mod")` 捕获 C module 初始化错误。
 - [ ] 验证 C function 运行时错误包含合理 traceback。
 - [ ] 定义 C frame 在 `debug.traceback` 中的展示策略。
@@ -217,3 +217,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：扩展 Unix native smoke fixture；C 模块现在通过真实 Lua 5.3 public header 的 `luaL_newlib` 宏返回模块 table，并暴露 `add(a,b)`、`echo(s)`、`multi()` 三个 C function，覆盖 integer/string 参数读取、`lua_push*` 返回值和 C function 多返回值搬运。为支持 `luaL_newlib` 宏补充 `luaL_checkversion_` 最小 no-op shim；版本不匹配错误与 longjmp 仍留到错误边界阶段。
 - 2026-07-06：补齐 C function 调用基址和 Unix `require` 端到端测试；native shim 现在会在进入 C function 时记录 Go State 栈基址，使 `luaL_checkinteger(L, 1)` 等正索引相对当前 C 调用帧，而不是误读外层 Lua 栈。Lua 源码层已验证 `package.cpath` 命中 `glua_native_smoke` fixture、`require` 返回模块 table、`add/echo/multi` 可调用且二次 `require` 命中缓存。
 - 2026-07-06：接入 CLI native loader 注入点；默认构建下 `applyNativeModuleOptions` 保持 no-op，`native_modules` 构建下 CLI 创建 State 时自动设置 `PackageDynamicLibraryLoaderForState = native.LoaderForState`，并保留无状态 loader 作为 `package.loadlib` 解析诊断路径。该切口只影响 native tag 构建，默认 no-CGO 行为由专门测试锁定。
+- 2026-07-06：新增 `lua_error` 与 `luaL_error` 最小错误传播；native shim 不跨 Go/C 边界 longjmp，而是在 opaque `lua_State*` handle 上暂存 Lua error object，C function 返回 Go 边界后转换为 `runtime.RaiseError`。Unix fixture 已验证 `pcall(mod.fail, "boom")` 捕获 `luaL_error` 文本，`pcall(mod.raise)` 捕获 `lua_error` 栈顶对象。C module 初始化期 `pcall(require, "mod")` 与 C frame traceback 展示仍在后续错误阶段补齐。

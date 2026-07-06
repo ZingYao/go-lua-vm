@@ -108,6 +108,10 @@ assert(mod.add(20, 22) == 42)
 assert(mod.echo("hello") == "hello")
 local a, b, c = mod.multi()
 assert(a == 1 and b == "two" and c == true)
+local ok, message = pcall(mod.fail, "boom")
+assert(ok == false and string.find(message, "native failure: boom", 1, true), message)
+local raised, object = pcall(mod.raise)
+assert(raised == false and object == "native lua_error object", object)
 assert(require("glua_native_smoke") == mod)
 `
 	if err := glualua.DoString(state, source); err != nil {
@@ -156,6 +160,29 @@ func assertNativeSmokeModule(t *testing.T, value luaruntime.Value) {
 		!multiResults[2].RawEqual(luaruntime.BooleanValue(true)) {
 		// multi 的结果可证明 C function 多返回值能回到 Go VM。
 		t.Fatalf("native smoke multi results = %#v, want 1,two,true", multiResults)
+	}
+
+	fail := nativeSmokeFunction(t, table, "fail")
+	_, failErr := fail(luaruntime.StringValue("boom"))
+	if failErr == nil {
+		// fail 使用 luaL_error，必须转换为 Go VM runtime error 而不是伪装成功。
+		t.Fatalf("native smoke fail returned nil error")
+	}
+	if !errors.Is(failErr, luaruntime.ErrLuaError) {
+		// 错误链需要保留 Lua error 分类，供 pcall/xpcall 捕获。
+		t.Fatalf("native smoke fail error = %v, want lua error classification", failErr)
+	}
+
+	raise := nativeSmokeFunction(t, table, "raise")
+	_, raiseErr := raise()
+	if raiseErr == nil {
+		// raise 使用 lua_error，必须把栈顶对象作为 Lua error object 传回 VM。
+		t.Fatalf("native smoke raise returned nil error")
+	}
+	var runtimeErr *luaruntime.RuntimeError
+	if !errors.As(raiseErr, &runtimeErr) || !runtimeErr.Object.RawEqual(luaruntime.StringValue("native lua_error object")) {
+		// Go 侧直接调用 C function wrapper 时也应能读取原始 Lua error object。
+		t.Fatalf("native smoke raise error = %#v, want native lua_error object", raiseErr)
 	}
 }
 
@@ -232,10 +259,22 @@ static int glua_native_multi(lua_State *L) {
 	return 3;
 }
 
+static int glua_native_fail(lua_State *L) {
+	const char *text = luaL_checkstring(L, 1);
+	return luaL_error(L, "native failure: %s", text);
+}
+
+static int glua_native_raise(lua_State *L) {
+	lua_pushstring(L, "native lua_error object");
+	return lua_error(L);
+}
+
 static const luaL_Reg glua_native_smoke_funcs[] = {
 	{"add", glua_native_add},
 	{"echo", glua_native_echo},
 	{"multi", glua_native_multi},
+	{"fail", glua_native_fail},
+	{"raise", glua_native_raise},
 	{NULL, NULL},
 };
 

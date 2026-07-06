@@ -66,6 +66,11 @@ func nativeLuaCallCFunction(luaState unsafe.Pointer, function unsafe.Pointer, ar
 	}
 
 	resultCount := int(C.glua_call_lua_cfunction(function, (*C.lua_State)(luaState)))
+	if errorObject, hasError := takeNativeStatePendingError(luaState); hasError {
+		// lua_error/luaL_error 通过 pending error 传回 Go 边界；此时忽略 C 返回数量并按 Lua error 传播。
+		nativeLuaRestoreStackTop(state, baseTop)
+		return nil, runtime.RaiseError(errorObject)
+	}
 	if resultCount < 0 {
 		// C 函数返回负数不是 Lua 5.3 合法结果数量，按运行时错误处理。
 		nativeLuaRestoreStackTop(state, baseTop)

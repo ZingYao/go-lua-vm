@@ -42,6 +42,8 @@ var (
 	nativeStateBuffers = make(map[uintptr][]unsafe.Pointer)
 	// nativeStateCallBases 保存当前 lua_State handle 上嵌套 C function 调用的 Go State 栈基址。
 	nativeStateCallBases = make(map[uintptr][]int)
+	// nativeStatePendingErrors 保存 C API lua_error/luaL_error 在返回 C 边界前记录的 Lua error object。
+	nativeStatePendingErrors = make(map[uintptr]runtime.Value)
 )
 
 // newNativeStateHandle 为当前 State 创建 C 可见的 opaque lua_State* handle。
@@ -97,12 +99,51 @@ func (handle *nativeStateHandle) close() {
 	buffers := nativeStateBuffers[uintptr(token)]
 	delete(nativeStateBuffers, uintptr(token))
 	delete(nativeStateCallBases, uintptr(token))
+	delete(nativeStatePendingErrors, uintptr(token))
 	nativeStateHandlesMu.Unlock()
 	for _, buffer := range buffers {
 		// buffer 都由 C malloc 分配，可安全在 handle 生命周期结束时统一释放。
 		C.glua_free_native_buffer(buffer)
 	}
 	C.glua_free_state_token(token)
+}
+
+// setNativeStatePendingError 记录 C 模块请求抛出的 Lua error object。
+func setNativeStatePendingError(token unsafe.Pointer, object runtime.Value) bool {
+	// lua_error/luaL_error 不能跨 Go/C 边界 longjmp，因此先把错误对象暂存在 handle 上。
+	if token == nil {
+		// nil token 无法绑定错误对象，调用方随后会走普通失败路径。
+		return false
+	}
+	nativeStateHandlesMu.Lock()
+	defer nativeStateHandlesMu.Unlock()
+	key := uintptr(token)
+	state := nativeStateHandles[key]
+	if state == nil || state.IsClosed() {
+		// State 已失效时不能再把错误传播回 VM。
+		return false
+	}
+	nativeStatePendingErrors[key] = object
+	return true
+}
+
+// takeNativeStatePendingError 取出并清理当前 handle 上挂起的 Lua error object。
+func takeNativeStatePendingError(token unsafe.Pointer) (runtime.Value, bool) {
+	// C 函数返回 Go 边界时只消费一次 pending error，避免后续正常调用误报旧错误。
+	if token == nil {
+		// nil token 没有可消费错误。
+		return runtime.NilValue(), false
+	}
+	nativeStateHandlesMu.Lock()
+	defer nativeStateHandlesMu.Unlock()
+	key := uintptr(token)
+	object, ok := nativeStatePendingErrors[key]
+	if !ok {
+		// 没有挂起错误时保持正常返回路径。
+		return runtime.NilValue(), false
+	}
+	delete(nativeStatePendingErrors, key)
+	return object, true
 }
 
 // pushNativeStateCallBase 记录一次 C function 调用进入时的 Go State 栈基址。
