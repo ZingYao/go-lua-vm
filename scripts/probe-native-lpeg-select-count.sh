@@ -124,6 +124,46 @@ LUA
 _G.__glua_select_count_probe = select("#", "alpha", "beta")
 LUA
       ;;
+    select-count-if-truthy)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+if not count then
+  error("unexpected falsy select count")
+end
+LUA
+      ;;
+    select-count-eq-unused)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+local equal = count == 2
+LUA
+      ;;
+    select-count-table-store-count)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+local packed = {count}
+LUA
+      ;;
+    select-count-lua-arg)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+local function sink(value)
+end
+sink(count)
+LUA
+      ;;
+    select-count-go-arg-rawequal)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+rawequal(count, 2)
+LUA
+      ;;
+    select-count-arith-add-zero)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+local sum = count + 0
+LUA
+      ;;
     select-count-gc-before)
       cat <<'LUA'
 collectgarbage()
