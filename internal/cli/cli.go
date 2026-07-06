@@ -334,6 +334,7 @@ func Run(ctx context.Context, args []string, streams Streams) error {
 	// 创建带 context 的 State，保证后续加载和调用可观察取消。
 	stateOptions := lua.DefaultOptions()
 	stateOptions = lua.WithSyntaxExtensions(stateOptions, syntaxForOptions(options))
+	stateOptions = applyNativeModuleOptions(stateOptions)
 	stateOptions.AllowHostFilesystem = true
 	stateOptions.AllowProcess = true
 	if !options.IgnoreEnvironment {
