@@ -64,6 +64,46 @@ if not count then
 end
 LUA
       ;;
+    select-count-if-not-skip-loadk)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+if not count then
+  local skipped = 1
+end
+LUA
+      ;;
+    select-count-if-not-skip-global)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+if not count then
+  local skipped = error
+end
+LUA
+      ;;
+    select-count-if-not-skip-type-call)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+if not count then
+  type("skipped")
+end
+LUA
+      ;;
+    select-count-if-eq-enter-loadk)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+if count == 2 then
+  local entered = 1
+end
+LUA
+      ;;
+    select-count-if-eq-enter-type-call)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+if count == 2 then
+  type("entered")
+end
+LUA
+      ;;
     select-count-if-count-empty)
       cat <<'LUA'
 local count = select("#", "alpha", "beta")
@@ -139,6 +179,11 @@ modes=(
   select-count-table-constructor
   select-count-if-truthy
   select-count-if-not-empty
+  select-count-if-not-skip-loadk
+  select-count-if-not-skip-global
+  select-count-if-not-skip-type-call
+  select-count-if-eq-enter-loadk
+  select-count-if-eq-enter-type-call
   select-count-if-count-empty
   select-count-if-eq-empty
   select-count-eq-unused
