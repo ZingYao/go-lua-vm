@@ -5461,6 +5461,87 @@ __call_temp_trace_hook_checks = checks
 	}
 }
 
+// TestDoStringCallTemporaryCleanupCallMetamethodArgumentGuards 验证 __call 改写参数区间。
+//
+// 固定返回 CALL 调用带 __call 元方法的值时，VM 会把原始被调用值改写为元方法的 self 参数；未来
+// 若清理 CALL 临时槽，不能提前清掉元方法帧仍需要读取的 self、命名参数和 vararg。
+func TestDoStringCallTemporaryCleanupCallMetamethodArgumentGuards(t *testing.T) {
+	// 创建完整标准库 State，确保 setmetatable、debug.getlocal、select 和 tostring 可用。
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库打开不应失败，否则无法覆盖 __call 元方法参数语义。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+
+	source := `
+local checks = {}
+
+local function metamethod(self, first, second, ...)
+  local values = {}
+  for index = 1, 12 do
+    local name, value = debug.getlocal(1, index)
+    if not name then break end
+    values[name] = value
+  end
+  local vararg_name_first, vararg_value_first = debug.getlocal(1, -1)
+  local vararg_name_second, vararg_value_second = debug.getlocal(1, -2)
+  local vararg_name_third, vararg_value_third = debug.getlocal(1, -3)
+
+  local tail_count = select("#", ...)
+  local tail_first, tail_second, tail_third = ...
+  checks.arguments =
+    self.marker == "callable" and
+    first == "alpha" and
+    second == 17 and
+    tail_count == 3 and
+    tail_first == "x" and
+    tail_second == false and
+    tail_third == "z"
+  checks.debug_locals =
+    values.self == self and
+    values.first == first and
+    values.second == second and
+    vararg_name_first == "(*vararg)" and
+    vararg_value_first == tail_first and
+    vararg_name_second == "(*vararg)" and
+    vararg_value_second == tail_second and
+    vararg_name_third == "(*vararg)" and
+    vararg_value_third == tail_third
+  return first .. ":" .. tostring(second) .. ":" .. tostring(tail_count)
+end
+
+local callable = setmetatable({ marker = "callable" }, { __call = metamethod })
+local fixed_result = callable("alpha", 17, "x", false, "z")
+local kept_callable = callable
+checks.fixed_result = fixed_result == "alpha:17:3" and kept_callable.marker == "callable"
+
+__call_temp_metamethod_argument_checks = checks
+`
+	if err := DoString(state, source); err != nil {
+		// 任一断言或元方法执行失败都说明 __call 参数区间门禁不成立。
+		t.Fatalf("DoString call metamethod argument guard failed: %v", err)
+	}
+	checksValue, err := GetGlobal(state, "__call_temp_metamethod_argument_checks")
+	if err != nil {
+		// 全局读取失败说明脚本未能暴露 __call 参数检查结果。
+		t.Fatalf("read call metamethod argument checks failed: %v", err)
+	}
+	checksTable, ok := checksValue.Ref.(*runtime.Table)
+	if checksValue.Kind != runtime.KindTable || !ok || checksTable == nil {
+		// 检查结果必须是 Lua table，便于逐项报告失败门禁。
+		t.Fatalf("call metamethod argument checks kind = %v, want table", checksValue.Kind)
+	}
+	for _, checkName := range []string{"arguments", "debug_locals", "fixed_result"} {
+		// 每个门禁项必须由元方法参数读取、debug local 或固定返回写回实际确认。
+		checkValue := checksTable.RawGetString(checkName)
+		if checkValue.Kind != runtime.KindBoolean || !checkValue.Bool {
+			// 逐项报告失败名称，避免 Lua error 抹掉具体门禁。
+			t.Fatalf("call metamethod argument guard %s = %#v, want true", checkName, checkValue)
+		}
+	}
+}
+
 // TestDoStringDebugDumpedLocalFunctionCallName 验证 dumped chunk 仍能反查局部函数调用名。
 //
 // 官方 all.lua 会将 db.lua 通过 string.dump/load 后执行；binary chunk 不保存 locvar 寄存器号，
