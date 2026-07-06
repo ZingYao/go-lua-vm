@@ -112,6 +112,10 @@ local ok, message = pcall(mod.fail, "boom")
 assert(ok == false and string.find(message, "native failure: boom", 1, true), message)
 local raised, object = pcall(mod.raise)
 assert(raised == false and object == "native lua_error object", object)
+local traced, traceback = xpcall(function() return mod.fail("trace") end, debug.traceback)
+assert(traced == false, "xpcall unexpectedly succeeded")
+assert(string.find(traceback, "native failure: trace", 1, true), traceback)
+assert(string.find(traceback, "stack traceback:", 1, true), traceback)
 assert(require("glua_native_smoke") == mod)
 `
 	if err := glualua.DoString(state, source); err != nil {

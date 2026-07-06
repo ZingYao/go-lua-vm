@@ -113,7 +113,7 @@
 
 - [x] 将 `lua_error` / `luaL_error` 转换为 Go VM runtime error。
 - [x] 验证 `pcall(require, "mod")` 捕获 C module 初始化错误。
-- [ ] 验证 C function 运行时错误包含合理 traceback。
+- [x] 验证 C function 运行时错误包含合理 traceback。
 - [ ] 定义 C frame 在 `debug.traceback` 中的展示策略。
 - [ ] 记录暂不支持或语义有差异的 C API。
 
@@ -219,3 +219,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：接入 CLI native loader 注入点；默认构建下 `applyNativeModuleOptions` 保持 no-op，`native_modules` 构建下 CLI 创建 State 时自动设置 `PackageDynamicLibraryLoaderForState = native.LoaderForState`，并保留无状态 loader 作为 `package.loadlib` 解析诊断路径。该切口只影响 native tag 构建，默认 no-CGO 行为由专门测试锁定。
 - 2026-07-06：新增 `lua_error` 与 `luaL_error` 最小错误传播；native shim 不跨 Go/C 边界 longjmp，而是在 opaque `lua_State*` handle 上暂存 Lua error object，C function 返回 Go 边界后转换为 `runtime.RaiseError`。Unix fixture 已验证 `pcall(mod.fail, "boom")` 捕获 `luaL_error` 文本，`pcall(mod.raise)` 捕获 `lua_error` 栈顶对象。C module 初始化期 `pcall(require, "mod")` 与 C frame traceback 展示仍在后续错误阶段补齐。
 - 2026-07-06：新增 C module 初始化错误验收；同一 Unix fixture 额外导出 `luaopen_glua_native_failopen`，并以模块名匹配的动态库文件走标准 `package.cpath` 和 `require` 路径。测试已验证 `pcall(require, "glua_native_failopen")` 捕获 luaopen 阶段的 `luaL_error("native open failure")`，且失败后不污染 `package.loaded`。
+- 2026-07-06：新增 C function 运行时错误 traceback 验收；Unix require fixture 通过 `xpcall(function() mod.fail("trace") end, debug.traceback)` 验证 C function 中的 `luaL_error` 会进入现有 protected-call traceback 链，返回文本同时包含原始错误文本和 `stack traceback:`。C frame 具体如何在 traceback 中命名或展示仍保持独立策略 TODO，不在本切口伪造帧信息。
