@@ -5251,6 +5251,119 @@ assert(count == 2, count)
 	}
 }
 
+// TestDoStringCallTemporaryCleanupGuardSemantics 验证 CALL 临时区清理不得破坏可见语义。
+//
+// 固定返回 CALL 会把函数值、self 与实参放在调用临时寄存器中；未来若清理非结果临时槽，必须保留
+// 活动 local、debug.getlocal、开放返回、TFORCALL 和 __call 元方法的 Lua 5.3 可见行为。
+func TestDoStringCallTemporaryCleanupGuardSemantics(t *testing.T) {
+	// 创建完整标准库 State，确保 debug hook、table、ipairs、setmetatable 和 select 可用。
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库打开不应失败，否则无法覆盖 debug 与 base 调用语义。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+
+	source := `
+local phase = ""
+local checks = {}
+
+debug.sethook(function()
+  if phase == "local_go" then
+    local values = {}
+    for index = 1, 8 do
+      local name, value = debug.getlocal(2, index)
+      if not name then break end
+      values[name] = value
+    end
+    checks.local_go = values.f == select and values.count == 1
+    phase = ""
+  elseif phase == "method" then
+    local values = {}
+    for index = 1, 8 do
+      local name, value = debug.getlocal(2, index)
+      if not name then break end
+      values[name] = value
+    end
+    checks.method = values.t and values.t.value == 41 and values.method_result == 42
+    phase = ""
+  elseif phase == "call_metamethod" then
+    local values = {}
+    for index = 1, 8 do
+      local name, value = debug.getlocal(2, index)
+      if not name then break end
+      values[name] = value
+    end
+    checks.call_metamethod = values.callable and values.callable.base == 40 and values.meta_result == 42
+    phase = ""
+  end
+end, "l")
+
+local function many()
+  return "x", "y", "z"
+end
+
+local function run()
+  local f = select
+  local count = f("#", "alpha")
+  phase = "local_go"
+  local preserved = f
+  assert(preserved == select and count == 1)
+
+  local t = { value = 41, f = function(self, add) return self.value + add end }
+  local method_result = t:f(1)
+  phase = "method"
+  local kept_method_receiver = t
+  assert(kept_method_receiver.value == 41 and method_result == 42)
+
+  local callable = setmetatable({ base = 40 }, { __call = function(self, add) return self.base + add end })
+  local meta_result = callable(2)
+  phase = "call_metamethod"
+  local kept_callable = callable
+  assert(kept_callable.base == 40 and meta_result == 42)
+
+  local packed = { many() }
+  local second = packed[2]
+  assert(#packed == 3 and second == "y")
+  checks.open_return = packed[1] == "x" and packed[2] == "y" and packed[3] == "z"
+
+  local total = 0
+  for _, value in ipairs({ 1, 2, 3 }) do
+    total = total + value
+  end
+  local final_total = total
+  assert(final_total == 6)
+  checks.generic_for = total == 6
+end
+
+run()
+debug.sethook()
+__call_temp_checks = checks
+`
+	if err := DoString(state, source); err != nil {
+		// 任一断言失败都说明 CALL 临时区清理门禁的可见语义不成立。
+		t.Fatalf("DoString call temporary cleanup guard failed: %v", err)
+	}
+	checksValue, err := GetGlobal(state, "__call_temp_checks")
+	if err != nil {
+		// 全局读取失败说明脚本未能暴露检查结果。
+		t.Fatalf("read call temporary checks failed: %v", err)
+	}
+	checksTable, ok := checksValue.Ref.(*runtime.Table)
+	if checksValue.Kind != runtime.KindTable || !ok || checksTable == nil {
+		// 检查结果必须是 Lua table，便于逐项报告失败门禁。
+		t.Fatalf("call temporary checks kind = %v, want table", checksValue.Kind)
+	}
+	for _, checkName := range []string{"local_go", "method", "call_metamethod", "open_return", "generic_for"} {
+		// 每个门禁项必须由 hook 或后续语句实际确认。
+		checkValue := checksTable.RawGetString(checkName)
+		if checkValue.Kind != runtime.KindBoolean || !checkValue.Bool {
+			// 逐项报告失败名称，避免 Lua error 抹掉具体门禁。
+			t.Fatalf("call temporary cleanup guard %s = %#v, want true", checkName, checkValue)
+		}
+	}
+}
+
 // TestDoStringDebugDumpedLocalFunctionCallName 验证 dumped chunk 仍能反查局部函数调用名。
 //
 // 官方 all.lua 会将 db.lua 通过 string.dump/load 后执行；binary chunk 不保存 locvar 寄存器号，
