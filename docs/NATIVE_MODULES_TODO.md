@@ -131,9 +131,10 @@
 - [ ] 真实第三方模块验收：
   - [ ] 明确自编 fixture 只作为 loader smoke，不作为最终兼容性依据。
   - [x] 固定 `lua-cjson` 源码到仓库或 `third_party/`，记录来源、版本和许可证，构建不得联网下载。
-  - [ ] `lua-cjson` 源码编译验收：`require("cjson")`、`encode/decode`、错误输入 `pcall`。
+  - [x] `lua-cjson` 源码编译验收：`require("cjson")`、`encode/decode`、错误输入 `pcall`。
     - [x] 新增 `scripts/build-native-cjson.sh`，使用仓库内 Lua 5.3 public headers 和固定源码编译当前平台 `cjson` 动态模块。
     - [x] 运行期 `require("cjson")`、`encode/decode` 和错误输入 `pcall` 验收。
+    - [x] 新增 `scripts/test-native-cjson.sh`，把真实模块运行期验收固化为可重复 CLI 脚本。
   - [ ] `lua-cjson` 官方 Lua 5.3 ABI 二进制模块验收：验证 `lua_*` / `luaL_*` 符号由本项目 shim 满足。
   - [ ] 固定 `lpeg` 或等价纯 C 模块源码到仓库或 `third_party/`，记录来源、版本和许可证。
   - [ ] `lpeg` 或等价纯 C 模块验收：覆盖 userdata、metatable、registry 和复杂 C function 行为。
@@ -160,6 +161,7 @@
   - [x] `scripts/build-native-fixtures.sh`
   - [x] `scripts/test-native-modules.sh`
   - [x] `scripts/build-native-cjson.sh`
+  - [x] `scripts/test-native-cjson.sh`
 - [ ] 增加最终验收记录。
 
 ## 每轮推进规则
@@ -249,3 +251,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：固定 `lua-cjson` 真实模块源码到 `third_party/lua-cjson/`，来源为 upstream `https://github.com/mpx/lua-cjson` tag `2.1.0`、commit `4bc5e917c8cd5fc2f6b217512ef530007529322f`，保留 MIT-style `LICENSE` 并新增 `GLUA_VENDOR.md` 记录本项目未做源码修改；源码编译与 `require("cjson")` 验收仍作为后续独立切口。
 - 2026-07-06：新增 `scripts/build-native-cjson.sh`，直接使用仓库内 `native/lua53/include/` 与 `third_party/lua-cjson/` 固定源码编译当前平台 `cjson` 动态模块；macOS 同时产出 `.so` 与 `.dylib`，Linux 产出 `.so`，Windows 在 `lua53.dll` shim/import library 落地前明确 skip。该切口只证明真实模块源码可自包含编译，`require("cjson")`、`encode/decode` 和错误输入 `pcall` 仍等待 Lua C API shim 覆盖后验收。
 - 2026-07-06：补齐 `lua-cjson` 运行期所需的最小 Lua 5.3 public C API：C closure upvalue、`lua_upvalueindex` 读取、`luaL_setfuncs(nup>=0)`、`lua_checkstack`、`lua_rotate`、`lua_pushlightuserdata`、`lua_rawset`、`lua_next`、`luaL_argerror`、`luaL_checkoption`、`lua_pcallk` 非 yield 路径，并把 `lua_error` / `luaL_error` / `luaL_argerror` 改为 C 层 `setjmp` 边界内不返回。当前 macOS arm64 已用仓库内 `lua-cjson` 源码完成 `require("cjson")`、`encode/decode` 和错误输入 `pcall(cjson.decode, "{")` 验收；默认 no-CGO 构建仍需本轮完整门禁确认。
+- 2026-07-06：新增 `scripts/test-native-cjson.sh`，把 `lua-cjson` 真实模块运行期验收固化为脚本：脚本先构建 native tag `glua` 和仓库内 `third_party/lua-cjson` 动态模块，再执行 `require("cjson")`、对象/数组/标量 `encode/decode`、`cjson.null` identity、非法 JSON `pcall` 和不可序列化 function `pcall`。当前 macOS arm64 验收通过；Windows 仍在 `lua53.dll` shim/import library 落地前明确 skip。

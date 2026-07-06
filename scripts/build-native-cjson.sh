@@ -98,4 +98,4 @@ done
 
 echo "native lua-cjson outputs:"
 find "${build_dir}" -maxdepth 1 -type f -print | sort
-echo "note: this script validates source compilation only; require(\"cjson\") runtime acceptance remains gated by Lua C API shim coverage."
+echo "note: this script validates source compilation only; run scripts/test-native-cjson.sh for require(\"cjson\") runtime acceptance."
