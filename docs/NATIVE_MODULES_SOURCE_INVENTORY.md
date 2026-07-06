@@ -27,12 +27,12 @@
 | Fixture 测试脚本 | `scripts/test-native-modules.sh` | 构建 native tag `glua`，调用 fixture 构建脚本，并执行成功 require 与 luaopen 初始化失败两条 CLI smoke | 已固定 |
 | 交叉编译脚本 | `scripts/check-native-cross-compile.sh` | 编译 `internal/native` 测试二进制和 `cmd/glua` native 产物，显式输出目标平台、`CC`、产物路径和 skip 原因 | 已固定 |
 | Fixture Go harness | `internal/native/loadlib_fixture_unix_test.go` | 编译仓库内 fixture C 文件，并验证 `package.loadlib`、`require`、错误传播和 userdata 状态 | 已固定 |
+| 真实模块源码 | `third_party/lua-cjson/` | 第一真实模块验收源码，固定 upstream `mpx/lua-cjson` tag `2.1.0` / commit `4bc5e917c8cd5fc2f6b217512ef530007529322f`，许可证见目录内 `LICENSE` | 已固定 |
 
 ## 尚未入仓清单
 
 | 类别 | 目标路径 | 用途 | 阻塞影响 |
 | --- | --- | --- | --- |
-| 真实模块源码 | `third_party/lua-cjson/` | 第一真实模块验收，覆盖 `require("cjson")`、`encode/decode` 和错误输入 `pcall` | 不能宣称真实第三方 C 模块兼容 |
 | 真实模块源码 | `third_party/lpeg/` 或等价纯 C 模块目录 | 第二层真实模块验收，覆盖复杂 userdata、metatable、registry 和 C function 行为 | 复杂 C API 兼容面仍未闭环 |
 | Windows shim 产物源码 | 待定 `native/lua53/windows/` 或 `tests/native_modules/windows/` | 提供 `lua53.dll` shim 或等价 import library 验证入口 | Windows 现成 Lua 5.3 ABI 模块验收暂缺 |
 
