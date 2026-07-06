@@ -22,13 +22,13 @@
 | Go/CGO loader | `internal/native/dlopen_unix.go` | Unix `dlopen` / `dlsym` / `dlclose` 封装 | 已固定 |
 | Go/CGO loader | `internal/native/dlopen_windows.go` | Windows `LoadLibraryW` / `GetProcAddress` / `FreeLibrary` 封装 | 已固定 |
 | Fixture C source | `tests/native_modules/fixtures/glua_native_smoke.c` | 构建 `glua_native_smoke` / `glua_native_failopen`，覆盖 `luaopen_*`、C function、userdata、metatable、registry 和错误 smoke | 已固定 |
+| Fixture Lua 脚本 | `tests/native_modules/fixtures/glua_native_smoke.lua` | 复用 `require("glua_native_smoke")`、C function、userdata、错误传播、traceback 和 `package.loaded` smoke 验收 | 已固定 |
 | Fixture Go harness | `internal/native/loadlib_fixture_unix_test.go` | 编译仓库内 fixture C 文件，并验证 `package.loadlib`、`require`、错误传播和 userdata 状态 | 已固定 |
 
 ## 尚未入仓清单
 
 | 类别 | 目标路径 | 用途 | 阻塞影响 |
 | --- | --- | --- | --- |
-| Fixture Lua 脚本 | `tests/native_modules/fixtures/glua_native_smoke.lua` | 复用当前 Go 测试内的 require 验收脚本 | CLI 级 fixture 验收脚本暂缺 |
 | Fixture 构建脚本 | `scripts/build-native-fixtures.sh` | 构建 Linux/macOS/Windows fixture 动态库并输出平台信息 | 自动化 fixture 构建暂缺 |
 | Fixture 测试脚本 | `scripts/test-native-modules.sh` | 使用 `GLUA_BIN` 执行 require 级验收 | CLI 级 smoke 暂缺 |
 | 交叉编译脚本 | `scripts/check-native-cross-compile.sh` | 输出 `GOOS`、`GOARCH`、`CC`、`CGO_ENABLED` 和 skip 原因 | Windows/macOS/Linux 编译闭环暂缺 |

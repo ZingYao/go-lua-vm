@@ -100,29 +100,7 @@ func TestUnixRequireLoadsNativeFixtureThroughCPath(t *testing.T) {
 		t.Fatalf("OpenLibs native require failed: %v", err)
 	}
 
-	source := `
-package.path = ` + nativeLuaStringLiteral(missingLuaPattern) + `
-package.cpath = ` + nativeLuaStringLiteral(cpathPattern) + `
-local mod = require("glua_native_smoke")
-assert(mod.add(20, 22) == 42)
-assert(mod.echo("hello") == "hello")
-local a, b, c = mod.multi()
-assert(a == 1 and b == "two" and c == true)
-local counter = mod.new_counter(10)
-assert(counter:add(5) == 15)
-assert(counter:get() == 15)
-assert(counter:add(-2) == 13)
-assert(counter:get() == 13)
-local ok, message = pcall(mod.fail, "boom")
-assert(ok == false and string.find(message, "native failure: boom", 1, true), message)
-local raised, object = pcall(mod.raise)
-assert(raised == false and object == "native lua_error object", object)
-local traced, traceback = xpcall(function() return mod.fail("trace") end, debug.traceback)
-assert(traced == false, "xpcall unexpectedly succeeded")
-assert(string.find(traceback, "native failure: trace", 1, true), traceback)
-assert(string.find(traceback, "stack traceback:", 1, true), traceback)
-assert(require("glua_native_smoke") == mod)
-`
+	source := loadNativeSmokeLuaFixture(t, cpathPattern, missingLuaPattern)
 	if err := glualua.DoString(state, source); err != nil {
 		// Lua 侧 require、模块函数调用和 require 缓存都必须成功。
 		t.Fatalf("native require script failed: %v", err)
@@ -258,6 +236,24 @@ func nativeLuaStringLiteral(text string) string {
 	// 测试路径只需要覆盖常见转义字符，避免 package.path/cpath 中的引号或反斜杠破坏源码。
 	replacer := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`, "\r", `\r`)
 	return `"` + replacer.Replace(text) + `"`
+}
+
+// loadNativeSmokeLuaFixture 读取仓库内固定的 Lua require smoke 脚本并注入测试路径。
+func loadNativeSmokeLuaFixture(t *testing.T, cpathPattern string, missingLuaPattern string) string {
+	// 使用独立 Lua fixture 文件，确保 Go 测试、CLI smoke 和跨平台脚本复用同一份验收逻辑。
+	t.Helper()
+	sourcePath := filepath.Join(repoRootFromTest(t), "tests", "native_modules", "fixtures", "glua_native_smoke.lua")
+	sourceBytes, err := os.ReadFile(sourcePath)
+	if err != nil {
+		// fixture Lua 脚本必须固定在仓库内，否则 CLI 级 native 验收无法复用当前 require 覆盖面。
+		t.Fatalf("read native Lua fixture source failed: %v", err)
+	}
+
+	replacer := strings.NewReplacer(
+		"@GLUA_NATIVE_PACKAGE_PATH@", nativeLuaStringLiteral(missingLuaPattern),
+		"@GLUA_NATIVE_PACKAGE_CPATH@", nativeLuaStringLiteral(cpathPattern),
+	)
+	return replacer.Replace(string(sourceBytes))
 }
 
 // buildUnixNativeFixture 构建导出 luaopen_glua_native_smoke 的 Lua C 动态库。

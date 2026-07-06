@@ -232,3 +232,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：补齐 `lua_pushvalue` 最小栈复制 API，并扩展 Unix smoke fixture 的 `glua_native_counter` userdata；fixture 通过 `luaL_newmetatable`、`lua_pushvalue`、`lua_setfield("__index")`、`luaL_setfuncs` 和 `luaL_checkudata` 验证 `counter:add()` / `counter:get()` 方法调用后状态可持续保存。
 - 2026-07-06：新增 `docs/NATIVE_MODULES_SOURCE_INVENTORY.md`，明确 Lua public headers、Go/CGO shim、loader、内嵌 fixture 的已入仓状态，并列出独立 fixture C/Lua 文件、构建脚本、交叉编译脚本、`lua-cjson`、`lpeg` 和 Windows shim 等尚未入仓项。该切口只补自包含边界文档，不改变 Go/native 运行时代码。
 - 2026-07-06：将 Unix smoke fixture 的 C 源码从 Go 测试内嵌字符串迁移到 `tests/native_modules/fixtures/glua_native_smoke.c`；`internal/native/loadlib_fixture_unix_test.go` 现在直接编译仓库内固定 C 文件，减少后续脚本和跨平台 fixture 复用前的重复源码入口。
+- 2026-07-06：将 Unix require smoke 的 Lua 脚本从 Go 测试内嵌字符串迁移到 `tests/native_modules/fixtures/glua_native_smoke.lua`；Go 测试通过占位符注入 `package.path` / `package.cpath`，后续 CLI smoke 和跨平台脚本可复用同一份 Lua 验收逻辑。
