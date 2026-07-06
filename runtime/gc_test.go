@@ -163,6 +163,93 @@ func TestGCRootsTableKeyValueRoot(t *testing.T) {
 	}
 }
 
+// TestGCRootsUserdataAssociationRoot 验证 userdata 关联边进入根快照。
+//
+// Lua 5.3 full userdata 的 user value 和 raw metatable 都是对象结构强边；native C 模块常用
+// user value 保存 ktable/capture 关联表，root 快照必须能观察这些关联值及其 table 内容。
+func TestGCRootsUserdataAssociationRoot(t *testing.T) {
+	state := NewState()
+	userValueTable := NewTable()
+	userValueTable.RawSetString("uv-key", StringValue("uv-value"))
+	metatable := NewTable()
+	metatable.RawSetString("__name", StringValue("native-ud"))
+	userdata := NewUserdata("payload")
+	userdata.UserValue = ReferenceValue(KindTable, userValueTable)
+	if err := userdata.SetMetatable(metatable); err != nil {
+		// 测试初始化 raw 元表失败说明 userdata 基础语义异常。
+		t.Fatalf("set userdata metatable failed: %v", err)
+	}
+	if err := state.Push(userdata.Value()); err != nil {
+		// userdata 需要作为栈根进入快照。
+		t.Fatalf("push userdata failed: %v", err)
+	}
+
+	snapshot := state.SnapshotGCRoots()
+	userdataRoots := snapshot.Batches[GCRootTypeUserdataAssociation]
+	if !containsValue(userdataRoots, ReferenceValue(KindTable, userValueTable)) {
+		// user value table 必须作为 userdata 关联根可见。
+		t.Fatalf("userdata association roots should include user value table: %#v", userdataRoots)
+	}
+	if !containsValue(userdataRoots, ReferenceValue(KindTable, metatable)) {
+		// raw metatable 也必须作为 userdata 关联根可见。
+		t.Fatalf("userdata association roots should include raw metatable: %#v", userdataRoots)
+	}
+
+	tableKVRoots := snapshot.Batches[GCRootTypeTableKeyValue]
+	if !containsValue(tableKVRoots, StringValue("uv-key")) || !containsValue(tableKVRoots, StringValue("uv-value")) {
+		// user value table 内容需要展开到 table key/value 根。
+		t.Fatalf("table kv roots should include user value table content: %#v", tableKVRoots)
+	}
+	if !containsValue(tableKVRoots, StringValue("__name")) || !containsValue(tableKVRoots, StringValue("native-ud")) {
+		// userdata raw metatable 内容也需要展开到 table key/value 根。
+		t.Fatalf("table kv roots should include userdata metatable content: %#v", tableKVRoots)
+	}
+}
+
+// TestSweepWeakTablesKeepsUserdataAssociationValues 验证 userdata 关联边保活 weak value。
+//
+// weak value 表不能把 value 自身当强根；只有 userdata.UserValue 和 raw metatable 可达时，
+// 对应 value 才应在 SweepWeakTables 后保留。该门禁覆盖 native userdata 生命周期通用语义，
+// 不依赖具体 C 模块实现。
+func TestSweepWeakTablesKeepsUserdataAssociationValues(t *testing.T) {
+	state := NewState()
+	weakValueTable := NewTable()
+	weakMetatable := NewTable()
+	weakMetatable.RawSetString("__mode", StringValue("v"))
+	weakValueTable.SetMetatable(weakMetatable)
+	state.SetGlobal("weak", ReferenceValue(KindTable, weakValueTable))
+
+	userValueTarget := NewTable()
+	metatableTarget := NewTable()
+	weakValueTable.RawSetString("from-user-value", ReferenceValue(KindTable, userValueTarget))
+	weakValueTable.RawSetString("from-metatable", ReferenceValue(KindTable, metatableTarget))
+
+	userdata := NewUserdata("payload")
+	userValueRoot := NewTable()
+	userValueRoot.RawSetString("target", ReferenceValue(KindTable, userValueTarget))
+	userdata.UserValue = ReferenceValue(KindTable, userValueRoot)
+	metatableRoot := NewTable()
+	metatableRoot.RawSetString("target", ReferenceValue(KindTable, metatableTarget))
+	if err := userdata.SetMetatable(metatableRoot); err != nil {
+		// 测试初始化 raw 元表失败说明 userdata 基础语义异常。
+		t.Fatalf("set userdata metatable failed: %v", err)
+	}
+	if err := state.Push(userdata.Value()); err != nil {
+		// userdata 需要作为强根进入 weak sweep。
+		t.Fatalf("push userdata failed: %v", err)
+	}
+
+	state.SweepWeakTables()
+	if got := weakValueTable.RawGetString("from-user-value"); got.IsNil() {
+		// user value 间接引用的对象必须保活 weak value 项。
+		t.Fatalf("weak value reachable through userdata user value was removed")
+	}
+	if got := weakValueTable.RawGetString("from-metatable"); got.IsNil() {
+		// raw metatable 间接引用的对象必须保活 weak value 项。
+		t.Fatalf("weak value reachable through userdata metatable was removed")
+	}
+}
+
 // TestGCRootsCoroutineStackRoot 验证每个协程栈快照被独立采集。
 //
 // 该测试对应 TODO “标记 coroutine stack”，覆盖非主线程的 stack 作为可达入口。

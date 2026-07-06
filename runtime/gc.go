@@ -21,6 +21,8 @@ const (
 	GCRootTypeTableKeyValue GCRootType = "table-key-value-root"
 	// GCRootTypeCoroutineStack 表示协程独立栈根样本。
 	GCRootTypeCoroutineStack GCRootType = "coroutine-stack-root"
+	// GCRootTypeUserdataAssociation 表示 userdata 关联的 user value 与 raw metatable 根样本。
+	GCRootTypeUserdataAssociation GCRootType = "userdata-association-root"
 	// autoGCSweepInterval 表示自动 GC 在分配压力下每多少次可收集对象分配推进一次 weak sweep。
 	// 弱表显式 collectgarbage 仍走完整扫描；自动路径使用独立低频节拍，既避免 finalizer-only
 	// 16 次周期误清普通弱表，也满足官方 closure.lua 等待弱引用在 100 次分配压力内消失的语义。
@@ -373,6 +375,7 @@ func joinCommaSpace(values []string) string {
 // - coroutine stack root：每个协程私有栈快照。
 // - closure/upvalue root：所有线程函数入口、call frame 函数和闭包 upvalues。
 // - table key/value root：所有可见 table 的 key 与 value。
+// - userdata association root：userdata 的 user value 与 raw metatable。
 func (state *State) SnapshotGCRoots() GCRootSnapshot {
 	if state == nil {
 		// nil State 无法构建根快照。
@@ -385,12 +388,13 @@ func (state *State) SnapshotGCRoots() GCRootSnapshot {
 
 	snapshot := GCRootSnapshot{
 		Batches: map[GCRootType][]Value{
-			GCRootTypeState:          {},
-			GCRootTypeRegistry:       {},
-			GCRootTypeStack:          {},
-			GCRootTypeClosureUpvalue: {},
-			GCRootTypeTableKeyValue:  {},
-			GCRootTypeCoroutineStack: {},
+			GCRootTypeState:               {},
+			GCRootTypeRegistry:            {},
+			GCRootTypeStack:               {},
+			GCRootTypeClosureUpvalue:      {},
+			GCRootTypeTableKeyValue:       {},
+			GCRootTypeCoroutineStack:      {},
+			GCRootTypeUserdataAssociation: {},
 		},
 	}
 
@@ -413,7 +417,7 @@ func (state *State) SnapshotGCRoots() GCRootSnapshot {
 	snapshot.Batches[GCRootTypeStack] = append(snapshot.Batches[GCRootTypeStack], state.stack...)
 	for index := range state.stack {
 		// 主栈上的 table 值会触发 key/value 采样。
-		snapshot.Batches[GCRootTypeTableKeyValue] = state.appendTableKVRoots(state.stack[index], snapshot.Batches[GCRootTypeTableKeyValue])
+		state.appendAssociatedRoots(state.stack[index], &snapshot)
 	}
 	for _, vm := range state.activeVMs {
 		if vm == nil {
@@ -424,7 +428,7 @@ func (state *State) SnapshotGCRoots() GCRootSnapshot {
 		snapshot.Batches[GCRootTypeStack] = append(snapshot.Batches[GCRootTypeStack], registers...)
 		for index := range registers {
 			// 活动 Lua VM 的存活局部寄存器同样属于运行栈根，table 值需要继续采样 key/value。
-			snapshot.Batches[GCRootTypeTableKeyValue] = state.appendTableKVRoots(registers[index], snapshot.Batches[GCRootTypeTableKeyValue])
+			state.appendAssociatedRoots(registers[index], &snapshot)
 		}
 	}
 
@@ -440,13 +444,13 @@ func (state *State) SnapshotGCRoots() GCRootSnapshot {
 		}
 		for index := range thread.stack {
 			// 每个协程栈项中的 table 都要进行 key/value 继续采样。
-			snapshot.Batches[GCRootTypeTableKeyValue] = state.appendTableKVRoots(thread.stack[index], snapshot.Batches[GCRootTypeTableKeyValue])
+			state.appendAssociatedRoots(thread.stack[index], &snapshot)
 		}
 
 		if !thread.function.IsNil() {
 			// thread 入口是可达函数本体，也是后续闭包 upvalue 扫描的入口。
 			snapshot.Batches[GCRootTypeClosureUpvalue] = append(snapshot.Batches[GCRootTypeClosureUpvalue], thread.function)
-			snapshot.Batches[GCRootTypeTableKeyValue] = state.appendTableKVRoots(thread.function, snapshot.Batches[GCRootTypeTableKeyValue])
+			state.appendAssociatedRoots(thread.function, &snapshot)
 			snapshot.Batches[GCRootTypeClosureUpvalue] = state.appendClosureUpvalueRoots(thread.function, snapshot.Batches[GCRootTypeClosureUpvalue])
 		}
 	}
@@ -459,10 +463,59 @@ func (state *State) SnapshotGCRoots() GCRootSnapshot {
 			continue
 		}
 		snapshot.Batches[GCRootTypeClosureUpvalue] = append(snapshot.Batches[GCRootTypeClosureUpvalue], frame.Function)
-		snapshot.Batches[GCRootTypeTableKeyValue] = state.appendTableKVRoots(frame.Function, snapshot.Batches[GCRootTypeTableKeyValue])
+		state.appendAssociatedRoots(frame.Function, &snapshot)
 		snapshot.Batches[GCRootTypeClosureUpvalue] = state.appendClosureUpvalueRoots(frame.Function, snapshot.Batches[GCRootTypeClosureUpvalue])
 	}
 	return snapshot
+}
+
+// appendAssociatedRoots 采样 value 的 table 内容与 userdata 关联边。
+//
+// value 可为任意 Lua 值；只有 table 和 userdata 会追加新的关联 root。userdata 的 user value
+// 与 raw metatable 是 Lua 5.3 full userdata 的强可达结构，native C 模块常用它保存 ktable 或
+// 方法表，必须在 root 快照中可见。
+func (state *State) appendAssociatedRoots(value Value, snapshot *GCRootSnapshot) {
+	// nil 快照不能写入采样结果，直接忽略保持调用方防御性。
+	if snapshot == nil {
+		// 无快照目标时没有可写入集合。
+		return
+	}
+	snapshot.Batches[GCRootTypeTableKeyValue] = state.appendTableKVRoots(value, snapshot.Batches[GCRootTypeTableKeyValue])
+	userdataRoots := state.userdataAssociationRoots(value)
+	if len(userdataRoots) == 0 {
+		// 非 userdata 或无关联边时无需继续采样。
+		return
+	}
+	snapshot.Batches[GCRootTypeUserdataAssociation] = append(snapshot.Batches[GCRootTypeUserdataAssociation], userdataRoots...)
+	for index := range userdataRoots {
+		// userdata 关联的 table 也需要展开一层 key/value，便于验证 ktable 等内容进入根样本。
+		snapshot.Batches[GCRootTypeTableKeyValue] = state.appendTableKVRoots(userdataRoots[index], snapshot.Batches[GCRootTypeTableKeyValue])
+	}
+}
+
+// userdataAssociationRoots 返回 userdata 的 user value 与 raw metatable 关联边。
+//
+// value 必须是 KindUserdata 才会返回关联值；损坏引用或 nil 关联值返回空集合。
+func (state *State) userdataAssociationRoots(value Value) []Value {
+	if value.Kind != KindUserdata {
+		// 只有 full userdata 才有 user value 和 raw metatable 关联边。
+		return nil
+	}
+	userdata, ok := value.Ref.(*Userdata)
+	if !ok || userdata == nil {
+		// 损坏 userdata 引用无法安全扫描。
+		return nil
+	}
+	roots := make([]Value, 0, 2)
+	if !userdata.UserValue.IsNil() {
+		// user value 是 Lua 5.3 full userdata 的强可达关联值。
+		roots = append(roots, userdata.UserValue)
+	}
+	if metatable := userdata.GetMetatable(); metatable != nil {
+		// raw metatable 是 userdata 的结构关联表，也必须作为强可达值。
+		roots = append(roots, ReferenceValue(KindTable, metatable))
+	}
+	return roots
 }
 
 // appendTableKVRoots 从 value 形状中提取 table 的 key/value 作为可达根。
@@ -1432,6 +1485,12 @@ func (state *State) collectStrongReferencesFromValue(value Value, strongRefs map
 			// upvalue 继续按强根递归。
 			state.collectStrongReferencesFromValue(closure.Upvalues[index], strongRefs, visited)
 		}
+	case KindUserdata:
+		// userdata 的 user value 与 raw metatable 是 full userdata 关联强边。
+		for _, associatedValue := range state.userdataAssociationRoots(value) {
+			// 关联值继续递归，覆盖 user value table 中保存的 ktable/capture 根。
+			state.collectStrongReferencesFromValue(associatedValue, strongRefs, visited)
+		}
 	default:
 		// 其他引用类型当前没有可扫描内部边。
 		return
@@ -1628,6 +1687,14 @@ func (state *State) sweepWeakTablesFromValue(value Value, visited map[*Table]boo
 			removed += state.sweepWeakTablesFromValue(closure.Upvalues[index], visited, strongRefs)
 		}
 		return removed
+	case KindUserdata:
+		// userdata 的 user value 与 raw metatable 可能间接持有弱表。
+		removed := 0
+		for _, associatedValue := range state.userdataAssociationRoots(value) {
+			// 逐个关联值递归扫描弱表。
+			removed += state.sweepWeakTablesFromValue(associatedValue, visited, strongRefs)
+		}
+		return removed
 	default:
 		// 其他类型没有可递归的 table 图。
 		return 0
@@ -1656,6 +1723,14 @@ func (state *State) sweepWeakValuesFromValue(value Value, visited map[*Table]boo
 		for index := range closure.Upvalues {
 			// 逐个 upvalue 递归查找 weak value 表。
 			removed += state.sweepWeakValuesFromValue(closure.Upvalues[index], visited, strongRefs, allowWeakKV)
+		}
+		return removed
+	case KindUserdata:
+		// userdata 的 user value 与 raw metatable 可能间接持有 weak value 表。
+		removed := 0
+		for _, associatedValue := range state.userdataAssociationRoots(value) {
+			// 逐个关联值递归扫描 finalizer 前 weak value 表。
+			removed += state.sweepWeakValuesFromValue(associatedValue, visited, strongRefs, allowWeakKV)
 		}
 		return removed
 	default:
