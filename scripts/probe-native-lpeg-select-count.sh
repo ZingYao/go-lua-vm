@@ -165,6 +165,46 @@ if count ~= 2 then
 end
 LUA
       ;;
+    select-count-first-string-second-nil)
+      cat <<'LUA'
+local count = select("#", "alpha", nil)
+if count ~= 2 then
+  error("unexpected first-string second-nil select count")
+end
+LUA
+      ;;
+    select-count-first-nil-second-string)
+      cat <<'LUA'
+local count = select("#", nil, "beta")
+if count ~= 2 then
+  error("unexpected first-nil second-string select count")
+end
+LUA
+      ;;
+    select-count-two-false)
+      cat <<'LUA'
+local count = select("#", false, false)
+if count ~= 2 then
+  error("unexpected two-false select count")
+end
+LUA
+      ;;
+    select-count-first-false-second-nil)
+      cat <<'LUA'
+local count = select("#", false, nil)
+if count ~= 2 then
+  error("unexpected first-false second-nil select count")
+end
+LUA
+      ;;
+    select-count-first-nil-second-false)
+      cat <<'LUA'
+local count = select("#", nil, false)
+if count ~= 2 then
+  error("unexpected first-nil second-false select count")
+end
+LUA
+      ;;
     select-count-three-strings)
       cat <<'LUA'
 local count = select("#", "alpha", "beta", "gamma")
@@ -334,6 +374,11 @@ modes=(
   select-count-overwrite-args-false
   select-count-nonempty-discard
   select-count-two-nil
+  select-count-first-string-second-nil
+  select-count-first-nil-second-string
+  select-count-two-false
+  select-count-first-false-second-nil
+  select-count-first-nil-second-false
   select-count-three-strings
   select-count-one-string
   select-count-one-number
