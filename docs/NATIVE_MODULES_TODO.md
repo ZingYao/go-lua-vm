@@ -71,7 +71,7 @@
   - [x] `luaL_checkinteger`
   - [x] `luaL_checklstring`
   - [ ] `luaL_error`
-- [ ] fixture：C 模块 `luaopen_glua_native_smoke` 返回 table，并暴露一个简单函数。
+- [x] fixture：C 模块 `luaopen_glua_native_smoke` 返回 table，并暴露一个简单函数。
 
 ## 第四阶段：C function 调用
 
@@ -87,8 +87,8 @@
   - [x] `lua_tointegerx`
   - [x] `lua_tonumberx`
   - [x] `lua_tolstring`
-- [ ] 支持 C function 读取 Lua 参数并返回多值。
-- [ ] fixture：C 模块函数 `add(a, b)`、`echo(s)`、`multi()`。
+- [x] 支持 C function 读取 Lua 参数并返回多值。
+- [x] fixture：C 模块函数 `add(a, b)`、`echo(s)`、`multi()`。
 
 ## 第五阶段：userdata、metatable、registry
 
@@ -213,3 +213,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：新增 `lua_CFunction` 最小包装：`lua_pushcclosure`/`lua_pushcfunction` 可把 `nup==0` 的 C 函数指针压为 Go VM 可调用 closure；调用时临时把 Go 参数压入 native State 栈，执行 C 函数后按返回数量取结果并恢复调用前栈顶。当前不支持 C closure upvalue，`nup>0` 保持 no-op，`lua_error`/`luaL_error` 和 C frame traceback 留到错误阶段。
 - 2026-07-06：新增 `luaL_setfuncs` 与兼容 `luaL_newlib` 符号；Lua 5.3 public header 的 `luaL_newlib` 宏会展开为 `lua_createtable` + `luaL_setfuncs`，因此当前 C 模块可把 `nup==0` 的 `luaL_Reg` 函数表注册到 table。带 upvalue 的 `luaL_setfuncs` 仍保持 no-op，等待 C closure upvalue/registry 阶段补齐。
 - 2026-07-06：新增 `LoaderForState`，动态库符号解析后会保留库句柄并返回可调用 Go closure，调用时通过当前 State 的 opaque `lua_State*` 执行 `luaopen_*`。Unix fixture 已验证 `package.loadlib(path, "luaopen_glua_native_smoke")` 可返回 callable 并实际调用入口；无状态 `Loader()` 仍只做解析验证并返回 `init` 边界，防止误用错误 State。
+- 2026-07-06：扩展 Unix native smoke fixture；C 模块现在通过真实 Lua 5.3 public header 的 `luaL_newlib` 宏返回模块 table，并暴露 `add(a,b)`、`echo(s)`、`multi()` 三个 C function，覆盖 integer/string 参数读取、`lua_push*` 返回值和 C function 多返回值搬运。为支持 `luaL_newlib` 宏补充 `luaL_checkversion_` 最小 no-op shim；版本不匹配错误与 longjmp 仍留到错误边界阶段。

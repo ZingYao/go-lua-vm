@@ -3,7 +3,10 @@
 package native
 
 /*
+#include <stddef.h>
+
 typedef struct lua_State lua_State;
+typedef double lua_Number;
 typedef int (*lua_CFunction)(lua_State *L);
 
 typedef struct luaL_Reg {
@@ -114,4 +117,12 @@ func luaL_setfuncs(luaState *C.lua_State, list *C.luaL_Reg, upvalueCount C.int) 
 func luaL_newlib(luaState *C.lua_State, list *C.luaL_Reg) {
 	// 官方头文件中 luaL_newlib 是宏；这里额外导出函数符号，便于兼容手工声明入口。
 	_ = nativeLuaLNewLib(unsafe.Pointer(luaState), nativeLuaLRegList(list))
+}
+
+// luaL_checkversion_ 导出 Lua 5.3 lauxlib 版本检查入口。
+//
+//export luaL_checkversion_
+func luaL_checkversion_(luaState *C.lua_State, version C.lua_Number, sizes C.size_t) {
+	// 当前 native shim 固定 Lua 5.3 public header 与 runtime 版本，先接受头文件宏触发的版本检查。
+	_, _, _ = luaState, version, sizes
 }

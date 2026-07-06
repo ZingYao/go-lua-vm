@@ -17,7 +17,7 @@ import (
 
 // TestUnixPackageLoadLibResolvesNativeFixture 验证 package.loadlib 可解析真实 Lua C 模块入口。
 func TestUnixPackageLoadLibResolvesNativeFixture(t *testing.T) {
-	// 构建最小 Lua C 模块 fixture，只导出 luaopen_*，不调用任何 Lua C API。
+	// 构建使用 Lua 5.3 public C API 的 smoke 模块 fixture。
 	fixturePath := buildUnixNativeFixture(t)
 	environment := packagelib.NewEnvironmentWithLoaders(nil, Loader())
 
@@ -41,7 +41,7 @@ func TestUnixPackageLoadLibResolvesNativeFixture(t *testing.T) {
 
 // TestUnixPackageLoadLibReturnsCallableNativeFixture 验证 state-aware loader 可调用 luaopen_*。
 func TestUnixPackageLoadLibReturnsCallableNativeFixture(t *testing.T) {
-	// 当前 fixture 的 luaopen_* 返回 0 个结果，本测试只验证 package.loadlib 返回可执行 loader。
+	// fixture 的 luaopen_* 会通过 luaL_newlib 返回包含 C function 的模块 table。
 	fixturePath := buildUnixNativeFixture(t)
 	state := luaruntime.NewState()
 	defer state.Close()
@@ -66,20 +66,89 @@ func TestUnixPackageLoadLibReturnsCallableNativeFixture(t *testing.T) {
 	}
 	results, err := loader(luaruntime.StringValue("glua_native_smoke"), luaruntime.StringValue(fixturePath))
 	if err != nil {
-		// fixture luaopen_* 返回 0 个结果，调用不应失败。
+		// fixture luaopen_* 只使用当前已实现的 public C API，调用不应失败。
 		t.Fatalf("state-aware native loader call failed: %v", err)
 	}
-	if len(results) != 0 {
-		// 当前 fixture 没有压入模块值，因此结果为空；后续 smoke fixture 会改为返回 table。
-		t.Fatalf("state-aware native loader results = %#v, want empty", results)
+	if len(results) != 1 {
+		// luaopen_* 必须返回一个模块 table。
+		t.Fatalf("state-aware native loader results = %#v, want one module table", results)
 	}
+	assertNativeSmokeModule(t, results[0])
 	if got := state.StackTop(); got != 0 {
 		// loader 调用期间压入的 require 参数必须恢复干净。
 		t.Fatalf("state-aware native loader stack top = %d, want 0", got)
 	}
 }
 
-// buildUnixNativeFixture 构建只导出 luaopen_glua_native_smoke 的最小 Lua C 动态库。
+// assertNativeSmokeModule 验证 fixture 模块 table 及其中 C function 的调用语义。
+func assertNativeSmokeModule(t *testing.T, value luaruntime.Value) {
+	// 先确认 luaopen_* 的返回值是 table，再逐个调用由 luaL_newlib 注册的函数。
+	t.Helper()
+	table := nativeSmokeModuleTable(t, value)
+
+	add := nativeSmokeFunction(t, table, "add")
+	addResults, err := add(luaruntime.IntegerValue(20), luaruntime.IntegerValue(22))
+	if err != nil {
+		// add 只读取两个 integer 参数并返回一个 integer，不应触发错误。
+		t.Fatalf("native smoke add failed: %v", err)
+	}
+	if len(addResults) != 1 || !addResults[0].RawEqual(luaruntime.IntegerValue(42)) {
+		// add 的结果可证明 luaL_checkinteger 与 lua_pushinteger 已贯通。
+		t.Fatalf("native smoke add results = %#v, want 42", addResults)
+	}
+
+	echo := nativeSmokeFunction(t, table, "echo")
+	echoResults, err := echo(luaruntime.StringValue("hello"))
+	if err != nil {
+		// echo 只读取 string 参数并原样返回，不应触发错误。
+		t.Fatalf("native smoke echo failed: %v", err)
+	}
+	if len(echoResults) != 1 || !echoResults[0].RawEqual(luaruntime.StringValue("hello")) {
+		// echo 的结果可证明 luaL_checklstring 与 lua_pushlstring 已贯通。
+		t.Fatalf("native smoke echo results = %#v, want hello", echoResults)
+	}
+
+	multi := nativeSmokeFunction(t, table, "multi")
+	multiResults, err := multi()
+	if err != nil {
+		// multi 不读取参数，只返回三值，不应触发错误。
+		t.Fatalf("native smoke multi failed: %v", err)
+	}
+	if len(multiResults) != 3 ||
+		!multiResults[0].RawEqual(luaruntime.IntegerValue(1)) ||
+		!multiResults[1].RawEqual(luaruntime.StringValue("two")) ||
+		!multiResults[2].RawEqual(luaruntime.BooleanValue(true)) {
+		// multi 的结果可证明 C function 多返回值能回到 Go VM。
+		t.Fatalf("native smoke multi results = %#v, want 1,two,true", multiResults)
+	}
+}
+
+// nativeSmokeModuleTable 从 fixture 模块返回值读取 table 引用。
+func nativeSmokeModuleTable(t *testing.T, value luaruntime.Value) *luaruntime.Table {
+	// 模块入口必须返回 table；其他类型说明 luaopen_* 结果搬运错误。
+	t.Helper()
+	table, ok := value.Ref.(*luaruntime.Table)
+	if value.Kind != luaruntime.KindTable || !ok || table == nil {
+		// 这里直接失败，避免后续字段断言产生误导。
+		t.Fatalf("native smoke module = %#v, want table", value)
+	}
+	return table
+}
+
+// nativeSmokeFunction 从 fixture 模块 table 读取指定 C function。
+func nativeSmokeFunction(t *testing.T, table *luaruntime.Table, name string) luaruntime.GoResultsFunction {
+	// luaL_newlib 应把 luaL_Reg 中的函数注册成当前 VM 可调用的 Go closure。
+	t.Helper()
+	value := table.RawGetString(name)
+	function, ok := value.Ref.(luaruntime.GoResultsFunction)
+	if value.Kind != luaruntime.KindGoClosure || !ok || function == nil {
+		// 缺失函数表示 luaL_setfuncs 或 C function wrapper 退化。
+		t.Fatalf("native smoke function %s = %#v, want GoResultsFunction", name, value)
+	}
+	return function
+}
+
+// buildUnixNativeFixture 构建导出 luaopen_glua_native_smoke 的 Lua C 动态库。
 func buildUnixNativeFixture(t *testing.T) string {
 	// native_modules 测试依赖 C 编译器；若环境没有可用编译器则明确跳过。
 	t.Helper()
@@ -97,10 +166,39 @@ func buildUnixNativeFixture(t *testing.T) string {
 	sourcePath := filepath.Join(tempDir, "glua_native_smoke.c")
 	source := `
 #include "lua.h"
+#include "lauxlib.h"
+
+static int glua_native_add(lua_State *L) {
+	lua_Integer a = luaL_checkinteger(L, 1);
+	lua_Integer b = luaL_checkinteger(L, 2);
+	lua_pushinteger(L, a + b);
+	return 1;
+}
+
+static int glua_native_echo(lua_State *L) {
+	size_t length = 0;
+	const char *text = luaL_checklstring(L, 1, &length);
+	lua_pushlstring(L, text, length);
+	return 1;
+}
+
+static int glua_native_multi(lua_State *L) {
+	lua_pushinteger(L, 1);
+	lua_pushstring(L, "two");
+	lua_pushboolean(L, 1);
+	return 3;
+}
+
+static const luaL_Reg glua_native_smoke_funcs[] = {
+	{"add", glua_native_add},
+	{"echo", glua_native_echo},
+	{"multi", glua_native_multi},
+	{NULL, NULL},
+};
 
 int luaopen_glua_native_smoke(lua_State *L) {
-	(void)L;
-	return 0;
+	luaL_newlib(L, glua_native_smoke_funcs);
+	return 1;
 }
 `
 	if err := os.WriteFile(sourcePath, []byte(source), 0o600); err != nil {
@@ -134,14 +232,14 @@ func repoRootFromTest(t *testing.T) string {
 
 // nativeFixtureCompileArgs 返回当前 Unix 平台构建动态库 fixture 的编译参数。
 func nativeFixtureCompileArgs(includeDir string, outputPath string, sourcePath string) []string {
-	// 根据平台选择动态库输出参数，保持 fixture 只导出 luaopen_*。
+	// 根据平台选择动态库输出参数，fixture 的 lua_* 符号由当前测试进程中的 native shim 满足。
 	args := []string{"-I", includeDir, "-o", outputPath}
 	switch goruntime.GOOS {
 	case "darwin":
-		// macOS 使用 dynamiclib，当前 fixture 不依赖外部 Lua 符号。
-		args = append(args, "-dynamiclib")
+		// macOS Lua C 模块通常通过 dynamic_lookup 在宿主进程解析 lua_* / luaL_* 符号。
+		args = append(args, "-dynamiclib", "-undefined", "dynamic_lookup")
 	default:
-		// Linux 使用 shared + fPIC，满足 dlopen 对共享对象的要求。
+		// Linux 使用 shared + fPIC，未解析的 lua_* / luaL_* 符号在 dlopen 时绑定到宿主导出符号。
 		args = append(args, "-shared", "-fPIC")
 	}
 	return append(args, sourcePath)
@@ -193,7 +291,7 @@ func TestUnixPackageLoadLibMissingFixtureSymbol(t *testing.T) {
 
 // TestUnixNativeLuaPushCClosureCallsResolvedFixture 验证解析出的 C 函数可包装为 Go closure。
 func TestUnixNativeLuaPushCClosureCallsResolvedFixture(t *testing.T) {
-	// fixture 的 luaopen_* 入口是符合 lua_CFunction ABI 的真实动态库符号，当前返回 0 个结果。
+	// fixture 的 luaopen_* 入口是符合 lua_CFunction ABI 的真实动态库符号，并返回模块 table。
 	fixturePath := buildUnixNativeFixture(t)
 	library, err := openDynamicLibrary(fixturePath)
 	if err != nil {
@@ -233,18 +331,23 @@ func TestUnixNativeLuaPushCClosureCallsResolvedFixture(t *testing.T) {
 		// 当前 wrapper 使用 GoResultsFunction 承接多返回值语义。
 		t.Fatalf("native C closure payload = %#v, want GoResultsFunction", closureValue.Ref)
 	}
+	if _, err := state.Pop(); err != nil {
+		// 直接调用已保存的 Go closure 前先清空测试栈，保持 C API 正索引从实参 1 开始。
+		t.Fatalf("pop native C closure value failed: %v", err)
+	}
 	results, err := closure(luaruntime.IntegerValue(1), luaruntime.StringValue("arg"))
 	if err != nil {
-		// fixture 返回 0，调用不应产生错误。
+		// fixture 只使用当前已实现的 C API，调用不应产生错误。
 		t.Fatalf("native C closure call failed: %v", err)
 	}
-	if len(results) != 0 {
-		// fixture luaopen_* 返回 0 个结果，wrapper 应保持空结果。
-		t.Fatalf("native C closure results = %#v, want empty", results)
+	if len(results) != 1 {
+		// fixture luaopen_* 返回一个模块 table。
+		t.Fatalf("native C closure results = %#v, want one module table", results)
 	}
-	if got := nativeLuaStackTop(luaState); got != 1 {
-		// 调用期间临时压入的参数必须在返回后恢复，只保留原本压入的 closure。
-		t.Fatalf("native C closure top after call = %d, want 1", got)
+	assertNativeSmokeModule(t, results[0])
+	if got := nativeLuaStackTop(luaState); got != 0 {
+		// 调用期间临时压入的参数必须在返回后恢复，不污染调用方栈。
+		t.Fatalf("native C closure top after call = %d, want 0", got)
 	}
 }
 
