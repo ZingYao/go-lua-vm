@@ -132,6 +132,27 @@ if not count then
 end
 LUA
       ;;
+    select-count-if-not-empty)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+if not count then
+end
+LUA
+      ;;
+    select-count-if-count-empty)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+if count then
+end
+LUA
+      ;;
+    select-count-if-eq-empty)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+if count == 2 then
+end
+LUA
+      ;;
     select-count-eq-unused)
       cat <<'LUA'
 local count = select("#", "alpha", "beta")

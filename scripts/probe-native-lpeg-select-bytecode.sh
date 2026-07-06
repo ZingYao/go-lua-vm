@@ -49,6 +49,67 @@ if values[1] ~= 2 then
 end
 LUA
       ;;
+    select-count-if-truthy)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+if not count then
+  error("unexpected falsy select count")
+end
+LUA
+      ;;
+    select-count-if-not-empty)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+if not count then
+end
+LUA
+      ;;
+    select-count-if-count-empty)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+if count then
+end
+LUA
+      ;;
+    select-count-if-eq-empty)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+if count == 2 then
+end
+LUA
+      ;;
+    select-count-eq-unused)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+local equal = count == 2
+LUA
+      ;;
+    select-count-table-store-count)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+local packed = {count}
+LUA
+      ;;
+    select-count-lua-arg)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+local function sink(value)
+end
+sink(count)
+LUA
+      ;;
+    select-count-go-arg-rawequal)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+rawequal(count, 2)
+LUA
+      ;;
+    select-count-arith-add-zero)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+local sum = count + 0
+LUA
+      ;;
     builtin-rawequal-two-strings)
       cat <<'LUA'
 local same = rawequal("alpha", "beta")
@@ -76,6 +137,15 @@ modes=(
   select-count-consume
   select-count-discard
   select-count-table-constructor
+  select-count-if-truthy
+  select-count-if-not-empty
+  select-count-if-count-empty
+  select-count-if-eq-empty
+  select-count-eq-unused
+  select-count-table-store-count
+  select-count-lua-arg
+  select-count-go-arg-rawequal
+  select-count-arith-add-zero
   builtin-rawequal-two-strings
   builtin-tonumber-string-base
 )
