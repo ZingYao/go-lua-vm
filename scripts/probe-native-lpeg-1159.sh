@@ -339,6 +339,71 @@ LUA
   rg '^PROBE' "${output}" || tail -n 3 "${output}"
 }
 
+run_prefix620_synthetic_loadlib_error_probe() {
+  local source="${work_dir}/prefix620_synthetic_loadlib_error.lua"
+  local output="${work_dir}/prefix620_synthetic_loadlib_error.out"
+
+  {
+    printf 'package.path = "%s"\n' "${repo_root}/third_party/lpeg/?.lua"
+    printf 'package.cpath = "%s"\n' "${build_dir}/?${module_extension}"
+    sed "1,4d;621,\$d" "${repo_root}/third_party/lpeg/test.lua"
+    cat <<'LUA'
+local f, message, where = nil, "synthetic loadlib error", "open"
+assert(f == nil and message == "synthetic loadlib error" and where == "open")
+LUA
+    emit_probe_tail
+  } >"${source}"
+
+  echo "run prefix620 + synthetic loadlib error triple probe"
+  "${glua_bin}" "${source}" >"${output}"
+  printf 'prefix620_synthetic_loadlib_error '
+  rg '^PROBE' "${output}" || tail -n 3 "${output}"
+}
+
+run_prefix620_loadlib_bad_argument_probe() {
+  local source="${work_dir}/prefix620_loadlib_bad_argument.lua"
+  local output="${work_dir}/prefix620_loadlib_bad_argument.out"
+
+  {
+    printf 'package.path = "%s"\n' "${repo_root}/third_party/lpeg/?.lua"
+    printf 'package.cpath = "%s"\n' "${build_dir}/?${module_extension}"
+    sed "1,4d;621,\$d" "${repo_root}/third_party/lpeg/test.lua"
+    cat <<'LUA'
+local ok, message = pcall(package.loadlib, 123, "luaopen_missing")
+assert(ok == false and type(message) == "string", tostring(message))
+LUA
+    emit_probe_tail
+  } >"${source}"
+
+  echo "run prefix620 + package.loadlib bad-argument probe"
+  "${glua_bin}" "${source}" >"${output}"
+  printf 'prefix620_loadlib_bad_argument '
+  rg '^PROBE' "${output}" || tail -n 3 "${output}"
+}
+
+run_prefix620_loadlib_regular_file_probe() {
+  local source="${work_dir}/prefix620_loadlib_regular_file.lua"
+  local output="${work_dir}/prefix620_loadlib_regular_file.out"
+  local regular_file="${work_dir}/not_a_dynamic_library${module_extension}"
+
+  printf 'not a dynamic library\n' >"${regular_file}"
+  {
+    printf 'package.path = "%s"\n' "${repo_root}/third_party/lpeg/?.lua"
+    printf 'package.cpath = "%s"\n' "${build_dir}/?${module_extension}"
+    sed "1,4d;621,\$d" "${repo_root}/third_party/lpeg/test.lua"
+    cat <<LUA
+local f, message, where = package.loadlib("${regular_file}", "luaopen_missing")
+assert(f == nil and where == "open", tostring(message) .. " / " .. tostring(where))
+LUA
+    emit_probe_tail
+  } >"${source}"
+
+  echo "run prefix620 + regular-file package.loadlib probe"
+  "${glua_bin}" "${source}" >"${output}"
+  printf 'prefix620_loadlib_regular_file '
+  rg '^PROBE' "${output}" || tail -n 3 "${output}"
+}
+
 run_prefix620_loadlib_existing_symbol_probe() {
   local source="${work_dir}/prefix620_loadlib_existing_symbol.lua"
   local output="${work_dir}/prefix620_loadlib_existing_symbol.out"
@@ -399,6 +464,9 @@ run_prefix620_require_smoke_probe
 run_prefix620_parity_matches_require_smoke_probe
 run_fresh_loadlib_missing_file_probe
 run_prefix620_loadlib_missing_file_probe
+run_prefix620_synthetic_loadlib_error_probe
+run_prefix620_loadlib_bad_argument_probe
+run_prefix620_loadlib_regular_file_probe
 run_prefix620_loadlib_existing_symbol_probe
 run_prefix620_parity_matches_loadlib_missing_file_probe
 
