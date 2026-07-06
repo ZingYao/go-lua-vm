@@ -17,7 +17,9 @@
     "workspaceContains:**/*.glua",
     "workspaceContains:**/*.lua",
     "onCommand:glua.openBuiltinSignatureJson",
-    "onCommand:glua.showBuiltinDocStatus"
+    "onCommand:glua.showBuiltinDocStatus",
+    "onCommand:glua.startAttachDebug",
+    "onDebugResolve:glua"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -33,6 +35,14 @@
       {
         "command": "glua.showOutput",
         "title": "%glua.showOutput.title%"
+      },
+      {
+        "command": "glua.createAttachConfig",
+        "title": "%glua.createAttachConfig.title%"
+      },
+      {
+        "command": "glua.startAttachDebug",
+        "title": "%glua.startAttachDebug.title%"
       }
     ],
     "menus": {
@@ -48,9 +58,92 @@
         {
           "command": "glua.showOutput",
           "when": "true"
+        },
+        {
+          "command": "glua.createAttachConfig",
+          "when": "true"
+        },
+        {
+          "command": "glua.startAttachDebug",
+          "when": "true"
         }
       ]
     },
+    "debuggers": [
+      {
+        "type": "glua",
+        "label": "GLua",
+        "languages": [
+          "glua",
+          "lua"
+        ],
+        "configurationAttributes": {
+          "attach": {
+            "required": [
+              "request",
+              "type",
+              "name",
+              "host",
+              "port"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "glua"
+                ],
+                "description": "Debug adapter type."
+              },
+              "request": {
+                "type": "string",
+                "enum": [
+                  "attach"
+                ],
+                "description": "Attach to an existing GLua DAP server."
+              },
+              "name": {
+                "type": "string",
+                "description": "Configuration name shown in the debug dropdown."
+              },
+              "host": {
+                "type": "string",
+                "default": "127.0.0.1",
+                "description": "GLua DAP server IP address or host name."
+              },
+              "port": {
+                "type": "number",
+                "default": 5678,
+                "minimum": 1,
+                "maximum": 65535,
+                "description": "GLua DAP server TCP port."
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "glua",
+            "request": "attach",
+            "name": "Attach to GLua DAP",
+            "host": "127.0.0.1",
+            "port": 5678
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "GLua: Attach to DAP server",
+            "description": "Attach VS Code to a running GLua Debug Adapter Protocol server over TCP.",
+            "body": {
+              "type": "glua",
+              "request": "attach",
+              "name": "Attach to GLua DAP",
+              "host": "${1:127.0.0.1}",
+              "port": 5678
+            }
+          }
+        ]
+      }
+    ],
     "languages": [
       {
         "id": "glua",
@@ -133,6 +226,18 @@
             "type": "string"
           },
           "description": "Absolute or workspace-relative JSON files to extend or override builtin function docs."
+        },
+        "glua.debug.host": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "description": "Default GLua DAP server IP address or host name used when creating attach configurations."
+        },
+        "glua.debug.port": {
+          "type": "number",
+          "default": 5678,
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "Default GLua DAP server TCP port used when creating attach configurations."
         }
       }
     }

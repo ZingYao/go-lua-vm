@@ -12,6 +12,7 @@ VS Code extension for `go-lua-vm` / `glua`. It provides syntax highlighting, dia
 - Completion for builtin and custom functions
 - User-defined builtin/function signature JSON
 - Multi-language function documentation
+- Native VS Code debug attach to a running GLua DAP server over TCP
 
 ## Settings
 
@@ -21,7 +22,9 @@ VS Code extension for `go-lua-vm` / `glua`. It provides syntax highlighting, dia
   "glua.docLanguage": "auto",
   "glua.builtinDocs": [
     ".vscode/glua-builtin-docs.json"
-  ]
+  ],
+  "glua.debug.host": "127.0.0.1",
+  "glua.debug.port": 5678
 }
 ```
 
@@ -251,3 +254,36 @@ Use:
 ```text
 Developer: Reload Window
 ```
+
+## Debug Attach
+
+The extension contributes a native VS Code debugger type named `glua`.
+It attaches the VS Code Debug UI to an already running GLua Debug Adapter Protocol server over TCP.
+
+Create `.vscode/launch.json` with the Command Palette:
+
+```text
+GLua: Create DAP attach configuration
+```
+
+To attach once without editing `launch.json`, run:
+
+```text
+GLua: Attach to DAP server
+```
+
+The command prompts for `host` and `port`, then starts a native VS Code debug session immediately.
+
+Or add the configuration manually:
+
+```json
+{
+  "type": "glua",
+  "request": "attach",
+  "name": "Attach to GLua DAP",
+  "host": "127.0.0.1",
+  "port": 5678
+}
+```
+
+`host` and `port` must point to a process that speaks DAP. The editor extension does not start the GLua VM debugger by itself.

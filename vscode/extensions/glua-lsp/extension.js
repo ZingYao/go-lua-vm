@@ -15,7 +15,12 @@ const DEFAULT_DOC_LANGUAGE = "auto";
 const COMMAND_OPEN_BUILTIN_SIGNATURE_JSON = "glua.openBuiltinSignatureJson";
 const COMMAND_SHOW_BUILTIN_DOC_STATUS = "glua.showBuiltinDocStatus";
 const COMMAND_SHOW_OUTPUT = "glua.showOutput";
+const COMMAND_CREATE_ATTACH_CONFIG = "glua.createAttachConfig";
+const COMMAND_START_ATTACH_DEBUG = "glua.startAttachDebug";
 const BUILTIN_SIG_FILE_NAME = "glua-builtin-docs.json";
+const DEBUG_TYPE = "glua";
+const DEFAULT_DEBUG_HOST = "127.0.0.1";
+const DEFAULT_DEBUG_PORT = 5678;
 
 function isChineseEnvironment() {
   return String(vscode.env.language || "").toLowerCase().startsWith("zh");
@@ -342,6 +347,159 @@ function logResolvedDocLanguage(outputChannel, stage, docConfig) {
   );
 }
 
+function resolveDebugHost(value) {
+  const host = String(value || "").trim();
+  return host || DEFAULT_DEBUG_HOST;
+}
+
+function resolveDebugPort(value) {
+  const port = Number(value);
+  if (Number.isInteger(port) && port >= 1 && port <= 65535) {
+    return port;
+  }
+  return DEFAULT_DEBUG_PORT;
+}
+
+function isValidDebugPort(value) {
+  const port = Number(value);
+  return Number.isInteger(port) && port >= 1 && port <= 65535;
+}
+
+function defaultDebugAttachConfig() {
+  const config = vscode.workspace.getConfiguration("glua");
+  return {
+    type: DEBUG_TYPE,
+    request: "attach",
+    name: "Attach to GLua DAP",
+    host: resolveDebugHost(config.get("debug.host", DEFAULT_DEBUG_HOST)),
+    port: resolveDebugPort(config.get("debug.port", DEFAULT_DEBUG_PORT)),
+  };
+}
+
+async function createAttachDebugConfiguration(outputChannel) {
+  const workspaceFolder = (vscode.workspace.workspaceFolders || [])[0];
+  const target = workspaceFolder
+    ? vscode.Uri.joinPath(workspaceFolder.uri, ".vscode", "launch.json")
+    : null;
+  const attachConfig = defaultDebugAttachConfig();
+  const snippet = JSON.stringify(attachConfig, null, 2);
+  if (!target) {
+    await vscode.env.clipboard.writeText(snippet);
+    vscode.window.showInformationMessage(
+      localizeText({
+        en: "GLua DAP attach configuration copied to clipboard.",
+        zh: "GLua DAP attach 配置已复制到剪贴板。",
+      })
+    );
+    return;
+  }
+
+  const launchTemplate = `${JSON.stringify({
+    version: "0.2.0",
+    configurations: [attachConfig],
+  }, null, 2)}\n`;
+  await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(workspaceFolder.uri, ".vscode"));
+  try {
+    await vscode.workspace.fs.stat(target);
+    const document = await vscode.workspace.openTextDocument(target);
+    await vscode.window.showTextDocument(document, { preview: false });
+    await vscode.env.clipboard.writeText(snippet);
+    vscode.window.showInformationMessage(
+      localizeText({
+        en: "launch.json already exists. GLua DAP attach configuration copied to clipboard.",
+        zh: "launch.json 已存在，GLua DAP attach 配置已复制到剪贴板。",
+      })
+    );
+  } catch (error) {
+    await vscode.workspace.fs.writeFile(target, Buffer.from(launchTemplate, "utf8"));
+    const document = await vscode.workspace.openTextDocument(target);
+    await vscode.window.showTextDocument(document, { preview: false });
+    if (outputChannel) {
+      outputChannel.appendLine(`[glua-lsp] created debug attach configuration at ${target.fsPath}`);
+    }
+  }
+}
+
+async function promptAndStartAttachDebug(outputChannel) {
+  const defaults = defaultDebugAttachConfig();
+  const host = await vscode.window.showInputBox({
+    title: "GLua DAP Attach Host",
+    prompt: localizeText({
+      en: "Enter the IP address or host name of the running GLua DAP server.",
+      zh: "输入正在运行的 GLua DAP server IP 或主机名。",
+    }),
+    value: defaults.host,
+    validateInput(value) {
+      return String(value || "").trim()
+        ? null
+        : localizeText({ en: "Host is required.", zh: "必须填写 Host。" });
+    },
+  });
+  if (!host) {
+    return;
+  }
+
+  const portText = await vscode.window.showInputBox({
+    title: "GLua DAP Attach Port",
+    prompt: localizeText({
+      en: "Enter the TCP port of the running GLua DAP server.",
+      zh: "输入正在运行的 GLua DAP server TCP 端口。",
+    }),
+    value: String(defaults.port),
+    validateInput(value) {
+      return isValidDebugPort(Number(value))
+        ? null
+        : localizeText({ en: "Port must be a number from 1 to 65535.", zh: "端口必须是 1 到 65535 的数字。" });
+    },
+  });
+  if (!portText) {
+    return;
+  }
+
+  const attachConfig = {
+    ...defaults,
+    host: resolveDebugHost(host),
+    port: resolveDebugPort(Number(portText)),
+  };
+  if (outputChannel) {
+    outputChannel.appendLine(`[glua-dap] start attach host=${attachConfig.host}; port=${attachConfig.port}`);
+  }
+  await vscode.debug.startDebugging(undefined, attachConfig);
+}
+
+function registerDebugSupport(context, outputChannel) {
+  const configurationProvider = {
+    resolveDebugConfiguration(folder, config) {
+      const defaults = defaultDebugAttachConfig();
+      const next = {
+        ...defaults,
+        ...(config || {}),
+      };
+      next.type = DEBUG_TYPE;
+      next.request = "attach";
+      next.host = resolveDebugHost(next.host);
+      next.port = resolveDebugPort(next.port);
+      return next;
+    },
+  };
+
+  const descriptorFactory = {
+    createDebugAdapterDescriptor(session) {
+      const host = resolveDebugHost(session.configuration.host);
+      const port = resolveDebugPort(session.configuration.port);
+      if (outputChannel) {
+        outputChannel.appendLine(`[glua-dap] attach host=${host}; port=${port}`);
+      }
+      return new vscode.DebugAdapterServer(port, host);
+    },
+  };
+
+  context.subscriptions.push(
+    vscode.debug.registerDebugConfigurationProvider(DEBUG_TYPE, configurationProvider),
+    vscode.debug.registerDebugAdapterDescriptorFactory(DEBUG_TYPE, descriptorFactory)
+  );
+}
+
 function registerBuiltinDocumentProvider(context) {
   const provider = {
     provideTextDocumentContent(uri) {
@@ -502,8 +660,19 @@ function activate(context) {
       }
     })
   );
+  context.subscriptions.push(
+    vscode.commands.registerCommand(COMMAND_CREATE_ATTACH_CONFIG, () =>
+      createAttachDebugConfiguration(outputChannel)
+    )
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand(COMMAND_START_ATTACH_DEBUG, () =>
+      promptAndStartAttachDebug(outputChannel)
+    )
+  );
 
   registerBuiltinDocumentProvider(context);
+  registerDebugSupport(context, outputChannel);
 
   let languageClientApi;
   try {

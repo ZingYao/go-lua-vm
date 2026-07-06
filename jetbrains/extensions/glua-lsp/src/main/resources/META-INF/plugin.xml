@@ -7,6 +7,7 @@
   ]]></description>
 
   <depends>com.intellij.modules.platform</depends>
+  <depends>intellij.platform.dap</depends>
 
   <extensions defaultExtensionNs="com.intellij">
     <fileType
@@ -59,6 +60,18 @@
     <applicationConfigurable
       instance="com.glua.jetbrains.GluaSettingsConfigurable"
       displayName="GLua"/>
+
+    <configurationType
+      implementation="com.glua.jetbrains.GluaDapRunConfigurationType"/>
+
+    <xdebugger.breakpointType
+      implementation="com.glua.jetbrains.GluaLineBreakpointType"/>
+
+    <platform.dap.launchArgumentsProvider
+      implementation="com.glua.jetbrains.GluaDapLaunchArgumentsProvider"/>
+
+    <platform.dap.debugAdapterSupportProvider
+      implementation="com.glua.jetbrains.GluaDapSupportProvider"/>
   </extensions>
 
   <actions>
@@ -68,6 +81,13 @@
       text="Format GLua File"
       description="Format the current GLua file">
       <add-to-group group-id="CodeMenu" anchor="last"/>
+    </action>
+    <action
+      id="Glua.CopyDapAttachConfig"
+      class="com.glua.jetbrains.GluaDapAttachConfigAction"
+      text="Copy GLua DAP Attach Config"
+      description="Copy GLua DAP attach host and port configuration as JSON">
+      <add-to-group group-id="ToolsMenu" anchor="last"/>
     </action>
   </actions>
 </idea-plugin>

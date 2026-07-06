@@ -16,6 +16,8 @@ public final class GluaSettings implements PersistentStateComponent<GluaSettings
     public static final class StateData {
         public String docLanguage = "auto";
         public List<String> builtinDocs = new ArrayList<>();
+        public String dapHost = "127.0.0.1";
+        public int dapPort = 5678;
     }
 
     private StateData state = new StateData();
@@ -47,5 +49,21 @@ public final class GluaSettings implements PersistentStateComponent<GluaSettings
 
     public void setBuiltinDocs(List<String> docs) {
         state.builtinDocs = docs == null ? new ArrayList<>() : new ArrayList<>(docs);
+    }
+
+    public String dapHost() {
+        return state.dapHost == null || state.dapHost.isBlank() ? "127.0.0.1" : state.dapHost.trim();
+    }
+
+    public void setDapHost(String dapHost) {
+        state.dapHost = dapHost == null || dapHost.isBlank() ? "127.0.0.1" : dapHost.trim();
+    }
+
+    public int dapPort() {
+        return state.dapPort >= 1 && state.dapPort <= 65535 ? state.dapPort : 5678;
+    }
+
+    public void setDapPort(int dapPort) {
+        state.dapPort = dapPort >= 1 && dapPort <= 65535 ? dapPort : 5678;
     }
 }

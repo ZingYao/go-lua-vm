@@ -1,5 +1,7 @@
 {
   "glua.openBuiltinSignatureJson.title": "GLua: Open builtin signature JSON",
   "glua.showBuiltinDocStatus.title": "GLua: Show builtin doc status",
-  "glua.showOutput.title": "GLua: Show language server output"
+  "glua.showOutput.title": "GLua: Show language server output",
+  "glua.createAttachConfig.title": "GLua: Create DAP attach configuration",
+  "glua.startAttachDebug.title": "GLua: Attach to DAP server"
 }

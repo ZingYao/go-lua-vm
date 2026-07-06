@@ -15,6 +15,8 @@ It is implemented as a pure IntelliJ Platform plugin, so it can run in JetBrains
 - `Code -> Format GLua File` action
 - Multi-language builtin/function documentation
 - User JSON files that extend or override function signatures
+- Native JetBrains DAP attach configuration for running GLua Debug Adapter Protocol servers
+- GLua DAP attach host/port settings and a helper action for sharing attach JSON
 
 ## Settings
 
@@ -28,6 +30,8 @@ Available settings:
 
 - `Doc language tag`: `auto`, `en`, `zh-CN`, `ja-JP`, `ko`, `fr-FR`, etc.
 - `Builtin docs JSON files`: one JSON file path per line
+- `DAP attach host`: GLua DAP server IP address or host name
+- `DAP attach port`: GLua DAP server TCP port, from 1 to 65535
 
 `auto` uses the IDE/JVM default locale and normalizes it to a language tag. For example, `zh-cn` becomes `zh-CN`, and `ja-jp` becomes `ja-JP`.
 
@@ -160,6 +164,49 @@ Function names can be global functions or qualified library functions:
 ```
 
 After adding the JSON file to settings, completion and documentation include these functions.
+
+## Debug Attach
+
+Create a native JetBrains Run/Debug configuration:
+
+```text
+Run -> Edit Configurations -> Add New Configuration -> GLua DAP Attach
+```
+
+Set:
+
+- `DAP attach host`: GLua DAP server IP address or host name
+- `DAP attach port`: GLua DAP server TCP port
+
+Use the Debug action to start a JetBrains DAP session backed by the configured TCP server. The GLua VM debugger process must already be listening on that address.
+
+You can also store default attach values in:
+
+```text
+Settings / Preferences -> GLua
+```
+
+New `GLua DAP Attach` configurations use these saved defaults.
+
+For sharing or copying the attach payload, run:
+
+```text
+Tools -> Copy GLua DAP Attach Config
+```
+
+The action copies this JSON shape to the clipboard:
+
+```json
+{
+  "type": "glua",
+  "request": "attach",
+  "name": "Attach to GLua DAP",
+  "host": "127.0.0.1",
+  "port": 5678
+}
+```
+
+The JSON shape matches the VS Code attach configuration.
 
 ## Override Default Builtins
 
