@@ -133,8 +133,18 @@ func nativeLuaCallK(luaState unsafe.Pointer, argumentCount int, resultCount int)
 		_ = setNativeStatePendingError(luaState, runtime.StringValue("bad argument count to lua_callk"))
 		return
 	}
+	baseTop := 0
+	if currentBaseTop, ok := currentNativeStateCallBase(luaState); ok {
+		// C function 内 lua_callk 只能消费当前 C 帧可见栈，不能穿透外层 Go VM 栈。
+		baseTop = currentBaseTop
+	}
+	if state.StackTop()-baseTop < argumentCount+1 {
+		// 当前 C 帧可见槽不足时记录错误，但不弹栈，避免误删外层调用帧值。
+		_ = setNativeStatePendingError(luaState, runtime.StringValue("attempt to call a missing native value"))
+		return
+	}
 	functionIndex := state.StackTop() - argumentCount
-	if functionIndex <= 0 {
+	if functionIndex <= baseTop {
 		// 栈上没有被调函数时记录运行期错误，避免 C 模块继续读取伪造结果。
 		_ = setNativeStatePendingError(luaState, runtime.StringValue("attempt to call a missing native value"))
 		return
@@ -181,8 +191,18 @@ func nativeLuaPCallK(luaState unsafe.Pointer, argumentCount int, resultCount int
 		nativeLuaPushValue(luaState, runtime.StringValue("bad argument count to lua_pcallk"))
 		return nativeLuaErrRun
 	}
+	baseTop := 0
+	if currentBaseTop, ok := currentNativeStateCallBase(luaState); ok {
+		// C function 内 lua_pcallk 只能消费当前 C 帧可见栈，不能穿透外层 Go VM 栈。
+		baseTop = currentBaseTop
+	}
+	if state.StackTop()-baseTop < argumentCount+1 {
+		// 当前 C 帧可见槽不足时按 protected call 语义压入错误对象，但不弹外层栈。
+		nativeLuaPushValue(luaState, runtime.StringValue("attempt to call a missing native value"))
+		return nativeLuaErrRun
+	}
 	functionIndex := state.StackTop() - argumentCount
-	if functionIndex <= 0 {
+	if functionIndex <= baseTop {
 		// 栈上缺失被调函数时按运行期错误处理。
 		nativeLuaPushValue(luaState, runtime.StringValue("attempt to call a missing native value"))
 		return nativeLuaErrRun
