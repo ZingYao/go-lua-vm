@@ -124,7 +124,7 @@
 - [x] 验证 `pcall(require, "mod")` 捕获 C module 初始化错误。
 - [x] 验证 C function 运行时错误包含合理 traceback。
 - [x] 定义 C frame 在 `debug.traceback` 中的展示策略。
-- [ ] 记录暂不支持或语义有差异的 C API。
+- [x] 记录暂不支持或语义有差异的 C API。
 
 ## 第七阶段：平台闭环
 
@@ -256,3 +256,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：扩展 fixture 构建与 CLI smoke 脚本；macOS 现在同时产出 `glua_native_smoke` / `glua_native_failopen` 的 `.dylib` 和 `.so` 两种后缀，并分别通过 `package.cpath` 执行 require 成功路径与 luaopen 初始化失败路径，覆盖 Lua 生态在 macOS 上常见的双后缀候选。
 - 2026-07-06：执行 `scripts/check-native-cross-compile.sh`；当前 macOS arm64 已完成 `internal/native` 测试二进制和 native tag `cmd/glua` 编译验证，Linux arm64 与 Windows arm64 因未配置 `NATIVE_CC_LINUX_ARM64` / `NATIVE_CC_WINDOWS_ARM64` 或 `CC` 明确 skip，未冒充跨平台通过。
 - 2026-07-06：扩展 `scripts/test-native-cjson.sh`；macOS 上不再用合并 `package.cpath` 只验证搜索顺序首个候选，而是分别用 `?.so` 和 `?.dylib` 独立执行 `require("cjson")`、对象/数组/标量 `encode/decode`、`cjson.null`、非法 JSON `pcall` 和不可序列化 function `pcall`，真实第三方模块双后缀运行期验收均通过。
+- 2026-07-06：更新 `docs/NATIVE_MODULES_BUILD.md` 的当前支持面与限制；明确已覆盖的 Lua 5.3 public C API、非 yield `lua_pcallk` 边界、未支持的 C continuation/debug hook/全局表/加载与 GC API、`luaL_checkversion_` 的当前语义，以及官方 Lua 5.3 ABI 二进制模块和 Linux/Windows 运行期验收仍未闭环。
