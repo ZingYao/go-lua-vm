@@ -26,6 +26,12 @@ const (
 	nativeLuaTypeThread   = 8
 )
 
+const (
+	nativeLuaNoRef        = -2
+	nativeLuaRefNil       = -1
+	nativeLuaRefFreeIndex = 0
+)
+
 // nativeLuaTypeCode 返回 Lua 5.3 C API 使用的基础类型编号。
 func nativeLuaTypeCode(value runtime.Value, missing bool) int {
 	// 越界索引与不可读取值在 C API 中用 LUA_TNONE 表示。
@@ -164,6 +170,64 @@ func nativeLuaRawSetI(luaState unsafe.Pointer, index int, key int64) {
 	table.RawSetInteger(key, value)
 }
 
+// nativeLuaLRef 在指定 table 中为栈顶值创建 Lua 5.3 lauxlib 引用。
+func nativeLuaLRef(luaState unsafe.Pointer, index int) int {
+	// luaL_ref 必须先解析 State 和目标 table；当前最小 shim 对非法 table 返回 LUA_NOREF。
+	state, ok := lookupNativeStateHandle(luaState)
+	if !ok {
+		// 无效 State 无法弹栈或保存引用。
+		return nativeLuaNoRef
+	}
+	table, ok := nativeLuaTableAt(luaState, index)
+	if !ok {
+		// 非 table 目标保持栈不变，后续 api_check 阶段再收口错误边界。
+		return nativeLuaNoRef
+	}
+	value, err := state.Pop()
+	if err != nil {
+		// 空栈无法取得待引用值。
+		return nativeLuaNoRef
+	}
+	if value.IsNil() {
+		// Lua 5.3 规定 nil 引用不写入 table，直接返回 LUA_REFNIL。
+		return nativeLuaRefNil
+	}
+
+	freeHead := table.RawGetInteger(nativeLuaRefFreeIndex)
+	if freeHead.Kind == runtime.KindInteger && freeHead.Integer > 0 {
+		// freelist 非空时复用链表头，并把 t[0] 更新为下一空闲引用。
+		reference := freeHead.Integer
+		nextFree := table.RawGetInteger(reference)
+		table.RawSetInteger(nativeLuaRefFreeIndex, nextFree)
+		table.RawSetInteger(reference, value)
+		return int(reference)
+	}
+
+	// freelist 为空时按 Lua 5.3 luaL_ref 语义使用 raw length 后的下一个正整数槽。
+	reference := table.Len() + 1
+	table.RawSetInteger(reference, value)
+	return int(reference)
+}
+
+// nativeLuaLUnref 释放指定 table 中的 Lua 5.3 lauxlib 引用。
+func nativeLuaLUnref(luaState unsafe.Pointer, index int, reference int) {
+	// LUA_NOREF 和 LUA_REFNIL 是预定义空引用，释放时必须保持 no-op。
+	if reference < 0 {
+		// 负数引用没有 table 副作用。
+		return
+	}
+	table, ok := nativeLuaTableAt(luaState, index)
+	if !ok {
+		// 非 table 目标保持 no-op，后续 api_check 阶段再补错误语义。
+		return
+	}
+
+	// 将 ref 节点插回 t[0] freelist 头部：t[ref] = oldHead; t[0] = ref。
+	freeHead := table.RawGetInteger(nativeLuaRefFreeIndex)
+	table.RawSetInteger(int64(reference), freeHead)
+	table.RawSetInteger(nativeLuaRefFreeIndex, runtime.IntegerValue(int64(reference)))
+}
+
 // lua_createtable 导出 Lua 5.3 C API table 创建入口。
 //
 //export lua_createtable
@@ -202,4 +266,20 @@ func lua_rawgeti(luaState *C.lua_State, index C.int, key C.lua_Integer) C.int {
 func lua_rawseti(luaState *C.lua_State, index C.int, key C.lua_Integer) {
 	// C API 入口只做类型转换，具体写入和弹栈语义由 Go helper 维护。
 	nativeLuaRawSetI(unsafe.Pointer(luaState), int(index), int64(key))
+}
+
+// luaL_ref 导出 Lua 5.3 lauxlib 引用创建入口。
+//
+//export luaL_ref
+func luaL_ref(luaState *C.lua_State, index C.int) C.int {
+	// C API 入口只做类型转换，具体 freelist 语义由 Go helper 维护。
+	return C.int(nativeLuaLRef(unsafe.Pointer(luaState), int(index)))
+}
+
+// luaL_unref 导出 Lua 5.3 lauxlib 引用释放入口。
+//
+//export luaL_unref
+func luaL_unref(luaState *C.lua_State, index C.int, reference C.int) {
+	// C API 入口只做类型转换，具体 freelist 语义由 Go helper 维护。
+	nativeLuaLUnref(unsafe.Pointer(luaState), int(index), int(reference))
 }

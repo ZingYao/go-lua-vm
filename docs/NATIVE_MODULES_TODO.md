@@ -103,8 +103,8 @@
   - [x] `lua_setmetatable`
   - [x] `lua_getmetatable`
 - [ ] 实现 registry/ref：
-  - [ ] `luaL_ref`
-  - [ ] `luaL_unref`
+  - [x] `luaL_ref`
+  - [x] `luaL_unref`
   - [x] `lua_rawgeti`
   - [x] `lua_rawseti`
 - [ ] fixture：C 模块创建 userdata，方法调用后能保持状态。
@@ -226,3 +226,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：新增 registry 命名元表基础 API；`luaL_newmetatable` 可在 registry 中按类型名创建/复用元表并保持 Lua C API 返回值语义，`luaL_getmetatable` 复用 `lua_getfield(L, LUA_REGISTRYINDEX, name)` 语义并额外导出兼容符号。当前 `luaL_checkudata` 还未比较 userdata raw 元表与命名元表，registry integer ref 仍待 `luaL_ref` / `lua_rawgeti` 阶段接入。
 - 2026-07-06：新增 `luaL_checkudata` 最小类型检查；成功路径按 Lua 5.3 规则比较 userdata raw metatable 与 `registry[tname]` identity，并返回 native full userdata 的 C 数据区指针。失败路径当前记录 pending error 并返回 nil，等待 C function 返回边界传播；尚未实现 C 层 longjmp，因此不应把失败返回 nil 的行为视为完整 lauxlib 错误语义。
 - 2026-07-06：新增 `lua_rawgeti` / `lua_rawseti` 最小 raw integer API；支持普通 table 和 registry pseudo-index，按 integer key 直接读写且不触发元方法，`rawseti` 成功时弹出栈顶 value。当前无效目标仍保持 no-op/none，后续 api_check/错误边界统一收口。
+- 2026-07-06：新增 `luaL_ref` / `luaL_unref` 最小 registry 引用 API；按 Lua 5.3 lauxlib 语义处理 `LUA_REFNIL` / `LUA_NOREF`、`t[0]` freelist 复用和 `#t+1` 追加分配。当前非法 table 目标返回 no-ref/no-op，后续 api_check/longjmp 阶段统一收口。

@@ -225,3 +225,111 @@ func TestNativeCAPIRawIntegerRejectsInvalidTarget(t *testing.T) {
 		t.Fatalf("invalid lua_rawgeti type = %d, want %d", typeCode, nativeLuaTypeNone)
 	}
 }
+
+// TestNativeCAPILRefRegistryAllocatesAndReuses 验证 luaL_ref/luaL_unref 的 registry freelist 语义。
+func TestNativeCAPILRefRegistryAllocatesAndReuses(t *testing.T) {
+	// luaL_ref 是 userdata/registry 阶段的关键能力，必须能分配引用并复用已释放槽位。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+	registry := state.Registry()
+
+	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'f', 'i', 'r', 's', 't', 0}[0]))
+	firstRef := nativeLuaLRef(luaState, runtime.RegistryPseudoIndex)
+	if firstRef <= 0 {
+		// 非 nil 值必须获得正整数引用。
+		t.Fatalf("first luaL_ref = %d, want positive", firstRef)
+	}
+	if got := nativeLuaStackTop(luaState); got != 0 {
+		// luaL_ref 成功后必须弹出被引用值。
+		t.Fatalf("first luaL_ref top = %d, want 0", got)
+	}
+	if value := registry.RawGetInteger(int64(firstRef)); value.Kind != runtime.KindString || value.String != "first" {
+		// registry[ref] 必须保存第一个字符串。
+		t.Fatalf("registry[firstRef] = %#v, want first", value)
+	}
+
+	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'s', 'e', 'c', 'o', 'n', 'd', 0}[0]))
+	secondRef := nativeLuaLRef(luaState, runtime.RegistryPseudoIndex)
+	if secondRef <= firstRef {
+		// freelist 为空时第二个引用应追加到更大的正整数槽位。
+		t.Fatalf("second luaL_ref = %d, want > %d", secondRef, firstRef)
+	}
+
+	nativeLuaLUnref(luaState, runtime.RegistryPseudoIndex, firstRef)
+	if value := registry.RawGetInteger(int64(firstRef)); !value.IsNil() {
+		// 释放首个引用时，空 freelist 会让该槽位变为 nil。
+		t.Fatalf("registry[firstRef] after unref = %#v, want nil", value)
+	}
+	if value := registry.RawGetInteger(nativeLuaRefFreeIndex); value.Kind != runtime.KindInteger || value.Integer != int64(firstRef) {
+		// t[0] 必须记录 freelist 头。
+		t.Fatalf("registry freelist head = %#v, want %d", value, firstRef)
+	}
+
+	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'t', 'h', 'i', 'r', 'd', 0}[0]))
+	reusedRef := nativeLuaLRef(luaState, runtime.RegistryPseudoIndex)
+	if reusedRef != firstRef {
+		// 新引用必须复用刚释放的 freelist 头。
+		t.Fatalf("reused luaL_ref = %d, want %d", reusedRef, firstRef)
+	}
+	if value := registry.RawGetInteger(nativeLuaRefFreeIndex); !value.IsNil() {
+		// freelist 只有一个节点时复用后 t[0] 回到 nil。
+		t.Fatalf("registry freelist head after reuse = %#v, want nil", value)
+	}
+	if value := registry.RawGetInteger(int64(reusedRef)); value.Kind != runtime.KindString || value.String != "third" {
+		// 复用槽位必须保存新的字符串。
+		t.Fatalf("registry[reusedRef] = %#v, want third", value)
+	}
+	if value := registry.RawGetInteger(int64(secondRef)); value.Kind != runtime.KindString || value.String != "second" {
+		// 未释放的第二个引用不能被 freelist 复用破坏。
+		t.Fatalf("registry[secondRef] = %#v, want second", value)
+	}
+}
+
+// TestNativeCAPILRefNilAndInvalidTargets 验证 luaL_ref 的预定义引用和失败安全边界。
+func TestNativeCAPILRefNilAndInvalidTargets(t *testing.T) {
+	// nil 引用必须返回 LUA_REFNIL；非法 table 目标当前保持 LUA_NOREF/no-op。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+	registry := state.Registry()
+
+	nativeLuaPushNil(luaState)
+	if ref := nativeLuaLRef(luaState, runtime.RegistryPseudoIndex); ref != nativeLuaRefNil {
+		// nil 值按 Lua 5.3 lauxlib 语义返回 LUA_REFNIL。
+		t.Fatalf("nil luaL_ref = %d, want %d", ref, nativeLuaRefNil)
+	}
+	if got := nativeLuaStackTop(luaState); got != 0 {
+		// nil 引用也必须弹出 nil 值。
+		t.Fatalf("nil luaL_ref top = %d, want 0", got)
+	}
+	nativeLuaLUnref(luaState, runtime.RegistryPseudoIndex, nativeLuaNoRef)
+	nativeLuaLUnref(luaState, runtime.RegistryPseudoIndex, nativeLuaRefNil)
+	if value := registry.RawGetInteger(nativeLuaRefFreeIndex); !value.IsNil() {
+		// 释放预定义负数引用不能污染 freelist。
+		t.Fatalf("registry freelist after negative unref = %#v, want nil", value)
+	}
+
+	nativeLuaPushInteger(luaState, 1)
+	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'v', 0}[0]))
+	if ref := nativeLuaLRef(luaState, 1); ref != nativeLuaNoRef {
+		// 非 table 目标当前返回 LUA_NOREF，后续 api_check 阶段再补错误。
+		t.Fatalf("invalid luaL_ref = %d, want %d", ref, nativeLuaNoRef)
+	}
+	if got := nativeLuaStackTop(luaState); got != 2 {
+		// 非 table 目标不能弹出待引用值，避免提前吞掉 C 模块数据。
+		t.Fatalf("invalid luaL_ref top = %d, want 2", got)
+	}
+}
