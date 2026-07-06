@@ -233,6 +233,30 @@ local skipped = _G["${global_name}"]
 local message = "unexpected falsy select count"
 LUA
       ;;
+    select-count-global-only-*)
+      local global_name="${mode#select-count-global-only-}"
+      cat <<LUA
+local count = select("#", "alpha", "beta")
+local skipped = _G["${global_name}"]
+LUA
+      ;;
+    select-count-message-global-*)
+      local global_name="${mode#select-count-message-global-}"
+      cat <<LUA
+local count = select("#", "alpha", "beta")
+local message = "unexpected falsy select count"
+local skipped = _G["${global_name}"]
+LUA
+      ;;
+    select-count-global-spacer-message-*)
+      local global_name="${mode#select-count-global-spacer-message-}"
+      cat <<LUA
+local count = select("#", "alpha", "beta")
+local skipped = _G["${global_name}"]
+local spacer = 0
+local message = "unexpected falsy select count"
+LUA
+      ;;
     select-count-if-truthy)
       cat <<'LUA'
 local count = select("#", "alpha", "beta")
