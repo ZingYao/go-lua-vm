@@ -45,11 +45,11 @@
 - [x] 动态库 loader 返回 Lua 可调用 loader，接入 `PackageDynamicLibraryLoader`。
   - [x] 已新增 State-aware loader 工厂入口，后续 native shim 可绑定当前 State 后返回 Lua callable。
 - [x] `native_modules` 构建下 CLI 自动注入 State-aware native loader。
-- [ ] `package.loadlib(path, symbol)` 在 native 构建下可加载 fixture 入口。
+- [x] `package.loadlib(path, symbol)` 在 native 构建下可加载 fixture 入口。
   - [x] 已验证 Linux/macOS 真实 fixture 可解析到 `luaopen_*`，无状态 loader 仍返回 `init` 分类。
   - [x] 已验证 State-aware loader 可返回 callable 并实际调用 fixture `luaopen_*`。
 - [x] `require("mod")` 在 native 构建下可通过 `package.cpath` 命中 fixture。
-- [ ] 保持默认构建 `package.loadlib` 禁用说明不变。
+- [x] 保持默认构建 `package.loadlib` 禁用说明不变。
 
 ## 第三阶段：最小 Lua C API shim
 
@@ -268,3 +268,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：增强 `scripts/check-native-cross-compile.sh`；`NATIVE_CC_*` / `CC` 现在可传入带参数的编译器命令，脚本只校验第一个命令词是否存在，完整命令仍原样传给 Go/cgo，方便后续 Linux/Windows CI 使用 `zig cc -target ...` 或等价 cross toolchain。
 - 2026-07-06：固定第二真实模块 LPeg 1.1.0 到 `third_party/lpeg/`，新增 `GLUA_VENDOR.md` 记录官方源码包 URL、版本、许可位置和本项目未改源码；该切口只完成源码自包含门禁，尚未声明 `require("lpeg")` 运行期验收通过。
 - 2026-07-06：新增 `scripts/build-native-lpeg.sh`，直接使用仓库内 `native/lua53/include/` 与 `third_party/lpeg/` 固定源码编译当前平台 `lpeg` 动态模块；macOS 同时产出 `.so` 与 `.dylib`，Linux 产出 `.so`，Windows 在 `lua53.dll` shim/import library 落地前明确 skip。该切口只证明 LPeg 源码可自包含编译，`require("lpeg")` 运行期验收仍等待独立脚本闭环。
+- 2026-07-06：复核 `package.loadlib` 门禁并同步 TODO；`go test ./stdlib/package -run 'TestLoadLibDisabled|TestCLoadingPolicyDocumentsUnsupportedDynamicLibraries|TestLoadLibUsesDynamicLibraryLoader'` 确认默认 no-CGO 禁用说明和宿主 loader 覆盖稳定，`CGO_ENABLED=1 go test -tags native_modules ./internal/native -run 'TestUnixPackageLoadLibResolvesNativeFixture|TestUnixPackageLoadLibReturnsCallableNativeFixture'` 确认 native fixture 可通过 `package.loadlib` 解析并在 state-aware loader 下调用。LPeg 运行期探测已进入动态库打开阶段，但当前被 `_luaL_addlstring` 等尚未导出的 public C API 阻塞，后续需按 `luaL_Buffer`、table/user value、raw length/equality/call 等 API 组分批补齐。
