@@ -165,6 +165,7 @@ state := lua.NewStateWithOptions(options)
 
 - `lua_gettop`
 - `lua_settop`
+- `lua_copy`
 - `lua_pushvalue`
 - `lua_pushnil`
 - `lua_pushboolean`

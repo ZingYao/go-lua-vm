@@ -109,8 +109,10 @@
   - [x] `lua_tolstring`
   - [x] `lua_callk` / `lua_call`
     - [x] Lua 5.3 public header 的 `lua_call` 宏会展开到 `lua_callk`；当前实现覆盖非 yield、非 continuation 路径。
-  - [ ] `lua_compare`
-    - [ ] LPeg 1.1.0 当前运行期探针阻塞在 `_lua_compare`。
+  - [x] `lua_compare`
+    - [x] 当前覆盖 EQ raw equality，以及 number/string 的 LT/LE 基础比较；元方法比较后续按真实模块需求扩展。
+  - [ ] `lua_copy`
+    - [ ] LPeg 1.1.0 当前运行期探针阻塞在 `_lua_copy`。
 - [x] 支持 C function 读取 Lua 参数并返回多值。
 - [x] fixture：C 模块函数 `add(a, b)`、`echo(s)`、`multi()`。
 
@@ -290,3 +292,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：新增 `luaL_checktype` 基础类型检查；成功路径按 `lua_type` 类型编号比较，失败路径记录 `bad argument #n (<expected> expected, got <actual>)` pending error。LPeg 1.1.0 macOS arm64 运行期探针确认阻塞点已从 `_luaL_checktype` 前移到 `_luaL_optinteger`，下一轮应继续补齐 optional integer 参数 API。
 - 2026-07-06：新增 `luaL_optinteger` 可选整数参数读取；缺失参数和 `nil` 返回调用方默认值，存在但不可转整数的参数记录 `bad argument #n (integer expected)` pending error。LPeg 1.1.0 macOS arm64 运行期探针确认阻塞点已从 `_luaL_optinteger` 前移到 `_lua_callk`，下一轮应优先补齐非 yield `lua_callk` / `lua_call` 调用路径。
 - 2026-07-06：新增 `lua_callk` / `lua_call` 非 protected 调用路径；成功时按 `nresults` 搬运返回值，失败时记录 pending error 并等待当前 C function 返回边界传播，不实现 yield continuation。LPeg 1.1.0 macOS arm64 运行期探针确认阻塞点已从 `_lua_callk` 前移到 `_lua_compare`，下一轮应补齐 Lua 5.3 compare API。
+- 2026-07-06：新增 `lua_compare` 基础比较 API；`LUA_OPEQ` 覆盖 raw equality，`LUA_OPLT` / `LUA_OPLE` 覆盖 number 与 string 基础比较，不可比较类型记录 pending error。LPeg 1.1.0 macOS arm64 运行期探针确认阻塞点已从 `_lua_compare` 前移到 `_lua_copy`，下一轮应补齐栈槽复制 API。
