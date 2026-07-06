@@ -212,8 +212,9 @@
         - [x] 2026-07-07 复核：使用 `gopls check stdlib/base/base.go lua/api.go runtime/vm.go` 确认目标包无诊断；新增 `scripts/probe-native-lpeg-select-count.sh`，把 `1-620` 前序状态后的 `baseline`、`select("#")`、`select(1, ...)`、`select("#", "alpha", "beta")` 四组单独固化为可复跑 probe。当前输出显示前三组为 good，非空 `select("#", ...)` 为 bad，进一步排除 `select` 空计数和索引返回路径。
         - [x] 2026-07-07 复核：扩展 `scripts/probe-native-lpeg-select-count.sh` 的返回形态矩阵；普通 Lua 函数返回整数 `2`、Lua vararg 函数返回整数 `2`、Lua 函数内部 `return select("#", ...)`、`assert(2)` 和 `assert(2, "ok")` 均保持 good，仅顶层直接 `select("#", "alpha", "beta")` 保持 bad。因此进一步证伪“整数 2 返回值本身”“Lua vararg 调用”“GoResultsFunction 透传整数/多返回”是必要根因，下一轮应审查该 CALL 形态的结果寄存器写回和后续寄存器/开放栈顶清理。
         - [x] 2026-07-07 复核：新增 `lua.TestDoStringSelectCountFixedResultDoesNotLeakArguments` 作为模块无关 Go 回归测试；纯 Go VM 中顶层固定单返回 `select("#", "alpha", "beta")` 后继续调用 vararg 函数、table constructor 和公开 State 栈清理均通过。该结果证伪“普通固定单返回 CALL 在无 native/LPeg 前序状态下必然泄漏实参或开放栈顶”是必要根因，后续应聚焦 native/LPeg 前序状态与 VM 调用边界叠加后的隔离差异。
+        - [x] 2026-07-07 复核：继续扩展 `scripts/probe-native-lpeg-select-count.sh` 的 select 计数矩阵；`select("#", "alpha", "beta")` 调用语句直接丢弃返回值保持 good，单个非空参数的 `select("#", "alpha")` / `select("#", 17)` 也保持 good，但两个数字参数、双返回左值接收和 table constructor 消费计数结果均为 bad。当前边界进一步收敛为 native/LPeg 前序状态后“两个以上非空参数的 select 计数结果被后续消费”触发的通用寄存器/返回值/GC 根隔离问题，而不是参数值类型、返回值内容或 `select` Go closure 调用本身。
         - [ ] 修复门禁：LPeg 只作为真实第三方 C 模块集成验收和问题暴露样本，禁止通过模块名、测试行号、特定 pattern、特定返回值或 LPeg 私有行为做特向性修复；任何生产代码修复都必须能解释为通用 Lua 5.3 C API、VM 调用帧、vararg、返回值写回、栈隔离、registry/metatable/userdata 或错误恢复语义，并补充模块无关的定向测试或 probe。
-        - [ ] 下一轮继续使用 gopls 审查 native/LPeg 前序状态后顶层直接 `select("#", 非空变参)` 调用点的结果寄存器写回、固定/开放返回、寄存器清理和 `openTop` 复位路径；只有能抽象为通用 VM/native 调用帧隔离语义时才进入生产代码小切口。
+        - [ ] 下一轮继续使用 gopls 审查 native/LPeg 前序状态后顶层直接 `select("#", 两个以上非空变参)` 固定结果被消费时的结果寄存器写回、参数槽清理、活跃寄存器/GC 根扫描和 `openTop` 复位路径；只有能抽象为通用 VM/native 调用帧隔离语义时才进入生产代码小切口。
   - [ ] LuaSocket 或等价网络库验收：仅在 userdata/metatable/registry/错误边界稳定后进入平台闭环。
 - [ ] 增加交叉编译验证脚本：
   - [x] `scripts/check-native-cross-compile.sh`：显式输出 `GOOS`、`GOARCH`、`CC`、产物路径和缺失 toolchain 时的 skip 原因。

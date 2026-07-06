@@ -108,6 +108,51 @@ if count ~= 2 then
 end
 LUA
       ;;
+    select-count-nonempty-discard)
+      cat <<'LUA'
+select("#", "alpha", "beta")
+LUA
+      ;;
+    select-count-one-string)
+      cat <<'LUA'
+local count = select("#", "alpha")
+if count ~= 1 then
+  error("unexpected one-string select count")
+end
+LUA
+      ;;
+    select-count-one-number)
+      cat <<'LUA'
+local count = select("#", 17)
+if count ~= 1 then
+  error("unexpected one-number select count")
+end
+LUA
+      ;;
+    select-count-two-numbers)
+      cat <<'LUA'
+local count = select("#", 17, 25)
+if count ~= 2 then
+  error("unexpected two-number select count")
+end
+LUA
+      ;;
+    select-count-multivar)
+      cat <<'LUA'
+local count, extra = select("#", "alpha", "beta")
+if count ~= 2 or extra ~= nil then
+  error("unexpected multi-var select count")
+end
+LUA
+      ;;
+    select-count-table-constructor)
+      cat <<'LUA'
+local packed = {select("#", "alpha", "beta")}
+if #packed ~= 1 or packed[1] ~= 2 then
+  error("unexpected table constructor select count")
+end
+LUA
+      ;;
     lua-return-integer-two)
       cat <<'LUA'
 local function diag()
@@ -206,6 +251,12 @@ modes=(
   select-count-empty
   select-index-nonempty
   select-count-nonempty
+  select-count-nonempty-discard
+  select-count-one-string
+  select-count-one-number
+  select-count-two-numbers
+  select-count-multivar
+  select-count-table-constructor
   lua-return-integer-two
   lua-return-integer-two-after-vararg
   lua-return-select-count-nonempty
