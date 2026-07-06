@@ -94,8 +94,8 @@
 ## 第五阶段：userdata、metatable、registry
 
 - [ ] 实现 userdata：
-  - [ ] `lua_newuserdata`
-  - [ ] `lua_touserdata`
+  - [x] `lua_newuserdata`
+  - [x] `lua_touserdata`
   - [ ] `luaL_checkudata`
 - [ ] 实现 metatable：
   - [ ] `luaL_newmetatable`
@@ -221,3 +221,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：新增 C module 初始化错误验收；同一 Unix fixture 额外导出 `luaopen_glua_native_failopen`，并以模块名匹配的动态库文件走标准 `package.cpath` 和 `require` 路径。测试已验证 `pcall(require, "glua_native_failopen")` 捕获 luaopen 阶段的 `luaL_error("native open failure")`，且失败后不污染 `package.loaded`。
 - 2026-07-06：新增 C function 运行时错误 traceback 验收；Unix require fixture 通过 `xpcall(function() mod.fail("trace") end, debug.traceback)` 验证 C function 中的 `luaL_error` 会进入现有 protected-call traceback 链，返回文本同时包含原始错误文本和 `stack traceback:`。C frame 具体如何在 traceback 中命名或展示仍保持独立策略 TODO，不在本切口伪造帧信息。
 - 2026-07-06：定义 C frame traceback 展示策略；native C function 继续复用 Go closure 调试帧，函数名来自 Lua 调用点 `name/namewhat` 推断，不伪造 C 源码文件、C 行号、C 栈地址或动态库内部调用栈。该策略保持 `pcall`/`xpcall` 错误对象和默认 no-CGO 行为不变，后续若增加专用 native frame 元信息必须作为附加展示。
+- 2026-07-06：新增 native full userdata 基础 API；`lua_newuserdata` 会在 C heap 分配可读写数据区、压入 `runtime.Userdata`，并把释放动作绑定到 `State.Close`，`lua_touserdata` 只对 native shim 创建的 full userdata 返回同一 C 指针。当前尚未支持 `luaL_checkudata`、metatable 与 registry，因此真实第三方模块仍需等后续阶段闭环。

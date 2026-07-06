@@ -1,0 +1,149 @@
+//go:build native_modules
+
+package native
+
+/*
+#include <stdlib.h>
+
+typedef struct lua_State lua_State;
+*/
+import "C"
+
+import (
+	"unsafe"
+
+	"github.com/zing/go-lua-vm/runtime"
+)
+
+// nativeUserdataBlock 保存 Lua C full userdata 的 C 可见内存块。
+type nativeUserdataBlock struct {
+	// pointer 指向 C heap 上分配的 userdata 数据区，允许 C 模块直接读写。
+	pointer unsafe.Pointer
+	// size 记录 lua_newuserdata 请求的逻辑字节数，0 字节 userdata 仍会分配 1 字节哨兵。
+	size uintptr
+}
+
+// newNativeUserdataBlock 分配一块由 Lua C 模块持有的 full userdata 内存。
+func newNativeUserdataBlock(size uintptr) (*nativeUserdataBlock, bool) {
+	// Lua 允许 0 字节 full userdata；C malloc(0) 结果不稳定，因此用 1 字节哨兵保持非 nil identity。
+	allocationSize := size
+	if allocationSize == 0 {
+		// 0 字节 userdata 仍需要稳定地址，供 lua_touserdata 返回同一 identity。
+		allocationSize = 1
+	}
+	pointer := C.calloc(1, C.size_t(allocationSize))
+	if pointer == nil {
+		// 分配失败时当前最小 shim 不 longjmp，调用方会返回 NULL 并保持栈不变。
+		return nil, false
+	}
+
+	// C heap 指针只存放在 Go wrapper 中，不把 Go 指针暴露给 C 模块。
+	return &nativeUserdataBlock{
+		pointer: pointer,
+		size:    size,
+	}, true
+}
+
+// data 返回当前 userdata 数据区指针。
+func (block *nativeUserdataBlock) data() unsafe.Pointer {
+	if block == nil {
+		// nil block 表示 userdata 构造路径异常，C API 视为不可转换。
+		return nil
+	}
+
+	// 返回 C heap 指针，调用方不得在 State.Close 后继续使用。
+	return block.pointer
+}
+
+// release 释放 C heap 上的 userdata 内存。
+func (block *nativeUserdataBlock) release() {
+	if block == nil || block.pointer == nil {
+		// nil 或已释放 block 保持幂等。
+		return
+	}
+
+	// C 内存由 native shim 分配，因此也必须由 native shim 释放。
+	C.free(block.pointer)
+	block.pointer = nil
+}
+
+// nativeLuaUserdataFinalizer 在 State.Close 阶段释放 native full userdata。
+func nativeLuaUserdataFinalizer(payload any) error {
+	// payload 必须来自 newNativeUserdataBlock；其他来源忽略以保持关闭路径稳健。
+	block, ok := payload.(*nativeUserdataBlock)
+	if !ok {
+		// 非 native block 不是本 shim 的所有权范围。
+		return nil
+	}
+	block.release()
+	return nil
+}
+
+// nativeLuaNewUserdata 实现 Lua 5.3 C API 的 lua_newuserdata。
+func nativeLuaNewUserdata(luaState unsafe.Pointer, size uintptr) unsafe.Pointer {
+	// 先解析 opaque State，失效 State 不能分配或压栈。
+	state, ok := lookupNativeStateHandle(luaState)
+	if !ok {
+		// 无效 State 返回 NULL，当前阶段不跨 C 边界抛出错误。
+		return nil
+	}
+	block, ok := newNativeUserdataBlock(size)
+	if !ok {
+		// 分配失败保持栈不变，后续错误阶段再补齐 longjmp 语义。
+		return nil
+	}
+
+	// native full userdata 通过 runtime.Userdata 承载，并在 State.Close 时释放 C 内存。
+	userdata := runtime.NewUserdataWithFinalizer(block, nativeLuaUserdataFinalizer)
+	if err := state.RegisterUserdata(userdata); err != nil {
+		// 注册失败说明 State 生命周期不可用，必须立即释放刚分配的 C 内存。
+		block.release()
+		return nil
+	}
+	if err := state.Push(userdata.Value()); err != nil {
+		// 压栈失败时返回 NULL；userdata 已注册，会在 State.Close 中释放，避免无主泄漏。
+		return nil
+	}
+
+	// 返回 C 模块可读写的数据区地址，栈顶保留对应 full userdata 对象。
+	return block.data()
+}
+
+// nativeLuaToUserdata 实现 Lua 5.3 C API 的 lua_touserdata。
+func nativeLuaToUserdata(luaState unsafe.Pointer, index int) unsafe.Pointer {
+	// 通过统一 helper 读取 C API 视角下的索引，none/nil 都不可转换为 userdata。
+	value, ok := nativeLuaValueAt(luaState, index)
+	if !ok || value.Kind != runtime.KindUserdata {
+		// 非 userdata 返回 NULL，与 Lua C API 转换失败语义一致。
+		return nil
+	}
+	userdata, ok := value.Ref.(*runtime.Userdata)
+	if !ok || userdata == nil {
+		// 损坏的 userdata 引用不向 C 模块暴露。
+		return nil
+	}
+	block, ok := userdata.Data.(*nativeUserdataBlock)
+	if !ok {
+		// 当前 shim 只把 native 创建的 full userdata 暴露为 C 指针；纯 Go userdata 不可转换。
+		return nil
+	}
+
+	// 返回创建时分配的同一 C heap 指针。
+	return block.data()
+}
+
+// lua_newuserdata 导出 Lua 5.3 C API full userdata 创建入口。
+//
+//export lua_newuserdata
+func lua_newuserdata(luaState *C.lua_State, size C.size_t) unsafe.Pointer {
+	// C API 入口只做类型转换，生命周期由 Go helper 绑定到 State.Close。
+	return nativeLuaNewUserdata(unsafe.Pointer(luaState), uintptr(size))
+}
+
+// lua_touserdata 导出 Lua 5.3 C API userdata 指针查询入口。
+//
+//export lua_touserdata
+func lua_touserdata(luaState *C.lua_State, index C.int) unsafe.Pointer {
+	// C API 入口只做类型转换，具体索引与类型判断由 Go helper 维护。
+	return nativeLuaToUserdata(unsafe.Pointer(luaState), int(index))
+}
