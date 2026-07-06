@@ -332,9 +332,9 @@ func nativeLuaNext(luaState unsafe.Pointer, index int) int {
 		// 非 table 目标在当前最小 shim 中按迭代结束处理。
 		return 0
 	}
-	key, err := state.Pop()
-	if err != nil {
-		// 缺少当前 key 时无法继续迭代。
+	key, ok := nativeLuaPopVisible(luaState, state)
+	if !ok {
+		// 当前 C 帧没有可见 key 时无法继续迭代，且不得弹掉外层 VM 栈。
 		return 0
 	}
 	nextKey, nextValue, hasNext, err := table.RawPairsNext(key)

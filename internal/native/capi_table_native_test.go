@@ -533,6 +533,45 @@ func TestNativeCAPIRawSetAndNext(t *testing.T) {
 	}
 }
 
+// TestNativeLuaNextRespectsCurrentCFrameBase 验证 lua_next 不会弹出当前 C 帧之前的外层 key。
+func TestNativeLuaNextRespectsCurrentCFrameBase(t *testing.T) {
+	// registry 目标在当前 C 帧无可见 key 时，最容易暴露 next 是否误弹调用者栈。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 C frame 边界。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	keyBytes := []byte{'o', 'u', 't', 'e', 'r', '_', 'k', 'e', 'y', 0}
+	nativeLuaPushString(luaState, unsafe.Pointer(&keyBytes[0]))
+	if !pushNativeStateCallFrame(luaState, state.StackTop(), nil) {
+		// 无法建立 C 调用帧时，后续索引语义不可验证。
+		t.Fatal("pushNativeStateCallFrame failed")
+	}
+	defer popNativeStateCallFrame(luaState)
+
+	if got := nativeLuaNext(luaState, runtime.RegistryPseudoIndex); got != 0 {
+		// 当前 C 帧没有可见 key 时，next 必须按迭代结束/失败返回 0。
+		t.Fatalf("lua_next result = %d, want 0", got)
+	}
+	if got := state.StackTop(); got != 1 {
+		// 当前 C 帧没有可见 key 时，next 不得弹掉外层 sentinel。
+		t.Fatalf("lua_next global top = %d, want 1", got)
+	}
+	if value := state.ValueAt(1); value.Kind != runtime.KindString || value.String != "outer_key" {
+		// 外层 key sentinel 必须原样保留给调用者。
+		t.Fatalf("outer key stack value = %#v, want outer_key", value)
+	}
+	if errorObject, hasError := takeNativeStatePendingError(luaState); hasError {
+		// 缺少当前 C 帧可见 key 不应产生额外 pending error。
+		t.Fatalf("lua_next pending error = %#v", errorObject)
+	}
+}
+
 // TestNativeLuaRawSetRespectsCurrentCFrameBase 验证 lua_rawset 不会弹出当前 C 帧之前的外层栈值。
 func TestNativeLuaRawSetRespectsCurrentCFrameBase(t *testing.T) {
 	// registry 目标在当前 C 帧无可见 key/value 时，最容易暴露 rawset 是否误弹调用者栈。
