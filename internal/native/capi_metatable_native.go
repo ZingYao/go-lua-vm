@@ -132,6 +132,35 @@ func nativeLuaGetMetatable(luaState unsafe.Pointer, index int) int {
 	return 1
 }
 
+// nativeLuaLNewMetatable 实现 Lua 5.3 lauxlib 的 luaL_newmetatable。
+func nativeLuaLNewMetatable(luaState unsafe.Pointer, typeNamePointer unsafe.Pointer) int {
+	// registry 是 Lua C API 命名元表的存储位置，失效 State 或空名字都不能创建元表。
+	registry, ok := nativeLuaTableAt(luaState, runtime.RegistryPseudoIndex)
+	if !ok || typeNamePointer == nil {
+		// 当前最小 shim 不执行 luaL_argerror，保持失败安全并不改栈。
+		return 0
+	}
+	typeName := nativeLuaCString(typeNamePointer)
+	existing := registry.RawGetString(typeName)
+	if !existing.IsNil() {
+		// 名字已存在时压入现有值并返回 0，完全对齐 luaL_newmetatable 的复用语义。
+		nativeLuaPushValue(luaState, existing)
+		return 0
+	}
+
+	// 首次创建命名元表时同时写入 registry 并把新表留在栈顶。
+	metatableValue := runtime.ReferenceValue(runtime.KindTable, runtime.NewTable())
+	registry.RawSetString(typeName, metatableValue)
+	nativeLuaPushValue(luaState, metatableValue)
+	return 1
+}
+
+// nativeLuaLGetMetatable 实现 Lua 5.3 头文件宏 luaL_getmetatable 的直接 helper。
+func nativeLuaLGetMetatable(luaState unsafe.Pointer, typeNamePointer unsafe.Pointer) int {
+	// Lua 5.3 public header 将 luaL_getmetatable 展开成 lua_getfield(registry, name)，这里保持同一语义。
+	return nativeLuaGetField(luaState, runtime.RegistryPseudoIndex, typeNamePointer)
+}
+
 // lua_setmetatable 导出 Lua 5.3 C API raw 元表写入入口。
 //
 //export lua_setmetatable
@@ -146,4 +175,20 @@ func lua_setmetatable(luaState *C.lua_State, index C.int) C.int {
 func lua_getmetatable(luaState *C.lua_State, index C.int) C.int {
 	// C API 入口只做类型转换，返回 1 表示已把元表压栈，0 表示无元表。
 	return C.int(nativeLuaGetMetatable(unsafe.Pointer(luaState), int(index)))
+}
+
+// luaL_newmetatable 导出 Lua 5.3 lauxlib 命名元表创建入口。
+//
+//export luaL_newmetatable
+func luaL_newmetatable(luaState *C.lua_State, typeName *C.char) C.int {
+	// C API 入口只做类型转换，具体 registry 写入和压栈语义由 Go helper 维护。
+	return C.int(nativeLuaLNewMetatable(unsafe.Pointer(luaState), unsafe.Pointer(typeName)))
+}
+
+// luaL_getmetatable 导出 Lua 5.3 lauxlib 命名元表读取入口。
+//
+//export luaL_getmetatable
+func luaL_getmetatable(luaState *C.lua_State, typeName *C.char) C.int {
+	// Lua 5.3 头文件通常以宏实现该入口；导出符号用于兼容未走宏展开的模块。
+	return C.int(nativeLuaLGetMetatable(unsafe.Pointer(luaState), unsafe.Pointer(typeName)))
 }

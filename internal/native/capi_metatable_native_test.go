@@ -4,6 +4,7 @@ package native
 
 import (
 	"testing"
+	"unsafe"
 
 	"github.com/zing/go-lua-vm/runtime"
 )
@@ -129,5 +130,95 @@ func TestNativeLuaSetMetatableRejectsInvalidInput(t *testing.T) {
 	if got := nativeLuaGetMetatable(luaState, 99); got != 0 {
 		// 无效索引读取元表返回 0。
 		t.Fatalf("lua_getmetatable(invalid index) = %d, want 0", got)
+	}
+}
+
+// TestNativeLuaLNewMetatableCreatesAndReusesRegistryEntry 验证 luaL_newmetatable 命名元表语义。
+func TestNativeLuaLNewMetatableCreatesAndReusesRegistryEntry(t *testing.T) {
+	// 命名元表必须存放在 registry，后续 luaL_checkudata 会按同一名字取回。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 native State 映射不可用。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+	typeNameBytes := []byte{'g', 'l', 'u', 'a', '.', 'u', 'd', 0}
+	typeNamePointer := unsafe.Pointer(&typeNameBytes[0])
+
+	if got := nativeLuaLNewMetatable(luaState, typeNamePointer); got != 1 {
+		// 首次创建命名元表必须返回 1。
+		t.Fatalf("luaL_newmetatable first = %d, want 1", got)
+	}
+	if got := nativeLuaStackTop(luaState); got != 1 {
+		// 新元表必须留在栈顶。
+		t.Fatalf("top after first luaL_newmetatable = %d, want 1", got)
+	}
+	createdValue := state.ValueAt(-1)
+	if createdValue.Kind != runtime.KindTable {
+		// 新建结果必须是 table。
+		t.Fatalf("luaL_newmetatable value = %#v, want table", createdValue)
+	}
+	registryValue := state.ValueAt(runtime.RegistryPseudoIndex)
+	registry := registryValue.Ref.(*runtime.Table)
+	if registry.RawGetString("glua.ud").Ref != createdValue.Ref {
+		// registry 中必须保存同一个命名元表引用。
+		t.Fatalf("registry named metatable mismatch")
+	}
+
+	if got := nativeLuaLNewMetatable(luaState, typeNamePointer); got != 0 {
+		// 第二次遇到已有名字必须返回 0。
+		t.Fatalf("luaL_newmetatable second = %d, want 0", got)
+	}
+	if got := nativeLuaStackTop(luaState); got != 2 {
+		// 第二次调用会把既有值再压栈。
+		t.Fatalf("top after second luaL_newmetatable = %d, want 2", got)
+	}
+	if reusedValue := state.ValueAt(-1); reusedValue.Ref != createdValue.Ref {
+		// 复用路径必须压入同一元表引用，而不是创建新表。
+		t.Fatalf("luaL_newmetatable reused = %#v, want %p", reusedValue, createdValue.Ref)
+	}
+}
+
+// TestNativeLuaLGetMetatableReadsRegistryEntry 验证 luaL_getmetatable 读取 registry 命名元表。
+func TestNativeLuaLGetMetatableReadsRegistryEntry(t *testing.T) {
+	// 该 helper 与 Lua 5.3 头文件宏保持一致：读取 registry[name] 并压入结果。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 native State 映射不可用。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+	typeNameBytes := []byte{'g', 'l', 'u', 'a', '.', 'm', 't', 0}
+	typeNamePointer := unsafe.Pointer(&typeNameBytes[0])
+
+	if got := nativeLuaLGetMetatable(luaState, typeNamePointer); got != nativeLuaTypeNil {
+		// 不存在的名字应压入 nil 并返回 nil 类型编号。
+		t.Fatalf("missing luaL_getmetatable type = %d, want %d", got, nativeLuaTypeNil)
+	}
+	if value := state.ValueAt(-1); !value.IsNil() {
+		// 缺失命名元表读取结果必须是 nil。
+		t.Fatalf("missing luaL_getmetatable value = %#v, want nil", value)
+	}
+	nativeLuaSetTop(luaState, 0)
+
+	if got := nativeLuaLNewMetatable(luaState, typeNamePointer); got != 1 {
+		// 创建命名元表用于后续读取。
+		t.Fatalf("luaL_newmetatable = %d, want 1", got)
+	}
+	created := state.ValueAt(-1)
+	nativeLuaSetTop(luaState, 0)
+	if got := nativeLuaLGetMetatable(luaState, typeNamePointer); got != nativeLuaTypeTable {
+		// 已存在名字应压入 table 并返回 table 类型编号。
+		t.Fatalf("existing luaL_getmetatable type = %d, want %d", got, nativeLuaTypeTable)
+	}
+	if value := state.ValueAt(-1); value.Kind != runtime.KindTable || value.Ref != created.Ref {
+		// 读取到的命名元表必须是 registry 中同一个引用。
+		t.Fatalf("existing luaL_getmetatable value = %#v, want %p", value, created.Ref)
 	}
 }
