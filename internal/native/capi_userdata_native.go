@@ -123,9 +123,13 @@ func nativeLuaToUserdata(luaState unsafe.Pointer, index int) unsafe.Pointer {
 		// 损坏的 userdata 引用不向 C 模块暴露。
 		return nil
 	}
+	if light, ok := userdata.Data.(nativeLightUserdata); ok {
+		// lightuserdata 按 Lua C API 直接返回原始裸指针数值；NULL 指针也允许返回 nil。
+		return unsafe.Pointer(light.pointer)
+	}
 	block, ok := userdata.Data.(*nativeUserdataBlock)
 	if !ok {
-		// 当前 shim 只把 native 创建的 full userdata 暴露为 C 指针；纯 Go userdata 不可转换。
+		// 当前 shim 只把 native 创建的 full userdata 和 lightuserdata 暴露为 C 指针；纯 Go userdata 不可转换。
 		return nil
 	}
 

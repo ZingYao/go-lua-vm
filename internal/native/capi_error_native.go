@@ -43,11 +43,11 @@ func nativeLuaErrorMessage(luaState unsafe.Pointer, message unsafe.Pointer) int 
 	return 0
 }
 
-// lua_error 导出 Lua 5.3 C API error 入口。
+// glua_lua_error_record 记录 Lua 5.3 C API error 对象。
 //
-//export lua_error
-func lua_error(luaState *C.lua_State) C.int {
-	// C API 入口只做类型转换；真实错误传播在 nativeLuaCallCFunction 返回边界完成。
+//export glua_lua_error_record
+func glua_lua_error_record(luaState *C.lua_State) C.int {
+	// C wrapper 会在记录后 longjmp 回当前 C function 调用入口。
 	return C.int(nativeLuaError(unsafe.Pointer(luaState)))
 }
 

@@ -18,6 +18,7 @@ const (
 	nativeLuaTypeNone     = -1
 	nativeLuaTypeNil      = 0
 	nativeLuaTypeBoolean  = 1
+	nativeLuaTypeLightUD  = 2
 	nativeLuaTypeNumber   = 3
 	nativeLuaTypeString   = 4
 	nativeLuaTypeTable    = 5
@@ -59,6 +60,13 @@ func nativeLuaTypeCode(value runtime.Value, missing bool) int {
 		// Lua/C/Go closure 对 C API 统一表现为 function。
 		return nativeLuaTypeFunction
 	case runtime.KindUserdata:
+		// lightuserdata 与 full userdata 在 Lua C API 中使用不同 type code。
+		if userdata, ok := value.Ref.(*runtime.Userdata); ok && userdata != nil {
+			// nativeLightUserdata 由 lua_pushlightuserdata 创建，必须报告为 LUA_TLIGHTUSERDATA。
+			if _, ok := userdata.Data.(nativeLightUserdata); ok {
+				return nativeLuaTypeLightUD
+			}
+		}
 		// Lua full userdata 类型编号为 7。
 		return nativeLuaTypeUserdata
 	case runtime.KindThread:
@@ -170,6 +178,72 @@ func nativeLuaRawSetI(luaState unsafe.Pointer, index int, key int64) {
 	table.RawSetInteger(key, value)
 }
 
+// nativeLuaRawSet 按栈顶 key/value raw 写入 table，并弹出 key 和 value。
+func nativeLuaRawSet(luaState unsafe.Pointer, index int) {
+	// rawset 不触发元方法；目标必须是 table 或 registry pseudo-index。
+	state, ok := lookupNativeStateHandle(luaState)
+	if !ok {
+		// 无效 State 不能弹栈或写表。
+		return
+	}
+	table, ok := nativeLuaTableAt(luaState, index)
+	if !ok {
+		// 非 table 目标保持栈不变，后续 api_check 阶段再补齐错误语义。
+		return
+	}
+	if state.StackTop() < 2 {
+		// rawset 需要栈顶 value 与其下方 key。
+		return
+	}
+	value, err := state.Pop()
+	if err != nil {
+		// 弹出 value 失败时保持 no-op。
+		return
+	}
+	key, err := state.Pop()
+	if err != nil {
+		// key 缺失时无法写入；value 已按 C API 消费，保持当前最小边界。
+		return
+	}
+	if err := table.RawSet(key, value); err != nil {
+		// nil/NaN key 在 Lua C API 中属于运行期错误；当前通过 pending error 回传 Go 边界。
+		setNativeStatePendingError(luaState, runtime.StringValue(err.Error()))
+	}
+}
+
+// nativeLuaNext 实现 Lua 5.3 C API 的 raw next 迭代。
+func nativeLuaNext(luaState unsafe.Pointer, index int) int {
+	// lua_next 会弹出栈顶当前 key，命中后压入下一组 key/value。
+	state, ok := lookupNativeStateHandle(luaState)
+	if !ok {
+		// 无效 State 没有可迭代表。
+		return 0
+	}
+	table, ok := nativeLuaTableAt(luaState, index)
+	if !ok {
+		// 非 table 目标在当前最小 shim 中按迭代结束处理。
+		return 0
+	}
+	key, err := state.Pop()
+	if err != nil {
+		// 缺少当前 key 时无法继续迭代。
+		return 0
+	}
+	nextKey, nextValue, hasNext, err := table.RawPairsNext(key)
+	if err != nil {
+		// 迭代错误以 pending error 形式传回 C function 调用边界。
+		setNativeStatePendingError(luaState, runtime.StringValue(err.Error()))
+		return 0
+	}
+	if !hasNext {
+		// 迭代结束时仅弹出当前 key，不压入新值。
+		return 0
+	}
+	nativeLuaPushValue(luaState, nextKey)
+	nativeLuaPushValue(luaState, nextValue)
+	return 1
+}
+
 // nativeLuaLRef 在指定 table 中为栈顶值创建 Lua 5.3 lauxlib 引用。
 func nativeLuaLRef(luaState unsafe.Pointer, index int) int {
 	// luaL_ref 必须先解析 State 和目标 table；当前最小 shim 对非法 table 返回 LUA_NOREF。
@@ -266,6 +340,22 @@ func lua_rawgeti(luaState *C.lua_State, index C.int, key C.lua_Integer) C.int {
 func lua_rawseti(luaState *C.lua_State, index C.int, key C.lua_Integer) {
 	// C API 入口只做类型转换，具体写入和弹栈语义由 Go helper 维护。
 	nativeLuaRawSetI(unsafe.Pointer(luaState), int(index), int64(key))
+}
+
+// lua_rawset 导出 Lua 5.3 C API raw key/value 写入入口。
+//
+//export lua_rawset
+func lua_rawset(luaState *C.lua_State, index C.int) {
+	// C API 入口只做类型转换，具体写入和弹栈语义由 Go helper 维护。
+	nativeLuaRawSet(unsafe.Pointer(luaState), int(index))
+}
+
+// lua_next 导出 Lua 5.3 C API table 迭代入口。
+//
+//export lua_next
+func lua_next(luaState *C.lua_State, index C.int) C.int {
+	// C API 入口只做类型转换，返回 0 表示迭代结束，非 0 表示压入 key/value。
+	return C.int(nativeLuaNext(unsafe.Pointer(luaState), int(index)))
 }
 
 // luaL_ref 导出 Lua 5.3 lauxlib 引用创建入口。

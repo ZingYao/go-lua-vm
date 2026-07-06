@@ -113,3 +113,48 @@ func TestNativeCAPICheckLString(t *testing.T) {
 		t.Fatalf("nativeStateBuffers still tracks closed token")
 	}
 }
+
+// TestNativeCAPICheckOption 验证 luaL_checkoption 的默认值、匹配和错误边界。
+func TestNativeCAPICheckOption(t *testing.T) {
+	// cjson 使用 checkoption 读取 encode/decode 配置项，必须支持 NULL 终止选项数组。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证选项检查。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	first := []byte{'o', 'n', 'e', 0}
+	second := []byte{'t', 'w', 'o', 0}
+	defaultValue := []byte{'o', 'n', 'e', 0}
+	options := []unsafe.Pointer{unsafe.Pointer(&first[0]), unsafe.Pointer(&second[0]), nil}
+
+	nativeLuaPushString(luaState, unsafe.Pointer(&second[0]))
+	if got := nativeLuaCheckOption(luaState, 1, nil, unsafe.Pointer(&options[0])); got != 1 {
+		// 栈上字符串 two 应匹配第二个选项，返回 0-based 下标 1。
+		t.Fatalf("nativeLuaCheckOption explicit = %d, want 1", got)
+	}
+
+	nativeLuaSetTop(luaState, 0)
+	nativeLuaPushNil(luaState)
+	if got := nativeLuaCheckOption(luaState, 1, unsafe.Pointer(&defaultValue[0]), unsafe.Pointer(&options[0])); got != 0 {
+		// nil 参数带默认值时应使用默认字符串 one。
+		t.Fatalf("nativeLuaCheckOption default = %d, want 0", got)
+	}
+
+	nativeLuaSetTop(luaState, 0)
+	invalid := []byte{'b', 'a', 'd', 0}
+	nativeLuaPushString(luaState, unsafe.Pointer(&invalid[0]))
+	if got := nativeLuaCheckOption(luaState, 1, nil, unsafe.Pointer(&options[0])); got != 0 {
+		// 错误路径返回 0，真正错误对象通过 pending error 暂存。
+		t.Fatalf("nativeLuaCheckOption invalid = %d, want 0", got)
+	}
+	errorObject, ok := takeNativeStatePendingError(luaState)
+	if !ok || errorObject.Kind != runtime.KindString || errorObject.String == "" {
+		// 非法选项必须挂起一个错误对象，供 C function 返回边界传播。
+		t.Fatalf("nativeLuaCheckOption pending error = %#v ok=%v, want string error", errorObject, ok)
+	}
+}

@@ -12,7 +12,7 @@ import (
 // TestNativeLuaCallCFunctionRejectsInvalidHandle 验证失效 State 不会进入本机函数。
 func TestNativeLuaCallCFunctionRejectsInvalidHandle(t *testing.T) {
 	// 无效 handle 必须直接返回 runtime error，避免 C 函数在已关闭 VM 上执行。
-	results, err := nativeLuaCallCFunction(nil, nil)
+	results, err := nativeLuaCallCFunction(nil, nil, nil)
 	if err == nil || !errors.Is(err, runtime.ErrClosedState) {
 		// nil handle 没有可映射 State，应按关闭 State 分类。
 		t.Fatalf("nativeLuaCallCFunction nil state err = %v, want ErrClosedState", err)
@@ -23,9 +23,9 @@ func TestNativeLuaCallCFunctionRejectsInvalidHandle(t *testing.T) {
 	}
 }
 
-// TestNativeLuaPushCClosureRejectsUnsupportedUpvalues 验证当前 nup>0 边界保持 no-op。
-func TestNativeLuaPushCClosureRejectsUnsupportedUpvalues(t *testing.T) {
-	// 当前阶段还没有 C closure upvalue 模型，nup>0 不能压入半成品 closure。
+// TestNativeLuaPushCClosureCapturesUpvalues 验证 C closure 能捕获栈顶 upvalue。
+func TestNativeLuaPushCClosureCapturesUpvalues(t *testing.T) {
+	// cjson 通过 luaL_setfuncs(..., nup=1) 给多个 C 函数共享配置 userdata。
 	state := runtime.NewState()
 	defer state.Close()
 	handle, err := newNativeStateHandle(state)
@@ -44,7 +44,17 @@ func TestNativeLuaPushCClosureRejectsUnsupportedUpvalues(t *testing.T) {
 	}
 	nativeLuaPushCClosure(luaState, luaState, 1)
 	if got := nativeLuaStackTop(luaState); got != 1 {
-		// nup>0 暂不支持，不能弹 upvalue 或压入不可正确调用的 closure。
+		// nup>0 应弹出原始 upvalue 并压入一个 closure。
 		t.Fatalf("upvalue C closure top = %d, want 1", got)
+	}
+	closureValue := state.ValueAt(-1)
+	closure, ok := closureValue.Ref.(*runtime.GoClosureWithUpvalues)
+	if closureValue.Kind != runtime.KindGoClosure || !ok || closure == nil {
+		// 栈顶必须是带 upvalue 元数据的 Go closure。
+		t.Fatalf("upvalue C closure value = %#v, want GoClosureWithUpvalues", closureValue)
+	}
+	if len(closure.Upvalues) != 1 || !closure.Upvalues[0].RawEqual(runtime.IntegerValue(1)) {
+		// 第一个 upvalue 必须保留原始栈值。
+		t.Fatalf("upvalue C closure upvalues = %#v, want [1]", closure.Upvalues)
 	}
 }

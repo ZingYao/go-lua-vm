@@ -170,6 +170,67 @@ func TestNativeCAPIRawIntegerPrimitives(t *testing.T) {
 	}
 }
 
+// TestNativeCAPIRawSetAndNext 验证 lua_rawset 与 lua_next 的基础 table 语义。
+func TestNativeCAPIRawSetAndNext(t *testing.T) {
+	// cjson 编码 table 时依赖 rawset/next 这类不触发元方法的 public C API。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	nativeLuaCreateTable(luaState, 0, 1)
+	keyBytes := []byte{'k', 0}
+	nativeLuaPushString(luaState, unsafe.Pointer(&keyBytes[0]))
+	nativeLuaPushInteger(luaState, 7)
+	nativeLuaRawSet(luaState, 1)
+	if got := nativeLuaStackTop(luaState); got != 1 {
+		// rawset 必须弹出 key/value，只保留 table。
+		t.Fatalf("lua_rawset top = %d, want 1", got)
+	}
+	tableValue := state.ValueAt(1)
+	tableRef, ok := tableValue.Ref.(*runtime.Table)
+	if tableValue.Kind != runtime.KindTable || !ok || tableRef == nil {
+		// 栈底必须是 rawset 操作的 table。
+		t.Fatalf("table value = %#v, want table", tableValue)
+	}
+	if value := tableRef.RawGetString("k"); !value.RawEqual(runtime.IntegerValue(7)) {
+		// rawset 应按原始 string key 写入 integer value。
+		t.Fatalf("table.k = %#v, want 7", value)
+	}
+
+	nativeLuaPushNil(luaState)
+	if got := nativeLuaNext(luaState, 1); got != 1 {
+		// 首次 next(nil) 应返回一组 key/value。
+		t.Fatalf("lua_next first = %d, want 1", got)
+	}
+	if got := nativeLuaStackTop(luaState); got != 3 {
+		// next 命中后栈顶应为 table,key,value。
+		t.Fatalf("lua_next first top = %d, want 3", got)
+	}
+	if value := state.ValueAt(2); value.Kind != runtime.KindString || value.String != "k" {
+		// next 返回的 key 必须是原始 string key。
+		t.Fatalf("lua_next key = %#v, want k", value)
+	}
+	if value := state.ValueAt(3); !value.RawEqual(runtime.IntegerValue(7)) {
+		// next 返回的 value 必须是原始 integer value。
+		t.Fatalf("lua_next value = %#v, want 7", value)
+	}
+	nativeLuaSetTop(luaState, 2)
+	if got := nativeLuaNext(luaState, 1); got != 0 {
+		// 单元素 table 的第二次 next 应结束迭代。
+		t.Fatalf("lua_next end = %d, want 0", got)
+	}
+	if got := nativeLuaStackTop(luaState); got != 1 {
+		// 迭代结束时 lua_next 只弹出 key，不压入新值。
+		t.Fatalf("lua_next end top = %d, want 1", got)
+	}
+}
+
 // TestNativeCAPIRawIntegerRegistry 验证 rawgeti/rawseti 可操作 registry pseudo-index。
 func TestNativeCAPIRawIntegerRegistry(t *testing.T) {
 	// registry pseudo-index 是 luaL_ref 的底层存储位置，必须支持 integer key。

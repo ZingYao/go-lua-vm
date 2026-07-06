@@ -50,9 +50,14 @@ func nativeLuaValueAt(luaState unsafe.Pointer, index int) (runtime.Value, bool) 
 		return runtime.NilValue(), false
 	}
 	if index <= runtime.RegistryPseudoIndex {
-		// 当前阶段只公开 registry pseudo-index；upvalue pseudo-index 留到 C closure 阶段补齐。
+		// registry pseudo-index 与 C closure upvalue pseudo-index 都在该区间内。
+		if index < runtime.RegistryPseudoIndex {
+			// lua_upvalueindex(i) 定义为 LUA_REGISTRYINDEX - i，因此小于 registry 的索引读取当前 C closure upvalue。
+			upvalueIndex := runtime.RegistryPseudoIndex - index
+			return currentNativeStateCallUpvalue(luaState, upvalueIndex)
+		}
 		if index != runtime.RegistryPseudoIndex {
-			// 未支持的 pseudo-index 不能误判成 nil。
+			// 其他未支持 pseudo-index 不能误判成 nil。
 			return runtime.NilValue(), false
 		}
 		value := state.ValueAt(index)

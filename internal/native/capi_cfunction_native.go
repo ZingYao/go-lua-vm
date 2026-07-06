@@ -5,14 +5,6 @@ package native
 /*
 typedef struct lua_State lua_State;
 typedef int (*lua_CFunction)(lua_State *L);
-
-static int glua_call_lua_cfunction(void* function, lua_State* L) {
-	if (function == NULL) {
-		return -1;
-	}
-	lua_CFunction fn = (lua_CFunction)function;
-	return fn(L);
-}
 */
 import "C"
 
@@ -24,9 +16,9 @@ import (
 
 // nativeLuaPushCClosure 把 Lua C 函数指针包装为当前 Go VM 可调用 closure。
 func nativeLuaPushCClosure(luaState unsafe.Pointer, function unsafe.Pointer, upvalueCount int) {
-	// 当前小切口只支持无 upvalue 的 C function；带 upvalue 的 closure 留到 registry/upvalue 阶段补齐。
-	if function == nil || upvalueCount != 0 {
-		// nil 函数指针或带 upvalue 请求不能伪装成可调用 closure，保持栈不变暴露能力边界。
+	// nil 函数指针不能伪装成可调用 closure，保持栈不变暴露能力边界。
+	if function == nil || upvalueCount < 0 {
+		// 非法函数指针或 upvalue 数量不修改栈。
 		return
 	}
 	state, ok := lookupNativeStateHandle(luaState)
@@ -34,16 +26,29 @@ func nativeLuaPushCClosure(luaState unsafe.Pointer, function unsafe.Pointer, upv
 		// 无效 State 无法创建绑定到 VM 的 C function wrapper。
 		return
 	}
-	_ = state
+	if upvalueCount > state.StackTop() {
+		// 调用方没有提供足够 upvalue 时保持 no-op，后续 api_check 阶段再收口错误。
+		return
+	}
+	upvalues := make([]runtime.Value, upvalueCount)
+	firstUpvalueIndex := state.StackTop() - upvalueCount + 1
+	for upvalueIndex := 0; upvalueIndex < upvalueCount; upvalueIndex++ {
+		// upvalue 按栈上原始顺序捕获，lua_upvalueindex(1) 对应最先压入的值。
+		upvalues[upvalueIndex] = state.ValueAt(firstUpvalueIndex + upvalueIndex)
+	}
+	nativeLuaRestoreStackTop(state, state.StackTop()-upvalueCount)
 	closure := runtime.GoResultsFunction(func(args ...runtime.Value) ([]runtime.Value, error) {
 		// C function 调用时重新校验 handle，避免 State 关闭后继续执行本机函数。
-		return nativeLuaCallCFunction(luaState, function, args...)
+		return nativeLuaCallCFunction(luaState, function, upvalues, args...)
 	})
-	nativeLuaPushValue(luaState, runtime.ReferenceValue(runtime.KindGoClosure, closure))
+	nativeLuaPushValue(luaState, runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoClosureWithUpvalues{
+		Function: closure,
+		Upvalues: upvalues,
+	}))
 }
 
 // nativeLuaCallCFunction 在 Go closure 调用期间建立 Lua C API 可见的临时栈。
-func nativeLuaCallCFunction(luaState unsafe.Pointer, function unsafe.Pointer, args ...runtime.Value) ([]runtime.Value, error) {
+func nativeLuaCallCFunction(luaState unsafe.Pointer, function unsafe.Pointer, upvalues []runtime.Value, args ...runtime.Value) ([]runtime.Value, error) {
 	// 每次调用都重新查表，确保已关闭 State 不会继续进入本机函数。
 	state, ok := lookupNativeStateHandle(luaState)
 	if !ok {
@@ -51,11 +56,11 @@ func nativeLuaCallCFunction(luaState unsafe.Pointer, function unsafe.Pointer, ar
 		return nil, runtime.NewRuntimeError(runtime.StringValue(runtime.ErrClosedState.Error()), runtime.ErrClosedState)
 	}
 	baseTop := state.StackTop()
-	if !pushNativeStateCallBase(luaState, baseTop) {
+	if !pushNativeStateCallFrame(luaState, baseTop, upvalues) {
 		// 无法建立调用帧时不能进入 C 函数，否则 C API 正索引会读到错误槽位。
 		return nil, runtime.NewRuntimeError(runtime.StringValue(runtime.ErrClosedState.Error()), runtime.ErrClosedState)
 	}
-	defer popNativeStateCallBase(luaState)
+	defer popNativeStateCallFrame(luaState)
 	for argumentIndex := range args {
 		// C API 约定函数入口栈上从 1 开始排列实参；这里把 Go 调用参数临时压入 State 栈。
 		if err := state.Push(args[argumentIndex]); err != nil {
@@ -65,7 +70,7 @@ func nativeLuaCallCFunction(luaState unsafe.Pointer, function unsafe.Pointer, ar
 		}
 	}
 
-	resultCount := int(C.glua_call_lua_cfunction(function, (*C.lua_State)(luaState)))
+	resultCount := nativeLuaInvokeCFunction(luaState, function)
 	if errorObject, hasError := takeNativeStatePendingError(luaState); hasError {
 		// lua_error/luaL_error 通过 pending error 传回 Go 边界；此时忽略 C 返回数量并按 Lua error 传播。
 		nativeLuaRestoreStackTop(state, baseTop)

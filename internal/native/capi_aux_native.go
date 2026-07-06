@@ -28,6 +28,7 @@ static char* glua_alloc_native_lstring(const void* data, size_t length) {
 import "C"
 
 import (
+	"fmt"
 	"unsafe"
 
 	"github.com/zing/go-lua-vm/runtime"
@@ -58,6 +59,64 @@ func nativeLuaCheckInteger(luaState unsafe.Pointer, index int) int64 {
 		return 0
 	}
 	return integerValue
+}
+
+// nativeLuaArgError 记录 lauxlib 参数错误，并返回 Lua 5.3 API 约定的不可达返回值。
+func nativeLuaArgError(luaState unsafe.Pointer, index int, extra unsafe.Pointer) int {
+	// 当前 shim 不跨 Go/C 边界 longjmp，先把错误对象挂到 State，等待 C function 返回边界传播。
+	message := fmt.Sprintf("bad argument #%d", index)
+	if extra != nil {
+		// extra 是 lauxlib 调用方提供的补充原因。
+		message = fmt.Sprintf("%s (%s)", message, nativeLuaCString(extra))
+	}
+	_ = setNativeStatePendingError(luaState, runtime.StringValue(message))
+	return 0
+}
+
+// nativeLuaOptionAt 读取以 NULL 结尾的 C 字符串选项数组。
+func nativeLuaOptionAt(options unsafe.Pointer, index int) unsafe.Pointer {
+	// lauxlib 选项表是 const char *const []，当前 helper 只做只读指针扫描。
+	if options == nil || index < 0 {
+		// 缺失数组或非法下标表示没有可读选项。
+		return nil
+	}
+	pointerSize := unsafe.Sizeof(uintptr(0))
+	return *(*unsafe.Pointer)(unsafe.Add(options, uintptr(index)*pointerSize))
+}
+
+// nativeLuaCheckOption 实现 luaL_checkoption 的字符串匹配语义。
+func nativeLuaCheckOption(luaState unsafe.Pointer, index int, defaultValue unsafe.Pointer, options unsafe.Pointer) int {
+	// 参数缺失或为 nil 时，只有提供默认值才可继续匹配。
+	var option string
+	value, ok := nativeLuaValueAt(luaState, index)
+	if (!ok || value.IsNil()) && defaultValue != nil {
+		// 默认值由调用方保证来自静态 C 字符串。
+		option = nativeLuaCString(defaultValue)
+	} else {
+		// 非默认路径要求参数能转换为 Lua string。
+		buffer, _, converted := nativeLuaToLString(luaState, index)
+		if !converted {
+			// 不能转换为字符串时记录参数错误。
+			message := fmt.Sprintf("bad argument #%d (string expected)", index)
+			_ = setNativeStatePendingError(luaState, runtime.StringValue(message))
+			return 0
+		}
+		option = nativeLuaCString(buffer)
+	}
+	for optionIndex := 0; ; optionIndex++ {
+		// 选项数组以 NULL 终止，逐项做完全匹配。
+		optionPointer := nativeLuaOptionAt(options, optionIndex)
+		if optionPointer == nil {
+			// 没有匹配项时记录 invalid option 错误。
+			message := fmt.Sprintf("invalid option '%s'", option)
+			_ = setNativeStatePendingError(luaState, runtime.StringValue(message))
+			return 0
+		}
+		if option == nativeLuaCString(optionPointer) {
+			// 返回匹配选项的 0-based 下标，符合 lauxlib 语义。
+			return optionIndex
+		}
+	}
 }
 
 // nativeLuaAllocCString 为 Lua C API 返回值分配 C 可见字符串。
@@ -137,6 +196,39 @@ func lua_tointegerx(luaState *C.lua_State, index C.int, isNumber *C.int) C.lua_I
 func luaL_checkinteger(luaState *C.lua_State, index C.int) C.lua_Integer {
 	// 当前阶段只返回转换结果；失败错误会在 luaL_error/longjmp 阶段接入。
 	return C.lua_Integer(nativeLuaCheckInteger(unsafe.Pointer(luaState), int(index)))
+}
+
+// glua_luaL_argerror_record 记录 Lua 5.3 lauxlib 参数错误。
+//
+//export glua_luaL_argerror_record
+func glua_luaL_argerror_record(luaState *C.lua_State, index C.int, extra *C.char) C.int {
+	// C wrapper 会在记录后 longjmp 回当前 C function 调用入口。
+	return C.int(nativeLuaArgError(unsafe.Pointer(luaState), int(index), unsafe.Pointer(extra)))
+}
+
+// luaL_checkoption 导出 Lua 5.3 lauxlib 选项检查入口。
+//
+//export luaL_checkoption
+func luaL_checkoption(luaState *C.lua_State, index C.int, defaultValue *C.char, options **C.char) C.int {
+	// C API 入口只做类型转换；具体默认值、字符串转换和匹配语义由 Go helper 维护。
+	return C.int(nativeLuaCheckOption(unsafe.Pointer(luaState), int(index), unsafe.Pointer(defaultValue), unsafe.Pointer(options)))
+}
+
+// luaL_checkstack 导出 Lua 5.3 lauxlib 栈检查入口。
+//
+//export luaL_checkstack
+func luaL_checkstack(luaState *C.lua_State, size C.int, message *C.char) {
+	// lauxlib 失败时应抛出错误；当前 shim 用 pending error 延迟到 Go 边界传播。
+	if nativeLuaCheckStack(unsafe.Pointer(luaState), int(size)) {
+		// 栈可扩展时没有可见副作用。
+		return
+	}
+	errorText := "stack overflow"
+	if message != nil {
+		// 调用方提供 message 时作为错误补充。
+		errorText = fmt.Sprintf("%s (%s)", errorText, nativeLuaCString(unsafe.Pointer(message)))
+	}
+	_ = setNativeStatePendingError(unsafe.Pointer(luaState), runtime.StringValue(errorText))
 }
 
 // lua_tolstring 导出 Lua 5.3 C API 字符串转换入口。

@@ -55,9 +55,9 @@ func TestNativeLuaLSetFuncsRegistersGoCallableFields(t *testing.T) {
 	}
 }
 
-// TestNativeLuaLSetFuncsRejectsUnsupportedUpvalues 验证 nup>0 当前保持 no-op。
-func TestNativeLuaLSetFuncsRejectsUnsupportedUpvalues(t *testing.T) {
-	// C closure upvalue 尚未实现，setfuncs 不能消耗 upvalue 或写入错误 closure。
+// TestNativeLuaLSetFuncsRegistersUpvalueClosures 验证 nup>0 会复制 upvalue 并注册闭包。
+func TestNativeLuaLSetFuncsRegistersUpvalueClosures(t *testing.T) {
+	// lua-cjson 的函数表会通过 nup=1 捕获同一个配置 userdata。
 	state := runtime.NewState()
 	defer state.Close()
 	handle, err := newNativeStateHandle(state)
@@ -70,13 +70,13 @@ func TestNativeLuaLSetFuncsRejectsUnsupportedUpvalues(t *testing.T) {
 
 	nativeLuaCreateTable(luaState, 0, 1)
 	nativeLuaPushInteger(luaState, 9)
-	if nativeLuaLSetFuncs(luaState, []nativeLuaLibraryFunction{{name: "add", function: luaState}}, 1) {
-		// nup>0 当前必须明确返回 false。
-		t.Fatalf("nativeLuaLSetFuncs nup>0 returned true")
+	if !nativeLuaLSetFuncs(luaState, []nativeLuaLibraryFunction{{name: "add", function: luaState}}, 1) {
+		// nup>0 应注册成功并在结束时弹出原始 upvalue。
+		t.Fatalf("nativeLuaLSetFuncs nup>0 returned false")
 	}
-	if got := nativeLuaStackTop(luaState); got != 2 {
-		// no-op 边界必须保留 table 和调用方压入的 upvalue。
-		t.Fatalf("nativeLuaLSetFuncs nup>0 top = %d, want 2", got)
+	if got := nativeLuaStackTop(luaState); got != 1 {
+		// luaL_setfuncs 成功后必须只保留目标 table。
+		t.Fatalf("nativeLuaLSetFuncs nup>0 top = %d, want 1", got)
 	}
 	tableValue := state.ValueAt(1)
 	tableRef, ok := tableValue.Ref.(*runtime.Table)
@@ -84,9 +84,15 @@ func TestNativeLuaLSetFuncsRejectsUnsupportedUpvalues(t *testing.T) {
 		// 第一个槽位仍应是原始 table。
 		t.Fatalf("nativeLuaLSetFuncs nup>0 target = %#v, want table", tableValue)
 	}
-	if value := tableRef.RawGetString("add"); !value.IsNil() {
-		// nup>0 未实现时不能写入 add 字段。
-		t.Fatalf("table.add after nup>0 = %#v, want nil", value)
+	value := tableRef.RawGetString("add")
+	closure, ok := value.Ref.(*runtime.GoClosureWithUpvalues)
+	if value.Kind != runtime.KindGoClosure || !ok || closure == nil {
+		// 注册字段必须是带 upvalue 的 Go closure。
+		t.Fatalf("table.add after nup>0 = %#v, want GoClosureWithUpvalues", value)
+	}
+	if len(closure.Upvalues) != 1 || !closure.Upvalues[0].RawEqual(runtime.IntegerValue(9)) {
+		// 注册时捕获的 upvalue 必须来自调用栈原始值。
+		t.Fatalf("table.add upvalues = %#v, want [9]", closure.Upvalues)
 	}
 }
 

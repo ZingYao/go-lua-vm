@@ -42,8 +42,12 @@ var (
 	nativeStateBuffers = make(map[uintptr][]unsafe.Pointer)
 	// nativeStateCallBases 保存当前 lua_State handle 上嵌套 C function 调用的 Go State 栈基址。
 	nativeStateCallBases = make(map[uintptr][]int)
+	// nativeStateCallUpvalues 保存当前 lua_State handle 上嵌套 C closure 调用的 upvalue 快照。
+	nativeStateCallUpvalues = make(map[uintptr][][]runtime.Value)
 	// nativeStatePendingErrors 保存 C API lua_error/luaL_error 在返回 C 边界前记录的 Lua error object。
 	nativeStatePendingErrors = make(map[uintptr]runtime.Value)
+	// nativeStateLightUserdatas 保存 lightuserdata 指针到 Lua userdata identity 的稳定映射。
+	nativeStateLightUserdatas = make(map[uintptr]map[uintptr]*runtime.Userdata)
 )
 
 // newNativeStateHandle 为当前 State 创建 C 可见的 opaque lua_State* handle。
@@ -69,6 +73,7 @@ func newNativeStateHandle(state *runtime.State) (*nativeStateHandle, error) {
 	nativeStateHandlesMu.Lock()
 	nativeStateHandles[uintptr(token)] = state
 	nativeStateBuffers[uintptr(token)] = nil
+	nativeStateLightUserdatas[uintptr(token)] = make(map[uintptr]*runtime.Userdata)
 	nativeStateHandlesMu.Unlock()
 	return handle, nil
 }
@@ -99,7 +104,9 @@ func (handle *nativeStateHandle) close() {
 	buffers := nativeStateBuffers[uintptr(token)]
 	delete(nativeStateBuffers, uintptr(token))
 	delete(nativeStateCallBases, uintptr(token))
+	delete(nativeStateCallUpvalues, uintptr(token))
 	delete(nativeStatePendingErrors, uintptr(token))
+	delete(nativeStateLightUserdatas, uintptr(token))
 	nativeStateHandlesMu.Unlock()
 	for _, buffer := range buffers {
 		// buffer 都由 C malloc 分配，可安全在 handle 生命周期结束时统一释放。
@@ -146,8 +153,8 @@ func takeNativeStatePendingError(token unsafe.Pointer) (runtime.Value, bool) {
 	return object, true
 }
 
-// pushNativeStateCallBase 记录一次 C function 调用进入时的 Go State 栈基址。
-func pushNativeStateCallBase(token unsafe.Pointer, baseTop int) bool {
+// pushNativeStateCallFrame 记录一次 C function 调用进入时的 Go State 栈基址与 upvalue。
+func pushNativeStateCallFrame(token unsafe.Pointer, baseTop int, upvalues []runtime.Value) bool {
 	// C API 正索引需要相对当前 C function 参数区，而不是整个 Go State 栈底。
 	if token == nil {
 		// nil token 无法记录调用帧。
@@ -162,11 +169,12 @@ func pushNativeStateCallBase(token unsafe.Pointer, baseTop int) bool {
 		return false
 	}
 	nativeStateCallBases[key] = append(nativeStateCallBases[key], baseTop)
+	nativeStateCallUpvalues[key] = append(nativeStateCallUpvalues[key], append([]runtime.Value(nil), upvalues...))
 	return true
 }
 
-// popNativeStateCallBase 弹出当前 C function 调用基址。
-func popNativeStateCallBase(token unsafe.Pointer) {
+// popNativeStateCallFrame 弹出当前 C function 调用基址与 upvalue。
+func popNativeStateCallFrame(token unsafe.Pointer) {
 	// 调用退出时恢复上一层 C function 基址，支持后续 lua_call/pcall 阶段的嵌套 C 调用。
 	if token == nil {
 		// nil token 没有可清理状态。
@@ -183,9 +191,17 @@ func popNativeStateCallBase(token unsafe.Pointer) {
 	if len(bases) == 1 {
 		// 最后一层退出后删除 map 项，避免长期保留空切片。
 		delete(nativeStateCallBases, key)
+		delete(nativeStateCallUpvalues, key)
 		return
 	}
 	nativeStateCallBases[key] = bases[:len(bases)-1]
+	upvalueFrames := nativeStateCallUpvalues[key]
+	if len(upvalueFrames) <= 1 {
+		// upvalue 栈与基址栈理论上同步；异常时清空，避免后续读到错配闭包。
+		delete(nativeStateCallUpvalues, key)
+		return
+	}
+	nativeStateCallUpvalues[key] = upvalueFrames[:len(upvalueFrames)-1]
 }
 
 // currentNativeStateCallBase 返回当前 C function 调用的 Go State 栈基址。
@@ -203,6 +219,28 @@ func currentNativeStateCallBase(token unsafe.Pointer) (int, bool) {
 		return 0, false
 	}
 	return bases[len(bases)-1], true
+}
+
+// currentNativeStateCallUpvalue 返回当前 C closure 调用的指定 upvalue。
+func currentNativeStateCallUpvalue(token unsafe.Pointer, index int) (runtime.Value, bool) {
+	// Lua C API 的 upvalue 从 1 开始编号；0 或负数不是合法 upvalue。
+	if token == nil || index <= 0 {
+		// 无效 token 或编号不能读出 upvalue。
+		return runtime.NilValue(), false
+	}
+	nativeStateHandlesMu.Lock()
+	defer nativeStateHandlesMu.Unlock()
+	upvalueFrames := nativeStateCallUpvalues[uintptr(token)]
+	if len(upvalueFrames) == 0 {
+		// 当前没有 C closure 调用帧。
+		return runtime.NilValue(), false
+	}
+	upvalues := upvalueFrames[len(upvalueFrames)-1]
+	if index > len(upvalues) {
+		// 超出当前 closure 捕获数量时按 none 处理。
+		return runtime.NilValue(), false
+	}
+	return upvalues[index-1], true
 }
 
 // lookupNativeStateHandle 按 C token 查找对应 Go State。
@@ -242,4 +280,41 @@ func rememberNativeStateBuffer(token unsafe.Pointer, buffer unsafe.Pointer) bool
 	}
 	nativeStateBuffers[key] = append(nativeStateBuffers[key], buffer)
 	return true
+}
+
+// nativeLightUserdata 保存 Lua lightuserdata 的 C 指针 identity。
+type nativeLightUserdata struct {
+	// pointer 保存 C 模块传入的裸指针数值；0 对应合法的 NULL lightuserdata。
+	pointer uintptr
+}
+
+// nativeLightUserdataValue 返回当前 lua_State 内指定指针的稳定 lightuserdata 值。
+func nativeLightUserdataValue(token unsafe.Pointer, pointer unsafe.Pointer) (runtime.Value, bool) {
+	// lightuserdata 是不可回收裸指针；这里用 runtime.Userdata 承载 Lua 侧 identity。
+	if token == nil {
+		// nil lua_State 无法建立 per-State identity。
+		return runtime.NilValue(), false
+	}
+	nativeStateHandlesMu.Lock()
+	defer nativeStateHandlesMu.Unlock()
+	key := uintptr(token)
+	state := nativeStateHandles[key]
+	if state == nil || state.IsClosed() {
+		// State 已失效时不能创建或读取 Lua 值。
+		return runtime.NilValue(), false
+	}
+	pointerKey := uintptr(pointer)
+	userdatas := nativeStateLightUserdatas[key]
+	if userdatas == nil {
+		// 防御旧 handle 或测试直接构造 map 缺失场景。
+		userdatas = make(map[uintptr]*runtime.Userdata)
+		nativeStateLightUserdatas[key] = userdatas
+	}
+	userdata := userdatas[pointerKey]
+	if userdata == nil {
+		// 同一 State 内同一裸指针必须复用同一 userdata 对象，保证 raw equality 稳定。
+		userdata = runtime.NewUserdata(nativeLightUserdata{pointer: pointerKey})
+		userdatas[pointerKey] = userdata
+	}
+	return userdata.Value(), true
 }

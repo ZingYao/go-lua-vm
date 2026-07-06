@@ -26,6 +26,8 @@ import "C"
 
 import (
 	"unsafe"
+
+	"github.com/zing/go-lua-vm/runtime"
 )
 
 // nativeLuaLibraryFunction 保存 luaL_Reg 的 Go 侧只读快照。
@@ -58,11 +60,11 @@ func nativeLuaLRegList(list *C.luaL_Reg) []nativeLuaLibraryFunction {
 	return functions
 }
 
-// nativeLuaLSetFuncs 把函数列表注册到栈顶 table。
+// nativeLuaLSetFuncs 把函数列表注册到 table，并按 Lua 5.3 语义复制 upvalue。
 func nativeLuaLSetFuncs(luaState unsafe.Pointer, functions []nativeLuaLibraryFunction, upvalueCount int) bool {
-	// 当前小切口只支持无 upvalue 注册；带 upvalue 的复制和弹栈语义留到 closure upvalue 阶段。
-	if upvalueCount != 0 {
-		// 保持 no-op，避免消耗调用方栈上的 upvalue 后产生错误可见性差异。
+	// luaL_setfuncs 要求 table 位于 upvalue 下方；注册结束后会弹出原始 upvalue。
+	if upvalueCount < 0 {
+		// 负数 upvalue 数量不是合法 Lua C API 调用，保持 no-op。
 		return false
 	}
 	state, ok := lookupNativeStateHandle(luaState)
@@ -70,10 +72,22 @@ func nativeLuaLSetFuncs(luaState unsafe.Pointer, functions []nativeLuaLibraryFun
 		// 无效 State 不能注册任何函数。
 		return false
 	}
-	table, ok := nativeLuaTableAt(luaState, -1)
-	if !ok {
-		// luaL_setfuncs 要求栈顶是目标 table；当前错误 longjmp 尚未接入，失败时保持 no-op。
+	if upvalueCount > state.StackTop() {
+		// 调用方没有提供足够 upvalue，保持栈不变便于定位错误 C 模块。
 		return false
+	}
+	tableIndex := -(upvalueCount + 1)
+	table, ok := nativeLuaTableAt(luaState, tableIndex)
+	if !ok {
+		// luaL_setfuncs 要求目标 table 在 upvalue 下方；当前错误 longjmp 尚未接入，失败时保持 no-op。
+		return false
+	}
+	originalTop := state.StackTop()
+	upvalues := make([]runtime.Value, upvalueCount)
+	firstUpvalueIndex := originalTop - upvalueCount + 1
+	for upvalueIndex := 0; upvalueIndex < upvalueCount; upvalueIndex++ {
+		// 每个函数都需要捕获同一组 upvalue 副本，不能共享后续被弹出的栈槽。
+		upvalues[upvalueIndex] = state.ValueAt(firstUpvalueIndex + upvalueIndex)
 	}
 	for functionIndex := range functions {
 		// nil C 函数指针不注册，避免创建无法调用的 table 字段。
@@ -81,7 +95,11 @@ func nativeLuaLSetFuncs(luaState unsafe.Pointer, functions []nativeLuaLibraryFun
 			// 继续处理后续条目，便于部分损坏列表仍尽量注册有效函数。
 			continue
 		}
-		nativeLuaPushCClosure(luaState, functions[functionIndex].function, 0)
+		for upvalueIndex := range upvalues {
+			// lua_pushcclosure 会从栈顶弹出 nup 个值，因此这里先为当前函数压入捕获副本。
+			nativeLuaPushValue(luaState, upvalues[upvalueIndex])
+		}
+		nativeLuaPushCClosure(luaState, functions[functionIndex].function, upvalueCount)
 		value, err := state.Pop()
 		if err != nil {
 			// 压 closure 后无法弹出说明 State 已损坏，停止处理避免继续扩大副作用。
@@ -89,6 +107,7 @@ func nativeLuaLSetFuncs(luaState unsafe.Pointer, functions []nativeLuaLibraryFun
 		}
 		table.RawSetString(functions[functionIndex].name, value)
 	}
+	nativeLuaRestoreStackTop(state, originalTop-upvalueCount)
 	return true
 }
 
@@ -107,7 +126,7 @@ func nativeLuaLNewLib(luaState unsafe.Pointer, functions []nativeLuaLibraryFunct
 //
 //export luaL_setfuncs
 func luaL_setfuncs(luaState *C.lua_State, list *C.luaL_Reg, upvalueCount C.int) {
-	// Lua 5.3 真实 luaL_newlib 宏会调用该符号；当前阶段只支持 nup==0。
+	// Lua 5.3 真实 luaL_newlib 宏会调用该符号；upvalue 复制语义由 Go helper 维护。
 	_ = nativeLuaLSetFuncs(unsafe.Pointer(luaState), nativeLuaLRegList(list), int(upvalueCount))
 }
 

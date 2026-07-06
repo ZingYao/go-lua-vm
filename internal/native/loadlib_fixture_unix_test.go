@@ -62,7 +62,7 @@ func TestUnixPackageLoadLibReturnsCallableNativeFixture(t *testing.T) {
 	}
 	loader, ok := values[0].Ref.(luaruntime.GoResultsFunction)
 	if !ok || loader == nil {
-		// 当前 native luaopen_* 通过 GoResultsFunction 进入 VM 调用通道。
+		// state-aware loader 本身仍通过 GoResultsFunction 调用 luaopen_*。
 		t.Fatalf("LoadLib state-aware fixture payload = %#v, want GoResultsFunction", values[0].Ref)
 	}
 	results, err := loader(luaruntime.StringValue("glua_native_smoke"), luaruntime.StringValue(fixturePath))
@@ -223,12 +223,20 @@ func nativeSmokeFunction(t *testing.T, table *luaruntime.Table, name string) lua
 	// luaL_newlib 应把 luaL_Reg 中的函数注册成当前 VM 可调用的 Go closure。
 	t.Helper()
 	value := table.RawGetString(name)
-	function, ok := value.Ref.(luaruntime.GoResultsFunction)
-	if value.Kind != luaruntime.KindGoClosure || !ok || function == nil {
+	if value.Kind != luaruntime.KindGoClosure {
 		// 缺失函数表示 luaL_setfuncs 或 C function wrapper 退化。
-		t.Fatalf("native smoke function %s = %#v, want GoResultsFunction", name, value)
+		t.Fatalf("native smoke function %s = %#v, want Go closure", name, value)
 	}
-	return function
+	if function, ok := value.Ref.(luaruntime.GoResultsFunction); ok && function != nil {
+		// loader 自身或旧无 upvalue closure 可直接保存 GoResultsFunction。
+		return function
+	}
+	if closure, ok := value.Ref.(*luaruntime.GoClosureWithUpvalues); ok && closure != nil && closure.Function != nil {
+		// 新的 C closure 路径统一保存 upvalue 元数据，即使 nup==0 也可按 Function 调用。
+		return closure.Function
+	}
+	t.Fatalf("native smoke function %s payload = %#v, want callable", name, value.Ref)
+	return nil
 }
 
 // nativeLuaStringLiteral 返回可嵌入测试 Lua 源码的字符串字面量。
@@ -405,16 +413,16 @@ func TestUnixNativeLuaPushCClosureCallsResolvedFixture(t *testing.T) {
 		// C function 必须被包装成当前 VM 可调用的 Go closure。
 		t.Fatalf("native C closure value = %#v, want Go closure", closureValue)
 	}
-	closure, ok := closureValue.Ref.(luaruntime.GoResultsFunction)
-	if !ok || closure == nil {
-		// 当前 wrapper 使用 GoResultsFunction 承接多返回值语义。
-		t.Fatalf("native C closure payload = %#v, want GoResultsFunction", closureValue.Ref)
+	closure, ok := closureValue.Ref.(*luaruntime.GoClosureWithUpvalues)
+	if !ok || closure == nil || closure.Function == nil {
+		// 当前 wrapper 使用带 upvalue 元数据的 Go closure 承接多返回值语义。
+		t.Fatalf("native C closure payload = %#v, want GoClosureWithUpvalues", closureValue.Ref)
 	}
 	if _, err := state.Pop(); err != nil {
 		// 直接调用已保存的 Go closure 前先清空测试栈，保持 C API 正索引从实参 1 开始。
 		t.Fatalf("pop native C closure value failed: %v", err)
 	}
-	results, err := closure(luaruntime.IntegerValue(1), luaruntime.StringValue("arg"))
+	results, err := closure.Function(luaruntime.IntegerValue(1), luaruntime.StringValue("arg"))
 	if err != nil {
 		// fixture 只使用当前已实现的 C API，调用不应产生错误。
 		t.Fatalf("native C closure call failed: %v", err)

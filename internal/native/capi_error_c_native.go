@@ -3,21 +3,104 @@
 package native
 
 /*
+#include <setjmp.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 typedef struct lua_State lua_State;
+typedef int (*lua_CFunction)(lua_State *L);
 
+extern int glua_lua_error_record(lua_State *L);
+extern int glua_luaL_argerror_record(lua_State *L, int arg, const char *extra);
 extern int glua_luaL_error_message(lua_State *L, const char *message);
 
+#if defined(_MSC_VER)
+#define GLUA_THREAD_LOCAL __declspec(thread)
+#else
+#define GLUA_THREAD_LOCAL __thread
+#endif
+
+static GLUA_THREAD_LOCAL jmp_buf *glua_native_error_target = NULL;
+
+static void glua_lua_error_jump(void) {
+	if (glua_native_error_target != NULL) {
+		longjmp(*glua_native_error_target, 1);
+	}
+	abort();
+}
+
+static int glua_call_lua_cfunction(void* function, lua_State* L) {
+	if (function == NULL) {
+		return -1;
+	}
+	jmp_buf env;
+	jmp_buf *previous = glua_native_error_target;
+	glua_native_error_target = &env;
+	if (setjmp(env) != 0) {
+		glua_native_error_target = previous;
+		return -2;
+	}
+	lua_CFunction fn = (lua_CFunction)function;
+	int result = fn(L);
+	glua_native_error_target = previous;
+	return result;
+}
+
+int lua_error(lua_State *L) {
+	glua_lua_error_record(L);
+	glua_lua_error_jump();
+	return 0;
+}
+
+int luaL_argerror(lua_State *L, int arg, const char *extra) {
+	glua_luaL_argerror_record(L, arg, extra);
+	glua_lua_error_jump();
+	return 0;
+}
+
 int luaL_error(lua_State *L, const char *fmt, ...) {
-	char buffer[512];
+	char stack_buffer[512];
 	va_list args;
 	va_start(args, fmt);
-	vsnprintf(buffer, sizeof(buffer), fmt, args);
+	int required = vsnprintf(NULL, 0, fmt, args);
 	va_end(args);
-	buffer[sizeof(buffer) - 1] = '\0';
-	return glua_luaL_error_message(L, buffer);
+	if (required < 0) {
+		glua_luaL_error_message(L, "native luaL_error formatting failed");
+		glua_lua_error_jump();
+		return 0;
+	}
+	if ((size_t)required < sizeof(stack_buffer)) {
+		va_start(args, fmt);
+		vsnprintf(stack_buffer, sizeof(stack_buffer), fmt, args);
+		va_end(args);
+		stack_buffer[sizeof(stack_buffer) - 1] = '\0';
+		glua_luaL_error_message(L, stack_buffer);
+		glua_lua_error_jump();
+		return 0;
+	}
+	char *heap_buffer = (char*)malloc((size_t)required + 1);
+	if (heap_buffer == NULL) {
+		glua_luaL_error_message(L, "native luaL_error memory allocation failed");
+		glua_lua_error_jump();
+		return 0;
+	}
+	va_start(args, fmt);
+	vsnprintf(heap_buffer, (size_t)required + 1, fmt, args);
+	va_end(args);
+	heap_buffer[required] = '\0';
+	glua_luaL_error_message(L, heap_buffer);
+	free(heap_buffer);
+	glua_lua_error_jump();
+	return 0;
 }
 */
 import "C"
+
+import "unsafe"
+
+// nativeLuaInvokeCFunction 在 C 层建立 setjmp 边界后调用 lua_CFunction。
+func nativeLuaInvokeCFunction(luaState unsafe.Pointer, function unsafe.Pointer) int {
+	// lua_error/luaL_error/luaL_argerror 会 longjmp 回该 C helper，再由 Go 边界读取 pending error。
+	return int(C.glua_call_lua_cfunction(function, (*C.lua_State)(luaState)))
+}

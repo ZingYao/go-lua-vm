@@ -112,6 +112,39 @@ func TestNativeCAPIStackPrimitives(t *testing.T) {
 	}
 }
 
+// TestNativeCAPILightUserdataStableIdentity 验证 lightuserdata 指针 identity 可稳定往返。
+func TestNativeCAPILightUserdataStableIdentity(t *testing.T) {
+	// cjson 会用 lightuserdata 表达 cjson.null 等哨兵值，同一指针必须 raw equal。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 lightuserdata。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	sentinel := 7
+	pointer := unsafe.Pointer(&sentinel)
+	nativeLuaPushLightUserdata(luaState, pointer)
+	nativeLuaPushLightUserdata(luaState, pointer)
+	first := state.ValueAt(1)
+	second := state.ValueAt(2)
+	if !first.RawEqual(second) {
+		// 同一 State 内同一裸指针必须复用同一个 userdata identity。
+		t.Fatalf("lightuserdata values are not raw equal: first=%#v second=%#v", first, second)
+	}
+	if got := nativeLuaType(luaState, 1); got != nativeLuaTypeLightUD {
+		// Lua C API 要把 lightuserdata 与 full userdata 区分开。
+		t.Fatalf("lightuserdata type = %d, want %d", got, nativeLuaTypeLightUD)
+	}
+	if got := nativeLuaToUserdata(luaState, 1); got != pointer {
+		// lua_touserdata 对 lightuserdata 必须返回原始裸指针。
+		t.Fatalf("lightuserdata pointer = %p, want %p", got, pointer)
+	}
+}
+
 // TestNativeCAPIStackPrimitivesRejectInvalidState 验证失效 State handle 的最小安全边界。
 func TestNativeCAPIStackPrimitivesRejectInvalidState(t *testing.T) {
 	// nil lua_State* 没有可映射 State，所有操作必须保持失败安全。

@@ -64,7 +64,7 @@ func LoaderForState(state *runtime.State) func(filename string, symbol string) (
 		loader := runtime.GoResultsFunction(func(args ...runtime.Value) ([]runtime.Value, error) {
 			// closeLibrary 被 closure 捕获以保持动态库句柄存活；当前阶段不做卸载。
 			_ = closeLibrary
-			return nativeLuaCallCFunction(handle.pointer(), symbolAddress, args...)
+			return nativeLuaCallCFunction(handle.pointer(), symbolAddress, nil, args...)
 		})
 		return runtime.ReferenceValue(runtime.KindGoClosure, loader), nil
 	}

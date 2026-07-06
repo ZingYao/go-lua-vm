@@ -86,6 +86,73 @@ func nativeLuaSetTop(luaState unsafe.Pointer, index int) {
 	}
 }
 
+// nativeLuaCheckStack 检查当前最小 shim 是否可继续扩展栈。
+func nativeLuaCheckStack(luaState unsafe.Pointer, extraSlots int) bool {
+	// 当前 Go State 栈是动态 slice，最小 shim 只需要校验 State 生命周期和非负请求。
+	if extraSlots < 0 {
+		// 负数扩展请求非法，按失败处理。
+		return false
+	}
+	state, ok := lookupNativeStateHandle(luaState)
+	if !ok {
+		// 无效 State 不能继续压栈。
+		return false
+	}
+	_, _ = state, extraSlots
+	return true
+}
+
+// nativeLuaRotate 按 Lua 5.3 C API 规则旋转 idx..top 的栈段。
+func nativeLuaRotate(luaState unsafe.Pointer, index int, rotateCount int) {
+	// 入口先解析 State；失效 handle 不能修改任何 Go VM 状态。
+	state, ok := lookupNativeStateHandle(luaState)
+	if !ok {
+		// 无效 State 保持 no-op。
+		return
+	}
+	top := state.StackTop()
+	absoluteIndex := state.AbsIndex(index)
+	if index > 0 {
+		// C function 内正索引从当前调用帧参数区开始。
+		if baseTop, ok := currentNativeStateCallBase(luaState); ok {
+			// index 是 1-based 可见槽位，因此全局绝对索引需要加上调用进入前栈顶。
+			absoluteIndex = baseTop + index
+		}
+	}
+	if absoluteIndex <= 0 || absoluteIndex > top {
+		// 无效区间按当前 api_check 策略保持 no-op。
+		return
+	}
+	segmentLength := top - absoluteIndex + 1
+	if segmentLength <= 1 {
+		// 长度 0/1 的区间旋转没有可观察副作用。
+		return
+	}
+	offset := rotateCount % segmentLength
+	if offset < 0 {
+		// 负数左旋转转换为等价右旋转。
+		offset += segmentLength
+	}
+	if offset == 0 {
+		// 整圈旋转没有副作用。
+		return
+	}
+	values := make([]runtime.Value, segmentLength)
+	for valueIndex := 0; valueIndex < segmentLength; valueIndex++ {
+		// 保存原始区间，避免边改边读造成错位。
+		values[valueIndex] = state.ValueAt(absoluteIndex + valueIndex)
+	}
+	rotated := append(values[segmentLength-offset:], values[:segmentLength-offset]...)
+	nativeLuaRestoreStackTop(state, absoluteIndex-1)
+	for valueIndex := range rotated {
+		// 重新压入旋转后的区间，保持区间外栈值不变。
+		if err := state.Push(rotated[valueIndex]); err != nil {
+			// 写回失败时停止，后续 State 错误边界会暴露异常。
+			return
+		}
+	}
+}
+
 // nativeLuaPushValue 把一个运行期值压入 native C API 对应的 Go State 栈。
 func nativeLuaPushValue(luaState unsafe.Pointer, value runtime.Value) {
 	// 入口先解析 State，失效 handle 不能修改任何 Go VM 状态。
@@ -157,6 +224,17 @@ func nativeLuaPushString(luaState unsafe.Pointer, text unsafe.Pointer) unsafe.Po
 	return text
 }
 
+// nativeLuaPushLightUserdata 把 C 裸指针作为 lightuserdata 压入栈顶。
+func nativeLuaPushLightUserdata(luaState unsafe.Pointer, pointer unsafe.Pointer) {
+	// 同一个 lua_State 内同一裸指针必须映射为稳定 Lua identity。
+	value, ok := nativeLightUserdataValue(luaState, pointer)
+	if !ok {
+		// 无效 State 下保持 no-op。
+		return
+	}
+	nativeLuaPushValue(luaState, value)
+}
+
 // nativeLuaCStringN 把 C 字符串片段复制成 Go 字符串。
 func nativeLuaCStringN(text unsafe.Pointer, length uintptr) (string, bool) {
 	// nil 指针只允许空长度字符串；非空长度说明 C 模块传入了无效指针。
@@ -168,7 +246,8 @@ func nativeLuaCStringN(text unsafe.Pointer, length uintptr) (string, bool) {
 		// Go 字符串长度不能超过 int 上限，拒绝复制避免整数截断。
 		return "", false
 	}
-	return unsafe.String((*byte)(text), int(length)), true
+	// C 模块传入的内存可能来自临时解析缓冲区，必须复制成 Go-owned string。
+	return string(unsafe.Slice((*byte)(text), int(length))), true
 }
 
 // nativeLuaCString 把 NUL 结尾 C 字符串复制成 Go 字符串。
@@ -179,7 +258,8 @@ func nativeLuaCString(text unsafe.Pointer) string {
 		// 每次迭代只前进一个字节，直到 C 字符串终止符。
 		length++
 	}
-	return unsafe.String((*byte)(text), length)
+	// C 字符串可能来自动态库临时内存或可复用缓冲区，返回前必须复制。
+	return string(unsafe.Slice((*byte)(text), length))
 }
 
 // lua_gettop 导出 Lua 5.3 C API 栈顶查询入口。
@@ -196,6 +276,26 @@ func lua_gettop(luaState *C.lua_State) C.int {
 func lua_settop(luaState *C.lua_State, index C.int) {
 	// C API 入口只做类型转换，具体正负索引语义由 Go helper 统一维护。
 	nativeLuaSetTop(unsafe.Pointer(luaState), int(index))
+}
+
+// lua_checkstack 导出 Lua 5.3 C API 栈空间检查入口。
+//
+//export lua_checkstack
+func lua_checkstack(luaState *C.lua_State, extraSlots C.int) C.int {
+	// 当前 Go 栈按需扩展；返回值只表示 State 生命周期和参数是否合法。
+	if nativeLuaCheckStack(unsafe.Pointer(luaState), int(extraSlots)) {
+		// 非 0 表示检查成功。
+		return 1
+	}
+	return 0
+}
+
+// lua_rotate 导出 Lua 5.3 C API 栈区间旋转入口。
+//
+//export lua_rotate
+func lua_rotate(luaState *C.lua_State, index C.int, rotateCount C.int) {
+	// C API 入口只做类型转换，具体区间读写由 Go helper 维护。
+	nativeLuaRotate(unsafe.Pointer(luaState), int(index), int(rotateCount))
 }
 
 // lua_pushvalue 导出 Lua 5.3 C API 值复制入口。
@@ -252,4 +352,12 @@ func lua_pushlstring(luaState *C.lua_State, text *C.char, length C.size_t) *C.ch
 func lua_pushstring(luaState *C.lua_State, text *C.char) *C.char {
 	// C API 入口只做类型转换，具体 NUL 结尾字符串语义由 Go helper 统一维护。
 	return (*C.char)(nativeLuaPushString(unsafe.Pointer(luaState), unsafe.Pointer(text)))
+}
+
+// lua_pushlightuserdata 导出 Lua 5.3 C API lightuserdata 压栈入口。
+//
+//export lua_pushlightuserdata
+func lua_pushlightuserdata(luaState *C.lua_State, pointer unsafe.Pointer) {
+	// C API 入口只做类型转换，具体 identity 映射由 Go helper 维护。
+	nativeLuaPushLightUserdata(unsafe.Pointer(luaState), pointer)
 }
