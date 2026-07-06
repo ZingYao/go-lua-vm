@@ -273,6 +273,56 @@ func TestNativeLuaSetUserValueRejectsNonFullUserdata(t *testing.T) {
 	}
 }
 
+// TestNativeLuaSetUserValueRespectsCurrentCFrameBase 验证 lua_setuservalue 不会弹出当前 C 帧之前的外层栈值。
+func TestNativeLuaSetUserValueRespectsCurrentCFrameBase(t *testing.T) {
+	// 使用 C closure upvalue 作为目标 userdata，让目标可见但当前 C 帧没有可见 user value。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 native State 映射不可用，无法验证 C frame 边界。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	if pointer := nativeLuaNewUserdata(luaState, 8); pointer == nil {
+		// 测试需要一个 native full userdata 作为 upvalue 目标。
+		t.Fatalf("lua_newuserdata returned nil")
+	}
+	userdataValue := state.ValueAt(1)
+	userdata, ok := userdataValue.Ref.(*runtime.Userdata)
+	if !ok || userdata == nil {
+		// native full userdata 必须能解析为 runtime.Userdata。
+		t.Fatalf("userdata ref = %#v, want *runtime.Userdata", userdataValue.Ref)
+	}
+	nativeLuaSetTop(luaState, 0)
+	sentinelBytes := []byte{'o', 'u', 't', 'e', 'r', '_', 'v', 'a', 'l', 'u', 'e', 0}
+	nativeLuaPushString(luaState, unsafe.Pointer(&sentinelBytes[0]))
+	if !pushNativeStateCallFrame(luaState, state.StackTop(), []runtime.Value{userdataValue}) {
+		// 无法建立 C 调用帧时，upvalue pseudo-index 语义不可验证。
+		t.Fatal("pushNativeStateCallFrame failed")
+	}
+	defer popNativeStateCallFrame(luaState)
+
+	if got := nativeLuaSetUserValue(luaState, runtime.RegistryPseudoIndex-1); got != 0 {
+		// 当前 C 帧没有可见 user value 时必须失败返回。
+		t.Fatalf("lua_setuservalue(upvalue) = %d, want 0", got)
+	}
+	if got := state.StackTop(); got != 1 {
+		// 当前 C 帧没有可见 user value 时，不得弹掉外层 sentinel。
+		t.Fatalf("lua_setuservalue global top = %d, want 1", got)
+	}
+	if value := state.ValueAt(1); value.Kind != runtime.KindString || value.String != "outer_value" {
+		// 外层 sentinel 必须原样保留给调用者。
+		t.Fatalf("outer stack value = %#v, want outer_value", value)
+	}
+	if !userdata.UserValue.IsNil() {
+		// 缺少可见 user value 时不得把外层 sentinel 写入 userdata。
+		t.Fatalf("userdata user value = %#v, want nil", userdata.UserValue)
+	}
+}
+
 // TestNativeLuaToUserdataRejectsNonUserdata 验证非 native userdata 不会被误暴露为 C 指针。
 func TestNativeLuaToUserdataRejectsNonUserdata(t *testing.T) {
 	// 构造普通栈值和纯 Go userdata，覆盖转换失败边界。

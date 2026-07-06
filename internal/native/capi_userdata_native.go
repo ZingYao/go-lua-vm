@@ -190,9 +190,9 @@ func nativeLuaSetUserValue(luaState unsafe.Pointer, index int) int {
 		// 当前 shim 只允许 native full userdata 通过 C API 写入 user value。
 		return 0
 	}
-	userValue, err := state.Pop()
-	if err != nil {
-		// 缺少栈顶值时不能完成写入。
+	userValue, ok := nativeLuaPopVisible(luaState, state)
+	if !ok {
+		// 当前 C 帧没有可见 user value 时不能完成写入，且不得弹掉外层 VM 栈。
 		return 0
 	}
 	userdata.UserValue = userValue
