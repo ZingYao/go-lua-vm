@@ -188,7 +188,8 @@
         - [x] 2026-07-06 复核：替换 1159 行断言为打印后，官方测试同路径下 `c:match('[==[]]====]]]]==]===[]')` 实际返回 `12`。
         - [x] 2026-07-06 复核：前缀执行到 656 行后，若沿用官方脚本的外层 `c = ...` 赋值形态，match-time callback 只在 position 12 触发并返回 `12`；独立脚本会尝试 position 7、12、13、14、15、18 并最终返回 `18`。
         - [x] 2026-07-06 复核：`local c = ...` shadow 形态与官方外层 `c = ...` 形态表现不同，说明问题不在动态库解析，而更可能在 native C frame 与 Go VM 嵌套执行 Lua callback 时的栈/寄存器隔离、`lua_call`、`lua_remove`/`lua_rotate` 或借用 VM 清理边界。
-        - [ ] 下一轮优先构造定向最小复现：在 native C fixture 中模拟 `runtimecap` 的 `lua_call` + `lua_remove` 清理路径，比较 C frame 可见 `lua_gettop`、动态 capture 栈残留和 Lua callback 多返回清理。
+        - [x] 2026-07-06 复核：已在 native smoke fixture 中模拟 `runtimecap` 的 `lua_call(..., LUA_MULTRET)` + `lua_remove` 旧动态 capture 清理路径，macOS `.dylib`/`.so` 均通过；基础 C frame 可见 `lua_gettop` 与 `lua_remove` 清理未单独复现 1159 行错位。
+        - [ ] 下一轮优先构造更贴近 LPeg 的复现：加入多次 runtime callback、lightuserdata stackbase、旧动态 capture 多轮残留和外层 Lua 变量覆盖场景，确认是否为借用 VM 寄存器/active VM 状态污染。
   - [ ] LuaSocket 或等价网络库验收：仅在 userdata/metatable/registry/错误边界稳定后进入平台闭环。
 - [ ] 增加交叉编译验证脚本：
   - [x] `scripts/check-native-cross-compile.sh`：显式输出 `GOOS`、`GOARCH`、`CC`、产物路径和缺失 toolchain 时的 skip 原因。

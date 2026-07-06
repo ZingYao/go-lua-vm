@@ -9,6 +9,16 @@ local a, b, c = mod.multi()
 assert(a == 1 and b == "two" and c == true)
 assert(mod.alloc_roundtrip() == true)
 
+local cleanup_result, cleanup_top = mod.runtimecap_cleanup_probe(function(subject, position, s1, s2)
+	assert(subject == "subject")
+	assert(position == 12)
+	assert(s1 == "==")
+	assert(s2 == "==")
+	return s1 == s2
+end)
+assert(cleanup_result == true)
+assert(cleanup_top == 2, cleanup_top)
+
 local counter = mod.new_counter(10)
 assert(counter:add(5) == 15)
 assert(counter:get() == 15)

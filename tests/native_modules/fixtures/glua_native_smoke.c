@@ -62,6 +62,30 @@ static int glua_native_alloc_roundtrip(lua_State *L) {
 	return 1;
 }
 
+static int glua_native_runtimecap_cleanup_probe(lua_State *L) {
+	luaL_checktype(L, 1, LUA_TFUNCTION);
+	lua_pushstring(L, "old-dyncap-1");
+	lua_pushstring(L, "old-dyncap-2");
+	int id = 2;
+	int otop = lua_gettop(L);
+
+	lua_pushvalue(L, 1);
+	lua_pushstring(L, "subject");
+	lua_pushinteger(L, 12);
+	lua_pushstring(L, "==");
+	lua_pushstring(L, "==");
+	lua_call(L, 4, LUA_MULTRET);
+
+	for (int i = id; i <= otop; i++) {
+		lua_remove(L, id);
+	}
+	int cleanup_top = lua_gettop(L);
+	int result_truthy = lua_toboolean(L, -1);
+	lua_pushboolean(L, result_truthy);
+	lua_pushinteger(L, cleanup_top);
+	return 2;
+}
+
 typedef struct glua_native_counter {
 	lua_Integer value;
 } glua_native_counter;
@@ -112,6 +136,7 @@ static const luaL_Reg glua_native_smoke_funcs[] = {
 	{"fail", glua_native_fail},
 	{"raise", glua_native_raise},
 	{"alloc_roundtrip", glua_native_alloc_roundtrip},
+	{"runtimecap_cleanup_probe", glua_native_runtimecap_cleanup_probe},
 	{NULL, NULL},
 };
 
