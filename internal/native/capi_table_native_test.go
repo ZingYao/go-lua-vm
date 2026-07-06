@@ -533,6 +533,48 @@ func TestNativeCAPIRawSetAndNext(t *testing.T) {
 	}
 }
 
+// TestNativeLuaRawSetRespectsCurrentCFrameBase 验证 lua_rawset 不会弹出当前 C 帧之前的外层栈值。
+func TestNativeLuaRawSetRespectsCurrentCFrameBase(t *testing.T) {
+	// registry 目标在当前 C 帧无可见 key/value 时，最容易暴露 rawset 是否误弹调用者栈。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 C frame 边界。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	keyBytes := []byte{'o', 'u', 't', 'e', 'r', '_', 'k', 'e', 'y', 0}
+	valueBytes := []byte{'o', 'u', 't', 'e', 'r', '_', 'v', 'a', 'l', 'u', 'e', 0}
+	nativeLuaPushString(luaState, unsafe.Pointer(&keyBytes[0]))
+	nativeLuaPushString(luaState, unsafe.Pointer(&valueBytes[0]))
+	if !pushNativeStateCallFrame(luaState, state.StackTop(), nil) {
+		// 无法建立 C 调用帧时，后续索引语义不可验证。
+		t.Fatal("pushNativeStateCallFrame failed")
+	}
+	defer popNativeStateCallFrame(luaState)
+
+	nativeLuaRawSet(luaState, runtime.RegistryPseudoIndex)
+	if got := state.StackTop(); got != 2 {
+		// 当前 C 帧没有可见 key/value 时，rawset 不得弹掉外层 sentinel。
+		t.Fatalf("lua_rawset global top = %d, want 2", got)
+	}
+	if value := state.ValueAt(1); value.Kind != runtime.KindString || value.String != "outer_key" {
+		// 外层 key sentinel 必须原样保留给调用者。
+		t.Fatalf("outer key stack value = %#v, want outer_key", value)
+	}
+	if value := state.ValueAt(2); value.Kind != runtime.KindString || value.String != "outer_value" {
+		// 外层 value sentinel 必须原样保留给调用者。
+		t.Fatalf("outer value stack value = %#v, want outer_value", value)
+	}
+	if value := state.Registry().RawGetString("outer_key"); !value.IsNil() {
+		// 缺少可见 key/value 时不得向 registry 写入错误值。
+		t.Fatalf("registry.outer_key = %#v, want nil", value)
+	}
+}
+
 // TestNativeCAPIRawLen 验证 lua_rawlen 的 string/table/full userdata 原始长度语义。
 func TestNativeCAPIRawLen(t *testing.T) {
 	// rawlen 只读取原始长度，不触发元方法，也不改变栈顶。

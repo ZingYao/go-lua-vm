@@ -255,18 +255,18 @@ func nativeLuaRawSet(luaState unsafe.Pointer, index int) {
 		// 非 table 目标保持栈不变，后续 api_check 阶段再补齐错误语义。
 		return
 	}
-	if state.StackTop() < 2 {
-		// rawset 需要栈顶 value 与其下方 key。
+	if nativeLuaStackTop(luaState) < 2 {
+		// rawset 需要当前 C 帧可见栈顶 value 与其下方 key。
 		return
 	}
-	value, err := state.Pop()
-	if err != nil {
-		// 弹出 value 失败时保持 no-op。
+	value, ok := nativeLuaPopVisible(luaState, state)
+	if !ok {
+		// 当前 C 帧没有可见 value 时保持栈不变，避免穿透外层 VM 栈。
 		return
 	}
-	key, err := state.Pop()
-	if err != nil {
-		// key 缺失时无法写入；value 已按 C API 消费，保持当前最小边界。
+	key, ok := nativeLuaPopVisible(luaState, state)
+	if !ok {
+		// 当前 C 帧没有可见 key 时无法写入；前置数量检查正常会避免进入该分支。
 		return
 	}
 	if err := table.RawSet(key, value); err != nil {
