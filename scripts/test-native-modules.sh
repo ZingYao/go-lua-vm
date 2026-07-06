@@ -32,10 +32,10 @@ fi
 
 case "${target_goos}" in
   darwin)
-    extension=".dylib"
+    runtime_extensions=(".dylib" ".so")
     ;;
   linux)
-    extension=".so"
+    runtime_extensions=(".so")
     ;;
   windows)
     echo "skip: Windows CLI smoke requires lua53.dll shim or import library, not implemented yet" >&2
@@ -60,15 +60,6 @@ fi
 
 BUILD_DIR="${build_dir}" CGO_ENABLED=1 "${repo_root}/scripts/build-native-fixtures.sh"
 
-smoke_module="${build_dir}/glua_native_smoke${extension}"
-failopen_module="${build_dir}/glua_native_failopen${extension}"
-if [[ ! -f "${smoke_module}" || ! -f "${failopen_module}" ]]; then
-  echo "native fixture outputs missing:" >&2
-  echo "  ${smoke_module}" >&2
-  echo "  ${failopen_module}" >&2
-  exit 1
-fi
-
 lua_string_literal() {
   local text="$1"
   text="${text//\\/\\\\}"
@@ -77,18 +68,30 @@ lua_string_literal() {
 }
 
 missing_lua_pattern="${work_dir}/missing/?.lua"
-cpath_pattern="${build_dir}/?${extension}"
 package_path_literal="$(lua_string_literal "${missing_lua_pattern}")"
-package_cpath_literal="$(lua_string_literal "${cpath_pattern}")"
 
-smoke_source="${work_dir}/glua_native_smoke.lua"
-smoke_template="$(<"${template_file}")"
-smoke_template="${smoke_template//@GLUA_NATIVE_PACKAGE_PATH@/${package_path_literal}}"
-smoke_template="${smoke_template//@GLUA_NATIVE_PACKAGE_CPATH@/${package_cpath_literal}}"
-printf '%s\n' "${smoke_template}" >"${smoke_source}"
+for extension in "${runtime_extensions[@]}"; do
+  smoke_module="${build_dir}/glua_native_smoke${extension}"
+  failopen_module="${build_dir}/glua_native_failopen${extension}"
+  if [[ ! -f "${smoke_module}" || ! -f "${failopen_module}" ]]; then
+    echo "native fixture outputs missing for ${extension}:" >&2
+    echo "  ${smoke_module}" >&2
+    echo "  ${failopen_module}" >&2
+    exit 1
+  fi
 
-failopen_source="${work_dir}/glua_native_failopen.lua"
-cat >"${failopen_source}" <<EOF
+  suffix_name="${extension#.}"
+  cpath_pattern="${build_dir}/?${extension}"
+  package_cpath_literal="$(lua_string_literal "${cpath_pattern}")"
+
+  smoke_source="${work_dir}/glua_native_smoke_${suffix_name}.lua"
+  smoke_template="$(<"${template_file}")"
+  smoke_template="${smoke_template//@GLUA_NATIVE_PACKAGE_PATH@/${package_path_literal}}"
+  smoke_template="${smoke_template//@GLUA_NATIVE_PACKAGE_CPATH@/${package_cpath_literal}}"
+  printf '%s\n' "${smoke_template}" >"${smoke_source}"
+
+  failopen_source="${work_dir}/glua_native_failopen_${suffix_name}.lua"
+  cat >"${failopen_source}" <<EOF
 package.path = ${package_path_literal}
 package.cpath = ${package_cpath_literal}
 
@@ -98,10 +101,11 @@ assert(string.find(message, "native open failure", 1, true), message)
 assert(package.loaded["glua_native_failopen"] == nil)
 EOF
 
-echo "run native smoke require: ${smoke_source}"
-"${glua_bin}" "${smoke_source}"
+  echo "run native smoke require (${extension}): ${smoke_source}"
+  "${glua_bin}" "${smoke_source}"
 
-echo "run native failopen require: ${failopen_source}"
-"${glua_bin}" "${failopen_source}"
+  echo "run native failopen require (${extension}): ${failopen_source}"
+  "${glua_bin}" "${failopen_source}"
+done
 
 echo "native module CLI smoke passed"

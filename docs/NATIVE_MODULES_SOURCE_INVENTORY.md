@@ -23,8 +23,8 @@
 | Go/CGO loader | `internal/native/dlopen_windows.go` | Windows `LoadLibraryW` / `GetProcAddress` / `FreeLibrary` 封装 | 已固定 |
 | Fixture C source | `tests/native_modules/fixtures/glua_native_smoke.c` | 构建 `glua_native_smoke` / `glua_native_failopen`，覆盖 `luaopen_*`、C function、userdata、metatable、registry 和错误 smoke | 已固定 |
 | Fixture Lua 脚本 | `tests/native_modules/fixtures/glua_native_smoke.lua` | 复用 `require("glua_native_smoke")`、C function、userdata、错误传播、traceback 和 `package.loaded` smoke 验收 | 已固定 |
-| Fixture 构建脚本 | `scripts/build-native-fixtures.sh` | 使用仓库内 Lua public headers 和 fixture C 源码构建当前平台动态库，并输出 `GOOS`、`GOARCH`、`CC`、`CGO_ENABLED` 与产物路径 | 已固定 |
-| Fixture 测试脚本 | `scripts/test-native-modules.sh` | 构建 native tag `glua`，调用 fixture 构建脚本，并执行成功 require 与 luaopen 初始化失败两条 CLI smoke | 已固定 |
+| Fixture 构建脚本 | `scripts/build-native-fixtures.sh` | 使用仓库内 Lua public headers 和 fixture C 源码构建当前平台动态库；Linux 产出 `.so`，macOS 同时产出 `.dylib` 与 `.so`，并输出 `GOOS`、`GOARCH`、`CC`、`CGO_ENABLED` 与产物路径 | 已固定 |
+| Fixture 测试脚本 | `scripts/test-native-modules.sh` | 构建 native tag `glua`，调用 fixture 构建脚本，并按当前平台后缀执行成功 require 与 luaopen 初始化失败两条 CLI smoke；macOS 覆盖 `.dylib` 与 `.so` 两类候选 | 已固定 |
 | 交叉编译脚本 | `scripts/check-native-cross-compile.sh` | 编译 `internal/native` 测试二进制和 `cmd/glua` native 产物，显式输出目标平台、`CC`、产物路径和 skip 原因 | 已固定 |
 | Fixture Go harness | `internal/native/loadlib_fixture_unix_test.go` | 编译仓库内 fixture C 文件，并验证 `package.loadlib`、`require`、错误传播和 userdata 状态 | 已固定 |
 | 真实模块源码 | `third_party/lua-cjson/` | 第一真实模块验收源码，固定 upstream `mpx/lua-cjson` tag `2.1.0` / commit `4bc5e917c8cd5fc2f6b217512ef530007529322f`，许可证见目录内 `LICENSE` | 已固定 |

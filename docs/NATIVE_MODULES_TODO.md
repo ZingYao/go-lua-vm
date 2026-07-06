@@ -145,8 +145,8 @@
   - [ ] macOS native build/test 编译验证。
   - [ ] Windows native build/test 编译验证。
 - [ ] Linux `.so` fixture 构建和 require。
-- [ ] macOS `.dylib` fixture 构建和 require。
-- [ ] macOS `.so` 后缀候选验证。
+- [x] macOS `.dylib` fixture 构建和 require。
+- [x] macOS `.so` 后缀候选验证。
 - [ ] Windows `.dll` fixture 构建和 require。
 - [ ] Windows `lua53.dll` shim 或等价 import library 方案落地。
 - [ ] 在平台不可用时提供可跳过但明确原因的测试。
@@ -252,3 +252,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：新增 `scripts/build-native-cjson.sh`，直接使用仓库内 `native/lua53/include/` 与 `third_party/lua-cjson/` 固定源码编译当前平台 `cjson` 动态模块；macOS 同时产出 `.so` 与 `.dylib`，Linux 产出 `.so`，Windows 在 `lua53.dll` shim/import library 落地前明确 skip。该切口只证明真实模块源码可自包含编译，`require("cjson")`、`encode/decode` 和错误输入 `pcall` 仍等待 Lua C API shim 覆盖后验收。
 - 2026-07-06：补齐 `lua-cjson` 运行期所需的最小 Lua 5.3 public C API：C closure upvalue、`lua_upvalueindex` 读取、`luaL_setfuncs(nup>=0)`、`lua_checkstack`、`lua_rotate`、`lua_pushlightuserdata`、`lua_rawset`、`lua_next`、`luaL_argerror`、`luaL_checkoption`、`lua_pcallk` 非 yield 路径，并把 `lua_error` / `luaL_error` / `luaL_argerror` 改为 C 层 `setjmp` 边界内不返回。当前 macOS arm64 已用仓库内 `lua-cjson` 源码完成 `require("cjson")`、`encode/decode` 和错误输入 `pcall(cjson.decode, "{")` 验收；默认 no-CGO 构建仍需本轮完整门禁确认。
 - 2026-07-06：新增 `scripts/test-native-cjson.sh`，把 `lua-cjson` 真实模块运行期验收固化为脚本：脚本先构建 native tag `glua` 和仓库内 `third_party/lua-cjson` 动态模块，再执行 `require("cjson")`、对象/数组/标量 `encode/decode`、`cjson.null` identity、非法 JSON `pcall` 和不可序列化 function `pcall`。当前 macOS arm64 验收通过；Windows 仍在 `lua53.dll` shim/import library 落地前明确 skip。
+- 2026-07-06：扩展 fixture 构建与 CLI smoke 脚本；macOS 现在同时产出 `glua_native_smoke` / `glua_native_failopen` 的 `.dylib` 和 `.so` 两种后缀，并分别通过 `package.cpath` 执行 require 成功路径与 luaopen 初始化失败路径，覆盖 Lua 生态在 macOS 上常见的双后缀候选。

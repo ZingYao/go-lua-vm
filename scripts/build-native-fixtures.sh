@@ -36,11 +36,11 @@ fi
 
 case "${target_goos}" in
   darwin)
-    extension=".dylib"
+    output_extensions=(".dylib" ".so")
     link_args=("-dynamiclib" "-undefined" "dynamic_lookup")
     ;;
   linux)
-    extension=".so"
+    output_extensions=(".so")
     link_args=("-shared" "-fPIC")
     ;;
   windows)
@@ -57,13 +57,14 @@ mkdir -p "${build_dir}"
 
 build_module() {
   local module_name="$1"
+  local extension="$2"
   local output_path="${build_dir}/${module_name}${extension}"
   local args=("-I" "${include_dir}" "-o" "${output_path}")
 
   args+=("${link_args[@]}")
   args+=("${source_file}")
 
-  printf 'compile %s:' "${module_name}"
+  printf 'compile %s%s:' "${module_name}" "${extension}"
   printf ' %q' "${cc}" "${args[@]}"
   printf '\n'
 
@@ -71,8 +72,10 @@ build_module() {
   echo "built ${output_path}"
 }
 
-build_module "glua_native_smoke"
-build_module "glua_native_failopen"
+for extension in "${output_extensions[@]}"; do
+  build_module "glua_native_smoke" "${extension}"
+  build_module "glua_native_failopen" "${extension}"
+done
 
 echo "native fixture outputs:"
 find "${build_dir}" -maxdepth 1 -type f -print | sort
