@@ -78,6 +78,33 @@ print("PROBE", c:match'[==[]]====]]]]==]===[]', table.concat(attempts, ","))
 LUA
 }
 
+lua_value_expr_for_kind() {
+  case "$1" in
+    string)
+      printf '%s\n' '"unexpected falsy select count"'
+      ;;
+    number)
+      printf '%s\n' '17'
+      ;;
+    boolean)
+      printf '%s\n' 'true'
+      ;;
+    nil)
+      printf '%s\n' 'nil'
+      ;;
+    table)
+      printf '%s\n' '{}'
+      ;;
+    function)
+      printf '%s\n' 'function() return 1 end'
+      ;;
+    *)
+      echo "unknown select-count global value kind: $1" >&2
+      return 1
+      ;;
+  esac
+}
+
 emit_mode_body() {
   local mode="$1"
 
@@ -231,34 +258,46 @@ LUA
       local value_kind="${payload##*-}"
       local value_expr
 
-      case "${value_kind}" in
-        string)
-          value_expr='"unexpected falsy select count"'
-          ;;
-        number)
-          value_expr='17'
-          ;;
-        boolean)
-          value_expr='true'
-          ;;
-        nil)
-          value_expr='nil'
-          ;;
-        table)
-          value_expr='{}'
-          ;;
-        function)
-          value_expr='function() return 1 end'
-          ;;
-        *)
-          echo "unknown select-count global value kind: ${value_kind}" >&2
-          return 1
-          ;;
-      esac
+      if ! value_expr="$(lua_value_expr_for_kind "${value_kind}")"; then
+        return 1
+      fi
 
       cat <<LUA
 local count = select("#", "alpha", "beta")
 local skipped = _G["${global_name}"]
+local payload = ${value_expr}
+LUA
+      ;;
+    select-count-value-global-*)
+      local payload="${mode#select-count-value-global-}"
+      local value_kind="${payload%-*}"
+      local global_name="${payload##*-}"
+      local value_expr
+
+      if ! value_expr="$(lua_value_expr_for_kind "${value_kind}")"; then
+        return 1
+      fi
+
+      cat <<LUA
+local count = select("#", "alpha", "beta")
+local payload = ${value_expr}
+local skipped = _G["${global_name}"]
+LUA
+      ;;
+    select-count-global-spacer-value-*)
+      local payload="${mode#select-count-global-spacer-value-}"
+      local global_name="${payload%-*}"
+      local value_kind="${payload##*-}"
+      local value_expr
+
+      if ! value_expr="$(lua_value_expr_for_kind "${value_kind}")"; then
+        return 1
+      fi
+
+      cat <<LUA
+local count = select("#", "alpha", "beta")
+local skipped = _G["${global_name}"]
+local spacer = 0
 local payload = ${value_expr}
 LUA
       ;;
