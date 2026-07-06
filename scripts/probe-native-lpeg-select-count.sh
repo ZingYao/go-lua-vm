@@ -205,6 +205,46 @@ if count ~= 2 then
 end
 LUA
       ;;
+    select-count-two-true)
+      cat <<'LUA'
+local count = select("#", true, true)
+if count ~= 2 then
+  error("unexpected two-true select count")
+end
+LUA
+      ;;
+    select-count-first-true-second-false)
+      cat <<'LUA'
+local count = select("#", true, false)
+if count ~= 2 then
+  error("unexpected first-true second-false select count")
+end
+LUA
+      ;;
+    select-count-first-false-second-true)
+      cat <<'LUA'
+local count = select("#", false, true)
+if count ~= 2 then
+  error("unexpected first-false second-true select count")
+end
+LUA
+      ;;
+    select-count-first-string-second-false)
+      cat <<'LUA'
+local count = select("#", "alpha", false)
+if count ~= 2 then
+  error("unexpected first-string second-false select count")
+end
+LUA
+      ;;
+    select-count-first-false-second-string)
+      cat <<'LUA'
+local count = select("#", false, "beta")
+if count ~= 2 then
+  error("unexpected first-false second-string select count")
+end
+LUA
+      ;;
     select-count-three-strings)
       cat <<'LUA'
 local count = select("#", "alpha", "beta", "gamma")
@@ -419,6 +459,11 @@ modes=(
   select-count-two-false
   select-count-first-false-second-nil
   select-count-first-nil-second-false
+  select-count-two-true
+  select-count-first-true-second-false
+  select-count-first-false-second-true
+  select-count-first-string-second-false
+  select-count-first-false-second-string
   select-count-three-strings
   select-count-one-string
   select-count-one-number
