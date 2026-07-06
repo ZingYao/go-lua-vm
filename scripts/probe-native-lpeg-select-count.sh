@@ -124,6 +124,32 @@ LUA
 _G.__glua_select_count_probe = select("#", "alpha", "beta")
 LUA
       ;;
+    select-count-error-local-after)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+local skipped = error
+LUA
+      ;;
+    select-count-message-local-after)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+local message = "unexpected falsy select count"
+LUA
+      ;;
+    select-count-error-message-locals-after)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+local skipped = error
+local message = "unexpected falsy select count"
+LUA
+      ;;
+    select-count-type-message-locals-after)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+local skipped = type
+local message = "unexpected falsy select count"
+LUA
+      ;;
     select-count-if-truthy)
       cat <<'LUA'
 local count = select("#", "alpha", "beta")
@@ -155,11 +181,37 @@ if not count then
 end
 LUA
       ;;
+    select-count-if-not-skip-error-locals)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+if not count then
+  local skipped = error
+  local message = "unexpected falsy select count"
+end
+LUA
+      ;;
+    select-count-if-not-skip-error-local-call)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+if not count then
+  local skipped = error
+  skipped("unexpected falsy select count")
+end
+LUA
+      ;;
     select-count-if-not-skip-type-call)
       cat <<'LUA'
 local count = select("#", "alpha", "beta")
 if not count then
   type("skipped")
+end
+LUA
+      ;;
+    select-count-if-not-skip-assert-false)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+if not count then
+  assert(false, "unexpected falsy select count")
 end
 LUA
       ;;
@@ -176,6 +228,14 @@ LUA
 local count = select("#", "alpha", "beta")
 if count == 2 then
   type("entered")
+end
+LUA
+      ;;
+    select-count-if-eq-enter-assert-true)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+if count == 2 then
+  assert(true, "entered")
 end
 LUA
       ;;

@@ -49,6 +49,32 @@ if values[1] ~= 2 then
 end
 LUA
       ;;
+    select-count-error-local-after)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+local skipped = error
+LUA
+      ;;
+    select-count-message-local-after)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+local message = "unexpected falsy select count"
+LUA
+      ;;
+    select-count-error-message-locals-after)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+local skipped = error
+local message = "unexpected falsy select count"
+LUA
+      ;;
+    select-count-type-message-locals-after)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+local skipped = type
+local message = "unexpected falsy select count"
+LUA
+      ;;
     select-count-if-truthy)
       cat <<'LUA'
 local count = select("#", "alpha", "beta")
@@ -80,11 +106,37 @@ if not count then
 end
 LUA
       ;;
+    select-count-if-not-skip-error-locals)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+if not count then
+  local skipped = error
+  local message = "unexpected falsy select count"
+end
+LUA
+      ;;
+    select-count-if-not-skip-error-local-call)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+if not count then
+  local skipped = error
+  skipped("unexpected falsy select count")
+end
+LUA
+      ;;
     select-count-if-not-skip-type-call)
       cat <<'LUA'
 local count = select("#", "alpha", "beta")
 if not count then
   type("skipped")
+end
+LUA
+      ;;
+    select-count-if-not-skip-assert-false)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+if not count then
+  assert(false, "unexpected falsy select count")
 end
 LUA
       ;;
@@ -101,6 +153,14 @@ LUA
 local count = select("#", "alpha", "beta")
 if count == 2 then
   type("entered")
+end
+LUA
+      ;;
+    select-count-if-eq-enter-assert-true)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+if count == 2 then
+  assert(true, "entered")
 end
 LUA
       ;;
@@ -177,13 +237,21 @@ modes=(
   select-count-consume
   select-count-discard
   select-count-table-constructor
+  select-count-error-local-after
+  select-count-message-local-after
+  select-count-error-message-locals-after
+  select-count-type-message-locals-after
   select-count-if-truthy
   select-count-if-not-empty
   select-count-if-not-skip-loadk
   select-count-if-not-skip-global
+  select-count-if-not-skip-error-locals
+  select-count-if-not-skip-error-local-call
   select-count-if-not-skip-type-call
+  select-count-if-not-skip-assert-false
   select-count-if-eq-enter-loadk
   select-count-if-eq-enter-type-call
+  select-count-if-eq-enter-assert-true
   select-count-if-count-empty
   select-count-if-eq-empty
   select-count-eq-unused
