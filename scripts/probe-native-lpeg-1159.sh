@@ -404,6 +404,32 @@ LUA
   rg '^PROBE' "${output}" || tail -n 3 "${output}"
 }
 
+run_prefix620_loadlib_diagnostic_probe() {
+  local mode="$1"
+  local label="$2"
+  local source="${work_dir}/${label}.lua"
+  local output="${work_dir}/${label}.out"
+
+  {
+    printf 'package.path = "%s"\n' "${repo_root}/third_party/lpeg/?.lua"
+    printf 'package.cpath = "%s"\n' "${build_dir}/?${module_extension}"
+    sed "1,4d;621,\$d" "${repo_root}/third_party/lpeg/test.lua"
+    cat <<LUA
+local f, message, where = package.loadlib("${build_dir}/no_such_native_module${module_extension}", "luaopen_missing")
+assert(f == nil and where == "open", tostring(message) .. " / " .. tostring(where))
+assert(tostring(message):find("${mode}", 1, true), tostring(message))
+LUA
+    emit_probe_tail
+  } >"${source}"
+
+  echo "run prefix620 + package.loadlib diagnostic ${mode} probe"
+  GLUA_NATIVE_DLOPEN_DIAGNOSTIC="${mode}" \
+    GLUA_NATIVE_DLOPEN_DIAGNOSTIC_MATCH="no_such_native_module" \
+    "${glua_bin}" "${source}" >"${output}"
+  printf '%s ' "${label}"
+  rg '^PROBE' "${output}" || tail -n 3 "${output}"
+}
+
 run_prefix620_loadlib_existing_symbol_probe() {
   local source="${work_dir}/prefix620_loadlib_existing_symbol.lua"
   local output="${work_dir}/prefix620_loadlib_existing_symbol.out"
@@ -467,6 +493,10 @@ run_prefix620_loadlib_missing_file_probe
 run_prefix620_synthetic_loadlib_error_probe
 run_prefix620_loadlib_bad_argument_probe
 run_prefix620_loadlib_regular_file_probe
+run_prefix620_loadlib_diagnostic_probe before-cstring prefix620_loadlib_diag_before_cstring
+run_prefix620_loadlib_diagnostic_probe after-cstring prefix620_loadlib_diag_after_cstring
+run_prefix620_loadlib_diagnostic_probe after-clear prefix620_loadlib_diag_after_clear
+run_prefix620_loadlib_diagnostic_probe after-dlopen-no-dlerror prefix620_loadlib_diag_after_dlopen_no_dlerror
 run_prefix620_loadlib_existing_symbol_probe
 run_prefix620_parity_matches_loadlib_missing_file_probe
 

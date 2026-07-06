@@ -27,6 +27,8 @@ import "C"
 
 import (
 	"fmt"
+	"os"
+	"strings"
 	"unsafe"
 
 	packagelib "github.com/zing/go-lua-vm/stdlib/package"
@@ -49,11 +51,32 @@ func openDynamicLibrary(filename string) (*dynamicLibrary, error) {
 		// 空路径属于打开阶段错误，package.loadlib 应返回 open 分类。
 		return nil, packagelib.DynamicLibraryError{Category: "open", Message: "dynamic library filename is empty"}
 	}
+	diagnosticMode := dynamicOpenDiagnosticMode()
+	if diagnosticMode == "before-cstring" && dynamicOpenDiagnosticApplies(filename) {
+		// 诊断模式在任何 C 分配和 loader 调用之前返回，用于隔离 package.loadlib/native Go 错误路径。
+		return nil, diagnosticDynamicOpenError(filename, diagnosticMode)
+	}
 	cFilename := C.CString(filename)
 	defer C.free(unsafe.Pointer(cFilename))
+	if diagnosticMode == "after-cstring" && dynamicOpenDiagnosticApplies(filename) {
+		// 诊断模式只覆盖 C.CString/C.free 生命周期，不进入 dlerror 或 dlopen。
+		return nil, diagnosticDynamicOpenError(filename, diagnosticMode)
+	}
 
 	clearDynamicLibraryError()
+	if diagnosticMode == "after-clear" && dynamicOpenDiagnosticApplies(filename) {
+		// 诊断模式覆盖 dlerror 清理调用，但仍不触发真实 dlopen。
+		return nil, diagnosticDynamicOpenError(filename, diagnosticMode)
+	}
 	handle := C.glua_dlopen(cFilename)
+	if diagnosticMode == "after-dlopen-no-dlerror" && dynamicOpenDiagnosticApplies(filename) {
+		// 诊断模式触发真实 dlopen，但故意不读取 dlerror，避免把错误字符串读取混入定位结果。
+		if handle != nil {
+			// 异常成功时立即关闭句柄，避免诊断模式泄漏平台 loader 资源。
+			_ = C.glua_dlclose(handle)
+		}
+		return nil, diagnosticDynamicOpenError(filename, diagnosticMode)
+	}
 	if handle == nil {
 		// dlopen 返回 nil 表示库不存在、格式不匹配或依赖缺失，统一归类为 open。
 		return nil, packagelib.DynamicLibraryError{
@@ -168,4 +191,36 @@ func lastDynamicLibraryError() string {
 		return "no dynamic loader error details"
 	}
 	return C.GoString(message)
+}
+
+// dynamicOpenDiagnosticMode 返回 Unix native loader 的诊断阶段开关。
+//
+// 该环境变量只供 LPeg/loadlib 边界定位脚本使用，不属于公开 API；未设置时生产路径完全保持原样。
+func dynamicOpenDiagnosticMode() string {
+	// 每次打开库时读取环境变量，便于同一二进制在不同探针进程中切换诊断阶段。
+	return os.Getenv("GLUA_NATIVE_DLOPEN_DIAGNOSTIC")
+}
+
+// dynamicOpenDiagnosticApplies 判断当前文件是否命中 Unix native loader 诊断范围。
+//
+// GLUA_NATIVE_DLOPEN_DIAGNOSTIC_MATCH 为空时诊断模式影响全部打开请求；非空时只匹配包含该片段的路径。
+func dynamicOpenDiagnosticApplies(filename string) bool {
+	// 未启用匹配条件时保留旧诊断行为，方便手工直接拦截任意 dlopen。
+	filenameFragment := os.Getenv("GLUA_NATIVE_DLOPEN_DIAGNOSTIC_MATCH")
+	if filenameFragment == "" {
+		// 空匹配条件表示调用者明确要让诊断模式覆盖所有动态库打开。
+		return true
+	}
+	return strings.Contains(filename, filenameFragment)
+}
+
+// diagnosticDynamicOpenError 构造 package.loadlib 兼容的诊断 open 错误。
+//
+// filename 必须是原始动态库路径；mode 记录中断阶段，供脚本输出和 TODO 证据定位。
+func diagnosticDynamicOpenError(filename string, mode string) error {
+	// 诊断错误仍返回 open 分类，确保 package.loadlib 三返回形态与真实 dlopen 失败一致。
+	return packagelib.DynamicLibraryError{
+		Category: "open",
+		Message:  fmt.Sprintf("diagnostic dynamic library open failure at %s for %q", mode, filename),
+	}
 }

@@ -96,6 +96,46 @@ func TestUnixLoaderReportsShimBoundary(t *testing.T) {
 	}
 }
 
+// TestUnixDynamicLibraryDiagnosticOpenMode 验证 LPeg 定位用诊断开关只拦截匹配路径。
+func TestUnixDynamicLibraryDiagnosticOpenMode(t *testing.T) {
+	// 诊断模式只应拦截包含匹配片段的目标文件，避免误伤前置 require("lpeg")。
+	t.Setenv("GLUA_NATIVE_DLOPEN_DIAGNOSTIC", "before-cstring")
+	t.Setenv("GLUA_NATIVE_DLOPEN_DIAGNOSTIC_MATCH", "glua_diag_target")
+
+	_, err := openDynamicLibrary("/tmp/glua_diag_target_missing.so")
+	if err == nil {
+		// 命中匹配片段时必须强制返回诊断错误，而不是进入真实 dlopen。
+		t.Fatalf("diagnostic open returned nil error")
+	}
+	var dynamicErr packagelib.DynamicLibraryError
+	if !errors.As(err, &dynamicErr) {
+		// 诊断错误必须保留 package.loadlib 可识别的动态库错误类型。
+		t.Fatalf("diagnostic open error = %T, want DynamicLibraryError", err)
+	}
+	if dynamicErr.Category != "open" {
+		// 诊断模式模拟打开阶段失败，因此分类必须是 open。
+		t.Fatalf("diagnostic open category = %q, want open", dynamicErr.Category)
+	}
+	if !strings.Contains(dynamicErr.Message, "before-cstring") {
+		// 错误文本必须携带阶段名，便于探针脚本确认拦截位置。
+		t.Fatalf("diagnostic open message = %q", dynamicErr.Message)
+	}
+
+	filename, _ := unixSmokeLibrary()
+	library, err := openDynamicLibrary(filename)
+	if err != nil {
+		// 非匹配路径必须继续进入真实 dlopen，避免诊断开关污染 LPeg 模块加载。
+		t.Fatalf("openDynamicLibrary(%q) with non-matching diagnostic filter failed: %v", filename, err)
+	}
+	defer func() {
+		// 成功打开的系统库必须关闭，避免影响同进程后续 native 测试。
+		if err := library.close(); err != nil {
+			// close 失败说明诊断开关之外的平台 loader 状态异常。
+			t.Fatalf("close dynamic library failed: %v", err)
+		}
+	}()
+}
+
 // unixSmokeLibrary 返回当前 Unix 平台上可用于 dlopen/dlsym smoke 的系统库和符号。
 func unixSmokeLibrary() (string, string) {
 	// 根据平台选择稳定的 C 运行时库入口。
