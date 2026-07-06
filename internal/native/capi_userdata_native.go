@@ -10,6 +10,7 @@ typedef struct lua_State lua_State;
 import "C"
 
 import (
+	"fmt"
 	"unsafe"
 
 	"github.com/zing/go-lua-vm/runtime"
@@ -132,6 +133,62 @@ func nativeLuaToUserdata(luaState unsafe.Pointer, index int) unsafe.Pointer {
 	return block.data()
 }
 
+// nativeLuaCheckUDataFailure 记录 luaL_checkudata 检查失败的错误对象。
+func nativeLuaCheckUDataFailure(luaState unsafe.Pointer, index int, typeName string) unsafe.Pointer {
+	// 当前 shim 不跨 Go/C 边界 longjmp；先记录错误对象，等待 C function 返回边界统一传播。
+	message := fmt.Sprintf("bad argument #%d (%s expected)", index, typeName)
+	_ = setNativeStatePendingError(luaState, runtime.StringValue(message))
+	return nil
+}
+
+// nativeLuaCheckUData 实现 Lua 5.3 lauxlib 的 luaL_checkudata。
+func nativeLuaCheckUData(luaState unsafe.Pointer, index int, typeNamePointer unsafe.Pointer) unsafe.Pointer {
+	// type name 是 registry 命名元表的 key，缺失时无法做可靠类型检查。
+	if typeNamePointer == nil {
+		// 保留错误对象，避免 C 模块把 nil 当作有效 full userdata 指针继续使用。
+		return nativeLuaCheckUDataFailure(luaState, index, "userdata")
+	}
+	typeName := nativeLuaCString(typeNamePointer)
+	value, ok := nativeLuaValueAt(luaState, index)
+	if !ok || value.Kind != runtime.KindUserdata {
+		// 目标不是 userdata 时不能返回 C full userdata 指针。
+		return nativeLuaCheckUDataFailure(luaState, index, typeName)
+	}
+	userdata, ok := value.Ref.(*runtime.Userdata)
+	if !ok || userdata == nil {
+		// userdata 引用损坏时按类型检查失败处理。
+		return nativeLuaCheckUDataFailure(luaState, index, typeName)
+	}
+	block, ok := userdata.Data.(*nativeUserdataBlock)
+	if !ok || block == nil {
+		// 纯 Go userdata 没有 C full userdata 数据区，不能通过 Lua C API 暴露。
+		return nativeLuaCheckUDataFailure(luaState, index, typeName)
+	}
+	metatable := userdata.GetMetatable()
+	if metatable == nil {
+		// 没有 raw 元表说明尚未绑定命名 userdata 类型。
+		return nativeLuaCheckUDataFailure(luaState, index, typeName)
+	}
+	registry, ok := nativeLuaTableAt(luaState, runtime.RegistryPseudoIndex)
+	if !ok {
+		// registry 不可用时无法验证类型名。
+		return nativeLuaCheckUDataFailure(luaState, index, typeName)
+	}
+	expectedValue := registry.RawGetString(typeName)
+	if expectedValue.Kind != runtime.KindTable {
+		// registry 中不存在命名元表或类型不匹配，检查失败。
+		return nativeLuaCheckUDataFailure(luaState, index, typeName)
+	}
+	expectedMetatable, ok := expectedValue.Ref.(*runtime.Table)
+	if !ok || expectedMetatable == nil || expectedMetatable != metatable {
+		// Lua 5.3 以 registry[tname] 与 userdata raw metatable 的 identity 判断类型。
+		return nativeLuaCheckUDataFailure(luaState, index, typeName)
+	}
+
+	// 类型匹配时返回 native full userdata 的 C 数据区指针。
+	return block.data()
+}
+
 // lua_newuserdata 导出 Lua 5.3 C API full userdata 创建入口。
 //
 //export lua_newuserdata
@@ -146,4 +203,12 @@ func lua_newuserdata(luaState *C.lua_State, size C.size_t) unsafe.Pointer {
 func lua_touserdata(luaState *C.lua_State, index C.int) unsafe.Pointer {
 	// C API 入口只做类型转换，具体索引与类型判断由 Go helper 维护。
 	return nativeLuaToUserdata(unsafe.Pointer(luaState), int(index))
+}
+
+// luaL_checkudata 导出 Lua 5.3 lauxlib full userdata 类型检查入口。
+//
+//export luaL_checkudata
+func luaL_checkudata(luaState *C.lua_State, index C.int, typeName *C.char) unsafe.Pointer {
+	// C API 入口只做类型转换；当前失败时记录 pending error 并返回 nil，等待 Go 边界传播。
+	return nativeLuaCheckUData(unsafe.Pointer(luaState), int(index), unsafe.Pointer(typeName))
 }

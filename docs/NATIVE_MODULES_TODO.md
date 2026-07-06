@@ -96,7 +96,7 @@
 - [ ] 实现 userdata：
   - [x] `lua_newuserdata`
   - [x] `lua_touserdata`
-  - [ ] `luaL_checkudata`
+  - [x] `luaL_checkudata`
 - [ ] 实现 metatable：
   - [x] `luaL_newmetatable`
   - [x] `luaL_getmetatable`
@@ -224,3 +224,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：新增 native full userdata 基础 API；`lua_newuserdata` 会在 C heap 分配可读写数据区、压入 `runtime.Userdata`，并把释放动作绑定到 `State.Close`，`lua_touserdata` 只对 native shim 创建的 full userdata 返回同一 C 指针。当前尚未支持 `luaL_checkudata`、metatable 与 registry，因此真实第三方模块仍需等后续阶段闭环。
 - 2026-07-06：新增 native raw metatable 基础 API；`lua_setmetatable` / `lua_getmetatable` 已支持 table、native userdata 和 runtime 已有基础类型共享元表槽，成功设置时按 Lua C API 弹出栈顶 metatable。当前 `luaL_newmetatable` / `luaL_getmetatable` 的 registry 命名元表和 `luaL_checkudata` 类型检查仍待后续接入。
 - 2026-07-06：新增 registry 命名元表基础 API；`luaL_newmetatable` 可在 registry 中按类型名创建/复用元表并保持 Lua C API 返回值语义，`luaL_getmetatable` 复用 `lua_getfield(L, LUA_REGISTRYINDEX, name)` 语义并额外导出兼容符号。当前 `luaL_checkudata` 还未比较 userdata raw 元表与命名元表，registry integer ref 仍待 `luaL_ref` / `lua_rawgeti` 阶段接入。
+- 2026-07-06：新增 `luaL_checkudata` 最小类型检查；成功路径按 Lua 5.3 规则比较 userdata raw metatable 与 `registry[tname]` identity，并返回 native full userdata 的 C 数据区指针。失败路径当前记录 pending error 并返回 nil，等待 C function 返回边界传播；尚未实现 C 层 longjmp，因此不应把失败返回 nil 的行为视为完整 lauxlib 错误语义。
