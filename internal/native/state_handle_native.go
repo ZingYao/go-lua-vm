@@ -12,6 +12,10 @@ static void* glua_alloc_state_token(void) {
 static void glua_free_state_token(void* token) {
 	free(token);
 }
+
+static void glua_free_native_buffer(void* buffer) {
+	free(buffer);
+}
 */
 import "C"
 
@@ -34,6 +38,8 @@ var (
 	nativeStateHandlesMu sync.Mutex
 	// nativeStateHandles 保存 C token 与 Go State 的生命周期绑定；key 不保存 Go 指针。
 	nativeStateHandles = make(map[uintptr]*runtime.State)
+	// nativeStateBuffers 保存 C API 返回给 C 模块的临时 C buffer，并绑定到 lua_State handle 生命周期。
+	nativeStateBuffers = make(map[uintptr][]unsafe.Pointer)
 )
 
 // newNativeStateHandle 为当前 State 创建 C 可见的 opaque lua_State* handle。
@@ -58,6 +64,7 @@ func newNativeStateHandle(state *runtime.State) (*nativeStateHandle, error) {
 	handle := &nativeStateHandle{token: token}
 	nativeStateHandlesMu.Lock()
 	nativeStateHandles[uintptr(token)] = state
+	nativeStateBuffers[uintptr(token)] = nil
 	nativeStateHandlesMu.Unlock()
 	return handle, nil
 }
@@ -85,7 +92,13 @@ func (handle *nativeStateHandle) close() {
 
 	nativeStateHandlesMu.Lock()
 	delete(nativeStateHandles, uintptr(token))
+	buffers := nativeStateBuffers[uintptr(token)]
+	delete(nativeStateBuffers, uintptr(token))
 	nativeStateHandlesMu.Unlock()
+	for _, buffer := range buffers {
+		// buffer 都由 C malloc 分配，可安全在 handle 生命周期结束时统一释放。
+		C.glua_free_native_buffer(buffer)
+	}
 	C.glua_free_state_token(token)
 }
 
@@ -105,4 +118,25 @@ func lookupNativeStateHandle(token unsafe.Pointer) (*runtime.State, bool) {
 		return nil, false
 	}
 	return state, true
+}
+
+// rememberNativeStateBuffer 将 C buffer 绑定到 lua_State handle 生命周期。
+//
+// buffer 必须来自 C malloc；若 token 无效，该方法会释放 buffer 并返回 false，避免泄漏。
+func rememberNativeStateBuffer(token unsafe.Pointer, buffer unsafe.Pointer) bool {
+	// nil token 或 nil buffer 都没有可记录的生命周期关系。
+	if token == nil || buffer == nil {
+		// 无效输入直接返回 false，调用方负责保持 no-op。
+		return false
+	}
+	nativeStateHandlesMu.Lock()
+	defer nativeStateHandlesMu.Unlock()
+	key := uintptr(token)
+	if state := nativeStateHandles[key]; state == nil || state.IsClosed() {
+		// handle 已失效时释放刚分配的 C buffer，避免 C API 失败路径泄漏。
+		C.glua_free_native_buffer(buffer)
+		return false
+	}
+	nativeStateBuffers[key] = append(nativeStateBuffers[key], buffer)
+	return true
 }

@@ -67,7 +67,7 @@
   - [ ] `luaL_newlib`
 - [ ] 实现基础参数检查：
   - [x] `luaL_checkinteger`
-  - [ ] `luaL_checklstring`
+  - [x] `luaL_checklstring`
   - [ ] `luaL_error`
 - [ ] fixture：C 模块 `luaopen_glua_native_smoke` 返回 table，并暴露一个简单函数。
 
@@ -82,7 +82,7 @@
   - [ ] `lua_toboolean`
   - [x] `lua_tointegerx`
   - [ ] `lua_tonumberx`
-  - [ ] `lua_tolstring`
+  - [x] `lua_tolstring`
 - [ ] 支持 C function 读取 Lua 参数并返回多值。
 - [ ] fixture：C 模块函数 `add(a, b)`、`echo(s)`、`multi()`。
 
@@ -204,3 +204,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：更正 CGO 边界：默认构建继续禁用 CGO；`native_modules` 为 Lua C 模块加载允许使用 CGO，但项目侧 C shim、fixture、真实模块验收源码和构建脚本必须全部随仓库提交，并补充跨平台交叉编译验证 TODO。
 - 2026-07-06：新增最小 table 字段 C API shim：`lua_createtable`、`lua_setfield`、`lua_getfield` 可创建 Go table 并按 string key 读写字段；当前字段路径使用 raw table 语义，元方法和错误 longjmp 留到后续阶段。
 - 2026-07-06：新增 integer 参数检查/转换 shim：`lua_tointegerx` 与 `luaL_checkinteger` 可读取 number/integer 栈值；当前不做字符串转数字，也不在失败时 longjmp，后续与 `luaL_error` 一并补齐。
+- 2026-07-06：新增字符串转换/检查 shim：`lua_tolstring` 与 `luaL_checklstring` 返回绑定到 native State handle 生命周期的 C 分配 buffer，支持 string 和 number-to-string；当前不回写 number 栈槽，失败时也暂不 longjmp，后续与 `luaL_error` 一并补齐。
