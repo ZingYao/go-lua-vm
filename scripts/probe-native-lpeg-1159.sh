@@ -430,6 +430,37 @@ LUA
   rg '^PROBE' "${output}" || tail -n 3 "${output}"
 }
 
+run_prefix620_loader_diagnostic_probe() {
+  local mode="$1"
+  local label="$2"
+  local target_path="$3"
+  local target_symbol="$4"
+  local match_fragment="$5"
+  local expected_where="$6"
+  local expected_message_fragment="${7:-${mode}}"
+  local source="${work_dir}/${label}.lua"
+  local output="${work_dir}/${label}.out"
+
+  {
+    printf 'package.path = "%s"\n' "${repo_root}/third_party/lpeg/?.lua"
+    printf 'package.cpath = "%s"\n' "${build_dir}/?${module_extension}"
+    sed "1,4d;621,\$d" "${repo_root}/third_party/lpeg/test.lua"
+    cat <<LUA
+local f, message, where = package.loadlib("${target_path}", "${target_symbol}")
+assert(f == nil and where == "${expected_where}", tostring(message) .. " / " .. tostring(where))
+assert(tostring(message):find("${expected_message_fragment}", 1, true), tostring(message))
+LUA
+    emit_probe_tail
+  } >"${source}"
+
+  echo "run prefix620 + native loader diagnostic ${mode} probe"
+  GLUA_NATIVE_LOADER_DIAGNOSTIC="${mode}" \
+    GLUA_NATIVE_LOADER_DIAGNOSTIC_MATCH="${match_fragment}" \
+    "${glua_bin}" "${source}" >"${output}"
+  printf '%s ' "${label}"
+  rg '^PROBE' "${output}" || tail -n 3 "${output}"
+}
+
 run_prefix620_loadlib_existing_symbol_probe() {
   local source="${work_dir}/prefix620_loadlib_existing_symbol.lua"
   local output="${work_dir}/prefix620_loadlib_existing_symbol.out"
@@ -497,6 +528,10 @@ run_prefix620_loadlib_diagnostic_probe before-cstring prefix620_loadlib_diag_bef
 run_prefix620_loadlib_diagnostic_probe after-cstring prefix620_loadlib_diag_after_cstring
 run_prefix620_loadlib_diagnostic_probe after-clear prefix620_loadlib_diag_after_clear
 run_prefix620_loadlib_diagnostic_probe after-dlopen-no-dlerror prefix620_loadlib_diag_after_dlopen_no_dlerror
+run_prefix620_loader_diagnostic_probe dynamic-error prefix620_loader_diag_dynamic_error "${build_dir}/no_such_native_module${module_extension}" luaopen_missing no_such_native_module open
+run_prefix620_loader_diagnostic_probe plain-error prefix620_loader_diag_plain_error "${build_dir}/no_such_native_module${module_extension}" luaopen_missing no_such_native_module open
+run_prefix620_loader_diagnostic_probe noncallable prefix620_loader_diag_noncallable "${build_dir}/no_such_native_module${module_extension}" luaopen_missing no_such_native_module init "not return a callable"
+run_prefix620_loader_diagnostic_probe after-open-dynamic-error prefix620_loader_diag_after_open_dynamic_error "${smoke_module_path}" luaopen_glua_native_smoke glua_native_smoke open
 run_prefix620_loadlib_existing_symbol_probe
 run_prefix620_parity_matches_loadlib_missing_file_probe
 
