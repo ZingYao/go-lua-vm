@@ -108,6 +108,33 @@ if count ~= 2 then
 end
 LUA
       ;;
+    select-count-gc-before)
+      cat <<'LUA'
+collectgarbage()
+local count = select("#", "alpha", "beta")
+if count ~= 2 then
+  error("unexpected gc-before select count")
+end
+LUA
+      ;;
+    select-count-gc-after-call)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+collectgarbage()
+if count ~= 2 then
+  error("unexpected gc-after-call select count")
+end
+LUA
+      ;;
+    select-count-gc-after-consume)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+if count ~= 2 then
+  error("unexpected gc-after-consume select count")
+end
+collectgarbage()
+LUA
+      ;;
     select-count-inline-if)
       cat <<'LUA'
 if select("#", "alpha", "beta") ~= 2 then
@@ -465,6 +492,9 @@ modes=(
   select-count-empty
   select-index-nonempty
   select-count-nonempty
+  select-count-gc-before
+  select-count-gc-after-call
+  select-count-gc-after-consume
   select-count-inline-if
   select-count-do-block
   select-count-nil-after-use
