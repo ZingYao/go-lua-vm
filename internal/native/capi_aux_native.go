@@ -61,6 +61,24 @@ func nativeLuaCheckInteger(luaState unsafe.Pointer, index int) int64 {
 	return integerValue
 }
 
+// nativeLuaOptInteger 实现 luaL_optinteger 的可选整数读取语义。
+func nativeLuaOptInteger(luaState unsafe.Pointer, index int, defaultValue int64) int64 {
+	// 可选参数只在缺失或 nil 时使用调用方默认值，其余路径等同 checkinteger。
+	value, ok := nativeLuaValueAt(luaState, index)
+	if !ok || value.IsNil() {
+		// none 与 nil 均按 Lua 5.3 lauxlib 语义返回默认值。
+		return defaultValue
+	}
+	integerValue, converted := nativeLuaToInteger(luaState, index)
+	if !converted {
+		// 非整数参数记录参数错误，等待 C function 返回边界传播。
+		message := fmt.Sprintf("bad argument #%d (integer expected)", index)
+		_ = setNativeStatePendingError(luaState, runtime.StringValue(message))
+		return 0
+	}
+	return integerValue
+}
+
 // nativeLuaArgError 记录 lauxlib 参数错误，并返回 Lua 5.3 API 约定的不可达返回值。
 func nativeLuaArgError(luaState unsafe.Pointer, index int, extra unsafe.Pointer) int {
 	// 当前 shim 不跨 Go/C 边界 longjmp，先把错误对象挂到 State，等待 C function 返回边界传播。
@@ -259,6 +277,14 @@ func lua_tointegerx(luaState *C.lua_State, index C.int, isNumber *C.int) C.lua_I
 func luaL_checkinteger(luaState *C.lua_State, index C.int) C.lua_Integer {
 	// 当前阶段只返回转换结果；失败错误会在 luaL_error/longjmp 阶段接入。
 	return C.lua_Integer(nativeLuaCheckInteger(unsafe.Pointer(luaState), int(index)))
+}
+
+// luaL_optinteger 导出 Lua 5.3 lauxlib optional integer 参数读取入口。
+//
+//export luaL_optinteger
+func luaL_optinteger(luaState *C.lua_State, index C.int, defaultValue C.lua_Integer) C.lua_Integer {
+	// 可选整数参数由 Go helper 统一处理 none/nil 默认值与参数错误记录。
+	return C.lua_Integer(nativeLuaOptInteger(unsafe.Pointer(luaState), int(index), int64(defaultValue)))
 }
 
 // glua_luaL_argerror_record 记录 Lua 5.3 lauxlib 参数错误。

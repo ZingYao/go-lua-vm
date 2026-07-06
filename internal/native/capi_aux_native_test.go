@@ -53,6 +53,47 @@ func TestNativeCAPICheckInteger(t *testing.T) {
 	}
 }
 
+// TestNativeCAPIOptInteger 验证 luaL_optinteger 的默认值与参数错误边界。
+func TestNativeCAPIOptInteger(t *testing.T) {
+	// 使用真实 State 和 opaque handle 验证 none/nil 默认值以及非整数错误记录。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 optinteger。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	text := []byte{'x', 0}
+	nativeLuaPushNil(luaState)
+	nativeLuaPushInteger(luaState, 7)
+	nativeLuaPushString(luaState, unsafe.Pointer(&text[0]))
+
+	if integerValue := nativeLuaOptInteger(luaState, 1, 99); integerValue != 99 {
+		// nil 参数必须按 lauxlib 可选参数语义返回默认值。
+		t.Fatalf("nativeLuaOptInteger nil = %d, want 99", integerValue)
+	}
+	if integerValue := nativeLuaOptInteger(luaState, 2, 99); integerValue != 7 {
+		// 存在的整数参数必须返回实际值。
+		t.Fatalf("nativeLuaOptInteger integer = %d, want 7", integerValue)
+	}
+	if integerValue := nativeLuaOptInteger(luaState, 4, 88); integerValue != 88 {
+		// 缺失参数必须按 none 语义返回默认值。
+		t.Fatalf("nativeLuaOptInteger missing = %d, want 88", integerValue)
+	}
+	if integerValue := nativeLuaOptInteger(luaState, 3, 99); integerValue != 0 {
+		// 非整数参数错误路径返回 0，真正错误对象通过 pending error 暂存。
+		t.Fatalf("nativeLuaOptInteger string = %d, want 0", integerValue)
+	}
+	errorObject, ok := takeNativeStatePendingError(luaState)
+	if !ok || errorObject.Kind != runtime.KindString || errorObject.String != "bad argument #3 (integer expected)" {
+		// 非整数参数必须记录 lauxlib 兼容的 integer expected 错误。
+		t.Fatalf("nativeLuaOptInteger pending error = %#v ok=%v, want integer expected", errorObject, ok)
+	}
+}
+
 // TestNativeCAPICheckLString 验证字符串参数检查返回 C 分配 buffer。
 func TestNativeCAPICheckLString(t *testing.T) {
 	// 使用真实 State 和 opaque handle 验证 luaL_checklstring 的 C buffer 生命周期。

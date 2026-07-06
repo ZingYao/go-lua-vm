@@ -191,6 +191,7 @@ state := lua.NewStateWithOptions(options)
 
 - `lua_pushcclosure`
 - `lua_pushcfunction`
+- `lua_callk`
 - `lua_call`
 - `lua_pcall`
 - `lua_type`

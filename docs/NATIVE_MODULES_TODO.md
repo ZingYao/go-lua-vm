@@ -75,7 +75,7 @@
     - [x] 当前通过 `luaL_setfuncs` 覆盖 Lua 5.3 头文件中的 `luaL_newlib` 宏展开路径，并支持 `nup >= 0` 的 C closure upvalue 复制。
 - [ ] 实现基础参数检查：
   - [x] `luaL_checkinteger`
-  - [ ] `luaL_optinteger`
+  - [x] `luaL_optinteger`
   - [x] `luaL_checklstring`
   - [x] `luaL_checkany`
   - [x] `luaL_checktype`
@@ -107,6 +107,8 @@
   - [x] `lua_tointegerx`
   - [x] `lua_tonumberx`
   - [x] `lua_tolstring`
+  - [ ] `lua_callk` / `lua_call`
+    - [ ] LPeg 1.1.0 当前运行期探针阻塞在 `_lua_callk`；Lua 5.3 public header 的 `lua_call` 宏会展开到 `lua_callk`。
 - [x] 支持 C function 读取 Lua 参数并返回多值。
 - [x] fixture：C 模块函数 `add(a, b)`、`echo(s)`、`multi()`。
 
@@ -284,3 +286,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：新增 `luaL_Buffer` 基础 API 组：`luaL_buffinit`、`luaL_prepbuffsize`、`luaL_addlstring`、`luaL_addstring`、`luaL_addvalue`、`luaL_pushresult`、`luaL_pushresultsize`、`luaL_buffinitsize`。本轮用仓库内 LPeg 1.1.0 源码重新编译 macOS arm64 `.so/.dylib` 并执行 `require("lpeg")` 运行期探针，确认阻塞点已从 `_luaL_addlstring` 前移到 `_luaL_checkany`；说明 buffer 符号组已由本项目 shim 满足，LPeg 完整验收仍待参数检查、table/user value、raw length/equality/call 等剩余 API 组继续补齐。
 - 2026-07-06：新增 `luaL_checkany` 参数存在性检查；`nil` 参数按 Lua 5.3 语义视为存在，只有缺失参数记录 `bad argument #n (value expected)` pending error。LPeg 1.1.0 macOS arm64 运行期探针确认阻塞点已从 `_luaL_checkany` 前移到 `_luaL_checktype`，下一轮应继续补齐类型检查 API。
 - 2026-07-06：新增 `luaL_checktype` 基础类型检查；成功路径按 `lua_type` 类型编号比较，失败路径记录 `bad argument #n (<expected> expected, got <actual>)` pending error。LPeg 1.1.0 macOS arm64 运行期探针确认阻塞点已从 `_luaL_checktype` 前移到 `_luaL_optinteger`，下一轮应继续补齐 optional integer 参数 API。
+- 2026-07-06：新增 `luaL_optinteger` 可选整数参数读取；缺失参数和 `nil` 返回调用方默认值，存在但不可转整数的参数记录 `bad argument #n (integer expected)` pending error。LPeg 1.1.0 macOS arm64 运行期探针确认阻塞点已从 `_luaL_optinteger` 前移到 `_lua_callk`，下一轮应优先补齐非 yield `lua_callk` / `lua_call` 调用路径。
