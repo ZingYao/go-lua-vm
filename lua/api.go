@@ -1699,6 +1699,10 @@ func openPackageWithStateCaller(state *State) error {
 	runtimeState := (*runtime.State)(state)
 	runtimeState.SetGlobal("require", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(environment.Require)))
 	runtimeState.SetGlobal("package", runtime.ReferenceValue(runtime.KindTable, environment.Table()))
+	if diagnostic := environment.Table().RawGetString("_glua_loadlib_diag"); !diagnostic.IsNil() {
+		// LPeg/native 定位模式下同步注册全局诊断 closure，用于区分全局调用和 package 字段调用边界。
+		runtimeState.SetGlobal("_glua_loadlib_diag", diagnostic)
+	}
 	return nil
 }
 

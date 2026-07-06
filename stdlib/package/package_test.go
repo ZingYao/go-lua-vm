@@ -69,6 +69,10 @@ func TestOpenRegistersPackageAndRequire(t *testing.T) {
 		// 等价诊断函数默认不应暴露到标准 package 表。
 		t.Fatalf("package._glua_loadlib_diag should be nil by default")
 	}
+	if !state.GetGlobal("_glua_loadlib_diag").IsNil() {
+		// 等价诊断函数默认不应暴露到全局环境。
+		t.Fatalf("_glua_loadlib_diag should be nil by default")
+	}
 }
 
 // TestEnvironmentPathVariables 验证 package.path/package.cpath 启动环境变量。
@@ -540,16 +544,41 @@ func TestLoadLibEquivalentDiagnosticClosure(t *testing.T) {
 		t.Fatalf("diagnostic closure is registered without env")
 	}
 
-	t.Setenv("GLUA_PACKAGE_LOADLIB_EQUIVALENT_DIAGNOSTIC", "one-return")
+	t.Setenv("GLUA_PACKAGE_LOADLIB_EQUIVALENT_DIAGNOSTIC", "empty-return")
 	t.Setenv("GLUA_PACKAGE_LOADLIB_EQUIVALENT_DIAGNOSTIC_MATCH", "glua_loadlib_diag_target")
+	state := runtime.NewState()
+	if err := Open(state); err != nil {
+		// Open 必须能在诊断模式下正常注册 package 库。
+		t.Fatalf("Open with diagnostic failed: %v", err)
+	}
+	packageValue := state.GetGlobal("package")
+	if packageValue.Kind != runtime.KindTable {
+		// package 全局必须保持 table。
+		t.Fatalf("package kind = %v, want table", packageValue.Kind)
+	}
 	environment = NewEnvironment()
 	diagnosticValue := environment.Table().RawGetString("_glua_loadlib_diag")
 	if diagnosticValue.Kind != runtime.KindGoClosure {
 		// 开启诊断后必须注册可直接调用的 Go closure。
 		t.Fatalf("diagnostic closure kind = %v, want Go closure", diagnosticValue.Kind)
 	}
+	if state.GetGlobal("_glua_loadlib_diag").Kind != runtime.KindGoClosure {
+		// Open 路径还应把同一个诊断函数注册到全局，供调用路径对照。
+		t.Fatalf("global diagnostic closure kind = %v, want Go closure", state.GetGlobal("_glua_loadlib_diag").Kind)
+	}
 	diagnostic := diagnosticValue.Ref.(runtime.GoResultsFunction)
 	values, err := diagnostic(runtime.StringValue("/tmp/glua_loadlib_diag_target.so"), runtime.StringValue("luaopen_diag"))
+	if err != nil {
+		// empty-return 诊断函数不应抛出 Lua error。
+		t.Fatalf("empty-return diagnostic returned error: %v", err)
+	}
+	if len(values) != 0 {
+		// empty-return 模式必须不返回任何值。
+		t.Fatalf("empty-return diagnostic values = %#v", values)
+	}
+
+	t.Setenv("GLUA_PACKAGE_LOADLIB_EQUIVALENT_DIAGNOSTIC", "one-return")
+	values, err = diagnostic(runtime.StringValue("/tmp/glua_loadlib_diag_target.so"), runtime.StringValue("luaopen_diag"))
 	if err != nil {
 		// 等价诊断函数不应抛出 Lua error。
 		t.Fatalf("one-return diagnostic returned error: %v", err)
@@ -579,6 +608,50 @@ func TestLoadLibEquivalentDiagnosticClosure(t *testing.T) {
 	if len(values) != 3 || !values[0].IsNil() || values[2].String != "open" || !strings.Contains(values[1].String, "equivalent-three-return") {
 		// three-return 模式必须模拟 nil,message,open。
 		t.Fatalf("three-return diagnostic values = %#v", values)
+	}
+
+	t.Setenv("GLUA_PACKAGE_LOADLIB_EQUIVALENT_DIAGNOSTIC", "true-return")
+	values, err = diagnostic(runtime.StringValue("/tmp/glua_loadlib_diag_target.so"), runtime.StringValue("luaopen_diag"))
+	if err != nil {
+		// true-return 不应抛出 Lua error。
+		t.Fatalf("true-return diagnostic returned error: %v", err)
+	}
+	if len(values) != 1 || values[0].Kind != runtime.KindBoolean || !values[0].Bool {
+		// true-return 模式必须返回 true。
+		t.Fatalf("true-return diagnostic values = %#v", values)
+	}
+
+	t.Setenv("GLUA_PACKAGE_LOADLIB_EQUIVALENT_DIAGNOSTIC", "string-return")
+	values, err = diagnostic(runtime.StringValue("/tmp/glua_loadlib_diag_target.so"), runtime.StringValue("luaopen_diag"))
+	if err != nil {
+		// string-return 不应抛出 Lua error。
+		t.Fatalf("string-return diagnostic returned error: %v", err)
+	}
+	if len(values) != 1 || values[0].Kind != runtime.KindString || values[0].String == "" {
+		// string-return 模式必须返回非空字符串。
+		t.Fatalf("string-return diagnostic values = %#v", values)
+	}
+
+	t.Setenv("GLUA_PACKAGE_LOADLIB_EQUIVALENT_DIAGNOSTIC", "table-return")
+	values, err = diagnostic(runtime.StringValue("/tmp/glua_loadlib_diag_target.so"), runtime.StringValue("luaopen_diag"))
+	if err != nil {
+		// table-return 不应抛出 Lua error。
+		t.Fatalf("table-return diagnostic returned error: %v", err)
+	}
+	if len(values) != 1 || values[0].Kind != runtime.KindTable {
+		// table-return 模式必须返回 table。
+		t.Fatalf("table-return diagnostic values = %#v", values)
+	}
+
+	t.Setenv("GLUA_PACKAGE_LOADLIB_EQUIVALENT_DIAGNOSTIC", "callable-return")
+	values, err = diagnostic(runtime.StringValue("/tmp/glua_loadlib_diag_target.so"), runtime.StringValue("luaopen_diag"))
+	if err != nil {
+		// callable-return 不应抛出 Lua error。
+		t.Fatalf("callable-return diagnostic returned error: %v", err)
+	}
+	if len(values) != 1 || values[0].Kind != runtime.KindGoClosure {
+		// callable-return 模式必须返回 Go closure。
+		t.Fatalf("callable-return diagnostic values = %#v", values)
 	}
 }
 

@@ -502,22 +502,35 @@ run_prefix620_equivalent_go_closure_probe() {
   local mode="$1"
   local label="$2"
   local expected_count="$3"
+  local expected_kind="$4"
+  local scope="${5:-package}"
   local target_path="${build_dir}/no_such_native_module${module_extension}"
   local source="${work_dir}/${label}.lua"
   local output="${work_dir}/${label}.out"
+  local diag_expr='package._glua_loadlib_diag'
+  if [[ "${scope}" == "global" ]]; then
+    diag_expr='_glua_loadlib_diag'
+  fi
 
   {
     printf 'package.path = "%s"\n' "${repo_root}/third_party/lpeg/?.lua"
     printf 'package.cpath = "%s"\n' "${build_dir}/?${module_extension}"
     sed "1,4d;621,\$d" "${repo_root}/third_party/lpeg/test.lua"
     cat <<LUA
-local diag = assert(package._glua_loadlib_diag)
+local diag = assert(${diag_expr})
 local function capture(...)
   return select("#", ...), ...
 end
 local n, f, message, where = capture(diag("${target_path}", "luaopen_missing"))
 assert(n == ${expected_count}, tostring(n))
-assert(f == nil, tostring(f))
+local expected_kind = "${expected_kind}"
+if expected_kind == "nil" then
+  assert(f == nil, tostring(f))
+elseif expected_kind == "true" then
+  assert(f == true, tostring(f))
+elseif expected_kind ~= "none" then
+  assert(type(f) == expected_kind, tostring(type(f)) .. " / " .. tostring(f))
+end
 if ${expected_count} >= 2 then
   assert(tostring(message):find("equivalent", 1, true), tostring(message))
 end
@@ -528,7 +541,7 @@ LUA
     emit_probe_tail
   } >"${source}"
 
-  echo "run prefix620 + equivalent Go closure diagnostic ${mode} (${expected_count} returns) probe"
+  echo "run prefix620 + ${scope} equivalent Go closure diagnostic ${mode} (${expected_count} returns, ${expected_kind}) probe"
   GLUA_PACKAGE_LOADLIB_EQUIVALENT_DIAGNOSTIC="${mode}" \
     GLUA_PACKAGE_LOADLIB_EQUIVALENT_DIAGNOSTIC_MATCH="no_such_native_module" \
     "${glua_bin}" "${source}" >"${output}"
@@ -612,9 +625,16 @@ run_prefix620_loadlib_branch_probe before-loader-fixed prefix620_loadlib_branch_
 run_prefix620_loadlib_branch_probe after-args-one-return prefix620_loadlib_branch_after_args_one_return 1
 run_prefix620_loadlib_branch_probe after-args-two-return prefix620_loadlib_branch_after_args_two_return 2
 run_prefix620_loadlib_branch_probe after-loader-fixed prefix620_loadlib_branch_after_loader_fixed 3
-run_prefix620_equivalent_go_closure_probe one-return prefix620_equivalent_go_closure_one_return 1
-run_prefix620_equivalent_go_closure_probe two-return prefix620_equivalent_go_closure_two_return 2
-run_prefix620_equivalent_go_closure_probe three-return prefix620_equivalent_go_closure_three_return 3
+run_prefix620_equivalent_go_closure_probe empty-return prefix620_equivalent_go_closure_empty_return 0 none
+run_prefix620_equivalent_go_closure_probe one-return prefix620_equivalent_go_closure_one_return 1 nil
+run_prefix620_equivalent_go_closure_probe two-return prefix620_equivalent_go_closure_two_return 2 nil
+run_prefix620_equivalent_go_closure_probe three-return prefix620_equivalent_go_closure_three_return 3 nil
+run_prefix620_equivalent_go_closure_probe true-return prefix620_equivalent_go_closure_true_return 1 true
+run_prefix620_equivalent_go_closure_probe string-return prefix620_equivalent_go_closure_string_return 1 string
+run_prefix620_equivalent_go_closure_probe table-return prefix620_equivalent_go_closure_table_return 1 table
+run_prefix620_equivalent_go_closure_probe callable-return prefix620_equivalent_go_closure_callable_return 1 function
+run_prefix620_equivalent_go_closure_probe one-return prefix620_global_go_closure_one_return 1 nil global
+run_prefix620_equivalent_go_closure_probe callable-return prefix620_global_go_closure_callable_return 1 function global
 run_prefix620_loadlib_existing_symbol_probe
 run_prefix620_parity_matches_loadlib_missing_file_probe
 

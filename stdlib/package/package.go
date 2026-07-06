@@ -134,6 +134,7 @@ func OpenWithLuaFileLoader(state *runtime.State, luaFileLoader LuaFileLoader) er
 	// require 作为全局函数注册，符合 Lua 5.3 基础库可见性。
 	state.SetGlobal("require", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(environment.Require)))
 	state.SetGlobal("package", runtime.ReferenceValue(runtime.KindTable, environment.table))
+	registerLoadLibEquivalentDiagnosticGlobal(state)
 	return nil
 }
 
@@ -538,6 +539,21 @@ func registerLoadLibEquivalentDiagnostic(packageTable *runtime.Table) {
 	packageTable.RawSetString("_glua_loadlib_diag", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(loadLibEquivalentDiagnostic)))
 }
 
+// registerLoadLibEquivalentDiagnosticGlobal 按需注册全局等价诊断 Go closure。
+//
+// 该入口与 package 表诊断 closure 使用同一实现，用于区分全局调用和 package 表字段调用的 VM 清理边界。
+func registerLoadLibEquivalentDiagnosticGlobal(state *runtime.State) {
+	if state == nil {
+		// nil State 没有全局表，无法注册诊断函数。
+		return
+	}
+	if loadLibEquivalentDiagnosticMode() == "" {
+		// 未开启诊断时不污染全局环境。
+		return
+	}
+	state.SetGlobal("_glua_loadlib_diag", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(loadLibEquivalentDiagnostic)))
+}
+
 // loadLibEquivalentDiagnosticMode 返回等价 Go closure 诊断模式。
 func loadLibEquivalentDiagnosticMode() string {
 	// 该变量只供 scripts/probe-native-lpeg-1159.sh 使用，不属于公开 API。
@@ -553,12 +569,31 @@ func loadLibEquivalentDiagnostic(args ...runtime.Value) ([]runtime.Value, error)
 		return []runtime.Value{runtime.NilValue()}, nil
 	}
 	switch loadLibEquivalentDiagnosticMode() {
+	case "empty-return":
+		// 空返回用于判断 Go closure 调用本身是否足以触发后续 LPeg 退化。
+		return nil, nil
 	case "one-return":
 		// 单返回 nil 用于和 package.loadlib after-args-one-return 对照。
 		return []runtime.Value{runtime.NilValue()}, nil
 	case "two-return":
 		// 双返回 nil,message 用于和 package.loadlib after-args-two-return 对照。
 		return diagnosticLoadLibPartialFailure(filename, "equivalent-two-return"), nil
+	case "true-return":
+		// true 返回用于判断首返回非 nil 是否避免后续 LPeg 退化。
+		return []runtime.Value{runtime.BooleanValue(true)}, nil
+	case "string-return":
+		// string 返回用于判断普通标量非 nil 返回是否避免后续 LPeg 退化。
+		return []runtime.Value{runtime.StringValue("equivalent string result")}, nil
+	case "table-return":
+		// table 返回用于判断引用类型非 nil 返回是否避免后续 LPeg 退化。
+		return []runtime.Value{runtime.ReferenceValue(runtime.KindTable, runtime.NewTable())}, nil
+	case "callable-return":
+		// callable 返回用于和成功 package.loadlib 返回 loader 的形态对照。
+		callable := runtime.GoResultsFunction(func(args ...runtime.Value) ([]runtime.Value, error) {
+			// 诊断 callable 本身不会被 probe 调用，若被调用则返回固定字符串帮助定位误用。
+			return []runtime.Value{runtime.StringValue("equivalent callable invoked")}, nil
+		})
+		return []runtime.Value{runtime.ReferenceValue(runtime.KindGoClosure, callable)}, nil
 	default:
 		// 默认三返回用于和 package.loadlib before-args-fixed/before-loader-fixed 对照。
 		return diagnosticLoadLibFailure(filename, "equivalent-three-return"), nil
