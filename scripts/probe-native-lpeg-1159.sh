@@ -549,6 +549,83 @@ LUA
   rg '^PROBE' "${output}" || tail -n 3 "${output}"
 }
 
+run_prefix620_get_go_closure_without_call_probe() {
+  local source="${work_dir}/prefix620_get_go_closure_without_call.lua"
+  local output="${work_dir}/prefix620_get_go_closure_without_call.out"
+
+  {
+    printf 'package.path = "%s"\n' "${repo_root}/third_party/lpeg/?.lua"
+    printf 'package.cpath = "%s"\n' "${build_dir}/?${module_extension}"
+    sed "1,4d;621,\$d" "${repo_root}/third_party/lpeg/test.lua"
+    cat <<'LUA'
+local diag = assert(package._glua_loadlib_diag)
+assert(type(diag) == "function", type(diag))
+LUA
+    emit_probe_tail
+  } >"${source}"
+
+  echo "run prefix620 + get Go closure without call probe"
+  GLUA_PACKAGE_LOADLIB_EQUIVALENT_DIAGNOSTIC="one-return" \
+    "${glua_bin}" "${source}" >"${output}"
+  printf 'prefix620_get_go_closure_without_call '
+  rg '^PROBE' "${output}" || tail -n 3 "${output}"
+}
+
+run_prefix620_lua_closure_probe() {
+  local mode="$1"
+  local label="$2"
+  local expected_count="$3"
+  local expected_kind="$4"
+  local source="${work_dir}/${label}.lua"
+  local output="${work_dir}/${label}.out"
+
+  {
+    printf 'package.path = "%s"\n' "${repo_root}/third_party/lpeg/?.lua"
+    printf 'package.cpath = "%s"\n' "${build_dir}/?${module_extension}"
+    sed "1,4d;621,\$d" "${repo_root}/third_party/lpeg/test.lua"
+    cat <<LUA
+local function diag(...)
+  if "${mode}" == "empty-return" then
+    return
+  elseif "${mode}" == "one-return" then
+    return nil
+  elseif "${mode}" == "callable-return" then
+    return function()
+      return true
+    end
+  else
+    return nil, "lua equivalent diagnostic", "open"
+  end
+end
+local function capture(...)
+  return select("#", ...), ...
+end
+local n, first, second, third = capture(diag("placeholder", "luaopen_missing"))
+assert(n == ${expected_count}, tostring(n))
+local expected_kind = "${expected_kind}"
+if expected_kind == "nil" then
+  assert(first == nil, tostring(first))
+elseif expected_kind == "function" then
+  assert(type(first) == "function", type(first))
+elseif expected_kind ~= "none" then
+  assert(type(first) == expected_kind, tostring(type(first)) .. " / " .. tostring(first))
+end
+if ${expected_count} >= 2 then
+  assert(second == "lua equivalent diagnostic", tostring(second))
+end
+if ${expected_count} >= 3 then
+  assert(third == "open", tostring(third))
+end
+LUA
+    emit_probe_tail
+  } >"${source}"
+
+  echo "run prefix620 + Lua closure diagnostic ${mode} (${expected_count} returns, ${expected_kind}) probe"
+  "${glua_bin}" "${source}" >"${output}"
+  printf '%s ' "${label}"
+  rg '^PROBE' "${output}" || tail -n 3 "${output}"
+}
+
 run_prefix620_loadlib_existing_symbol_probe() {
   local source="${work_dir}/prefix620_loadlib_existing_symbol.lua"
   local output="${work_dir}/prefix620_loadlib_existing_symbol.out"
@@ -635,6 +712,11 @@ run_prefix620_equivalent_go_closure_probe table-return prefix620_equivalent_go_c
 run_prefix620_equivalent_go_closure_probe callable-return prefix620_equivalent_go_closure_callable_return 1 function
 run_prefix620_equivalent_go_closure_probe one-return prefix620_global_go_closure_one_return 1 nil global
 run_prefix620_equivalent_go_closure_probe callable-return prefix620_global_go_closure_callable_return 1 function global
+run_prefix620_get_go_closure_without_call_probe
+run_prefix620_lua_closure_probe empty-return prefix620_lua_closure_empty_return 0 none
+run_prefix620_lua_closure_probe one-return prefix620_lua_closure_one_return 1 nil
+run_prefix620_lua_closure_probe three-return prefix620_lua_closure_three_return 3 nil
+run_prefix620_lua_closure_probe callable-return prefix620_lua_closure_callable_return 1 function
 run_prefix620_loadlib_existing_symbol_probe
 run_prefix620_parity_matches_loadlib_missing_file_probe
 
