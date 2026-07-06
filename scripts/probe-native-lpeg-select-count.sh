@@ -38,6 +38,7 @@ echo "PROBE_PREBUILD_DUMMY_CAPTURE=${PROBE_PREBUILD_DUMMY_CAPTURE:-0}"
 echo "PROBE_PREBUILD_DUMMY_BACK=${PROBE_PREBUILD_DUMMY_BACK:-0}"
 echo "PROBE_PREBUILD_DUMMY_VALUE=${PROBE_PREBUILD_DUMMY_VALUE:-}"
 echo "PROBE_PREBUILD_DECLS_ONLY=${PROBE_PREBUILD_DECLS_ONLY:-0}"
+echo "PROBE_CONTINUE_ON_CRASH=${PROBE_CONTINUE_ON_CRASH:-0}"
 
 expected_go_version="go1.26.4"
 actual_go_version="$(go version | awk '{print $3}')"
@@ -1324,6 +1325,7 @@ probe_mode() {
   local result
   local attempts
   local class
+  local status
 
   {
     printf 'package.path = "%s"\n' "${repo_root}/third_party/lpeg/?.lua"
@@ -1348,10 +1350,19 @@ probe_mode() {
     fi
   } >"${source}"
 
-  if ! "${glua_bin}" "${source}" >"${output}" 2>&1; then
-    echo "mode=${mode} class=invalid"
+  set +e
+  "${glua_bin}" "${source}" >"${output}" 2>&1
+  status=$?
+  set -e
+  if ((status != 0)); then
+    if [[ "${PROBE_CONTINUE_ON_CRASH:-0}" == "1" ]]; then
+      echo "mode=${mode} class=crash exit=${status}"
+      tail -n 4 "${output}" | sed 's/^/  /'
+      return 0
+    fi
+    echo "mode=${mode} class=invalid exit=${status}"
     tail -n 4 "${output}" | sed 's/^/  /'
-    return 1
+    return "${status}"
   fi
 
   result="$(awk '/^PROBE[[:space:]]/{print $2; exit}' "${output}")"
