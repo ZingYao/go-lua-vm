@@ -415,6 +415,18 @@ func (state *State) SnapshotGCRoots() GCRootSnapshot {
 		// 主栈上的 table 值会触发 key/value 采样。
 		snapshot.Batches[GCRootTypeTableKeyValue] = state.appendTableKVRoots(state.stack[index], snapshot.Batches[GCRootTypeTableKeyValue])
 	}
+	for _, vm := range state.activeVMs {
+		if vm == nil {
+			// nil VM 占位不对应真实 Lua 调用帧，跳过避免误扫。
+			continue
+		}
+		registers := vm.ActiveRegistersSnapshot()
+		snapshot.Batches[GCRootTypeStack] = append(snapshot.Batches[GCRootTypeStack], registers...)
+		for index := range registers {
+			// 活动 Lua VM 的存活局部寄存器同样属于运行栈根，table 值需要继续采样 key/value。
+			snapshot.Batches[GCRootTypeTableKeyValue] = state.appendTableKVRoots(registers[index], snapshot.Batches[GCRootTypeTableKeyValue])
+		}
+	}
 
 	// coroutine stack root 与 closure/upvalue root 从线程入口采集，覆盖 thread + Lua upvalue。
 	for _, thread := range state.threads {

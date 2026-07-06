@@ -67,6 +67,46 @@ func TestGCRootsStackRoot(t *testing.T) {
 	}
 }
 
+// TestGCRootsActiveVMRegisterRoot 验证活动 VM 寄存器被纳入 stack root。
+//
+// active VM 的局部寄存器是 Lua 调用中的可达值；native/C API 回调期间也可能触发 GC root
+// 快照，必须把仍活动的寄存器作为栈根并继续采样其中 table 的 key/value。
+func TestGCRootsActiveVMRegisterRoot(t *testing.T) {
+	state := NewState()
+	activeTable := NewTable()
+	activeTable.RawSetString("marker", StringValue("active"))
+
+	vm := NewVM(2)
+	if err := vm.SetRegister(0, StringValue("active-register")); err != nil {
+		// 测试初始化寄存器失败说明 VM 基础写入异常，直接终止。
+		t.Fatalf("set active register string failed: %v", err)
+	}
+	if err := vm.SetRegister(1, ReferenceValue(KindTable, activeTable)); err != nil {
+		// table 寄存器是本测试的 key/value 采样入口，写入失败时无法继续。
+		t.Fatalf("set active register table failed: %v", err)
+	}
+
+	state.PushActiveVM(vm)
+	defer state.PopActiveVM(vm)
+
+	snapshot := state.SnapshotGCRoots()
+	stackRoots := snapshot.Batches[GCRootTypeStack]
+	if !containsValue(stackRoots, StringValue("active-register")) {
+		// 活动 VM 的普通寄存器值必须作为运行栈根保留。
+		t.Fatalf("stack roots should include active VM string register: %#v", stackRoots)
+	}
+	if !containsValue(stackRoots, ReferenceValue(KindTable, activeTable)) {
+		// 活动 VM 的 table 寄存器必须作为运行栈根保留。
+		t.Fatalf("stack roots should include active VM table register: %#v", stackRoots)
+	}
+
+	tableKVRoots := snapshot.Batches[GCRootTypeTableKeyValue]
+	if !containsValue(tableKVRoots, StringValue("marker")) || !containsValue(tableKVRoots, StringValue("active")) {
+		// table 寄存器进入 root 后，其 key/value 也必须继续采样。
+		t.Fatalf("table kv roots should include active VM table content: %#v", tableKVRoots)
+	}
+}
+
 // TestGCRootsClosureUpvalueRoot 验证 closure 和 upvalue 被纳入根采样。
 //
 // 该测试对应 TODO “标记 closure/upvalue root”。
