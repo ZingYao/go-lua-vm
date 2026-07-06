@@ -4,6 +4,7 @@ package native
 
 import (
 	"testing"
+	"unsafe"
 
 	"github.com/zing/go-lua-vm/runtime"
 )
@@ -71,6 +72,36 @@ func TestNativeCAPITypeAndNumberPrimitives(t *testing.T) {
 		if got := nativeLuaToBoolean(luaState, tc.index); got != tc.want {
 			t.Fatalf("nativeLuaToBoolean %s = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+
+	stringCases := []struct {
+		name  string
+		index int
+		want  bool
+	}{
+		{name: "nil", index: 1, want: false},
+		{name: "false", index: 2, want: false},
+		{name: "integer", index: 4, want: true},
+		{name: "number", index: 5, want: true},
+		{name: "nil from pushstring null", index: 6, want: false},
+		{name: "table", index: 7, want: false},
+		{name: "missing", index: 8, want: false},
+	}
+	for _, tc := range stringCases {
+		// lua_isstring 对 string 和 number 为真，对 nil、boolean、table、none 为假。
+		if got := nativeLuaIsString(luaState, tc.index); got != tc.want {
+			t.Fatalf("nativeLuaIsString %s = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	textBytes := []byte{'l', 'p', 'e', 'g', 0}
+	nativeLuaPushString(luaState, unsafe.Pointer(&textBytes[0]))
+	if got := nativeLuaIsString(luaState, -1); !got {
+		// 普通 string 必须可作为字符串读取。
+		t.Fatalf("nativeLuaIsString string = %v, want true", got)
+	}
+	if got := nativeLuaIsString(nil, 1); got {
+		// nil State 不能读取任何 string。
+		t.Fatalf("nativeLuaIsString nil state = %v, want false", got)
 	}
 
 	numberValue, ok := nativeLuaToNumber(luaState, 4)

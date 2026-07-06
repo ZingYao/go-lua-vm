@@ -173,6 +173,7 @@ state := lua.NewStateWithOptions(options)
 - `lua_pushnumber`
 - `lua_pushlstring`
 - `lua_pushstring`
+- `lua_pushfstring`
 - `lua_createtable`
 - `lua_gettable`
 - `lua_setfield`
@@ -205,7 +206,7 @@ state := lua.NewStateWithOptions(options)
 - `lua_tolstring`
 - `lua_compare`
 - `lua_is*` 系列常用入口
-  - `lua_isstring` 是 LPeg 1.1.0 在 `lua_getuservalue` 后暴露的下一动态链接阻塞点。
+  - `lua_isstring` 已覆盖 Lua 5.3 对 string 和 number 的可转换性判断；LPeg 1.1.0 下一阻塞点已前移到 `lua_pushfstring`。
 
 ### Phase 3：userdata、metatable、registry
 
