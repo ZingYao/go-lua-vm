@@ -47,7 +47,7 @@
 
 ## 第三阶段：最小 Lua C API shim
 
-- [ ] 设计 opaque `lua_State*` handle 与 Go State 映射。
+- [x] 设计 opaque `lua_State*` handle 与 Go State 映射。
 - [ ] 实现 C API 栈基本操作：
   - [ ] `lua_gettop`
   - [ ] `lua_settop`
@@ -189,3 +189,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：新增 Unix `package.loadlib` 真实 Lua C fixture 测试；fixture 使用 Lua 5.3 public `lua.h` 编译并导出 `luaopen_glua_native_smoke`，当前可证明动态库与符号解析已贯通到 package.loadlib，返回值停在 C API shim 未实现的 `init` 分类。
 - 2026-07-06：补充真实第三方模块验收门禁；明确自编 fixture 只作为 loader smoke，最终兼容验收以 `lua-cjson` 为第一真实模块，并区分源码编译模块和官方 Lua 5.3 ABI 二进制模块。
 - 2026-07-06：新增 `PackageDynamicLibraryLoaderForState` 状态感知 loader 工厂；`lua.OpenLibs` 注册 package 库时会优先绑定当前 State，为后续 `lua_State*` opaque handle 和 `luaopen_*` 调用提供正确 VM 上下文。
+- 2026-07-06：新增 native opaque `lua_State*` handle 注册表；handle 使用 C 分配 token 作为 C 可见身份，Go 侧只保存 token 到 `runtime.State` 的映射，避免把 Go 指针传入 C，并覆盖 nil/closed State、查找和重复关闭测试。
