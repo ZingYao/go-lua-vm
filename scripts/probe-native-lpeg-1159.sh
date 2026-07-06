@@ -297,10 +297,109 @@ LUA
   rg '^PROBE' "${output}" || tail -n 3 "${output}"
 }
 
+run_fresh_loadlib_missing_file_probe() {
+  local source="${work_dir}/fresh_loadlib_missing_file.lua"
+  local output="${work_dir}/fresh_loadlib_missing_file.out"
+
+  {
+    printf 'package.path = "%s"\n' "${repo_root}/third_party/lpeg/?.lua"
+    printf 'package.cpath = "%s"\n' "${build_dir}/?${module_extension}"
+    cat <<LUA
+local m = assert(require("lpeg"))
+local f, message, where = package.loadlib("${build_dir}/no_such_native_module${module_extension}", "luaopen_missing")
+assert(f == nil and where == "open", tostring(message) .. " / " .. tostring(where))
+LUA
+    emit_probe_tail
+  } >"${source}"
+
+  echo "run fresh lpeg + missing-file package.loadlib probe"
+  "${glua_bin}" "${source}" >"${output}"
+  printf 'fresh_loadlib_missing_file '
+  rg '^PROBE' "${output}" || tail -n 3 "${output}"
+}
+
+run_prefix620_loadlib_missing_file_probe() {
+  local source="${work_dir}/prefix620_loadlib_missing_file.lua"
+  local output="${work_dir}/prefix620_loadlib_missing_file.out"
+
+  {
+    printf 'package.path = "%s"\n' "${repo_root}/third_party/lpeg/?.lua"
+    printf 'package.cpath = "%s"\n' "${build_dir}/?${module_extension}"
+    sed "1,4d;621,\$d" "${repo_root}/third_party/lpeg/test.lua"
+    cat <<LUA
+local f, message, where = package.loadlib("${build_dir}/no_such_native_module${module_extension}", "luaopen_missing")
+assert(f == nil and where == "open", tostring(message) .. " / " .. tostring(where))
+LUA
+    emit_probe_tail
+  } >"${source}"
+
+  echo "run prefix620 + missing-file package.loadlib probe"
+  "${glua_bin}" "${source}" >"${output}"
+  printf 'prefix620_loadlib_missing_file '
+  rg '^PROBE' "${output}" || tail -n 3 "${output}"
+}
+
+run_prefix620_loadlib_existing_symbol_probe() {
+  local source="${work_dir}/prefix620_loadlib_existing_symbol.lua"
+  local output="${work_dir}/prefix620_loadlib_existing_symbol.out"
+
+  {
+    printf 'package.path = "%s"\n' "${repo_root}/third_party/lpeg/?.lua"
+    printf 'package.cpath = "%s"\n' "${build_dir}/?${module_extension}"
+    sed "1,4d;621,\$d" "${repo_root}/third_party/lpeg/test.lua"
+    cat <<LUA
+local loader = assert(package.loadlib("${smoke_module_path}", "luaopen_glua_native_smoke"))
+assert(type(loader) == "function")
+LUA
+    emit_probe_tail
+  } >"${source}"
+
+  echo "run prefix620 + existing-symbol package.loadlib probe"
+  "${glua_bin}" "${source}" >"${output}"
+  printf 'prefix620_loadlib_existing_symbol '
+  rg '^PROBE' "${output}" || tail -n 3 "${output}"
+}
+
+run_prefix620_parity_matches_loadlib_missing_file_probe() {
+  local source="${work_dir}/prefix620_parity_matches_loadlib_missing_file.lua"
+  local output="${work_dir}/prefix620_parity_matches_loadlib_missing_file.out"
+
+  {
+    printf 'package.path = "%s"\n' "${repo_root}/third_party/lpeg/?.lua"
+    printf 'package.cpath = "%s"\n' "${build_dir}/?${module_extension}"
+    sed "1,4d;621,\$d" "${repo_root}/third_party/lpeg/test.lua"
+    cat <<LUA
+p = m.P{
+  [1] = '0' * m.V(2) + '1' * m.V(3) + -1,
+  [2] = '0' * m.V(1) + '1' * m.V(4),
+  [3] = '0' * m.V(4) + '1' * m.V(1),
+  [4] = '0' * m.V(3) + '1' * m.V(2),
+}
+assert(p:match(string.rep("00", 10000)))
+assert(p:match(string.rep("01", 10000)))
+assert(p:match(string.rep("011", 10000)))
+assert(not p:match(string.rep("011", 10000) .. "1"))
+assert(not p:match(string.rep("011", 10001)))
+local f, message, where = package.loadlib("${build_dir}/no_such_native_module${module_extension}", "luaopen_missing")
+assert(f == nil and where == "open", tostring(message) .. " / " .. tostring(where))
+LUA
+    emit_probe_tail
+  } >"${source}"
+
+  echo "run prefix620 + parity matches + missing-file package.loadlib probe"
+  "${glua_bin}" "${source}" >"${output}"
+  printf 'prefix620_parity_matches_loadlib_missing_file '
+  rg '^PROBE' "${output}" || tail -n 3 "${output}"
+}
+
 run_prefix646_pcall_only_probe
 run_prefix620_parity_construct_overflow_probe
 run_prefix620_parity_matches_overflow_probe
 run_prefix620_require_smoke_probe
 run_prefix620_parity_matches_require_smoke_probe
+run_fresh_loadlib_missing_file_probe
+run_prefix620_loadlib_missing_file_probe
+run_prefix620_loadlib_existing_symbol_probe
+run_prefix620_parity_matches_loadlib_missing_file_probe
 
 echo "diagnostic note: PROBE result below 18 marks the current LPeg 1159 narrowing point; this script reports evidence and does not assert the known mismatch."
