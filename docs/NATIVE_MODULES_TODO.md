@@ -141,8 +141,9 @@
   - [x] `luaL_checkudata`
   - [x] `lua_getuservalue`
     - [x] 当前覆盖 native full userdata 的 user value 压栈和类型码返回；非 full userdata、lightuserdata、无效索引按 nil 回退。
-  - [ ] `lua_setuservalue`
-    - [ ] LPeg 1.1.0 当前运行期探针已越过 `_lua_settable`，阻塞前移到 `_lua_setuservalue`。
+  - [x] `lua_setuservalue`
+    - [x] 当前覆盖 native full userdata 的 user value 写入；失败路径保持栈顶值不被消费。
+    - [x] 导出 C ABI 保持 Lua 5.3 public header 的 `void lua_setuservalue(lua_State*, int)` 签名。
 - [ ] 实现 metatable：
   - [x] `luaL_newmetatable`
   - [x] `luaL_getmetatable`
@@ -178,7 +179,10 @@
   - [ ] `lua-cjson` 官方 Lua 5.3 ABI 二进制模块验收：验证 `lua_*` / `luaL_*` 符号由本项目 shim 满足。
   - [x] 固定 `lpeg` 或等价纯 C 模块源码到仓库或 `third_party/`，记录来源、版本和许可证。
     - [x] 新增 `scripts/build-native-lpeg.sh`，使用仓库内 Lua 5.3 public headers 和固定源码编译当前平台 `lpeg` 动态模块。
+    - [x] 新增 `scripts/test-native-lpeg.sh`，覆盖 `require("lpeg")` 和基础 pattern/match runtime smoke。
   - [ ] `lpeg` 或等价纯 C 模块验收：覆盖 userdata、metatable、registry 和复杂 C function 行为。
+    - [x] macOS arm64 `.so` 与 `.dylib` 两种后缀已通过基础 LPeg runtime smoke。
+    - [ ] 完整 `third_party/lpeg/test.lua`、复杂 capture、grammar 和错误边界仍待后续验收。
   - [ ] LuaSocket 或等价网络库验收：仅在 userdata/metatable/registry/错误边界稳定后进入平台闭环。
 - [ ] 增加交叉编译验证脚本：
   - [x] `scripts/check-native-cross-compile.sh`：显式输出 `GOOS`、`GOARCH`、`CC`、产物路径和缺失 toolchain 时的 skip 原因。
@@ -205,6 +209,7 @@
   - [x] `scripts/build-native-cjson.sh`
   - [x] `scripts/test-native-cjson.sh`
   - [x] `scripts/build-native-lpeg.sh`
+  - [x] `scripts/test-native-lpeg.sh`
 - [ ] 增加最终验收记录。
 
 ## 每轮推进规则

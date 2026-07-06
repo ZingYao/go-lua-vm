@@ -164,6 +164,41 @@ func nativeLuaGetUserValue(luaState unsafe.Pointer, index int) int {
 	return nativeLuaTypeCode(userValue, false)
 }
 
+// nativeLuaSetUserValue 实现 Lua 5.3 C API 的 lua_setuservalue。
+func nativeLuaSetUserValue(luaState unsafe.Pointer, index int) int {
+	// 先解析 State 与目标 userdata；只有 full userdata 才能保存 user value。
+	state, ok := lookupNativeStateHandle(luaState)
+	if !ok {
+		// 无效 State 不能弹栈或写入，按失败返回。
+		return 0
+	}
+	value, ok := nativeLuaValueAt(luaState, index)
+	if !ok || value.Kind != runtime.KindUserdata {
+		// 无效索引或非 userdata 不应消费栈顶 user value。
+		return 0
+	}
+	userdata, ok := value.Ref.(*runtime.Userdata)
+	if !ok || userdata == nil {
+		// 损坏的 userdata 引用不能保存 user value。
+		return 0
+	}
+	if _, ok := userdata.Data.(nativeLightUserdata); ok {
+		// lightuserdata 没有 Lua 5.3 full userdata 的 user value 槽。
+		return 0
+	}
+	if _, ok := userdata.Data.(*nativeUserdataBlock); !ok {
+		// 当前 shim 只允许 native full userdata 通过 C API 写入 user value。
+		return 0
+	}
+	userValue, err := state.Pop()
+	if err != nil {
+		// 缺少栈顶值时不能完成写入。
+		return 0
+	}
+	userdata.UserValue = userValue
+	return 1
+}
+
 // nativeLuaCheckUDataFailure 记录 luaL_checkudata 检查失败的错误对象。
 func nativeLuaCheckUDataFailure(luaState unsafe.Pointer, index int, typeName string) unsafe.Pointer {
 	// 当前 shim 不跨 Go/C 边界 longjmp；先记录错误对象，等待 C function 返回边界统一传播。
@@ -242,6 +277,14 @@ func lua_touserdata(luaState *C.lua_State, index C.int) unsafe.Pointer {
 func lua_getuservalue(luaState *C.lua_State, index C.int) C.int {
 	// C API 入口只做类型转换；具体 full userdata 与 nil 回退由 Go helper 维护。
 	return C.int(nativeLuaGetUserValue(unsafe.Pointer(luaState), int(index)))
+}
+
+// lua_setuservalue 导出 Lua 5.3 C API userdata user value 写入入口。
+//
+//export lua_setuservalue
+func lua_setuservalue(luaState *C.lua_State, index C.int) {
+	// C API 入口只做类型转换；成功路径会弹出栈顶 user value。
+	_ = nativeLuaSetUserValue(unsafe.Pointer(luaState), int(index))
 }
 
 // luaL_checkudata 导出 Lua 5.3 lauxlib full userdata 类型检查入口。

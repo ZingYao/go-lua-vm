@@ -182,6 +182,97 @@ func TestNativeLuaGetUserValueRejectsNonFullUserdata(t *testing.T) {
 	}
 }
 
+// TestNativeLuaSetUserValue 验证 lua_setuservalue 写入 full userdata 关联值。
+func TestNativeLuaSetUserValue(t *testing.T) {
+	// LPeg 使用 user value 保存 pattern 的 ktable，必须保持 table identity。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 native State 映射不可用。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	if pointer := nativeLuaNewUserdata(luaState, 4); pointer == nil {
+		// 测试需要一个 native full userdata。
+		t.Fatalf("lua_newuserdata returned nil")
+	}
+	value := state.ValueAt(1)
+	userdata, ok := value.Ref.(*runtime.Userdata)
+	if !ok || userdata == nil {
+		// userdata 引用负载必须是 *runtime.Userdata。
+		t.Fatalf("userdata ref = %#v, want *runtime.Userdata", value.Ref)
+	}
+	userValueTable := runtime.NewTable()
+	nativeLuaPushValue(luaState, runtime.ReferenceValue(runtime.KindTable, userValueTable))
+	if got := nativeLuaSetUserValue(luaState, 1); got != 1 {
+		// full userdata 写入 user value 应成功。
+		t.Fatalf("lua_setuservalue table = %d, want 1", got)
+	}
+	if got := nativeLuaStackTop(luaState); got != 1 {
+		// 成功写入必须弹出栈顶 user value，只保留 userdata。
+		t.Fatalf("top after lua_setuservalue = %d, want 1", got)
+	}
+	if userdata.UserValue.Kind != runtime.KindTable || userdata.UserValue.Ref != userValueTable {
+		// user value 必须保留同一个 table identity。
+		t.Fatalf("userdata user value = %#v, want %p", userdata.UserValue, userValueTable)
+	}
+
+	nativeLuaPushNil(luaState)
+	if got := nativeLuaSetUserValue(luaState, 1); got != 1 {
+		// nil 也是合法 user value，可用于清空关联值。
+		t.Fatalf("lua_setuservalue nil = %d, want 1", got)
+	}
+	if !userdata.UserValue.IsNil() {
+		// 写入 nil 后 user value 应回到 Lua nil。
+		t.Fatalf("userdata user value after nil = %#v, want nil", userdata.UserValue)
+	}
+}
+
+// TestNativeLuaSetUserValueRejectsNonFullUserdata 验证非 full userdata 不会吞掉栈顶值。
+func TestNativeLuaSetUserValueRejectsNonFullUserdata(t *testing.T) {
+	// 非 full userdata 没有 user value 槽，当前 shim 返回 0 并保持栈不变。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 native State 映射不可用。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+	var marker byte
+
+	nativeLuaPushLightUserdata(luaState, unsafe.Pointer(&marker))
+	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'v', 0}[0]))
+	if got := nativeLuaSetUserValue(luaState, 1); got != 0 {
+		// lightuserdata 不支持 user value。
+		t.Fatalf("lua_setuservalue(lightuserdata) = %d, want 0", got)
+	}
+	if got := nativeLuaStackTop(luaState); got != 2 {
+		// 失败路径不能弹出待写入值，避免 C 模块丢栈。
+		t.Fatalf("top after lightuserdata lua_setuservalue = %d, want 2", got)
+	}
+
+	nativeLuaSetTop(luaState, 0)
+	nativeLuaPushInteger(luaState, 7)
+	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'v', 0}[0]))
+	if got := nativeLuaSetUserValue(luaState, 1); got != 0 {
+		// 非 userdata 不支持 user value。
+		t.Fatalf("lua_setuservalue(integer) = %d, want 0", got)
+	}
+	if got := nativeLuaStackTop(luaState); got != 2 {
+		// 非 userdata 失败也不能弹栈。
+		t.Fatalf("top after integer lua_setuservalue = %d, want 2", got)
+	}
+	if got := nativeLuaSetUserValue(nil, 1); got != 0 {
+		// 无效 State 按失败返回。
+		t.Fatalf("lua_setuservalue(nil state) = %d, want 0", got)
+	}
+}
+
 // TestNativeLuaToUserdataRejectsNonUserdata 验证非 native userdata 不会被误暴露为 C 指针。
 func TestNativeLuaToUserdataRejectsNonUserdata(t *testing.T) {
 	// 构造普通栈值和纯 Go userdata，覆盖转换失败边界。
