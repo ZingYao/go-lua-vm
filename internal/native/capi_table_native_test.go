@@ -210,6 +210,40 @@ func TestNativeCAPIGetTableUsesStackKey(t *testing.T) {
 	}
 }
 
+// TestNativeLuaGetTableRespectsCurrentCFrameBase 验证 lua_gettable 不会弹出当前 C 帧之前的外层栈值。
+func TestNativeLuaGetTableRespectsCurrentCFrameBase(t *testing.T) {
+	// registry 目标不需要当前 C 帧内 table 参数，可直接暴露“缺少 key 时是否穿透外层栈”的边界。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 C frame 边界。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'o', 'u', 't', 'e', 'r', 0}[0]))
+	if !pushNativeStateCallFrame(luaState, state.StackTop(), nil) {
+		// 无法建立 C 调用帧时，后续索引语义不可验证。
+		t.Fatal("pushNativeStateCallFrame failed")
+	}
+	defer popNativeStateCallFrame(luaState)
+
+	if typeCode := nativeLuaGetTable(luaState, runtime.RegistryPseudoIndex); typeCode != nativeLuaTypeNone {
+		// 缺少可见 key 时返回 none，不压入 nil 伪造查询结果。
+		t.Fatalf("lua_gettable type = %d, want %d", typeCode, nativeLuaTypeNone)
+	}
+	if got := state.StackTop(); got != 1 {
+		// 当前 C 帧没有可见 key 时，gettable 不得弹掉外层 sentinel。
+		t.Fatalf("lua_gettable global top = %d, want 1", got)
+	}
+	if value := state.ValueAt(1); value.Kind != runtime.KindString || value.String != "outer" {
+		// 外层栈值必须原样保留给调用者。
+		t.Fatalf("outer stack value = %#v, want outer", value)
+	}
+}
+
 // TestNativeCAPIGetTableRejectsInvalidTarget 验证 lua_gettable 对无效目标保持失败安全。
 func TestNativeCAPIGetTableRejectsInvalidTarget(t *testing.T) {
 	// 当前最小 shim 不做 api_check；非 table 目标保持 key 不被吞掉。

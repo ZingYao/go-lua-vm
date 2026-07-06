@@ -159,9 +159,9 @@ func nativeLuaGetTable(luaState unsafe.Pointer, index int) int {
 		// 非 table 目标在当前最小 shim 中保持 no-op，后续元方法和错误阶段再补齐完整语义。
 		return nativeLuaTypeNone
 	}
-	key, err := state.Pop()
-	if err != nil {
-		// 缺少栈顶 key 时无法查询，保持失败安全。
+	key, ok := nativeLuaPopVisible(luaState, state)
+	if !ok {
+		// 当前 C 帧没有可见 key 时保持栈不变，避免穿透外层 VM 栈。
 		return nativeLuaTypeNone
 	}
 	value, err := table.RawGet(key)
