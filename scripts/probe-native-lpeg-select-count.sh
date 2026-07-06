@@ -301,6 +301,52 @@ local spacer = 0
 local payload = ${value_expr}
 LUA
       ;;
+    select-count-holder-table-*)
+      local payload="${mode#select-count-holder-table-}"
+      local global_name="${payload%-*}"
+      local value_kind="${payload##*-}"
+      local value_expr
+
+      if ! value_expr="$(lua_value_expr_for_kind "${value_kind}")"; then
+        return 1
+      fi
+
+      cat <<LUA
+local count = select("#", "alpha", "beta")
+local holder = {_G["${global_name}"], ${value_expr}}
+LUA
+      ;;
+    select-count-holder-table-clear-*)
+      local payload="${mode#select-count-holder-table-clear-}"
+      local global_name="${payload%-*}"
+      local value_kind="${payload##*-}"
+      local value_expr
+
+      if ! value_expr="$(lua_value_expr_for_kind "${value_kind}")"; then
+        return 1
+      fi
+
+      cat <<LUA
+local count = select("#", "alpha", "beta")
+local holder = {_G["${global_name}"], ${value_expr}}
+holder = nil
+LUA
+      ;;
+    select-count-global-holder-table-*)
+      local payload="${mode#select-count-global-holder-table-}"
+      local global_name="${payload%-*}"
+      local value_kind="${payload##*-}"
+      local value_expr
+
+      if ! value_expr="$(lua_value_expr_for_kind "${value_kind}")"; then
+        return 1
+      fi
+
+      cat <<LUA
+local count = select("#", "alpha", "beta")
+_G.__glua_select_count_holder = {_G["${global_name}"], ${value_expr}}
+LUA
+      ;;
     select-count-global-message-*)
       local global_name="${mode#select-count-global-message-}"
       cat <<LUA
