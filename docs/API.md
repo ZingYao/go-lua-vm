@@ -8,7 +8,7 @@
 - 允许宿主程序加载字符串、文件和二进制 chunk。
 - 允许宿主程序注册 Go 函数、调用 Lua 函数并读取返回值。
 - 允许 Lua 调 Go、Go 回调 Lua，并在错误、panic、context 取消时保持边界清晰。
-- 保持纯 Go 和无 CGO，不暴露 Lua C API 依赖。
+- 默认保持纯 Go 和无 CGO；Lua C 原生模块加载只在显式 `native_modules` 构建下启用。
 
 ## 核心类型草案
 
@@ -21,6 +21,7 @@ type Options struct {
     AllowEnvironment            bool
     AllowProcess                bool
     PackageDynamicLibraryLoader func(filename string, symbol string) (Value, error)
+    PackageDynamicLibraryLoaderForState func(state *State) func(filename string, symbol string) (Value, error)
     VirtualFilesystem           fs.FS
     PreferHostFilesystem        bool
 }
@@ -48,7 +49,7 @@ state := lua.NewStateWithOptions(lua.Options{
 state.OpenLibs()
 ```
 
-动态库加载默认不启用。需要外部 `.so/.dylib/.dll` 时，宿主可以注入 `PackageDynamicLibraryLoader` 或覆盖 Lua 侧 `package.loadlib`；本仓库默认构建仍保持 `CGO_ENABLED=0`，不需要 C 头文件、Lua C API 开发包或系统动态库。
+动态库加载默认不启用。需要外部 `.so/.dylib/.dll` 时，宿主可以注入 `PackageDynamicLibraryLoader` / `PackageDynamicLibraryLoaderForState` 或覆盖 Lua 侧 `package.loadlib`；本仓库默认构建仍保持 `CGO_ENABLED=0`，不需要 C 头文件、Lua C API 开发包或系统动态库。
 
 ```go
 var state *lua.State
@@ -62,7 +63,22 @@ state = lua.NewStateWithOptions(lua.Options{
 state.OpenLibs()
 ```
 
-跨平台注意事项：Linux/macOS 运行期候选是 `.so`/`.dylib`，Windows 运行期候选是 `.dll`；`.lib`/import library 属于链接期产物，不作为 `require` 运行期候选。普通 Lua C 模块还需要 Lua C ABI 兼容层，首版不承诺直接 `require`。
+`native_modules` 可选构建用于 Lua 5.3 public C API 原生模块。CLI 在该 build tag 下会自动注入仓库内 state-aware native loader；Go 嵌入方如果需要同类能力，必须显式注入 state-aware loader，确保 `luaopen_*` 调用绑定当前 VM state，而不是只做无状态符号解析。
+
+```go
+//go:build native_modules
+
+options := lua.DefaultOptions()
+options.PackageDynamicLibraryLoaderForState = func(loaderState *lua.State) func(filename, symbol string) (lua.Value, error) {
+    return mynative.LoaderForState(loaderState)
+}
+state := lua.NewStateWithOptions(options)
+state.OpenLibs()
+```
+
+上例中的 `mynative.LoaderForState` 代表宿主自己的 native loader 适配层。当前仓库内置实现位于 `internal/native`，供本仓库 CLI 和内部验收使用；它不是外部 module 可直接 import 的公开 Go API。外部嵌入方应通过 `lua.Options` 注入自己的 loader，或等待后续公开适配包。
+
+跨平台注意事项：Linux/macOS 运行期候选是 `.so`/`.dylib`，Windows 运行期候选是 `.dll`；`.lib`/import library 属于链接期产物，不作为 `require` 运行期候选。`native_modules` 只承诺按 Lua 5.3 public C API 编写并导出 `luaopen_*` 的模块，不承诺任意动态库 FFI，也不承诺访问 Lua 内部头文件或 `lua_State` 内部结构的模块兼容。
 
 ## 生命周期 API
 
