@@ -124,6 +124,12 @@ LUA
 _G.__glua_select_count_probe = select("#", "alpha", "beta")
 LUA
       ;;
+    error-message-no-select)
+      cat <<'LUA'
+local skipped = error
+local message = "unexpected falsy select count"
+LUA
+      ;;
     select-count-error-local-after)
       cat <<'LUA'
 local count = select("#", "alpha", "beta")
@@ -141,6 +147,40 @@ LUA
 local count = select("#", "alpha", "beta")
 local skipped = error
 local message = "unexpected falsy select count"
+LUA
+      ;;
+    select-count-message-error-locals-after)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+local message = "unexpected falsy select count"
+local skipped = error
+LUA
+      ;;
+    select-count-error-message-do-block)
+      cat <<'LUA'
+do
+  local count = select("#", "alpha", "beta")
+  local skipped = error
+  local message = "unexpected falsy select count"
+end
+LUA
+      ;;
+    select-count-error-message-clear-nil)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+local skipped = error
+local message = "unexpected falsy select count"
+skipped = nil
+message = nil
+LUA
+      ;;
+    select-count-error-message-clear-false)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+local skipped = error
+local message = "unexpected falsy select count"
+skipped = false
+message = false
 LUA
       ;;
     select-count-type-message-locals-after)

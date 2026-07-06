@@ -49,6 +49,12 @@ if values[1] ~= 2 then
 end
 LUA
       ;;
+    error-message-no-select)
+      cat <<'LUA'
+local skipped = error
+local message = "unexpected falsy select count"
+LUA
+      ;;
     select-count-error-local-after)
       cat <<'LUA'
 local count = select("#", "alpha", "beta")
@@ -66,6 +72,40 @@ LUA
 local count = select("#", "alpha", "beta")
 local skipped = error
 local message = "unexpected falsy select count"
+LUA
+      ;;
+    select-count-message-error-locals-after)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+local message = "unexpected falsy select count"
+local skipped = error
+LUA
+      ;;
+    select-count-error-message-do-block)
+      cat <<'LUA'
+do
+  local count = select("#", "alpha", "beta")
+  local skipped = error
+  local message = "unexpected falsy select count"
+end
+LUA
+      ;;
+    select-count-error-message-clear-nil)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+local skipped = error
+local message = "unexpected falsy select count"
+skipped = nil
+message = nil
+LUA
+      ;;
+    select-count-error-message-clear-false)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+local skipped = error
+local message = "unexpected falsy select count"
+skipped = false
+message = false
 LUA
       ;;
     select-count-type-message-locals-after)
@@ -237,9 +277,14 @@ modes=(
   select-count-consume
   select-count-discard
   select-count-table-constructor
+  error-message-no-select
   select-count-error-local-after
   select-count-message-local-after
   select-count-error-message-locals-after
+  select-count-message-error-locals-after
+  select-count-error-message-do-block
+  select-count-error-message-clear-nil
+  select-count-error-message-clear-false
   select-count-type-message-locals-after
   select-count-if-truthy
   select-count-if-not-empty
