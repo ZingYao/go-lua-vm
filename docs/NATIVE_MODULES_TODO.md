@@ -192,7 +192,8 @@
         - [x] 2026-07-06 复核：已在 native smoke fixture 中加入多次 runtime callback、lightuserdata stackbase、旧动态 capture 多轮残留和外层 Lua 变量覆盖场景，macOS `.dylib`/`.so` 均通过；通用 C API 多轮 callback 与清理路径继续被证伪为非单独根因。
         - [x] 2026-07-06 复核：修正 C frame 内过深负索引边界，`lua_type`、`lua_pushvalue`、`lua_copy`、`lua_rotate` 均不得通过 `-3` 等越界负索引读写 frame base 之前的外层 Go VM 栈；该语义边界已由 `internal/native` 定向测试覆盖，但不直接宣称解决 LPeg 1159。
         - [x] 2026-07-06 复核：新增 `scripts/probe-native-lpeg-1159.sh` 固化定位证据；前缀跑到 `test.lua:558` 与 `test.lua:641` 后 probe 均返回 `18`，跑到 `test.lua:651` 与 `test.lua:1153` 后退化为 `12`，而孤立执行 `645-651` 的 deep stack overflow/success match 组合仍返回 `18`。根因窗口进一步收敛为 `1-641` 前序状态叠加 `645-651` 后的 LPeg/native 状态污染。
-        - [ ] 下一轮优先收窄 LPeg 自身 pattern userdata / grammar 编译状态：对比官方测试前缀后新建 pattern 的 bytecode/ktable/capture 初始化，确认是否为 `lua_setuservalue`、pattern user value ktable、`luaL_ref`/registry 或 LPeg VM backtracking 状态污染。
+        - [x] 2026-07-06 复核：扩展 `scripts/probe-native-lpeg-1159.sh` 的细分诊断；前缀跑到 `test.lua:646` 仍返回 `18`，跑到 `test.lua:647` 首次 `checkerr("stack overflow", m.match, p, ...)` 后立即退化为 `12`。`p=nil`、两次 `collectgarbage()`、重新 `require("lpeg")`、`m.setmaxstack(1000000)` 后仍返回 `12`，因此已证伪递归 pattern 构造、成功 deep match、`lpeg-maxstack` 取值、Lua 层对象可达性和普通模块 reload 是单独根因。
+        - [ ] 下一轮优先收窄 LPeg overflow 错误路径后的 native protected-call 恢复：对比 `luaL_error` longjmp 后 C API 可见栈、native full userdata 临时栈槽、C frame base/upvalue 栈、registry/user value ktable 是否被错误保留；必要时新增一个模拟 `doublestack` overflow 的 native fixture，而不是继续扩大生产 API。
   - [ ] LuaSocket 或等价网络库验收：仅在 userdata/metatable/registry/错误边界稳定后进入平台闭环。
 - [ ] 增加交叉编译验证脚本：
   - [x] `scripts/check-native-cross-compile.sh`：显式输出 `GOOS`、`GOARCH`、`CC`、产物路径和缺失 toolchain 时的 skip 原因。

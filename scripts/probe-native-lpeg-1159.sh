@@ -123,8 +123,37 @@ LUA
 
 run_prefix_probe 558
 run_prefix_probe 641
+run_prefix_probe 646
+run_prefix_probe 647
 run_prefix_probe 651
 run_prefix_probe 1153
 run_isolated_deep_probe
+
+run_post_overflow_cleanup_probe() {
+  local source="${work_dir}/post_overflow_cleanup.lua"
+  local output="${work_dir}/post_overflow_cleanup.out"
+
+  {
+    printf 'package.path = "%s"\n' "${repo_root}/third_party/lpeg/?.lua"
+    printf 'package.cpath = "%s"\n' "${build_dir}/?${module_extension}"
+    sed "1,4d;648,\$d" "${repo_root}/third_party/lpeg/test.lua"
+    cat <<'LUA'
+p = nil
+collectgarbage()
+collectgarbage()
+package.loaded.lpeg = nil
+m = assert(require("lpeg"))
+m.setmaxstack(1000000)
+LUA
+    emit_probe_tail
+  } >"${source}"
+
+  echo "run post-overflow cleanup/reload/high-max probe"
+  "${glua_bin}" "${source}" >"${output}"
+  printf 'post_overflow_cleanup '
+  rg '^PROBE' "${output}" || tail -n 3 "${output}"
+}
+
+run_post_overflow_cleanup_probe
 
 echo "diagnostic note: PROBE result below 18 marks the current LPeg 1159 narrowing point; this script reports evidence and does not assert the known mismatch."
