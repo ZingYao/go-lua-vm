@@ -498,6 +498,44 @@ LUA
   rg '^PROBE' "${output}" || tail -n 3 "${output}"
 }
 
+run_prefix620_equivalent_go_closure_probe() {
+  local mode="$1"
+  local label="$2"
+  local expected_count="$3"
+  local target_path="${build_dir}/no_such_native_module${module_extension}"
+  local source="${work_dir}/${label}.lua"
+  local output="${work_dir}/${label}.out"
+
+  {
+    printf 'package.path = "%s"\n' "${repo_root}/third_party/lpeg/?.lua"
+    printf 'package.cpath = "%s"\n' "${build_dir}/?${module_extension}"
+    sed "1,4d;621,\$d" "${repo_root}/third_party/lpeg/test.lua"
+    cat <<LUA
+local diag = assert(package._glua_loadlib_diag)
+local function capture(...)
+  return select("#", ...), ...
+end
+local n, f, message, where = capture(diag("${target_path}", "luaopen_missing"))
+assert(n == ${expected_count}, tostring(n))
+assert(f == nil, tostring(f))
+if ${expected_count} >= 2 then
+  assert(tostring(message):find("equivalent", 1, true), tostring(message))
+end
+if ${expected_count} >= 3 then
+  assert(where == "open", tostring(message) .. " / " .. tostring(where))
+end
+LUA
+    emit_probe_tail
+  } >"${source}"
+
+  echo "run prefix620 + equivalent Go closure diagnostic ${mode} (${expected_count} returns) probe"
+  GLUA_PACKAGE_LOADLIB_EQUIVALENT_DIAGNOSTIC="${mode}" \
+    GLUA_PACKAGE_LOADLIB_EQUIVALENT_DIAGNOSTIC_MATCH="no_such_native_module" \
+    "${glua_bin}" "${source}" >"${output}"
+  printf '%s ' "${label}"
+  rg '^PROBE' "${output}" || tail -n 3 "${output}"
+}
+
 run_prefix620_loadlib_existing_symbol_probe() {
   local source="${work_dir}/prefix620_loadlib_existing_symbol.lua"
   local output="${work_dir}/prefix620_loadlib_existing_symbol.out"
@@ -574,6 +612,9 @@ run_prefix620_loadlib_branch_probe before-loader-fixed prefix620_loadlib_branch_
 run_prefix620_loadlib_branch_probe after-args-one-return prefix620_loadlib_branch_after_args_one_return 1
 run_prefix620_loadlib_branch_probe after-args-two-return prefix620_loadlib_branch_after_args_two_return 2
 run_prefix620_loadlib_branch_probe after-loader-fixed prefix620_loadlib_branch_after_loader_fixed 3
+run_prefix620_equivalent_go_closure_probe one-return prefix620_equivalent_go_closure_one_return 1
+run_prefix620_equivalent_go_closure_probe two-return prefix620_equivalent_go_closure_two_return 2
+run_prefix620_equivalent_go_closure_probe three-return prefix620_equivalent_go_closure_three_return 3
 run_prefix620_loadlib_existing_symbol_probe
 run_prefix620_parity_matches_loadlib_missing_file_probe
 

@@ -203,7 +203,8 @@
         - [x] 2026-07-06 复核：新增 native loader 顶层诊断开关；`DynamicLibraryError`、普通 `error`、nil+不可调用返回值、以及成功打开/解析 `glua_native_smoke` 后人工返回 open 错误四组均退化为 `12`，而成功返回 callable 的 `package.loadlib` 仍保持 `18`。因此已证伪错误类型、Go closure 返回 error 和真实动态库打开成功/失败本身是必要条件，当前边界进一步收敛为 `package.loadlib` 已调用 native loader 回调、随后进入失败三返回构造分支。
         - [x] 2026-07-06 复核：新增 `package.loadlib` 层诊断开关；`before-loader-fixed` 在合法参数解析后、不调用 native loader、直接返回固定 `nil,message,"open"` 三返回时已经退化为 `12`，`after-loader-fixed` 同样为 `12`，而成功 callable 路径仍为 `18`。因此已证伪 native loader 回调、`loadDynamicLibrary`、`dynamicLibraryFailure` 和错误分类转换是必要条件，边界继续前移到内置 `package.loadlib` 合法参数失败三返回路径本身。
         - [x] 2026-07-06 复核：继续扩展 `package.loadlib` 层诊断开关；`before-args-fixed` 在正式 `stringArgument` 参数解析前、只读取原始字符串参数并返回固定三返回时已退化为 `12`，`after-args-one-return` 只返回单个 `nil`、`after-args-two-return` 返回 `nil,message` 也都退化为 `12`。因此已证伪正式参数解析、返回数量、message 文本和第三返回 category 是必要条件，当前边界进一步收敛为“调用内置 `package.loadlib` 诊断/失败分支本身会扰动后续 LPeg match”，而不是失败返回值形态。
-        - [ ] 下一轮优先对比 `package.loadlib` 与等价 Go closure：在 package 表临时注入一个诊断 Go 函数，使用同样参数和相同单返回/三返回形态，但不走 `Environment.LoadLib` 方法，判断是否是 Go closure 普通返回边界、`package.loadlib` 方法接收者/环境捕获、或 package 表中该特定内置函数的调用帧清理扰动 LPeg 后续 match。
+        - [x] 2026-07-06 复核：新增仅诊断模式注册的 `package._glua_loadlib_diag` 等价 Go closure，不经过 `Environment.LoadLib`、不调用 native loader；在 `1-620` 前序状态后，`one-return`、`two-return`、`three-return` 三组全部退化为 `12`，而成功符号解析的 `package.loadlib` 仍保持 `18`。因此已证伪 `package.loadlib` 方法接收者、环境捕获和特定内置函数实现是必要条件，边界继续收敛为前序 LPeg 状态后普通 Go closure 正常返回 nil/失败形态会扰动后续 match。
+        - [ ] 下一轮优先比较 Go closure 返回值内容：在等价诊断 closure 中加入 `true`、string、table、callable 和空返回组，判断是否只有首返回 nil/失败形态触发，还是任意 Go closure 正常返回都会污染；同时对照 global Go closure 与 package 表 Go closure，继续区分返回值处理和表字段调用路径。
   - [ ] LuaSocket 或等价网络库验收：仅在 userdata/metatable/registry/错误边界稳定后进入平台闭环。
 - [ ] 增加交叉编译验证脚本：
   - [x] `scripts/check-native-cross-compile.sh`：显式输出 `GOOS`、`GOARCH`、`CC`、产物路径和缺失 toolchain 时的 skip 原因。

@@ -193,6 +193,7 @@ func NewEnvironmentWithOptions(luaFileLoader LuaFileLoader, options runtime.Opti
 	packageTable.RawSetString("cpath", runtime.StringValue(resolveConfiguredPath(environment.options, "LUA_CPATH_5_3", "LUA_CPATH", DefaultCPathForGOOS(goRuntime.GOOS))))
 	packageTable.RawSetString("loaded", runtime.ReferenceValue(runtime.KindTable, loadedTable))
 	packageTable.RawSetString("loadlib", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(environment.LoadLib)))
+	registerLoadLibEquivalentDiagnostic(packageTable)
 	packageTable.RawSetString("path", runtime.StringValue(resolveConfiguredPath(environment.options, "LUA_PATH_5_3", "LUA_PATH", DefaultPath)))
 	packageTable.RawSetString("preload", runtime.ReferenceValue(runtime.KindTable, preloadTable))
 	packageTable.RawSetString("searchers", runtime.ReferenceValue(runtime.KindTable, searchersTable))
@@ -519,6 +520,60 @@ func (environment *Environment) LoadLib(args ...runtime.Value) ([]runtime.Value,
 func loadLibDiagnosticMode() string {
 	// 每次 loadlib 调用时读取环境变量，便于同一个 glua 二进制执行不同诊断脚本。
 	return os.Getenv("GLUA_PACKAGE_LOADLIB_DIAGNOSTIC")
+}
+
+// registerLoadLibEquivalentDiagnostic 按需注册 package.loadlib 等价诊断 Go closure。
+//
+// 该入口只在 GLUA_PACKAGE_LOADLIB_EQUIVALENT_DIAGNOSTIC 非空时注册，用于 LPeg 1159 定位；默认
+// package 表不暴露该非标准字段。
+func registerLoadLibEquivalentDiagnostic(packageTable *runtime.Table) {
+	if packageTable == nil {
+		// nil package 表无法注册诊断函数，保持默认路径。
+		return
+	}
+	if loadLibEquivalentDiagnosticMode() == "" {
+		// 未开启诊断时不污染标准 package 表。
+		return
+	}
+	packageTable.RawSetString("_glua_loadlib_diag", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(loadLibEquivalentDiagnostic)))
+}
+
+// loadLibEquivalentDiagnosticMode 返回等价 Go closure 诊断模式。
+func loadLibEquivalentDiagnosticMode() string {
+	// 该变量只供 scripts/probe-native-lpeg-1159.sh 使用，不属于公开 API。
+	return os.Getenv("GLUA_PACKAGE_LOADLIB_EQUIVALENT_DIAGNOSTIC")
+}
+
+// loadLibEquivalentDiagnostic 模拟 package.loadlib 的失败返回，但不经过 Environment.LoadLib。
+func loadLibEquivalentDiagnostic(args ...runtime.Value) ([]runtime.Value, error) {
+	// 诊断函数只做最小路径匹配，避免把 package.loadlib 方法接收者和动态库 loader 纳入观测。
+	filename, ok := loadLibDiagnosticFilename(args)
+	if !ok || !loadLibEquivalentDiagnosticApplies(filename) {
+		// 未命中时返回单 nil，方便脚本暴露配置错误而不触发宿主 loader。
+		return []runtime.Value{runtime.NilValue()}, nil
+	}
+	switch loadLibEquivalentDiagnosticMode() {
+	case "one-return":
+		// 单返回 nil 用于和 package.loadlib after-args-one-return 对照。
+		return []runtime.Value{runtime.NilValue()}, nil
+	case "two-return":
+		// 双返回 nil,message 用于和 package.loadlib after-args-two-return 对照。
+		return diagnosticLoadLibPartialFailure(filename, "equivalent-two-return"), nil
+	default:
+		// 默认三返回用于和 package.loadlib before-args-fixed/before-loader-fixed 对照。
+		return diagnosticLoadLibFailure(filename, "equivalent-three-return"), nil
+	}
+}
+
+// loadLibEquivalentDiagnosticApplies 判断等价 Go closure 诊断是否命中当前 filename。
+func loadLibEquivalentDiagnosticApplies(filename string) bool {
+	// 复用与 loadlib 诊断相同的子串匹配语义，但使用独立环境变量避免两类 probe 相互影响。
+	filenameFragment := os.Getenv("GLUA_PACKAGE_LOADLIB_EQUIVALENT_DIAGNOSTIC_MATCH")
+	if filenameFragment == "" {
+		// 空匹配条件表示覆盖全部等价诊断调用。
+		return true
+	}
+	return strings.Contains(filename, filenameFragment)
 }
 
 // loadLibDiagnosticFilename 从原始参数中读取诊断路径。
