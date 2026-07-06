@@ -190,6 +190,41 @@ local skipped = type
 local message = "unexpected falsy select count"
 LUA
       ;;
+    select-count-pcall-message-locals-after)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+local skipped = pcall
+local message = "unexpected falsy select count"
+LUA
+      ;;
+    select-count-xpcall-message-locals-after)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+local skipped = xpcall
+local message = "unexpected falsy select count"
+LUA
+      ;;
+    select-count-tostring-message-locals-after)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+local skipped = tostring
+local message = "unexpected falsy select count"
+LUA
+      ;;
+    select-count-print-message-locals-after)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+local skipped = print
+local message = "unexpected falsy select count"
+LUA
+      ;;
+    select-count-dofile-message-locals-after)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+local skipped = dofile
+local message = "unexpected falsy select count"
+LUA
+      ;;
     select-count-if-truthy)
       cat <<'LUA'
 local count = select("#", "alpha", "beta")
