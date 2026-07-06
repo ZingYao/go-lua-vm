@@ -90,6 +90,14 @@ git ls-files --others --exclude-standard | rg '\.go$|_test\.go$'
 GLUA_BIN=./bin/glua-native ./scripts/test-native-modules.sh
 ```
 
+fixture 只验证 loader smoke，不作为最终兼容结论。真实兼容验收必须包含：
+
+- `lua-cjson`：第一真实模块，覆盖 `require`、`encode/decode` 和错误输入 `pcall`。
+- `lpeg` 或等价纯 C 模块：覆盖 userdata、metatable、registry 和复杂 C function。
+- LuaSocket 或等价网络库：放在平台闭环后段，用于验证系统依赖和 socket 行为。
+
+真实模块验收需要同时覆盖源码编译模块和按官方 Lua 5.3 ABI 构建的现成二进制模块。后者要求 Linux/macOS 提供可解析的 `lua_*` / `luaL_*` 符号，Windows 提供 `lua53.dll` 或等价 import library 方案。
+
 ## 当前限制
 
 - 尚未实现 Linux/macOS 的 `dlopen` / `dlsym`。

@@ -253,6 +253,16 @@ fixture 验收：
 GLUA_BIN=./bin/glua-native ./scripts/test-native-modules.sh
 ```
 
+真实第三方模块验收：
+
+- 自编 fixture 只作为 loader smoke：它只能证明 `package.loadlib`、`dlopen` / `dlsym` / `LoadLibraryW` / `GetProcAddress` 和错误分类链路贯通，不能作为 Lua C 扩展兼容性的最终依据。
+- 第一真实模块门禁使用 `lua-cjson`：必须验证 `require("cjson")`、`cjson.encode`、`cjson.decode`、错误输入下的 `pcall` 行为和 Lua 5.3 public C API shim 覆盖度。
+- 第二层真实模块建议使用 `lpeg` 或等价纯 C 模块：用于覆盖更复杂的 userdata、metatable、registry 和 C function 行为。
+- 网络库如 LuaSocket 放在后续平台闭环：它能验证更真实的系统依赖和 socket 行为，但只有在 userdata、metatable、registry 和错误边界稳定后才进入必过门禁。
+- 验收必须区分两类 ABI 场景：
+  - 源码编译验证：使用本项目提供的 Lua 5.3 public headers 和 shim 链接方式构建第三方模块。
+  - 现成二进制模块验证：验证按官方 Lua 5.3 ABI 构建、期望 `lua_*` / `luaL_*` 符号的 `.so`、`.dylib`、`.dll`；Linux/macOS 需要主程序导出符号或提供 `liblua5.3` / `liblua` 兼容 shim，Windows 需要 `lua53.dll` 或等价 import library 方案。
+
 平台验收：
 
 - Linux CI 或本机：`.so`
