@@ -937,6 +937,7 @@ probe_mode() {
   local source="${work_dir}/${mode}.lua"
   local output="${work_dir}/${mode}.out"
   local result
+  local attempts
   local class
 
   {
@@ -966,7 +967,12 @@ probe_mode() {
     class="bad"
   fi
 
-  echo "mode=${mode} result=${result} class=${class}"
+  if [[ "${PROBE_SHOW_ATTEMPTS:-0}" == "1" ]]; then
+    attempts="$(awk '/^PROBE[[:space:]]/{print $3; exit}' "${output}")"
+    echo "mode=${mode} result=${result} class=${class} attempts=${attempts}"
+  else
+    echo "mode=${mode} result=${result} class=${class}"
+  fi
 }
 
 modes=(
