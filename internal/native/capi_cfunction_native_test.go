@@ -58,3 +58,92 @@ func TestNativeLuaPushCClosureCapturesUpvalues(t *testing.T) {
 		t.Fatalf("upvalue C closure upvalues = %#v, want [1]", closure.Upvalues)
 	}
 }
+
+// TestNativeLuaPushCClosureCapturesVisibleFrameUpvalues 验证 C closure 只捕获当前 C 帧可见 upvalue。
+func TestNativeLuaPushCClosureCapturesVisibleFrameUpvalues(t *testing.T) {
+	// 外层 sentinel 模拟调用者栈；当前 C 帧只能捕获其后压入的 visible upvalue。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 C closure 边界。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	if err := state.Push(runtime.StringValue("outer")); err != nil {
+		// 外层 sentinel 压栈失败时无法验证调用帧隔离。
+		t.Fatalf("push outer sentinel failed: %v", err)
+	}
+	baseTop := state.StackTop()
+	if !pushNativeStateCallFrame(luaState, baseTop, nil) {
+		// C frame 基址记录失败时无法验证 visible upvalue 捕获。
+		t.Fatalf("pushNativeStateCallFrame failed")
+	}
+	defer popNativeStateCallFrame(luaState)
+
+	nativeLuaPushInteger(luaState, 7)
+	nativeLuaPushCClosure(luaState, luaState, 1)
+	if got := state.StackTop(); got != baseTop+1 {
+		// 捕获 visible upvalue 后应弹出 upvalue 并压入 closure，外层 sentinel 保留。
+		t.Fatalf("global top after visible C closure = %d, want %d", got, baseTop+1)
+	}
+	if got := nativeLuaStackTop(luaState); got != 1 {
+		// 当前 C 帧只应看到新压入的 closure。
+		t.Fatalf("visible top after visible C closure = %d, want 1", got)
+	}
+	if value := state.ValueAt(1); value.Kind != runtime.KindString || value.String != "outer" {
+		// 外层 sentinel 不能被 upvalue 捕获弹栈误消费。
+		t.Fatalf("outer sentinel after visible C closure = %#v, want outer string", value)
+	}
+	closureValue := state.ValueAt(-1)
+	closure, ok := closureValue.Ref.(*runtime.GoClosureWithUpvalues)
+	if closureValue.Kind != runtime.KindGoClosure || !ok || closure == nil {
+		// 栈顶必须是捕获 visible upvalue 后创建的 Go closure。
+		t.Fatalf("visible C closure value = %#v, want GoClosureWithUpvalues", closureValue)
+	}
+	if len(closure.Upvalues) != 1 || !closure.Upvalues[0].RawEqual(runtime.IntegerValue(7)) {
+		// 捕获值必须来自当前 C 帧可见栈，而不是外层 sentinel。
+		t.Fatalf("visible C closure upvalues = %#v, want [7]", closure.Upvalues)
+	}
+}
+
+// TestNativeLuaPushCClosureRejectsUpvaluesOutsideCurrentCFrame 验证 C closure 不穿透外层栈捕获 upvalue。
+func TestNativeLuaPushCClosureRejectsUpvaluesOutsideCurrentCFrame(t *testing.T) {
+	// 当前 C 帧没有可见 upvalue 时，nup=1 必须 no-op，不能捕获并弹掉外层调用者栈。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 C closure 边界。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	if err := state.Push(runtime.StringValue("outer")); err != nil {
+		// 外层 sentinel 压栈失败时无法验证调用帧隔离。
+		t.Fatalf("push outer sentinel failed: %v", err)
+	}
+	baseTop := state.StackTop()
+	if !pushNativeStateCallFrame(luaState, baseTop, nil) {
+		// C frame 基址记录失败时无法验证 upvalue 数量边界。
+		t.Fatalf("pushNativeStateCallFrame failed")
+	}
+	defer popNativeStateCallFrame(luaState)
+
+	nativeLuaPushCClosure(luaState, luaState, 1)
+	if got := state.StackTop(); got != baseTop {
+		// visible upvalue 不足时不能弹掉调用者栈，也不能额外压入 closure。
+		t.Fatalf("global top after missing-upvalue C closure = %d, want %d", got, baseTop)
+	}
+	if got := nativeLuaStackTop(luaState); got != 0 {
+		// 当前 C 帧仍应为空。
+		t.Fatalf("visible top after missing-upvalue C closure = %d, want 0", got)
+	}
+	if value := state.ValueAt(1); value.Kind != runtime.KindString || value.String != "outer" {
+		// 外层 sentinel 不能被当作 upvalue 捕获或弹出。
+		t.Fatalf("outer sentinel after missing-upvalue C closure = %#v, want outer string", value)
+	}
+}

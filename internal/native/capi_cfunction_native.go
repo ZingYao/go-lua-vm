@@ -26,17 +26,27 @@ func nativeLuaPushCClosure(luaState unsafe.Pointer, function unsafe.Pointer, upv
 		// 无效 State 无法创建绑定到 VM 的 C function wrapper。
 		return
 	}
-	if upvalueCount > state.StackTop() {
+	baseTop := 0
+	if currentBaseTop, ok := currentNativeStateCallBase(luaState); ok {
+		// C function 内只能从当前调用帧可见栈顶捕获 upvalue，不能穿透外层 Go VM 栈。
+		baseTop = currentBaseTop
+	}
+	visibleTop := state.StackTop() - baseTop
+	if visibleTop < 0 {
+		// 调用帧基址损坏时保持 no-op，避免继续读写错误栈区间。
+		return
+	}
+	if upvalueCount > visibleTop {
 		// 调用方没有提供足够 upvalue 时保持 no-op，后续 api_check 阶段再收口错误。
 		return
 	}
 	upvalues := make([]runtime.Value, upvalueCount)
-	firstUpvalueIndex := state.StackTop() - upvalueCount + 1
+	firstUpvalueIndex := baseTop + visibleTop - upvalueCount + 1
 	for upvalueIndex := 0; upvalueIndex < upvalueCount; upvalueIndex++ {
 		// upvalue 按栈上原始顺序捕获，lua_upvalueindex(1) 对应最先压入的值。
 		upvalues[upvalueIndex] = state.ValueAt(firstUpvalueIndex + upvalueIndex)
 	}
-	nativeLuaRestoreStackTop(state, state.StackTop()-upvalueCount)
+	nativeLuaRestoreStackTop(state, baseTop+visibleTop-upvalueCount)
 	closure := runtime.GoResultsFunction(func(args ...runtime.Value) ([]runtime.Value, error) {
 		// C function 调用时重新校验 handle，避免 State 关闭后继续执行本机函数。
 		return nativeLuaCallCFunction(luaState, function, upvalues, args...)
