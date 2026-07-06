@@ -318,6 +318,46 @@ if first ~= 2 or second ~= "ok" then
 end
 LUA
       ;;
+    builtin-rawequal-two-strings)
+      cat <<'LUA'
+local same = rawequal("alpha", "beta")
+if same ~= false then
+  error("unexpected rawequal string result")
+end
+LUA
+      ;;
+    builtin-rawequal-two-numbers)
+      cat <<'LUA'
+local same = rawequal(17, 25)
+if same ~= false then
+  error("unexpected rawequal number result")
+end
+LUA
+      ;;
+    builtin-tonumber-string-base)
+      cat <<'LUA'
+local value = tonumber("17", 10)
+if value ~= 17 then
+  error("unexpected tonumber string/base result")
+end
+LUA
+      ;;
+    builtin-rawget-table-string)
+      cat <<'LUA'
+local value = rawget({key = "value"}, "key")
+if value ~= "value" then
+  error("unexpected rawget table/string result")
+end
+LUA
+      ;;
+    builtin-setmetatable-two-tables)
+      cat <<'LUA'
+local object = setmetatable({}, {})
+if type(object) ~= "table" then
+  error("unexpected setmetatable result")
+end
+LUA
+      ;;
     *)
       echo "unknown select-count probe mode: ${mode}" >&2
       return 1
@@ -392,6 +432,11 @@ modes=(
   lua-return-select-count-nonempty
   builtin-assert-integer-two
   builtin-assert-two-values
+  builtin-rawequal-two-strings
+  builtin-rawequal-two-numbers
+  builtin-tonumber-string-base
+  builtin-rawget-table-string
+  builtin-setmetatable-two-tables
 )
 
 for mode in "${modes[@]}"; do
