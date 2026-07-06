@@ -99,6 +99,72 @@ local payload = 17
 	}
 }
 
+// TestBaseLuaCallTraceCalleeRegisterLifetimes 输出不同调用来源的 callee/local 生命周期。
+//
+// 该测试专门服务于评估固定返回 CALL 后能否清理非结果实参槽：若 CALL A 命中仍存活的
+// local callee，则运行期清理会破坏 Lua 5.3 语义；若 codegen 总是把 callee 搬到临时槽，
+// 后续才可以继续论证清理调用临时区的安全边界。
+func TestBaseLuaCallTraceCalleeRegisterLifetimes(t *testing.T) {
+	// 覆盖全局函数、local Go 函数、local Lua 函数、字段调用和方法调用的 CALL 布局。
+	for _, testCase := range []struct {
+		name   string
+		source string
+	}{
+		{
+			name: "global-go-callee",
+			source: `
+local count = select("#", "alpha")
+local payload = 17
+`,
+		},
+		{
+			name: "local-go-callee-preserved",
+			source: `
+local f = select
+local count = f("#", "alpha")
+local preserved = f
+local payload = 17
+`,
+		},
+		{
+			name: "local-lua-callee-preserved",
+			source: `
+local function f()
+  return 1
+end
+local count = f()
+local preserved = f
+local payload = 17
+`,
+		},
+		{
+			name: "field-lua-callee-preserved",
+			source: `
+local t = { f = function() return 1 end }
+local count = t.f()
+local preserved = t
+local payload = 17
+`,
+		},
+		{
+			name: "method-lua-callee-preserved",
+			source: `
+local t = { f = function(self) return 1 end }
+local count = t:f()
+local preserved = t
+local payload = 17
+`,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			// 运行同包 VM trace 并通过 -v 输出每个 CALL 写回后的活动 local 与寄存器窗口。
+			for _, event := range traceBaseLuaCallEvents(t, testCase.source) {
+				t.Log(event)
+			}
+		})
+	}
+}
+
 // traceBaseLuaCallEvents 编译并单步执行 Lua chunk，返回每个 CALL 写回后的诊断行。
 //
 // source 必须只依赖 base.Open 注册的全局函数；该 helper 只用于 call_trace 测试，不参与生产执行路径。
@@ -144,7 +210,7 @@ func traceBaseLuaCallEvents(t *testing.T, source string) []string {
 			if err := writeBaseLuaCallResults(vm, callRequest, results); err != nil {
 				t.Fatalf("write results pc=%d failed: %v", pc, err)
 			}
-			events = append(events, formatBaseCallTraceEvent(pc, instruction, callRequest, arguments, results, vm.RegistersSnapshot()))
+			events = append(events, formatBaseCallTraceEvent(pc, proto, instruction, callRequest, arguments, results, vm.RegistersSnapshot()))
 		}
 		if returnValues := vm.ReturnValues(); returnValues != nil {
 			// 测试片段均为主 chunk，RETURN 后停止。
@@ -179,8 +245,8 @@ func compileBaseCallTraceProto(t *testing.T, source string) *bytecode.Proto {
 
 // formatBaseCallTraceEvent 格式化单次 CALL trace。
 //
-// 输出包含 pc、CALL 的 A/B/C、解码后的实参/返回数量、实参快照、返回结果和写回后全部寄存器。
-func formatBaseCallTraceEvent(pc int, instruction bytecode.Instruction, request *runtime.CallRequest, arguments []runtime.Value, results []runtime.Value, registers []runtime.Value) string {
+// 输出包含 pc、CALL 的 A/B/C、解码后的实参/返回数量、实参快照、返回结果、活动 local 和写回后全部寄存器。
+func formatBaseCallTraceEvent(pc int, proto *bytecode.Proto, instruction bytecode.Instruction, request *runtime.CallRequest, arguments []runtime.Value, results []runtime.Value, registers []runtime.Value) string {
 	// 使用紧凑文本输出，便于在自动任务日志和 TODO 中摘录关键差异。
 	return strings.Join([]string{
 		"pc=" + traceInt(pc),
@@ -189,8 +255,28 @@ func formatBaseCallTraceEvent(pc int, instruction bytecode.Instruction, request 
 		"call=" + traceInt(request.FunctionIndex) + "/" + traceInt(request.ArgumentCount) + "/" + traceInt(request.ReturnCount),
 		"args=[" + traceValues(arguments) + "]",
 		"results=[" + traceValues(results) + "]",
+		"locals=[" + traceActiveLocals(proto, pc+1, registers) + "]",
 		"registers=[" + traceValues(registers) + "]",
 	}, " ")
+}
+
+// traceActiveLocals 格式化指定 pc 后仍活动的局部变量。
+//
+// pc 通常取 CALL 后的下一条指令位置，用于观察返回写回后哪些寄存器已经成为活动 local。
+func traceActiveLocals(proto *bytecode.Proto, pc int, registers []runtime.Value) string {
+	// 缺少 Proto 时没有可靠的 local 生命周期信息。
+	if proto == nil {
+		return ""
+	}
+	parts := make([]string, 0, len(proto.LocalVars))
+	for _, localVar := range proto.LocalVars {
+		// 只输出当前 pc 可见且寄存器落在窗口内的 local。
+		if !localVar.ActiveAt(pc) || localVar.Name == "" || localVar.Register < 0 || localVar.Register >= len(registers) {
+			continue
+		}
+		parts = append(parts, localVar.Name+"@"+traceInt(localVar.Register)+"="+registers[localVar.Register].DebugString())
+	}
+	return strings.Join(parts, ",")
 }
 
 // traceValues 格式化一组 runtime.Value。
