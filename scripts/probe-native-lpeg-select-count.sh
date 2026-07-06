@@ -108,6 +108,55 @@ if count ~= 2 then
 end
 LUA
       ;;
+    lua-return-integer-two)
+      cat <<'LUA'
+local function diag()
+  return 2
+end
+local count = diag()
+if count ~= 2 then
+  error("unexpected Lua integer return")
+end
+LUA
+      ;;
+    lua-return-integer-two-after-vararg)
+      cat <<'LUA'
+local function diag(...)
+  return 2
+end
+local count = diag("alpha", "beta")
+if count ~= 2 then
+  error("unexpected Lua vararg integer return")
+end
+LUA
+      ;;
+    lua-return-select-count-nonempty)
+      cat <<'LUA'
+local function diag(...)
+  return select("#", ...)
+end
+local count = diag("alpha", "beta")
+if count ~= 2 then
+  error("unexpected Lua select count return")
+end
+LUA
+      ;;
+    builtin-assert-integer-two)
+      cat <<'LUA'
+local count = assert(2)
+if count ~= 2 then
+  error("unexpected assert integer return")
+end
+LUA
+      ;;
+    builtin-assert-two-values)
+      cat <<'LUA'
+local first, second = assert(2, "ok")
+if first ~= 2 or second ~= "ok" then
+  error("unexpected assert multi return")
+end
+LUA
+      ;;
     *)
       echo "unknown select-count probe mode: ${mode}" >&2
       return 1
@@ -157,6 +206,11 @@ modes=(
   select-count-empty
   select-index-nonempty
   select-count-nonempty
+  lua-return-integer-two
+  lua-return-integer-two-after-vararg
+  lua-return-select-count-nonempty
+  builtin-assert-integer-two
+  builtin-assert-two-values
 )
 
 for mode in "${modes[@]}"; do
