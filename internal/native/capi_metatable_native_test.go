@@ -133,6 +133,57 @@ func TestNativeLuaSetMetatableRejectsInvalidInput(t *testing.T) {
 	}
 }
 
+// TestNativeLuaSetMetatableUsesCurrentCFrameTop 验证 lua_setmetatable 只消费当前 C 帧可见元表。
+func TestNativeLuaSetMetatableUsesCurrentCFrameTop(t *testing.T) {
+	// 测试通过外层 sentinel 模拟 Go VM 调用者栈，当前 C 帧只能操作其后的目标和元表。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 native State 映射不可用。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	if err := state.Push(runtime.StringValue("outer")); err != nil {
+		// 外层 sentinel 压栈失败时测试无法建立调用者栈边界。
+		t.Fatalf("push outer sentinel failed: %v", err)
+	}
+	baseTop := state.StackTop()
+	if !pushNativeStateCallFrame(luaState, baseTop, nil) {
+		// C frame 基址记录失败时无法验证正索引和弹栈隔离。
+		t.Fatalf("pushNativeStateCallFrame failed")
+	}
+	defer popNativeStateCallFrame(luaState)
+
+	nativeLuaCreateTable(luaState, 0, 0)
+	target := state.ValueAt(-1).Ref.(*runtime.Table)
+	nativeLuaCreateTable(luaState, 0, 0)
+	metatable := state.ValueAt(-1).Ref.(*runtime.Table)
+
+	if got := nativeLuaSetMetatable(luaState, 1); got != 1 {
+		// 当前 C 帧中目标 table 与栈顶元表均有效，设置应成功。
+		t.Fatalf("lua_setmetatable(frame table) = %d, want 1", got)
+	}
+	if got := state.StackTop(); got != baseTop+1 {
+		// 成功路径只应弹出 C 帧可见元表，外层 sentinel 和目标 table 必须保留。
+		t.Fatalf("global top after frame setmetatable = %d, want %d", got, baseTop+1)
+	}
+	if got := nativeLuaStackTop(luaState); got != 1 {
+		// 当前 C API 视角下只剩目标 table，一个外层 sentinel 不应被计入可见栈。
+		t.Fatalf("visible top after frame setmetatable = %d, want 1", got)
+	}
+	if value := state.ValueAt(1); value.Kind != runtime.KindString || value.String != "outer" {
+		// 外层 sentinel 不能被成功路径弹栈误消费。
+		t.Fatalf("outer sentinel after frame setmetatable = %#v, want outer string", value)
+	}
+	if target.GetMetatable() != metatable {
+		// 目标 table 必须持有当前 C 帧栈顶的同一个 raw metatable。
+		t.Fatalf("frame table metatable mismatch")
+	}
+}
+
 // TestNativeLuaLNewMetatableCreatesAndReusesRegistryEntry 验证 luaL_newmetatable 命名元表语义。
 func TestNativeLuaLNewMetatableCreatesAndReusesRegistryEntry(t *testing.T) {
 	// 命名元表必须存放在 registry，后续 luaL_checkudata 会按同一名字取回。

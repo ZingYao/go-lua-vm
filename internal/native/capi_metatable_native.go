@@ -108,8 +108,8 @@ func nativeLuaSetMetatable(luaState unsafe.Pointer, index int) int {
 			return 0
 		}
 	}
-	if _, err := state.Pop(); err != nil {
-		// 成功设置后弹出新元表；弹栈失败说明 State 已异常，按失败返回。
+	if _, ok := nativeLuaPopVisible(luaState, state); !ok {
+		// 成功设置后只弹出当前 C 帧可见的新元表；失败说明调用帧边界异常。
 		return 0
 	}
 	return 1
