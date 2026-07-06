@@ -504,6 +504,12 @@ modes=(
   builtin-setmetatable-two-tables
 )
 
+if (($# > 0)); then
+  modes=("$@")
+elif [[ -n "${PROBE_MODES:-}" ]]; then
+  read -r -a modes <<<"${PROBE_MODES}"
+fi
+
 for mode in "${modes[@]}"; do
   probe_mode "${mode}"
 done
