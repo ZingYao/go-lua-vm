@@ -39,6 +39,46 @@ func TestUnixPackageLoadLibResolvesNativeFixture(t *testing.T) {
 	}
 }
 
+// TestUnixPackageLoadLibReturnsCallableNativeFixture 验证 state-aware loader 可调用 luaopen_*。
+func TestUnixPackageLoadLibReturnsCallableNativeFixture(t *testing.T) {
+	// 当前 fixture 的 luaopen_* 返回 0 个结果，本测试只验证 package.loadlib 返回可执行 loader。
+	fixturePath := buildUnixNativeFixture(t)
+	state := luaruntime.NewState()
+	defer state.Close()
+	environment := packagelib.NewEnvironmentWithLoaders(nil, LoaderForState(state))
+
+	values, err := environment.LoadLib(
+		luaruntime.StringValue(fixturePath),
+		luaruntime.StringValue("luaopen_glua_native_smoke"),
+	)
+	if err != nil {
+		// 合法 loadlib 参数和 native loader 成功路径不应返回 Go error。
+		t.Fatalf("LoadLib state-aware fixture returned error: %v", err)
+	}
+	if len(values) != 1 || values[0].Kind != luaruntime.KindGoClosure {
+		// state-aware loader 成功时必须只返回可调用 Lua loader。
+		t.Fatalf("LoadLib state-aware fixture values = %#v, want callable", values)
+	}
+	loader, ok := values[0].Ref.(luaruntime.GoResultsFunction)
+	if !ok || loader == nil {
+		// 当前 native luaopen_* 通过 GoResultsFunction 进入 VM 调用通道。
+		t.Fatalf("LoadLib state-aware fixture payload = %#v, want GoResultsFunction", values[0].Ref)
+	}
+	results, err := loader(luaruntime.StringValue("glua_native_smoke"), luaruntime.StringValue(fixturePath))
+	if err != nil {
+		// fixture luaopen_* 返回 0 个结果，调用不应失败。
+		t.Fatalf("state-aware native loader call failed: %v", err)
+	}
+	if len(results) != 0 {
+		// 当前 fixture 没有压入模块值，因此结果为空；后续 smoke fixture 会改为返回 table。
+		t.Fatalf("state-aware native loader results = %#v, want empty", results)
+	}
+	if got := state.StackTop(); got != 0 {
+		// loader 调用期间压入的 require 参数必须恢复干净。
+		t.Fatalf("state-aware native loader stack top = %d, want 0", got)
+	}
+}
+
 // buildUnixNativeFixture 构建只导出 luaopen_glua_native_smoke 的最小 Lua C 动态库。
 func buildUnixNativeFixture(t *testing.T) string {
 	// native_modules 测试依赖 C 编译器；若环境没有可用编译器则明确跳过。

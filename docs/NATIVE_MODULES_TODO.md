@@ -41,10 +41,11 @@
 
 - [x] Linux/macOS 实现 `dlopen` / `dlsym` / `dlclose` 封装。
 - [x] Windows 实现 `LoadLibraryW` / `GetProcAddress` / `FreeLibrary` 封装。
-- [ ] 动态库 loader 返回 Lua 可调用 loader，接入 `PackageDynamicLibraryLoader`。
+- [x] 动态库 loader 返回 Lua 可调用 loader，接入 `PackageDynamicLibraryLoader`。
   - [x] 已新增 State-aware loader 工厂入口，后续 native shim 可绑定当前 State 后返回 Lua callable。
 - [ ] `package.loadlib(path, symbol)` 在 native 构建下可加载 fixture 入口。
-  - [x] 已验证 Linux/macOS 真实 fixture 可解析到 `luaopen_*`，并在 C API shim 未实现时返回 `init` 分类。
+  - [x] 已验证 Linux/macOS 真实 fixture 可解析到 `luaopen_*`，无状态 loader 仍返回 `init` 分类。
+  - [x] 已验证 State-aware loader 可返回 callable 并实际调用 fixture `luaopen_*`。
 - [ ] `require("mod")` 在 native 构建下可通过 `package.cpath` 命中 fixture。
 - [ ] 保持默认构建 `package.loadlib` 禁用说明不变。
 
@@ -211,3 +212,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：新增类型、truthiness 和 number 转换 shim：`lua_type`、`lua_typename`、`lua_toboolean`、`lua_tonumberx` 可区分 `LUA_TNONE` 与 `nil`，并按 Lua 5.3 规则读取 boolean/number；当前 `lua_tonumberx` 只覆盖 integer/float number，不做字符串转数字，错误 longjmp 留到 `luaL_error` 阶段。
 - 2026-07-06：新增 `lua_CFunction` 最小包装：`lua_pushcclosure`/`lua_pushcfunction` 可把 `nup==0` 的 C 函数指针压为 Go VM 可调用 closure；调用时临时把 Go 参数压入 native State 栈，执行 C 函数后按返回数量取结果并恢复调用前栈顶。当前不支持 C closure upvalue，`nup>0` 保持 no-op，`lua_error`/`luaL_error` 和 C frame traceback 留到错误阶段。
 - 2026-07-06：新增 `luaL_setfuncs` 与兼容 `luaL_newlib` 符号；Lua 5.3 public header 的 `luaL_newlib` 宏会展开为 `lua_createtable` + `luaL_setfuncs`，因此当前 C 模块可把 `nup==0` 的 `luaL_Reg` 函数表注册到 table。带 upvalue 的 `luaL_setfuncs` 仍保持 no-op，等待 C closure upvalue/registry 阶段补齐。
+- 2026-07-06：新增 `LoaderForState`，动态库符号解析后会保留库句柄并返回可调用 Go closure，调用时通过当前 State 的 opaque `lua_State*` 执行 `luaopen_*`。Unix fixture 已验证 `package.loadlib(path, "luaopen_glua_native_smoke")` 可返回 callable 并实际调用入口；无状态 `Loader()` 仍只做解析验证并返回 `init` 边界，防止误用错误 State。

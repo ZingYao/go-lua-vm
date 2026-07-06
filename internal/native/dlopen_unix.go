@@ -119,25 +119,38 @@ func (library *dynamicLibrary) close() error {
 //
 // 当前阶段只做解析验证，不调用符号地址；后续 Lua C API shim 落地后再把地址包装为 Lua loader。
 func resolveDynamicSymbol(filename string, symbol string) error {
-	// 解析过程先打开动态库，再查找 luaopen_* 符号，最后关闭句柄。
-	library, err := openDynamicLibrary(filename)
+	// 解析过程复用 loadDynamicSymbol，并在验证完成后关闭句柄。
+	_, closeLibrary, err := loadDynamicSymbol(filename, symbol)
 	if err != nil {
-		// 打开失败直接返回，保留 open 分类。
+		// 打开或符号解析失败直接返回，保留兼容分类。
 		return err
 	}
-	defer func() {
-		// defer 只做兜底清理；显式 close 的错误在下方返回，避免掩盖符号解析错误。
-		_ = library.close()
-	}()
-	if _, err := library.lookupSymbol(symbol); err != nil {
-		// 符号缺失直接返回，保留 init 分类。
-		return err
+	if closeLibrary == nil {
+		// 理论上可解析符号必须带有关闭函数；缺失时按打开阶段错误暴露。
+		return packagelib.DynamicLibraryError{Category: "open", Message: "dynamic library close function is missing"}
 	}
-	if err := library.close(); err != nil {
+	if err := closeLibrary(); err != nil {
 		// 显式关闭失败需要返回，避免测试遗漏平台 loader 异常。
 		return err
 	}
 	return nil
+}
+
+// loadDynamicSymbol 打开动态库并返回指定符号地址，调用方负责关闭库句柄。
+func loadDynamicSymbol(filename string, symbol string) (unsafe.Pointer, func() error, error) {
+	// 解析过程先打开动态库，再查找 luaopen_* 符号；成功后句柄必须保持到调用结束。
+	library, err := openDynamicLibrary(filename)
+	if err != nil {
+		// 打开失败直接返回，保留 open 分类。
+		return nil, nil, err
+	}
+	address, err := library.lookupSymbol(symbol)
+	if err != nil {
+		// 符号解析失败时立即关闭库，避免泄漏句柄。
+		_ = library.close()
+		return nil, nil, err
+	}
+	return address, library.close, nil
 }
 
 // clearDynamicLibraryError 清空 dlerror 的线程本地错误状态。
