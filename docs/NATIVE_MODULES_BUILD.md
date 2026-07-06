@@ -18,7 +18,9 @@ native 构建需要显式启用 CGO 和 build tag：
 CGO_ENABLED=1 go build -tags native_modules -o bin/glua-native ./cmd/glua
 ```
 
-当前阶段 `native_modules` 只提供 loader 入口骨架，尚未实现平台动态库打开、`luaopen_*` 调用和 Lua 5.3 C API shim。因此真实 C 模块加载仍会返回明确的未实现错误；后续阶段会按 `docs/NATIVE_MODULES_TODO.md` 逐步打开能力。
+`native_modules` 构建允许引入 CGO，用于平台动态库加载、Lua 5.3 C API shim 和后续 `lua53` 兼容符号层。该允许范围只适用于 native 模块能力；默认构建仍必须保持 `CGO_ENABLED=0`。
+
+native 构建不得依赖系统已安装的 Lua C 开发包。项目侧 C shim、Lua 5.3 public headers、fixture、真实模块验收源码和构建脚本必须随仓库提交，便于在不同机器和 CI 中重复编译验证。
 
 ## 兼容目标
 
@@ -40,6 +42,8 @@ native/lua53/include/
 ```
 
 该目录供本项目 shim、fixture 和外部模块构建说明引用。默认 Go 构建不会包含这些头文件，也不会引入 CGO。
+
+fixture 和真实模块验收必须只引用该目录下的头文件，禁止引用 `/usr/include/lua*`、Homebrew Lua、LuaRocks 或用户本机 Lua SDK。
 
 ## 平台前置条件
 
@@ -90,19 +94,25 @@ git ls-files --others --exclude-standard | rg '\.go$|_test\.go$'
 GLUA_BIN=./bin/glua-native ./scripts/test-native-modules.sh
 ```
 
+后续必须增加交叉编译验证入口：
+
+```bash
+./scripts/check-native-cross-compile.sh
+```
+
+该脚本需要显式输出每个目标的 `GOOS`、`GOARCH`、`CC`、`CGO_ENABLED` 和产物路径。缺少目标 C toolchain 时可以跳过对应目标，但必须打印明确 skip 原因，不能静默视为通过。
+
 fixture 只验证 loader smoke，不作为最终兼容结论。真实兼容验收必须包含：
 
 - `lua-cjson`：第一真实模块，覆盖 `require`、`encode/decode` 和错误输入 `pcall`。
 - `lpeg` 或等价纯 C 模块：覆盖 userdata、metatable、registry 和复杂 C function。
 - LuaSocket 或等价网络库：放在平台闭环后段，用于验证系统依赖和 socket 行为。
 
-真实模块验收需要同时覆盖源码编译模块和按官方 Lua 5.3 ABI 构建的现成二进制模块。后者要求 Linux/macOS 提供可解析的 `lua_*` / `luaL_*` 符号，Windows 提供 `lua53.dll` 或等价 import library 方案。
+真实模块验收需要同时覆盖源码编译模块和按官方 Lua 5.3 ABI 构建的现成二进制模块。源码编译模块必须使用仓库内固定源码和仓库内 Lua 5.3 public headers，不允许测试时联网下载；后者要求 Linux/macOS 提供可解析的 `lua_*` / `luaL_*` 符号，Windows 提供 `lua53.dll` 或等价 import library 方案。
 
 ## 当前限制
 
-- 尚未实现 Linux/macOS 的 `dlopen` / `dlsym`。
-- 尚未实现 Windows 的 `LoadLibraryW` / `GetProcAddress`。
-- 尚未实现 `lua_State*` opaque handle。
-- 尚未实现 Lua 5.3 public C API shim。
+- `luaopen_*` 入口尚未真正调用，动态库 loader 仍停在符号解析和 shim 边界。
+- Lua 5.3 public C API shim 只完成部分栈基础 API，table、newlib、C function、userdata、registry 和错误边界仍在 TODO 中。
 - 尚未接入 CLI 自动注入 native loader。
-- 尚未提供 C fixture 和跨平台验收脚本。
+- 尚未提供完整 C fixture、真实第三方模块源码验收和跨平台交叉编译脚本。

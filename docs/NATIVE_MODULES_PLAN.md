@@ -15,6 +15,7 @@ CGO_ENABLED=1 go build -tags native_modules ./cmd/glua
 - 构建模式、平台前置条件和当前限制见 [native_modules 构建说明](NATIVE_MODULES_BUILD.md)。
 - 复用现有 `package.cpath`、`package.loadlib`、`package.searchers[3]`、`package.searchers[4]` 和 `luaopen_*` 符号生成规则。
 - 为 Lua C 模块提供统一的 Lua 5.3 C API shim，使用户自定义模块无需针对每个模块单独写胶水。
+- `native_modules` 路径允许引入 CGO；但所有项目侧 C shim、Lua 5.3 public headers、fixture、真实模块验收源码和构建脚本必须随仓库提交，不能依赖系统已安装的 Lua C 开发包或临时下载源码。
 
 ## 非目标
 
@@ -22,6 +23,7 @@ CGO_ENABLED=1 go build -tags native_modules ./cmd/glua
 - 不承诺依赖 `lstate.h`、`lobject.h` 等 Lua 内部结构的模块兼容。第一阶段只承诺 public API。
 - 不把 Lua 官方 C VM 源码接入本项目运行时；本项目 VM 仍是 Go 实现。
 - 不在默认构建引入 CGO、C 头文件、系统动态库或 Lua C API 开发包依赖。
+- 不要求默认构建支持 native 模块；默认构建仍必须可在 `CGO_ENABLED=0` 下完整通过门禁。
 - 不承诺第一阶段覆盖完整 Lua 5.3 C API。兼容程度由 shim 已实现 API 决定。
 
 ## 当前基础
@@ -54,6 +56,7 @@ native 构建：
 - 注入 native dynamic loader。
 - 启用 Lua 5.3 public C API shim。
 - 平台动态库入口按系统拆分。
+- 允许使用 CGO、平台动态库 API 和随仓库提交的 C 源码；禁止依赖机器上预装的 Lua 头文件、Lua C 静态库、Lua C 动态库或未纳入仓库的第三方 C 源码。
 
 建议目录：
 
@@ -64,6 +67,16 @@ native/lua53/loader/         # dlopen/dlsym 或 LoadLibrary/GetProcAddress
 internal/native/             # glua 内部 native loader 封装
 tests/native_modules/        # C fixture、构建脚本和 Lua require 测试
 ```
+
+### C 源码与交叉编译策略
+
+`native_modules` 的可移植性要求是 **源码和构建入口自包含**：
+
+- 项目实现需要的 C shim、兼容 `lua53` 符号导出层、fixture C 文件、fixture Lua 脚本和构建脚本必须提交到仓库。
+- 验收使用的真实第三方 C 模块源码也必须固定到仓库或 `third_party/` 下，并记录来源、版本和许可证；CI/本地验收不得在测试时联网下载。
+- 构建脚本必须只引用仓库内的 Lua 5.3 public headers，不读取系统 `/usr/include/lua*`、Homebrew Lua、LuaRocks 安装目录或用户自定义 Lua SDK。
+- 交叉编译验证脚本需要显式输出目标平台、`GOOS`、`GOARCH`、`CC`、`CGO_ENABLED` 和产物路径；缺少目标 C toolchain 时必须跳过并说明原因，而不是静默通过。
+- Linux/macOS/Windows 的 shim 和 fixture 都应能通过同一套脚本入口做 `go test -c` 或 `go build` 级别验证；运行时加载测试只在对应平台执行。
 
 ### 头文件策略
 
@@ -256,6 +269,7 @@ GLUA_BIN=./bin/glua-native ./scripts/test-native-modules.sh
 真实第三方模块验收：
 
 - 自编 fixture 只作为 loader smoke：它只能证明 `package.loadlib`、`dlopen` / `dlsym` / `LoadLibraryW` / `GetProcAddress` 和错误分类链路贯通，不能作为 Lua C 扩展兼容性的最终依据。
+- 真实第三方模块验收也必须使用仓库内固定源码构建；允许再追加“现成二进制模块”验证，但不能替代仓库内源码编译验收。
 - 第一真实模块门禁使用 `lua-cjson`：必须验证 `require("cjson")`、`cjson.encode`、`cjson.decode`、错误输入下的 `pcall` 行为和 Lua 5.3 public C API shim 覆盖度。
 - 第二层真实模块建议使用 `lpeg` 或等价纯 C 模块：用于覆盖更复杂的 userdata、metatable、registry 和 C function 行为。
 - 网络库如 LuaSocket 放在后续平台闭环：它能验证更真实的系统依赖和 socket 行为，但只有在 userdata、metatable、registry 和错误边界稳定后才进入必过门禁。

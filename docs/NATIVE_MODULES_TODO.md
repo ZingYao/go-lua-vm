@@ -7,6 +7,7 @@
 - 默认 no-CGO 构建保持现状并通过全部门禁。
 - `native_modules` 构建支持直接 `require` 按 Lua 5.3 public C API 编写并导出 `luaopen_*` 的 `.so/.dylib/.dll`。
 - Linux、macOS、Windows 均有 fixture 或平台脚本验收。
+- `native_modules` 允许使用 CGO；项目侧 C shim、Lua public headers、fixture、真实模块验收源码和构建脚本必须全部入仓库，不能依赖系统 Lua C 开发包或测试时联网下载。
 
 ## 当前状态
 
@@ -19,6 +20,7 @@
   - `lua.openPackageWithStateCaller`
   - `internal/cli` 中 `lua.DefaultOptions()` 创建入口
 - 约束：默认构建仍必须 `CGO_ENABLED=0`。
+- 约束：native 构建可使用 `CGO_ENABLED=1`，但交叉编译验证必须显式记录目标平台、`GOOS`、`GOARCH`、`CC` 和跳过原因。
 
 ## 第一阶段：方案与骨架
 
@@ -33,6 +35,7 @@
 - [x] 新增 `native_modules` build tag 下的 native loader 包骨架。
 - [x] 新增非 `native_modules` build tag 下的 no-op 包，保证默认构建不受影响。
 - [x] 增加 `native_modules` 构建说明文档。
+- [ ] 增加仓库内 C 源码自包含清单，覆盖 shim、fixture 和真实模块验收源码。
 
 ## 第二阶段：动态库加载器
 
@@ -113,10 +116,17 @@
 
 - [ ] 真实第三方模块验收：
   - [ ] 明确自编 fixture 只作为 loader smoke，不作为最终兼容性依据。
+  - [ ] 固定 `lua-cjson` 源码到仓库或 `third_party/`，记录来源、版本和许可证，构建不得联网下载。
   - [ ] `lua-cjson` 源码编译验收：`require("cjson")`、`encode/decode`、错误输入 `pcall`。
   - [ ] `lua-cjson` 官方 Lua 5.3 ABI 二进制模块验收：验证 `lua_*` / `luaL_*` 符号由本项目 shim 满足。
+  - [ ] 固定 `lpeg` 或等价纯 C 模块源码到仓库或 `third_party/`，记录来源、版本和许可证。
   - [ ] `lpeg` 或等价纯 C 模块验收：覆盖 userdata、metatable、registry 和复杂 C function 行为。
   - [ ] LuaSocket 或等价网络库验收：仅在 userdata/metatable/registry/错误边界稳定后进入平台闭环。
+- [ ] 增加交叉编译验证脚本：
+  - [ ] `scripts/check-native-cross-compile.sh`：显式输出 `GOOS`、`GOARCH`、`CC`、产物路径和缺失 toolchain 时的 skip 原因。
+  - [ ] Linux native build/test 编译验证。
+  - [ ] macOS native build/test 编译验证。
+  - [ ] Windows native build/test 编译验证。
 - [ ] Linux `.so` fixture 构建和 require。
 - [ ] macOS `.dylib` fixture 构建和 require。
 - [ ] macOS `.so` 后缀候选验证。
@@ -191,3 +201,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：新增 `PackageDynamicLibraryLoaderForState` 状态感知 loader 工厂；`lua.OpenLibs` 注册 package 库时会优先绑定当前 State，为后续 `lua_State*` opaque handle 和 `luaopen_*` 调用提供正确 VM 上下文。
 - 2026-07-06：新增 native opaque `lua_State*` handle 注册表；handle 使用 C 分配 token 作为 C 可见身份，Go 侧只保存 token 到 `runtime.State` 的映射，避免把 Go 指针传入 C，并覆盖 nil/closed State、查找和重复关闭测试。
 - 2026-07-06：新增最小 C API 栈 shim：`lua_gettop`、`lua_settop` 和基础 `lua_push*` 可通过 opaque handle 操作 Go State 栈；当前对无效/关闭 State 采取 no-op/0 的失败安全策略，`lua_error`/longjmp 错误边界后续阶段补齐。
+- 2026-07-06：更正 CGO 边界：默认构建继续禁用 CGO；`native_modules` 为 Lua C 模块加载允许使用 CGO，但项目侧 C shim、fixture、真实模块验收源码和构建脚本必须全部随仓库提交，并补充跨平台交叉编译验证 TODO。
