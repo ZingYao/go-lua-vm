@@ -35,7 +35,8 @@
 - [x] 新增 `native_modules` build tag 下的 native loader 包骨架。
 - [x] 新增非 `native_modules` build tag 下的 no-op 包，保证默认构建不受影响。
 - [x] 增加 `native_modules` 构建说明文档。
-- [ ] 增加仓库内 C 源码自包含清单，覆盖 shim、fixture 和真实模块验收源码。
+- [x] 增加仓库内 C 源码自包含清单，覆盖 shim、fixture 和真实模块验收源码。
+  - 详见 `docs/NATIVE_MODULES_SOURCE_INVENTORY.md`；真实第三方模块源码仍作为第七阶段独立 TODO 跟踪。
 
 ## 第二阶段：动态库加载器
 
@@ -229,3 +230,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：新增 `lua_rawgeti` / `lua_rawseti` 最小 raw integer API；支持普通 table 和 registry pseudo-index，按 integer key 直接读写且不触发元方法，`rawseti` 成功时弹出栈顶 value。当前无效目标仍保持 no-op/none，后续 api_check/错误边界统一收口。
 - 2026-07-06：新增 `luaL_ref` / `luaL_unref` 最小 registry 引用 API；按 Lua 5.3 lauxlib 语义处理 `LUA_REFNIL` / `LUA_NOREF`、`t[0]` freelist 复用和 `#t+1` 追加分配。当前非法 table 目标返回 no-ref/no-op，后续 api_check/longjmp 阶段统一收口。
 - 2026-07-06：补齐 `lua_pushvalue` 最小栈复制 API，并扩展 Unix smoke fixture 的 `glua_native_counter` userdata；fixture 通过 `luaL_newmetatable`、`lua_pushvalue`、`lua_setfield("__index")`、`luaL_setfuncs` 和 `luaL_checkudata` 验证 `counter:add()` / `counter:get()` 方法调用后状态可持续保存。
+- 2026-07-06：新增 `docs/NATIVE_MODULES_SOURCE_INVENTORY.md`，明确 Lua public headers、Go/CGO shim、loader、内嵌 fixture 的已入仓状态，并列出独立 fixture C/Lua 文件、构建脚本、交叉编译脚本、`lua-cjson`、`lpeg` 和 Windows shim 等尚未入仓项。该切口只补自包含边界文档，不改变 Go/native 运行时代码。

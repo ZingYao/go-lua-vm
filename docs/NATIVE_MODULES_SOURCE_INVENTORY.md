@@ -1,0 +1,49 @@
+# native_modules C 源码自包含清单
+
+本文记录 `native_modules` 构建、测试和最终验收允许依赖的仓库内源码。目标是确保 Lua C 原生模块能力可以在 Linux、macOS、Windows 上用仓库内容复现，不依赖系统 Lua 开发包、LuaRocks、Homebrew Lua、临时下载源码或未记录的本机动态库。
+
+## 入仓原则
+
+- Lua 5.3 public headers、项目侧 C ABI/shim、fixture、真实第三方模块验收源码和构建脚本都必须有仓库内固定来源。
+- 构建脚本只能引用 `native/lua53/include/` 下的 Lua 5.3 public headers，不能读取 `/usr/include/lua*`、Homebrew Lua、LuaRocks 安装目录或用户自定义 Lua SDK。
+- 自编 fixture 只作为 loader 和 shim smoke；真实兼容验收必须使用仓库内固定的第三方 C 模块源码。
+- 现成二进制模块验收可以作为附加 ABI 验证，但不能替代仓库内源码编译验收。
+
+## 已入仓清单
+
+| 类别 | 路径 | 当前用途 | 状态 |
+| --- | --- | --- | --- |
+| Lua public header | `native/lua53/include/lua.h` | 编译 Lua 5.3 public C API fixture 和后续真实模块源码 | 已固定 |
+| Lua public header | `native/lua53/include/luaconf.h` | 提供 Lua 5.3 public ABI 类型配置 | 已固定 |
+| Lua public header | `native/lua53/include/lauxlib.h` | 提供 `luaL_*` public API 声明和宏 | 已固定 |
+| Lua public header | `native/lua53/include/lualib.h` | 提供标准库 public 声明 | 已固定 |
+| Header 来源说明 | `native/lua53/include/README.md` | 记录 public headers 来源和禁止使用内部头文件的边界 | 已固定 |
+| Go/CGO shim | `internal/native/capi_*_native.go` | 导出 `lua_*` / `luaL_*` 符号并映射到 Go VM | 已固定 |
+| Go/CGO loader | `internal/native/dlopen_unix.go` | Unix `dlopen` / `dlsym` / `dlclose` 封装 | 已固定 |
+| Go/CGO loader | `internal/native/dlopen_windows.go` | Windows `LoadLibraryW` / `GetProcAddress` / `FreeLibrary` 封装 | 已固定 |
+| Fixture C source | `internal/native/loadlib_fixture_unix_test.go` 内嵌 C 源码字符串 | 构建 `glua_native_smoke` / `glua_native_failopen`，覆盖 `luaopen_*`、C function、userdata、metatable、registry 和错误 smoke | 已固定但后续应迁移到 `tests/native_modules/fixtures/` |
+
+## 尚未入仓清单
+
+| 类别 | 目标路径 | 用途 | 阻塞影响 |
+| --- | --- | --- | --- |
+| Fixture C 文件 | `tests/native_modules/fixtures/glua_native_smoke.c` | 将当前内嵌 fixture 提升为独立 C 文件，供脚本和跨平台构建复用 | 跨平台 fixture 脚本暂缺统一源码入口 |
+| Fixture Lua 脚本 | `tests/native_modules/fixtures/glua_native_smoke.lua` | 复用当前 Go 测试内的 require 验收脚本 | CLI 级 fixture 验收脚本暂缺 |
+| Fixture 构建脚本 | `scripts/build-native-fixtures.sh` | 构建 Linux/macOS/Windows fixture 动态库并输出平台信息 | 自动化 fixture 构建暂缺 |
+| Fixture 测试脚本 | `scripts/test-native-modules.sh` | 使用 `GLUA_BIN` 执行 require 级验收 | CLI 级 smoke 暂缺 |
+| 交叉编译脚本 | `scripts/check-native-cross-compile.sh` | 输出 `GOOS`、`GOARCH`、`CC`、`CGO_ENABLED` 和 skip 原因 | Windows/macOS/Linux 编译闭环暂缺 |
+| 真实模块源码 | `third_party/lua-cjson/` | 第一真实模块验收，覆盖 `require("cjson")`、`encode/decode` 和错误输入 `pcall` | 不能宣称真实第三方 C 模块兼容 |
+| 真实模块源码 | `third_party/lpeg/` 或等价纯 C 模块目录 | 第二层真实模块验收，覆盖复杂 userdata、metatable、registry 和 C function 行为 | 复杂 C API 兼容面仍未闭环 |
+| Windows shim 产物源码 | 待定 `native/lua53/windows/` 或 `tests/native_modules/windows/` | 提供 `lua53.dll` shim 或等价 import library 验证入口 | Windows 现成 Lua 5.3 ABI 模块验收暂缺 |
+
+## 当前可验证边界
+
+- 默认构建仍以 `CGO_ENABLED=0 go test ./...` 和 `./scripts/check-go-gates.sh` 作为必过门禁。
+- `native_modules` 构建当前可通过 `CGO_ENABLED=1 go test -tags native_modules ./...` 验证仓库内 Go/CGO shim、平台 loader 和 Unix 内嵌 fixture。
+- 现阶段不得把内嵌 smoke fixture 的通过结果解释为“任意第三方 Lua C 模块兼容”；它只证明项目侧 loader、opaque `lua_State*`、基础 C API shim 和 require 链路已经贯通。
+
+## 后续维护规则
+
+- 每引入一个新的 C 源文件、第三方模块源码、构建脚本或平台 shim，都必须更新本文。
+- 每个第三方模块目录必须记录来源、版本、许可证和本项目是否修改过源码。
+- 若某个平台缺少 C toolchain，验证脚本必须显式输出 skip 原因，不能静默成功。
