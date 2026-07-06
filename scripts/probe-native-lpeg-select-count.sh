@@ -578,6 +578,25 @@ local skipped = _G["${global_name}"]
 local payload = ${value_expr}
 LUA
       ;;
+    fixed-result-clear3-global-value-*)
+      local payload="${mode#fixed-result-clear3-global-value-}"
+      local value_kind="${payload##*-}"
+      local rest="${payload%-*}"
+      local global_name="${rest##*-}"
+      local source_kind="${rest%-*}"
+      local value_expr
+
+      if ! value_expr="$(lua_value_expr_for_kind "${value_kind}")"; then
+        return 1
+      fi
+
+      emit_fixed_result_source "${source_kind}"
+      cat <<LUA
+local clear1, clear2, clear3 = nil, nil, nil
+local skipped = _G["${global_name}"]
+local payload = ${value_expr}
+LUA
+      ;;
     select-count-value-global-*)
       local payload="${mode#select-count-value-global-}"
       local value_kind="${payload%-*}"
