@@ -120,6 +120,39 @@ assert(require("glua_native_smoke") == mod)
 	}
 }
 
+// TestUnixRequireCapturesNativeFixtureOpenError 验证 pcall(require) 可捕获 C module 初始化错误。
+func TestUnixRequireCapturesNativeFixtureOpenError(t *testing.T) {
+	// 构建文件名与模块名匹配的动态库，确保 require 走标准 cpath 和 luaopen_* 符号生成规则。
+	fixturePath := buildUnixNativeFixtureModule(t, "glua_native_failopen")
+	cpathPattern := filepath.Join(filepath.Dir(fixturePath), "?"+dynamicLibraryExtension())
+	missingLuaPattern := filepath.Join(t.TempDir(), "missing", "?.lua")
+	state := glualua.NewStateWithOptions(glualua.Options{
+		AllowHostFilesystem: true,
+		PackageDynamicLibraryLoaderForState: func(loaderState *luaruntime.State) func(filename string, symbol string) (luaruntime.Value, error) {
+			// 初始化失败仍必须绑定当前 State，否则 luaL_error 无法转换为当前 VM 的 runtime error。
+			return LoaderForState(loaderState)
+		},
+	})
+	defer state.Close()
+	if err := glualua.OpenLibs(state); err != nil {
+		// require 和 pcall 依赖 base/package 标准库。
+		t.Fatalf("OpenLibs native failopen require failed: %v", err)
+	}
+
+	source := `
+package.path = ` + nativeLuaStringLiteral(missingLuaPattern) + `
+package.cpath = ` + nativeLuaStringLiteral(cpathPattern) + `
+local ok, message = pcall(require, "glua_native_failopen")
+assert(ok == false, "require unexpectedly succeeded")
+assert(string.find(message, "native open failure", 1, true), message)
+assert(package.loaded["glua_native_failopen"] == nil)
+`
+	if err := glualua.DoString(state, source); err != nil {
+		// pcall(require) 必须捕获 luaopen_* 中的 luaL_error，而不是让 chunk 失败。
+		t.Fatalf("native failopen require script failed: %v", err)
+	}
+}
+
 // assertNativeSmokeModule 验证 fixture 模块 table 及其中 C function 的调用语义。
 func assertNativeSmokeModule(t *testing.T, value luaruntime.Value) {
 	// 先确认 luaopen_* 的返回值是 table，再逐个调用由 luaL_newlib 注册的函数。
@@ -220,6 +253,13 @@ func nativeLuaStringLiteral(text string) string {
 
 // buildUnixNativeFixture 构建导出 luaopen_glua_native_smoke 的 Lua C 动态库。
 func buildUnixNativeFixture(t *testing.T) string {
+	// 默认构建 smoke 模块文件名，供现有 loadlib 和 require 成功路径复用。
+	t.Helper()
+	return buildUnixNativeFixtureModule(t, "glua_native_smoke")
+}
+
+// buildUnixNativeFixtureModule 构建指定模块文件名的 Lua C 动态库。
+func buildUnixNativeFixtureModule(t *testing.T, outputModule string) string {
 	// native_modules 测试依赖 C 编译器；若环境没有可用编译器则明确跳过。
 	t.Helper()
 	cc := os.Getenv("CC")
@@ -233,7 +273,7 @@ func buildUnixNativeFixture(t *testing.T) string {
 	}
 
 	tempDir := t.TempDir()
-	sourcePath := filepath.Join(tempDir, "glua_native_smoke.c")
+	sourcePath := filepath.Join(tempDir, outputModule+".c")
 	source := `
 #include "lua.h"
 #include "lauxlib.h"
@@ -282,6 +322,10 @@ int luaopen_glua_native_smoke(lua_State *L) {
 	luaL_newlib(L, glua_native_smoke_funcs);
 	return 1;
 }
+
+int luaopen_glua_native_failopen(lua_State *L) {
+	return luaL_error(L, "native open failure");
+}
 `
 	if err := os.WriteFile(sourcePath, []byte(source), 0o600); err != nil {
 		// 写入临时 C 源码失败说明测试环境不可用。
@@ -289,7 +333,7 @@ int luaopen_glua_native_smoke(lua_State *L) {
 	}
 
 	includeDir := filepath.Join(repoRootFromTest(t), "native", "lua53", "include")
-	outputPath := filepath.Join(tempDir, "glua_native_smoke"+dynamicLibraryExtension())
+	outputPath := filepath.Join(tempDir, outputModule+dynamicLibraryExtension())
 	args := nativeFixtureCompileArgs(includeDir, outputPath, sourcePath)
 	command := exec.Command(cc, args...)
 	output, err := command.CombinedOutput()
