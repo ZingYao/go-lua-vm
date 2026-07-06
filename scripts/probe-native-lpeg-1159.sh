@@ -156,4 +156,92 @@ LUA
 
 run_post_overflow_cleanup_probe
 
+run_prefix646_pcall_only_probe() {
+  local source="${work_dir}/prefix646_pcall_only.lua"
+  local output="${work_dir}/prefix646_pcall_only.out"
+
+  {
+    printf 'package.path = "%s"\n' "${repo_root}/third_party/lpeg/?.lua"
+    printf 'package.cpath = "%s"\n' "${build_dir}/?${module_extension}"
+    sed "1,4d;647,\$d" "${repo_root}/third_party/lpeg/test.lua"
+    cat <<'LUA'
+local st, err = pcall(m.match, p, string.rep("0", lim))
+assert(not st and string.find(tostring(err), "stack overflow", 1, true))
+LUA
+    emit_probe_tail
+  } >"${source}"
+
+  echo "run prefix646 + overflow pcall-only probe"
+  "${glua_bin}" "${source}" >"${output}"
+  printf 'prefix646_pcall_only '
+  rg '^PROBE' "${output}" || tail -n 3 "${output}"
+}
+
+run_prefix620_parity_construct_overflow_probe() {
+  local source="${work_dir}/prefix620_parity_construct_overflow.lua"
+  local output="${work_dir}/prefix620_parity_construct_overflow.out"
+
+  {
+    printf 'package.path = "%s"\n' "${repo_root}/third_party/lpeg/?.lua"
+    printf 'package.cpath = "%s"\n' "${build_dir}/?${module_extension}"
+    sed "1,4d;621,\$d" "${repo_root}/third_party/lpeg/test.lua"
+    cat <<'LUA'
+p = m.P{
+  [1] = '0' * m.V(2) + '1' * m.V(3) + -1,
+  [2] = '0' * m.V(1) + '1' * m.V(4),
+  [3] = '0' * m.V(4) + '1' * m.V(1),
+  [4] = '0' * m.V(3) + '1' * m.V(2),
+}
+local lim = 10000
+p = m.P{ '0' * m.V(1) + '0' }
+local st, err = pcall(m.match, p, string.rep("0", lim))
+assert(not st and string.find(tostring(err), "stack overflow", 1, true))
+LUA
+    emit_probe_tail
+  } >"${source}"
+
+  echo "run prefix620 + parity construction + overflow pcall-only probe"
+  "${glua_bin}" "${source}" >"${output}"
+  printf 'prefix620_parity_construct_overflow '
+  rg '^PROBE' "${output}" || tail -n 3 "${output}"
+}
+
+run_prefix620_parity_matches_overflow_probe() {
+  local source="${work_dir}/prefix620_parity_matches_overflow.lua"
+  local output="${work_dir}/prefix620_parity_matches_overflow.out"
+
+  {
+    printf 'package.path = "%s"\n' "${repo_root}/third_party/lpeg/?.lua"
+    printf 'package.cpath = "%s"\n' "${build_dir}/?${module_extension}"
+    sed "1,4d;621,\$d" "${repo_root}/third_party/lpeg/test.lua"
+    cat <<'LUA'
+p = m.P{
+  [1] = '0' * m.V(2) + '1' * m.V(3) + -1,
+  [2] = '0' * m.V(1) + '1' * m.V(4),
+  [3] = '0' * m.V(4) + '1' * m.V(1),
+  [4] = '0' * m.V(3) + '1' * m.V(2),
+}
+assert(p:match(string.rep("00", 10000)))
+assert(p:match(string.rep("01", 10000)))
+assert(p:match(string.rep("011", 10000)))
+assert(not p:match(string.rep("011", 10000) .. "1"))
+assert(not p:match(string.rep("011", 10001)))
+local lim = 10000
+p = m.P{ '0' * m.V(1) + '0' }
+local st, err = pcall(m.match, p, string.rep("0", lim))
+assert(not st and string.find(tostring(err), "stack overflow", 1, true))
+LUA
+    emit_probe_tail
+  } >"${source}"
+
+  echo "run prefix620 + parity matches + overflow pcall-only probe"
+  "${glua_bin}" "${source}" >"${output}"
+  printf 'prefix620_parity_matches_overflow '
+  rg '^PROBE' "${output}" || tail -n 3 "${output}"
+}
+
+run_prefix646_pcall_only_probe
+run_prefix620_parity_construct_overflow_probe
+run_prefix620_parity_matches_overflow_probe
+
 echo "diagnostic note: PROBE result below 18 marks the current LPeg 1159 narrowing point; this script reports evidence and does not assert the known mismatch."
