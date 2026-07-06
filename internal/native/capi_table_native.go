@@ -4,6 +4,7 @@ package native
 
 /*
 typedef struct lua_State lua_State;
+typedef long long lua_Integer;
 */
 import "C"
 
@@ -129,6 +130,40 @@ func nativeLuaGetField(luaState unsafe.Pointer, index int, keyPointer unsafe.Poi
 	return nativeLuaTypeCode(value, false)
 }
 
+// nativeLuaRawGetI 按 integer key raw 读取 table 字段并压入栈顶。
+func nativeLuaRawGetI(luaState unsafe.Pointer, index int, key int64) int {
+	// rawgeti 不触发元方法；目标必须是 table 或 registry pseudo-index。
+	table, ok := nativeLuaTableAt(luaState, index)
+	if !ok {
+		// 非 table 目标在当前最小 shim 中返回 none，后续 api_check 阶段再补齐错误语义。
+		return nativeLuaTypeNone
+	}
+	value := table.RawGetInteger(key)
+	nativeLuaPushValue(luaState, value)
+	return nativeLuaTypeCode(value, false)
+}
+
+// nativeLuaRawSetI 按 integer key raw 写入 table 字段并弹出栈顶值。
+func nativeLuaRawSetI(luaState unsafe.Pointer, index int, key int64) {
+	// 入口先解析 State；失效 handle 不能弹栈或写表。
+	state, ok := lookupNativeStateHandle(luaState)
+	if !ok {
+		// 无效 State 保持 no-op。
+		return
+	}
+	table, ok := nativeLuaTableAt(luaState, index)
+	if !ok {
+		// 非 table 目标保持栈不变，避免提前吞掉 C 模块传入的值。
+		return
+	}
+	value, err := state.Pop()
+	if err != nil {
+		// 空栈或关闭 State 时不能取得待写入值。
+		return
+	}
+	table.RawSetInteger(key, value)
+}
+
 // lua_createtable 导出 Lua 5.3 C API table 创建入口。
 //
 //export lua_createtable
@@ -151,4 +186,20 @@ func lua_setfield(luaState *C.lua_State, index C.int, key *C.char) {
 func lua_getfield(luaState *C.lua_State, index C.int, key *C.char) C.int {
 	// C API 入口只做类型转换，返回值是 Lua 5.3 C API 类型编号。
 	return C.int(nativeLuaGetField(unsafe.Pointer(luaState), int(index), unsafe.Pointer(key)))
+}
+
+// lua_rawgeti 导出 Lua 5.3 C API integer key raw 读取入口。
+//
+//export lua_rawgeti
+func lua_rawgeti(luaState *C.lua_State, index C.int, key C.lua_Integer) C.int {
+	// C API 入口只做类型转换，返回值是 Lua 5.3 C API 类型编号。
+	return C.int(nativeLuaRawGetI(unsafe.Pointer(luaState), int(index), int64(key)))
+}
+
+// lua_rawseti 导出 Lua 5.3 C API integer key raw 写入入口。
+//
+//export lua_rawseti
+func lua_rawseti(luaState *C.lua_State, index C.int, key C.lua_Integer) {
+	// C API 入口只做类型转换，具体写入和弹栈语义由 Go helper 维护。
+	nativeLuaRawSetI(unsafe.Pointer(luaState), int(index), int64(key))
 }

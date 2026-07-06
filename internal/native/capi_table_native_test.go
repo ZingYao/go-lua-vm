@@ -110,3 +110,118 @@ func TestNativeCAPITableFieldPrimitivesRejectInvalidTarget(t *testing.T) {
 		t.Fatalf("invalid lua_getfield type = %d, want %d", typeCode, nativeLuaTypeNone)
 	}
 }
+
+// TestNativeCAPIRawIntegerPrimitives 验证 lua_rawgeti/lua_rawseti 的整数 key raw 语义。
+func TestNativeCAPIRawIntegerPrimitives(t *testing.T) {
+	// 测试覆盖 table 数组区写入、读取、nil 删除和返回类型编号。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 raw integer API。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	nativeLuaCreateTable(luaState, 0, 0)
+	tableValue := state.ValueAt(-1)
+	tableRef, ok := tableValue.Ref.(*runtime.Table)
+	if !ok || tableRef == nil {
+		// raw integer API 需要一个真实 runtime table 目标。
+		t.Fatalf("table ref = %#v, want *runtime.Table", tableValue.Ref)
+	}
+	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'v', 'a', 'l', 'u', 'e', 0}[0]))
+	nativeLuaRawSetI(luaState, 1, 3)
+	if got := nativeLuaStackTop(luaState); got != 1 {
+		// rawseti 必须弹出待写入值，只保留 table。
+		t.Fatalf("lua_rawseti top = %d, want 1", got)
+	}
+	if value := tableRef.RawGetInteger(3); value.Kind != runtime.KindString || value.String != "value" {
+		// table[3] 必须写入字符串。
+		t.Fatalf("table[3] = %#v, want value", value)
+	}
+
+	typeCode := nativeLuaRawGetI(luaState, 1, 3)
+	if typeCode != nativeLuaTypeString {
+		// rawgeti 命中 string 值时返回 string 类型编号。
+		t.Fatalf("lua_rawgeti type = %d, want %d", typeCode, nativeLuaTypeString)
+	}
+	if value := state.ValueAt(-1); value.Kind != runtime.KindString || value.String != "value" {
+		// rawgeti 必须把读取结果压到栈顶。
+		t.Fatalf("lua_rawgeti value = %#v, want value", value)
+	}
+
+	nativeLuaSetTop(luaState, 1)
+	nativeLuaPushNil(luaState)
+	nativeLuaRawSetI(luaState, 1, 3)
+	if value := tableRef.RawGetInteger(3); !value.IsNil() {
+		// rawseti 写入 nil 应删除整数 key。
+		t.Fatalf("table[3] after nil rawseti = %#v, want nil", value)
+	}
+	typeCode = nativeLuaRawGetI(luaState, 1, 3)
+	if typeCode != nativeLuaTypeNil {
+		// 缺失整数 key 读取应返回 nil 类型编号。
+		t.Fatalf("lua_rawgeti missing type = %d, want %d", typeCode, nativeLuaTypeNil)
+	}
+	if value := state.ValueAt(-1); !value.IsNil() {
+		// 缺失整数 key 读取结果必须是 nil。
+		t.Fatalf("lua_rawgeti missing value = %#v, want nil", value)
+	}
+}
+
+// TestNativeCAPIRawIntegerRegistry 验证 rawgeti/rawseti 可操作 registry pseudo-index。
+func TestNativeCAPIRawIntegerRegistry(t *testing.T) {
+	// registry pseudo-index 是 luaL_ref 的底层存储位置，必须支持 integer key。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	nativeLuaPushInteger(luaState, 99)
+	nativeLuaRawSetI(luaState, runtime.RegistryPseudoIndex, 42)
+	if got := nativeLuaStackTop(luaState); got != 0 {
+		// registry rawseti 也必须弹出待写入值。
+		t.Fatalf("registry lua_rawseti top = %d, want 0", got)
+	}
+	typeCode := nativeLuaRawGetI(luaState, runtime.RegistryPseudoIndex, 42)
+	if typeCode != nativeLuaTypeNumber {
+		// Lua C API 中 integer 归类为 number。
+		t.Fatalf("registry lua_rawgeti type = %d, want %d", typeCode, nativeLuaTypeNumber)
+	}
+	if value := state.ValueAt(-1); value.Kind != runtime.KindInteger || value.Integer != 99 {
+		// registry[42] 必须保存并读取 integer 99。
+		t.Fatalf("registry[42] = %#v, want 99", value)
+	}
+}
+
+// TestNativeCAPIRawIntegerRejectsInvalidTarget 验证 raw integer API 的失败安全边界。
+func TestNativeCAPIRawIntegerRejectsInvalidTarget(t *testing.T) {
+	// 当前最小 shim 不做 api_check；无效目标保持 no-op/none。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	nativeLuaPushInteger(luaState, 1)
+	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'x', 0}[0]))
+	nativeLuaRawSetI(luaState, 1, 1)
+	if got := nativeLuaStackTop(luaState); got != 2 {
+		// 非 table 目标写入失败时不得弹栈。
+		t.Fatalf("invalid lua_rawseti top = %d, want 2", got)
+	}
+	if typeCode := nativeLuaRawGetI(luaState, 1, 1); typeCode != nativeLuaTypeNone {
+		// 非 table 目标读取返回 none。
+		t.Fatalf("invalid lua_rawgeti type = %d, want %d", typeCode, nativeLuaTypeNone)
+	}
+}
