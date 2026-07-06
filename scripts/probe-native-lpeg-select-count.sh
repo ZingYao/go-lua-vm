@@ -33,6 +33,9 @@ echo "PROBE_PREBUILD_ANY=${PROBE_PREBUILD_ANY:-0}"
 echo "PROBE_PREBUILD_CLOSE_HEAD=${PROBE_PREBUILD_CLOSE_HEAD:-0}"
 echo "PROBE_PREBUILD_CLOSE_BACK=${PROBE_PREBUILD_CLOSE_BACK:-0}"
 echo "PROBE_PREBUILD_CLOSE_FUNC=${PROBE_PREBUILD_CLOSE_FUNC:-0}"
+echo "PROBE_PREBUILD_DUMMY_FUNC=${PROBE_PREBUILD_DUMMY_FUNC:-0}"
+echo "PROBE_PREBUILD_DUMMY_CAPTURE=${PROBE_PREBUILD_DUMMY_CAPTURE:-0}"
+echo "PROBE_PREBUILD_DUMMY_BACK=${PROBE_PREBUILD_DUMMY_BACK:-0}"
 
 expected_go_version="go1.26.4"
 actual_go_version="$(go version | awk '{print $3}')"
@@ -132,6 +135,9 @@ local probe_any
 local probe_close_head
 local probe_close_back
 local probe_close_func
+local dummy_func
+local dummy_capture
+local dummy_back
 LUA
   if [[ "${PROBE_PREBUILD_OPEN:-0}" == "1" ]]; then
     cat <<'LUA'
@@ -165,6 +171,23 @@ LUA
 probe_close_func = function (_, pos, s1, s2)
                                                attempts[#attempts + 1] = pos .. ':' .. s1 .. ':' .. s2
                                                return s1 == s2 end
+LUA
+  fi
+  if [[ "${PROBE_PREBUILD_DUMMY_FUNC:-0}" == "1" ]]; then
+    cat <<'LUA'
+dummy_func = function (_, pos)
+  return pos
+end
+LUA
+  fi
+  if [[ "${PROBE_PREBUILD_DUMMY_CAPTURE:-0}" == "1" ]]; then
+    cat <<'LUA'
+dummy_capture = m.C(m.P'='^0)
+LUA
+  fi
+  if [[ "${PROBE_PREBUILD_DUMMY_BACK:-0}" == "1" ]]; then
+    cat <<'LUA'
+dummy_back = m.Cb("dummy")
 LUA
   fi
 }
@@ -1067,7 +1090,7 @@ probe_mode() {
       emit_probe_prebuild
     elif [[ "${PROBE_PREBUILD_PARTS:-0}" == "1" ]]; then
       emit_probe_prebuild_parts
-    elif [[ "${PROBE_PREBUILD_OPEN:-0}" == "1" || "${PROBE_PREBUILD_CLOSE:-0}" == "1" || "${PROBE_PREBUILD_ANY:-0}" == "1" || "${PROBE_PREBUILD_CLOSE_HEAD:-0}" == "1" || "${PROBE_PREBUILD_CLOSE_BACK:-0}" == "1" || "${PROBE_PREBUILD_CLOSE_FUNC:-0}" == "1" ]]; then
+    elif [[ "${PROBE_PREBUILD_OPEN:-0}" == "1" || "${PROBE_PREBUILD_CLOSE:-0}" == "1" || "${PROBE_PREBUILD_ANY:-0}" == "1" || "${PROBE_PREBUILD_CLOSE_HEAD:-0}" == "1" || "${PROBE_PREBUILD_CLOSE_BACK:-0}" == "1" || "${PROBE_PREBUILD_CLOSE_FUNC:-0}" == "1" || "${PROBE_PREBUILD_DUMMY_FUNC:-0}" == "1" || "${PROBE_PREBUILD_DUMMY_CAPTURE:-0}" == "1" || "${PROBE_PREBUILD_DUMMY_BACK:-0}" == "1" ]]; then
       emit_probe_prebuild_selected_parts
     fi
     emit_mode_body "${mode}"
@@ -1075,7 +1098,7 @@ probe_mode() {
       emit_probe_prebuilt_match_tail
     elif [[ "${PROBE_PREBUILD_PARTS:-0}" == "1" ]]; then
       emit_probe_prebuilt_parts_tail
-    elif [[ "${PROBE_PREBUILD_OPEN:-0}" == "1" || "${PROBE_PREBUILD_CLOSE:-0}" == "1" || "${PROBE_PREBUILD_ANY:-0}" == "1" || "${PROBE_PREBUILD_CLOSE_HEAD:-0}" == "1" || "${PROBE_PREBUILD_CLOSE_BACK:-0}" == "1" || "${PROBE_PREBUILD_CLOSE_FUNC:-0}" == "1" ]]; then
+    elif [[ "${PROBE_PREBUILD_OPEN:-0}" == "1" || "${PROBE_PREBUILD_CLOSE:-0}" == "1" || "${PROBE_PREBUILD_ANY:-0}" == "1" || "${PROBE_PREBUILD_CLOSE_HEAD:-0}" == "1" || "${PROBE_PREBUILD_CLOSE_BACK:-0}" == "1" || "${PROBE_PREBUILD_CLOSE_FUNC:-0}" == "1" || "${PROBE_PREBUILD_DUMMY_FUNC:-0}" == "1" || "${PROBE_PREBUILD_DUMMY_CAPTURE:-0}" == "1" || "${PROBE_PREBUILD_DUMMY_BACK:-0}" == "1" ]]; then
       emit_probe_selected_parts_tail
     else
       emit_probe_tail
