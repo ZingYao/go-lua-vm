@@ -210,6 +210,7 @@
         - [x] 2026-07-06 复核：新增 `scripts/bisect-native-lpeg-1159-prefix.sh`，将 LPeg 1159 prefix 边界改为机械二分定位；默认 `LOW=620`、`HIGH=651` 下自动验证 `620` 为 good、`651` 为 bad，并输出 `last_good_prefix_line=646`、`first_bad_prefix_line=647`。后续 prefix 边界复核优先用该脚本，避免继续靠长线性 probe 手工排查。
         - [x] 2026-07-06 复核：新增 `scripts/probe-native-lpeg-1159-call-kinds.sh`，用独立短矩阵复核 `1-620` 前序状态后的单操作影响；只定义局部函数、匿名函数赋值、table 字段读取函数、不带副作用的空 Lua 调用、局部变量 Lua 调用、`type`、`tostring`、`pcall(function() end)` 和单次 LPeg parity match 均保持 `18`，只有 `select("#", "alpha", "beta")` 退化为 `12`；`select("#")` 和 `select(1, "alpha", "beta")` 仍为 `18`。当前边界修正为 base `select` 的非空变参数量查询路径或其返回帧清理，而不是普通 Lua closure/CALL 本身。
         - [x] 2026-07-07 复核：使用 `gopls check stdlib/base/base.go lua/api.go runtime/vm.go` 确认目标包无诊断；新增 `scripts/probe-native-lpeg-select-count.sh`，把 `1-620` 前序状态后的 `baseline`、`select("#")`、`select(1, ...)`、`select("#", "alpha", "beta")` 四组单独固化为可复跑 probe。当前输出显示前三组为 good，非空 `select("#", ...)` 为 bad，进一步排除 `select` 空计数和索引返回路径。
+        - [ ] 修复门禁：LPeg 只作为真实第三方 C 模块集成验收和问题暴露样本，禁止通过模块名、测试行号、特定 pattern、特定返回值或 LPeg 私有行为做特向性修复；任何生产代码修复都必须能解释为通用 Lua 5.3 C API、VM 调用帧、vararg、返回值写回、栈隔离、registry/metatable/userdata 或错误恢复语义，并补充模块无关的定向测试或 probe。
         - [ ] 下一轮继续使用 gopls 审查 base `select` 调用后的 Go closure 结果写回、Lua open return 和 vararg 搬运路径；优先定位为什么只有非空 `#` 分支的一返回值会扰动后续 LPeg match，再决定是否进入 VM 调用帧小切口。
   - [ ] LuaSocket 或等价网络库验收：仅在 userdata/metatable/registry/错误边界稳定后进入平台闭环。
 - [ ] 增加交叉编译验证脚本：
@@ -257,6 +258,7 @@ git status --short --branch
   - `docs/NATIVE_MODULES_TODO.md`
 
 - 每轮只做一个可验证小切口。
+- native 修复必须优先落在通用 Lua 5.3 public C API 和 Go VM 语义上；真实模块 probe 只能作为验收证据，禁止为单个 C 模块、单个脚本行号或单个测试样例写特向性逻辑。
 - 修改 Go 代码前后使用 `gopls check` 或命令行 `gopls`。
 - 新建或修改 Go 文件后执行 `gofmt` 并立即 `git add`。
 - 默认构建相关变更必须执行：
