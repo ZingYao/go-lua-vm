@@ -75,9 +75,10 @@
     - [x] 当前通过 `luaL_setfuncs` 覆盖 Lua 5.3 头文件中的 `luaL_newlib` 宏展开路径，并支持 `nup >= 0` 的 C closure upvalue 复制。
 - [ ] 实现基础参数检查：
   - [x] `luaL_checkinteger`
+  - [ ] `luaL_optinteger`
   - [x] `luaL_checklstring`
   - [x] `luaL_checkany`
-  - [ ] `luaL_checktype`
+  - [x] `luaL_checktype`
   - [x] `luaL_argerror`
   - [x] `luaL_checkoption`
   - [x] `luaL_error`
@@ -282,3 +283,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：复核 `package.loadlib` 门禁并同步 TODO；`go test ./stdlib/package -run 'TestLoadLibDisabled|TestCLoadingPolicyDocumentsUnsupportedDynamicLibraries|TestLoadLibUsesDynamicLibraryLoader'` 确认默认 no-CGO 禁用说明和宿主 loader 覆盖稳定，`CGO_ENABLED=1 go test -tags native_modules ./internal/native -run 'TestUnixPackageLoadLibResolvesNativeFixture|TestUnixPackageLoadLibReturnsCallableNativeFixture'` 确认 native fixture 可通过 `package.loadlib` 解析并在 state-aware loader 下调用。LPeg 运行期探测已进入动态库打开阶段，但当前被 `_luaL_addlstring` 等尚未导出的 public C API 阻塞，后续需按 `luaL_Buffer`、table/user value、raw length/equality/call 等 API 组分批补齐。
 - 2026-07-06：新增 `luaL_Buffer` 基础 API 组：`luaL_buffinit`、`luaL_prepbuffsize`、`luaL_addlstring`、`luaL_addstring`、`luaL_addvalue`、`luaL_pushresult`、`luaL_pushresultsize`、`luaL_buffinitsize`。本轮用仓库内 LPeg 1.1.0 源码重新编译 macOS arm64 `.so/.dylib` 并执行 `require("lpeg")` 运行期探针，确认阻塞点已从 `_luaL_addlstring` 前移到 `_luaL_checkany`；说明 buffer 符号组已由本项目 shim 满足，LPeg 完整验收仍待参数检查、table/user value、raw length/equality/call 等剩余 API 组继续补齐。
 - 2026-07-06：新增 `luaL_checkany` 参数存在性检查；`nil` 参数按 Lua 5.3 语义视为存在，只有缺失参数记录 `bad argument #n (value expected)` pending error。LPeg 1.1.0 macOS arm64 运行期探针确认阻塞点已从 `_luaL_checkany` 前移到 `_luaL_checktype`，下一轮应继续补齐类型检查 API。
+- 2026-07-06：新增 `luaL_checktype` 基础类型检查；成功路径按 `lua_type` 类型编号比较，失败路径记录 `bad argument #n (<expected> expected, got <actual>)` pending error。LPeg 1.1.0 macOS arm64 运行期探针确认阻塞点已从 `_luaL_checktype` 前移到 `_luaL_optinteger`，下一轮应继续补齐 optional integer 参数 API。

@@ -143,6 +143,36 @@ func TestNativeCAPICheckAny(t *testing.T) {
 	}
 }
 
+// TestNativeCAPICheckType 验证 luaL_checktype 基础类型检查和错误记录。
+func TestNativeCAPICheckType(t *testing.T) {
+	// 使用真实 State 和 opaque handle 验证类型编号检查。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 checktype。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	text := []byte{'x', 0}
+	nativeLuaPushString(luaState, unsafe.Pointer(&text[0]))
+	if !nativeLuaCheckType(luaState, 1, nativeLuaTypeString) {
+		// 字符串值按 Lua C API 必须报告为 LUA_TSTRING。
+		t.Fatalf("nativeLuaCheckType string = false, want true")
+	}
+	if nativeLuaCheckType(luaState, 1, nativeLuaTypeTable) {
+		// 字符串不能通过 table 类型检查。
+		t.Fatalf("nativeLuaCheckType string-as-table = true, want false")
+	}
+	errorObject, ok := takeNativeStatePendingError(luaState)
+	if !ok || errorObject.Kind != runtime.KindString || errorObject.String != "bad argument #1 (table expected, got string)" {
+		// 类型不匹配必须记录 expected/got 错误。
+		t.Fatalf("nativeLuaCheckType pending error = %#v ok=%v, want table expected", errorObject, ok)
+	}
+}
+
 // TestNativeCAPICheckOption 验证 luaL_checkoption 的默认值、匹配和错误边界。
 func TestNativeCAPICheckOption(t *testing.T) {
 	// cjson 使用 checkoption 读取 encode/decode 配置项，必须支持 NULL 终止选项数组。

@@ -183,6 +183,57 @@ func nativeLuaCheckAny(luaState unsafe.Pointer, index int) bool {
 	return false
 }
 
+// nativeLuaTypeName 返回 Lua 5.3 C API 类型编号对应的 lauxlib 错误展示名称。
+func nativeLuaTypeName(typeCode int) string {
+	// 类型名称对齐 lua_typename；light userdata 与 full userdata 都展示为 userdata。
+	switch typeCode {
+	case nativeLuaTypeNone:
+		// none 表示缺失值。
+		return "no value"
+	case nativeLuaTypeNil:
+		// nil 表示 Lua nil。
+		return "nil"
+	case nativeLuaTypeBoolean:
+		// boolean 表示 Lua 布尔值。
+		return "boolean"
+	case nativeLuaTypeLightUD, nativeLuaTypeUserdata:
+		// light userdata 和 full userdata 在 Lua 5.3 typename 中同名。
+		return "userdata"
+	case nativeLuaTypeNumber:
+		// integer 和 float number 都属于 C API number。
+		return "number"
+	case nativeLuaTypeString:
+		// string 表示 Lua 字符串。
+		return "string"
+	case nativeLuaTypeTable:
+		// table 表示 Lua 表。
+		return "table"
+	case nativeLuaTypeFunction:
+		// function 表示 Lua/Go/C callable。
+		return "function"
+	case nativeLuaTypeThread:
+		// thread 表示 Lua coroutine。
+		return "thread"
+	default:
+		// 未知类型码只用于防御错误 C 调用。
+		return "unknown"
+	}
+}
+
+// nativeLuaCheckType 实现 luaL_checktype 的基础类型相等检查。
+func nativeLuaCheckType(luaState unsafe.Pointer, index int, expectedType int) bool {
+	// luaL_checktype 使用 lua_type 的基础类型编号比较。
+	actualType := nativeLuaType(luaState, index)
+	if actualType == expectedType {
+		// 类型一致时没有可见副作用。
+		return true
+	}
+	// 类型不一致时记录 lauxlib 风格的参数错误，等待 C function 返回边界传播。
+	message := fmt.Sprintf("bad argument #%d (%s expected, got %s)", index, nativeLuaTypeName(expectedType), nativeLuaTypeName(actualType))
+	_ = setNativeStatePendingError(luaState, runtime.StringValue(message))
+	return false
+}
+
 // lua_tointegerx 导出 Lua 5.3 C API integer 转换入口。
 //
 //export lua_tointegerx
@@ -295,4 +346,12 @@ func luaL_checklstring(luaState *C.lua_State, index C.int, length *C.size_t) *C.
 func luaL_checkany(luaState *C.lua_State, index C.int) {
 	// 当前 Go export 只记录 pending error；C 层 longjmp 完整语义由后续 api_check 阶段统一收口。
 	nativeLuaCheckAny(unsafe.Pointer(luaState), int(index))
+}
+
+// luaL_checktype 导出 Lua 5.3 lauxlib 基础类型检查入口。
+//
+//export luaL_checktype
+func luaL_checktype(luaState *C.lua_State, index C.int, expectedType C.int) {
+	// 当前 Go export 只记录 pending error；C 层 longjmp 完整语义由后续 api_check 阶段统一收口。
+	nativeLuaCheckType(unsafe.Pointer(luaState), int(index), int(expectedType))
 }

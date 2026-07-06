@@ -177,6 +177,7 @@ state := lua.NewStateWithOptions(options)
 - `lua_getfield`
 - `luaL_newlib`
 - `luaL_checkinteger`
+- `luaL_optinteger`
 - `luaL_checklstring`
 - `luaL_checkany`
 - `luaL_checktype`
