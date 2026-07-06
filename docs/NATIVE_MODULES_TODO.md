@@ -183,6 +183,8 @@
   - [ ] `lpeg` 或等价纯 C 模块验收：覆盖 userdata、metatable、registry 和复杂 C function 行为。
     - [x] macOS arm64 `.so` 与 `.dylib` 两种后缀已通过基础 LPeg runtime smoke。
     - [ ] 完整 `third_party/lpeg/test.lua`、复杂 capture、grammar 和错误边界仍待后续验收。
+      - [x] 已修复完整测试在 1084 行触发的 `string.char("98")` Lua 5.3 numeric string 转 integer 兼容断点。
+      - [ ] 当前完整测试推进到 1159 行；同一 pattern 独立运行返回 18，但完整前序状态后返回 12，疑似 LPeg match-time capture / named capture 前序状态污染，需继续缩小最小复现。
   - [ ] LuaSocket 或等价网络库验收：仅在 userdata/metatable/registry/错误边界稳定后进入平台闭环。
 - [ ] 增加交叉编译验证脚本：
   - [x] `scripts/check-native-cross-compile.sh`：显式输出 `GOOS`、`GOARCH`、`CC`、产物路径和缺失 toolchain 时的 skip 原因。

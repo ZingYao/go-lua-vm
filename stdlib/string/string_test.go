@@ -147,10 +147,27 @@ func TestCharBuildsBytesAndRejectsOutOfRange(t *testing.T) {
 		t.Fatalf("Char result mismatch: %#v", results)
 	}
 
+	results, err = Char(runtime.StringValue("98"))
+	if err != nil {
+		// Lua 5.3 string.char 底层使用 luaL_checkinteger，numeric string 应能转换为整数。
+		t.Fatalf("Char numeric string failed: %v", err)
+	}
+	if len(results) != 1 || results[0].Kind != runtime.KindString || results[0].String != "b" {
+		// 字符串数字 98 应按 byte 98 构造结果，也就是 ASCII 'b'。
+		t.Fatalf("Char numeric string result mismatch: %#v", results)
+	}
+
 	_, err = Char(runtime.IntegerValue(256))
 	if !errors.Is(err, runtime.ErrLuaError) {
 		// 越界参数必须以 Lua error 形式传播。
 		t.Fatalf("Char out-of-range error mismatch: %v", err)
+	}
+
+	_, err = Char(runtime.StringValue("98.5"))
+	errorObject := runtime.ErrorObject(err)
+	if !errors.Is(err, runtime.ErrLuaError) || errorObject.Kind != runtime.KindString || !strings.Contains(errorObject.String, "number has no integer representation") {
+		// numeric string 不能无损表示为 integer 时应沿用 Lua 5.3 的整数表示失败错误。
+		t.Fatalf("Char fractional numeric string error mismatch: %v", err)
 	}
 }
 

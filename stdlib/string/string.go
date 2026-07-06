@@ -323,11 +323,11 @@ func Char(args ...runtime.Value) ([]runtime.Value, error) {
 	// char 先分配目标字节切片，长度等于参数数量。
 	bytes := make([]byte, len(args))
 	for index, value := range args {
-		// 每个参数都必须是整数码点，Lua 5.3 string.char 按字节写入。
-		integerValue, ok := value.ToInteger()
-		if !ok {
-			// 非整数值不能作为字节码点。
-			return nil, badArgument("char", index+1, "integer expected")
+		// 每个参数都必须能按 Lua 5.3 luaL_checkinteger 语义转换为整数码点。
+		integerValue, err := charIntegerArgument(value, index+1)
+		if err != nil {
+			// 参数无法转换为 integer 时直接返回标准 Lua 参数错误。
+			return nil, err
 		}
 		if integerValue < 0 || integerValue > 255 {
 			// 超出 byte 范围时拒绝，避免 Go byte 截断改变语义。
@@ -3483,6 +3483,38 @@ func integerArgument(args []runtime.Value, position int, functionName string) (i
 
 	// 返回已转换的 int64 Lua integer。
 	return integerValue, nil
+}
+
+// charIntegerArgument 按 Lua 5.3 string.char 的 luaL_checkinteger 语义提取整数。
+//
+// string.char 由 Lua 官方 C 库实现，底层使用 luaL_checkinteger，因此 number 和可转换
+// numeric string 都应被接受；无法表示为 integer 的 number/numeric string 使用官方错误文案。
+func charIntegerArgument(value runtime.Value, position int) (int64, error) {
+	// 先走普通 number/integer 路径，避免无谓字符串解析。
+	if integerValue, ok := value.ToInteger(); ok {
+		// 已经是可无损表示的 Lua integer。
+		return integerValue, nil
+	}
+	if value.Kind == runtime.KindString {
+		// numeric string 需要先按 Lua 5.3 字符串转 number 规则解析。
+		numberValue, ok := value.StringToNumber()
+		if ok {
+			// 可解析为 number 的字符串继续走 integer 无损转换。
+			if integerValue, integerOK := numberValue.ToInteger(); integerOK {
+				// numeric string 可无损表示为 Lua integer。
+				return integerValue, nil
+			}
+			// numeric string 是小数或越界数值时，错误语义与 number 参数一致。
+			return 0, badArgument("char", position, "number has no integer representation")
+		}
+	}
+	if value.Kind == runtime.KindNumber {
+		// float number 但无法无损表示为 Lua integer 时，官方错误文本强调整数表示失败。
+		return 0, badArgument("char", position, "number has no integer representation")
+	}
+
+	// 非整数、非可转换 numeric string 的值不能作为 string.char 字节码点。
+	return 0, badArgument("char", position, "integer expected")
 }
 
 // integerValueArgument 按 Lua 标准库参数规则从单个 Value 提取 integer。
