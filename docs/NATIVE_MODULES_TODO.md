@@ -206,9 +206,10 @@
         - [x] 2026-07-06 复核：新增仅诊断模式注册的 `package._glua_loadlib_diag` 等价 Go closure，不经过 `Environment.LoadLib`、不调用 native loader；在 `1-620` 前序状态后，`one-return`、`two-return`、`three-return` 三组全部退化为 `12`，而成功符号解析的 `package.loadlib` 仍保持 `18`。因此已证伪 `package.loadlib` 方法接收者、环境捕获和特定内置函数实现是必要条件，边界继续收敛为前序 LPeg 状态后普通 Go closure 正常返回 nil/失败形态会扰动后续 match。
         - [x] 2026-07-06 复核：继续扩展等价 Go closure 诊断；`empty-return`、`true-return`、`string-return`、`table-return`、`callable-return` 在 package 表字段调用下全部退化为 `12`，全局 `_glua_loadlib_diag` 的 `one-return` 和 `callable-return` 也退化为 `12`，而成功符号解析的 `package.loadlib` 仍保持 `18`。因此已证伪首返回 nil、失败形态、返回值内容、返回值数量、package 表字段调用路径是必要条件；当前边界收敛为前序 LPeg 状态后任意普通 Go closure 被 Lua 调用并正常返回都会扰动后续 match。
         - [x] 2026-07-06 复核：新增 `scripts/probe-native-lpeg-1159.sh` 的 Go/Lua closure 对照组；`1-620` 前序状态后只读取 `package._glua_loadlib_diag` 函数值、不调用时仍返回 `18`，成功 `package.loadlib` 取得 native callable 但不调用 `luaopen_*` 也仍返回 `18`；但调用纯 Lua closure 的 `empty-return`、`one-return`、`three-return`、`callable-return` 均退化为 `12`。因此污染点不再局限于 Go closure、package closure 或 native loader，而是收敛到前序 LPeg 状态后任意 Lua 函数调用/返回边界触发的 VM 栈/寄存器/调用帧隔离问题。
-        - [x] 2026-07-06 复核：继续扩展 `scripts/probe-native-lpeg-1159.sh` 的 Lua 调用帧对照组；`1-620` 前序状态后只执行空 Lua 函数调用、读取参数但不返回、不读取参数但返回、函数内只使用局部变量、以及 `pcall(function() end)` 均退化为 `12`。因此已证伪参数搬运、返回值内容、局部变量和 protected-call 包装是必要条件，边界进一步收敛为前序 LPeg 状态后一次普通 Lua `CALL` 进入/退出帧即可扰动后续 match；只获取 Go/native 函数值但不调用仍为 `18`。
+        - [x] 2026-07-06 复核：继续扩展 `scripts/probe-native-lpeg-1159.sh` 的 Lua 调用帧对照组；该长线性 probe 一度显示空 Lua 函数、局部变量函数和 `pcall(function() end)` 均退化为 `12`，但后续独立短矩阵复核证明该结论不够隔离，保留为历史证据，不再作为最终 CALL 边界结论。
         - [x] 2026-07-06 复核：新增 `scripts/bisect-native-lpeg-1159-prefix.sh`，将 LPeg 1159 prefix 边界改为机械二分定位；默认 `LOW=620`、`HIGH=651` 下自动验证 `620` 为 good、`651` 为 bad，并输出 `last_good_prefix_line=646`、`first_bad_prefix_line=647`。后续 prefix 边界复核优先用该脚本，避免继续靠长线性 probe 手工排查。
-        - [ ] 下一轮优先比较“定义函数”与“调用函数”：新增只定义局部函数不调用、只创建匿名函数赋值、只经过 table 字段读取函数不调用、以及调用内置 C/Go 基础函数（例如 `type`、`select`、`tostring`）的 probe，判断污染是否只发生在 Lua closure 调用帧，还是任意 host/basic function 调用帧也会触发。
+        - [x] 2026-07-06 复核：新增 `scripts/probe-native-lpeg-1159-call-kinds.sh`，用独立短矩阵复核 `1-620` 前序状态后的单操作影响；只定义局部函数、匿名函数赋值、table 字段读取函数、不带副作用的空 Lua 调用、局部变量 Lua 调用、`type`、`tostring`、`pcall(function() end)` 和单次 LPeg parity match 均保持 `18`，只有 `select("#", "alpha", "beta")` 退化为 `12`；`select("#")` 和 `select(1, "alpha", "beta")` 仍为 `18`。当前边界修正为 base `select` 的非空变参数量查询路径或其返回帧清理，而不是普通 Lua closure/CALL 本身。
+        - [ ] 下一轮优先使用 gopls 定位并审查 base `select` 实现与 vararg 返回搬运路径；先新增 Go/CLI 定向测试或更小 Lua probe 覆盖 `select("#", 非空变参)` 后续 LPeg match，不直接改 VM 调用帧。
   - [ ] LuaSocket 或等价网络库验收：仅在 userdata/metatable/registry/错误边界稳定后进入平台闭环。
 - [ ] 增加交叉编译验证脚本：
   - [x] `scripts/check-native-cross-compile.sh`：显式输出 `GOOS`、`GOARCH`、`CC`、产物路径和缺失 toolchain 时的 skip 原因。
@@ -238,6 +239,7 @@
   - [x] `scripts/test-native-lpeg.sh`
   - [x] `scripts/probe-native-lpeg-1159.sh`
   - [x] `scripts/bisect-native-lpeg-1159-prefix.sh`
+  - [x] `scripts/probe-native-lpeg-1159-call-kinds.sh`
 - [ ] 增加最终验收记录。
 
 ## 每轮推进规则
