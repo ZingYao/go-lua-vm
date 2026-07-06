@@ -200,6 +200,7 @@ state := lua.NewStateWithOptions(options)
 - `lua_tointegerx`
 - `lua_tonumberx`
 - `lua_tolstring`
+- `lua_compare`
 - `lua_is*` 系列常用入口
 
 ### Phase 3：userdata、metatable、registry
