@@ -225,6 +225,14 @@ local skipped = dofile
 local message = "unexpected falsy select count"
 LUA
       ;;
+    select-count-global-message-*)
+      local global_name="${mode#select-count-global-message-}"
+      cat <<LUA
+local count = select("#", "alpha", "beta")
+local skipped = _G["${global_name}"]
+local message = "unexpected falsy select count"
+LUA
+      ;;
     select-count-if-truthy)
       cat <<'LUA'
 local count = select("#", "alpha", "beta")
