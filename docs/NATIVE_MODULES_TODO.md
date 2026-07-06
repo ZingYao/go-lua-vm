@@ -61,9 +61,9 @@
   - [x] `lua_pushlstring`
   - [x] `lua_pushstring`
 - [ ] 实现 table 和 newlib 基础：
-  - [ ] `lua_createtable`
-  - [ ] `lua_setfield`
-  - [ ] `lua_getfield`
+  - [x] `lua_createtable`
+  - [x] `lua_setfield`
+  - [x] `lua_getfield`
   - [ ] `luaL_newlib`
 - [ ] 实现基础参数检查：
   - [ ] `luaL_checkinteger`
@@ -202,3 +202,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：新增 native opaque `lua_State*` handle 注册表；handle 使用 C 分配 token 作为 C 可见身份，Go 侧只保存 token 到 `runtime.State` 的映射，避免把 Go 指针传入 C，并覆盖 nil/closed State、查找和重复关闭测试。
 - 2026-07-06：新增最小 C API 栈 shim：`lua_gettop`、`lua_settop` 和基础 `lua_push*` 可通过 opaque handle 操作 Go State 栈；当前对无效/关闭 State 采取 no-op/0 的失败安全策略，`lua_error`/longjmp 错误边界后续阶段补齐。
 - 2026-07-06：更正 CGO 边界：默认构建继续禁用 CGO；`native_modules` 为 Lua C 模块加载允许使用 CGO，但项目侧 C shim、fixture、真实模块验收源码和构建脚本必须全部随仓库提交，并补充跨平台交叉编译验证 TODO。
+- 2026-07-06：新增最小 table 字段 C API shim：`lua_createtable`、`lua_setfield`、`lua_getfield` 可创建 Go table 并按 string key 读写字段；当前字段路径使用 raw table 语义，元方法和错误 longjmp 留到后续阶段。
