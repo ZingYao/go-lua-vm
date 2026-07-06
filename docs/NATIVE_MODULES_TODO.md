@@ -125,6 +125,8 @@
   - [ ] 明确自编 fixture 只作为 loader smoke，不作为最终兼容性依据。
   - [x] 固定 `lua-cjson` 源码到仓库或 `third_party/`，记录来源、版本和许可证，构建不得联网下载。
   - [ ] `lua-cjson` 源码编译验收：`require("cjson")`、`encode/decode`、错误输入 `pcall`。
+    - [x] 新增 `scripts/build-native-cjson.sh`，使用仓库内 Lua 5.3 public headers 和固定源码编译当前平台 `cjson` 动态模块。
+    - [ ] 运行期 `require("cjson")`、`encode/decode` 和错误输入 `pcall` 验收。
   - [ ] `lua-cjson` 官方 Lua 5.3 ABI 二进制模块验收：验证 `lua_*` / `luaL_*` 符号由本项目 shim 满足。
   - [ ] 固定 `lpeg` 或等价纯 C 模块源码到仓库或 `third_party/`，记录来源、版本和许可证。
   - [ ] `lpeg` 或等价纯 C 模块验收：覆盖 userdata、metatable、registry 和复杂 C function 行为。
@@ -150,6 +152,7 @@
 - [ ] 增加脚本：
   - [x] `scripts/build-native-fixtures.sh`
   - [x] `scripts/test-native-modules.sh`
+  - [x] `scripts/build-native-cjson.sh`
 - [ ] 增加最终验收记录。
 
 ## 每轮推进规则
@@ -237,3 +240,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：新增 `scripts/test-native-modules.sh`，默认构建 native tag 的 `glua`，调用 `scripts/build-native-fixtures.sh` 生成当前平台 fixture，并实际执行 `glua_native_smoke.lua` require 成功路径和 `glua_native_failopen` 初始化失败路径；Windows CLI smoke 在 `lua53.dll` shim/import library 落地前明确 skip。
 - 2026-07-06：新增 `scripts/check-native-cross-compile.sh`，按 `NATIVE_CROSS_TARGETS` 或默认当前架构的 Linux/macOS/Windows 目标编译 `internal/native` 测试二进制和 native tag `cmd/glua`，并为缺失 C toolchain 的目标显式输出 skip 原因；脚本只做编译级闭环，不运行异平台产物。
 - 2026-07-06：固定 `lua-cjson` 真实模块源码到 `third_party/lua-cjson/`，来源为 upstream `https://github.com/mpx/lua-cjson` tag `2.1.0`、commit `4bc5e917c8cd5fc2f6b217512ef530007529322f`，保留 MIT-style `LICENSE` 并新增 `GLUA_VENDOR.md` 记录本项目未做源码修改；源码编译与 `require("cjson")` 验收仍作为后续独立切口。
+- 2026-07-06：新增 `scripts/build-native-cjson.sh`，直接使用仓库内 `native/lua53/include/` 与 `third_party/lua-cjson/` 固定源码编译当前平台 `cjson` 动态模块；macOS 同时产出 `.so` 与 `.dylib`，Linux 产出 `.so`，Windows 在 `lua53.dll` shim/import library 落地前明确 skip。该切口只证明真实模块源码可自包含编译，`require("cjson")`、`encode/decode` 和错误输入 `pcall` 仍等待 Lua C API shim 覆盖后验收。
