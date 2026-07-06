@@ -185,6 +185,73 @@ func TestNativeLuaPCallKCallsGoClosure(t *testing.T) {
 	}
 }
 
+// TestNativeLuaPCallKRespectsCurrentCFrameBase 验证 C function 内 lua_pcallk 不穿透外层栈。
+func TestNativeLuaPCallKRespectsCurrentCFrameBase(t *testing.T) {
+	// protected call 与非 protected call 使用同一 C 帧可见栈规则；失败时可以压入错误对象，
+	// 但绝不能把 baseTop 之前的外层 Go VM 栈值当作函数或参数消费。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 C 帧隔离。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	nativeLuaPushValue(luaState, runtime.StringValue("outer-sentinel"))
+	baseTop := state.StackTop()
+	if !pushNativeStateCallFrame(luaState, baseTop, nil) {
+		// 建立 C 帧失败会让后续测试无意义。
+		t.Fatalf("pushNativeStateCallFrame failed")
+	}
+	defer popNativeStateCallFrame(luaState)
+
+	nativeLuaPushValue(luaState, runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(func(args ...runtime.Value) ([]runtime.Value, error) {
+		// 嵌套 protected call 应只收到当前 C 帧内的一个实参。
+		if len(args) != 1 || !args[0].RawEqual(runtime.IntegerValue(11)) {
+			return nil, runtime.RaiseError(runtime.StringValue("bad protected args"))
+		}
+		return []runtime.Value{runtime.IntegerValue(12)}, nil
+	})))
+	nativeLuaPushInteger(luaState, 11)
+	if code := nativeLuaPCallK(luaState, 1, 1, 0); code != nativeLuaOK {
+		// 正常嵌套 pcall 必须成功。
+		t.Fatalf("nested nativeLuaPCallK code = %d, want LUA_OK", code)
+	}
+	if value := state.ValueAt(1); !value.RawEqual(runtime.StringValue("outer-sentinel")) {
+		// 外层栈值不能被嵌套 pcall 消费或覆盖。
+		t.Fatalf("outer sentinel after nested pcall = %#v", value)
+	}
+	if value := state.ValueAt(-1); !value.RawEqual(runtime.IntegerValue(12)) {
+		// 当前 C 帧内必须留下嵌套 protected call 的返回值。
+		t.Fatalf("nested pcall result = %#v, want 12", value)
+	}
+	if got := nativeLuaStackTop(luaState); got != 1 {
+		// C API 视角只看到当前 C 帧的返回值。
+		t.Fatalf("visible top after nested pcall = %d, want 1", got)
+	}
+
+	nativeLuaSetTop(luaState, 0)
+	nativeLuaPushInteger(luaState, 7)
+	if code := nativeLuaPCallK(luaState, 1, 1, 0); code != nativeLuaErrRun {
+		// 当前 C 帧可见槽不足时必须返回运行期错误码。
+		t.Fatalf("malformed nativeLuaPCallK code = %d, want LUA_ERRRUN", code)
+	}
+	if value := state.ValueAt(1); !value.RawEqual(runtime.StringValue("outer-sentinel")) {
+		// malformed pcall 不能穿透到 baseTop 之前，把外层 sentinel 当成函数槽。
+		t.Fatalf("outer sentinel after malformed pcall = %#v", value)
+	}
+	if got := nativeLuaStackTop(luaState); got != 2 {
+		// 失败安全路径保留当前 C 帧原始值，并把错误对象压在栈顶。
+		t.Fatalf("visible top after malformed pcall = %d, want 2", got)
+	}
+	if value := state.ValueAt(-1); value.Kind != runtime.KindString {
+		// 栈顶必须是 protected call 错误对象，供 C 模块读取或返回。
+		t.Fatalf("malformed pcall error object = %#v, want string", value)
+	}
+}
+
 // TestNativeLuaPCallKPushesErrorObject 验证 lua_pcallk 失败时压入 error object。
 func TestNativeLuaPCallKPushesErrorObject(t *testing.T) {
 	// pcall 失败时必须返回 LUA_ERRRUN，并把错误对象放到栈顶供 C 模块读取。
