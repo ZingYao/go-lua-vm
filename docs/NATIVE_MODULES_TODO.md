@@ -155,7 +155,7 @@
 ## 第八阶段：文档与发布边界
 
 - [x] 更新 `docs/COMPATIBILITY.md`，说明 native_modules 能力与默认 no-CGO 差异。
-- [ ] 更新 `docs/RELEASE_LIMITS.md`，说明 native 模块安全风险。
+- [x] 更新 `docs/RELEASE_LIMITS.md`，说明 native 模块安全风险。
 - [x] 更新 `docs/API.md`，展示嵌入方如何启用 native loader。
 - [ ] 更新 README，对外链接 native module 文档。
 - [ ] 增加脚本：
@@ -259,3 +259,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：更新 `docs/NATIVE_MODULES_BUILD.md` 的当前支持面与限制；明确已覆盖的 Lua 5.3 public C API、非 yield `lua_pcallk` 边界、未支持的 C continuation/debug hook/全局表/加载与 GC API、`luaL_checkversion_` 的当前语义，以及官方 Lua 5.3 ABI 二进制模块和 Linux/Windows 运行期验收仍未闭环。
 - 2026-07-06：更新 `docs/COMPATIBILITY.md`；将默认纯 Go/no-CGO 兼容口径与 `native_modules` 可选构建口径分离，记录 macOS arm64 `lua-cjson` `.so/.dylib` 真实模块验收状态、public C API 边界、Linux/Windows 未闭环项和 native 本机代码执行风险。
 - 2026-07-06：更新 `docs/API.md`；补充 `PackageDynamicLibraryLoaderForState` 对外配置口径，说明默认 no-CGO 嵌入保持纯 Go，`native_modules` 下 Lua C 模块必须通过 state-aware loader 绑定当前 VM state，并明确仓库内 `internal/native` 不是外部 module 可直接 import 的公开 Go API。
+- 2026-07-06：更新 `docs/RELEASE_LIMITS.md`；将 Lua C 原生模块从未立项旧口径改为显式 `native_modules` 可选构建口径，补充 macOS arm64 `lua-cjson` 验收状态、Linux/Windows/官方 ABI 未闭环限制，并新增 native 模块本机代码执行、`package.cpath` 搜索路径和 C 级崩溃不可由 `pcall` 隔离的安全边界。
