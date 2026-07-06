@@ -117,8 +117,10 @@
     - [x] Lua 5.3 public header 的 `lua_call` 宏会展开到 `lua_callk`；当前实现覆盖非 yield、非 continuation 路径。
   - [x] `lua_compare`
     - [x] 当前覆盖 EQ raw equality，以及 number/string 的 LT/LE 基础比较；元方法比较后续按真实模块需求扩展。
-  - [ ] `lua_rawequal`
-    - [ ] LPeg 1.1.0 当前运行期探针已越过 `_lua_pushfstring`，阻塞前移到 `_lua_rawequal`。
+  - [x] `lua_rawequal`
+    - [x] 当前覆盖 runtime raw equality，不触发 `__eq` 元方法，无效索引返回 false。
+  - [ ] `lua_rawlen`
+    - [ ] LPeg 1.1.0 当前运行期探针已越过 `_lua_rawequal`，阻塞前移到 `_lua_rawlen`。
   - [x] `lua_copy`
     - [x] 当前覆盖普通栈槽复制，以及 C function 调用帧内正索引相对基址复制；pseudo-index 目标写入留到完整 API 阶段。
   - [x] `lua_getallocf`
@@ -270,6 +272,7 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：补齐 `lua_getuservalue`；native full userdata 可按 Lua 5.3 C API 把 user value 压栈并返回类型码，默认零值为 nil，lightuserdata/非 userdata/无效 State 回退 nil。LPeg 1.1.0 运行期探针已从 `_lua_getuservalue` 前移到 `_lua_isstring`。
 - 2026-07-06：补齐 `lua_isstring`；native shim 按 Lua 5.3 C API 可转换性语义判断 string 和 number 为真，nil、boolean、table、none 为假。LPeg 1.1.0 运行期探针已从 `_lua_isstring` 前移到 `_lua_pushfstring`。
 - 2026-07-06：补齐 `lua_pushfstring` / `lua_pushvfstring`；C wrapper 负责 varargs / `va_list` 格式化，Go helper 负责压入格式化后 Lua string 并返回绑定到 State 生命周期的 C 字符串指针。LPeg 1.1.0 运行期探针已从 `_lua_pushfstring` 前移到 `_lua_rawequal`。
+- 2026-07-06：补齐 `lua_rawequal`；native shim 按 Lua 5.3 raw equality 语义比较两个栈值，不触发元方法，无效索引返回 false 且不留下 pending error。LPeg 1.1.0 运行期探针已从 `_lua_rawequal` 前移到 `_lua_rawlen`。
 - 2026-07-06：接入 CLI native loader 注入点；默认构建下 `applyNativeModuleOptions` 保持 no-op，`native_modules` 构建下 CLI 创建 State 时自动设置 `PackageDynamicLibraryLoaderForState = native.LoaderForState`，并保留无状态 loader 作为 `package.loadlib` 解析诊断路径。该切口只影响 native tag 构建，默认 no-CGO 行为由专门测试锁定。
 - 2026-07-06：新增 `lua_error` 与 `luaL_error` 最小错误传播；native shim 不跨 Go/C 边界 longjmp，而是在 opaque `lua_State*` handle 上暂存 Lua error object，C function 返回 Go 边界后转换为 `runtime.RaiseError`。Unix fixture 已验证 `pcall(mod.fail, "boom")` 捕获 `luaL_error` 文本，`pcall(mod.raise)` 捕获 `lua_error` 栈顶对象。C module 初始化期 `pcall(require, "mod")` 与 C frame traceback 展示仍在后续错误阶段补齐。
 - 2026-07-06：新增 C module 初始化错误验收；同一 Unix fixture 额外导出 `luaopen_glua_native_failopen`，并以模块名匹配的动态库文件走标准 `package.cpath` 和 `require` 路径。测试已验证 `pcall(require, "glua_native_failopen")` 捕获 luaopen 阶段的 `luaL_error("native open failure")`，且失败后不污染 `package.loaded`。

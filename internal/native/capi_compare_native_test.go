@@ -52,6 +52,48 @@ func TestNativeLuaCompareBasicValues(t *testing.T) {
 	}
 }
 
+// TestNativeLuaRawEqual 验证 lua_rawequal 的 raw equality 语义。
+func TestNativeLuaRawEqual(t *testing.T) {
+	// 构造数字和 table identity，确认 raw equality 不依赖元方法。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 rawequal。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+	table := runtime.NewTable()
+
+	nativeLuaPushInteger(luaState, 1)
+	nativeLuaPushNumber(luaState, 1.0)
+	nativeLuaPushValue(luaState, runtime.ReferenceValue(runtime.KindTable, table))
+	nativeLuaPushValue(luaState, runtime.ReferenceValue(runtime.KindTable, table))
+	nativeLuaPushValue(luaState, runtime.ReferenceValue(runtime.KindTable, runtime.NewTable()))
+
+	if got := nativeLuaRawEqual(luaState, 1, 2); got != 1 {
+		// Lua 5.3 raw equality 中 integer(1) 与 number(1.0) 相等。
+		t.Fatalf("nativeLuaRawEqual number eq = %d, want 1", got)
+	}
+	if got := nativeLuaRawEqual(luaState, 3, 4); got != 1 {
+		// 同一 table 引用必须 raw equal。
+		t.Fatalf("nativeLuaRawEqual same table = %d, want 1", got)
+	}
+	if got := nativeLuaRawEqual(luaState, 3, 5); got != 0 {
+		// 不同 table identity 即使内容相同也不 raw equal。
+		t.Fatalf("nativeLuaRawEqual different table = %d, want 0", got)
+	}
+	if got := nativeLuaRawEqual(luaState, 1, 99); got != 0 {
+		// 无效索引按 Lua C API 返回 false。
+		t.Fatalf("nativeLuaRawEqual missing = %d, want 0", got)
+	}
+	if errorObject, hasError := takeNativeStatePendingError(luaState); hasError {
+		// rawequal 不应留下 pending error。
+		t.Fatalf("nativeLuaRawEqual pending error = %#v", errorObject)
+	}
+}
+
 // TestNativeLuaCompareRecordsOrderError 验证不可有序比较时记录 pending error。
 func TestNativeLuaCompareRecordsOrderError(t *testing.T) {
 	// 当前 native shim 对不可比较类型记录错误，等待 C function 返回边界传播。

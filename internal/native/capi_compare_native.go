@@ -21,6 +21,22 @@ const (
 	nativeLuaOpLe = 2
 )
 
+// nativeLuaRawEqual 实现 Lua 5.3 C API 的 lua_rawequal。
+func nativeLuaRawEqual(luaState unsafe.Pointer, leftIndex int, rightIndex int) int {
+	// raw equality 先按 C API 视角读取两个栈值；任一索引无效时直接返回 false。
+	left, leftOK := nativeLuaValueAt(luaState, leftIndex)
+	right, rightOK := nativeLuaValueAt(luaState, rightIndex)
+	if !leftOK || !rightOK {
+		// Lua C API 对无效索引返回 0，不触发错误。
+		return 0
+	}
+	if left.RawEqual(right) {
+		// Lua C API 使用 int 表示 boolean，非 0 为 true。
+		return 1
+	}
+	return 0
+}
+
 // nativeLuaCompare 实现 Lua 5.3 C API 的基础比较入口。
 func nativeLuaCompare(luaState unsafe.Pointer, leftIndex int, rightIndex int, operation int) int {
 	// 比较先按 C API 视角读取两个栈值；任一索引无效时直接返回 false。
@@ -157,6 +173,14 @@ func nativeLuaFloatLessThanInteger(numberValue float64, integerValue int64) bool
 		return ceilInteger < integerValue
 	}
 	return ceilInteger <= integerValue
+}
+
+// lua_rawequal 导出 Lua 5.3 C API raw equality 入口。
+//
+//export lua_rawequal
+func lua_rawequal(luaState *C.lua_State, leftIndex C.int, rightIndex C.int) C.int {
+	// C API 入口只做类型转换；raw equality 不触发元方法。
+	return C.int(nativeLuaRawEqual(unsafe.Pointer(luaState), int(leftIndex), int(rightIndex)))
 }
 
 // lua_compare 导出 Lua 5.3 C API 比较入口。
