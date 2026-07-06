@@ -188,17 +188,17 @@ func nativeLuaSetTable(luaState unsafe.Pointer, index int) {
 		// 非 table 目标当前保持 no-op，后续 api_check/错误边界再补齐完整失败语义。
 		return
 	}
-	if state.StackTop() < 2 {
-		// settable 需要栈顶 value 和其下方 key。
+	if nativeLuaStackTop(luaState) < 2 {
+		// settable 需要当前 C 帧可见栈顶 value 和其下方 key。
 		return
 	}
-	value, err := state.Pop()
-	if err != nil {
-		// value 弹出失败时保持 no-op。
+	value, ok := nativeLuaPopVisible(luaState, state)
+	if !ok {
+		// 当前 C 帧缺少可见 value 时保持 no-op。
 		return
 	}
-	key, err := state.Pop()
-	if err != nil {
+	key, ok := nativeLuaPopVisible(luaState, state)
+	if !ok {
 		// key 缺失时无法写入；value 已按 C API 消费，等待后续 api_check 统一收口。
 		return
 	}

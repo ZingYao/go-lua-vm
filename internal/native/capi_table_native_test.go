@@ -310,6 +310,46 @@ func TestNativeCAPISetTableUsesStackKeyAndValue(t *testing.T) {
 	}
 }
 
+// TestNativeLuaSetTableRespectsCurrentCFrameBase 验证 lua_settable 不会弹出当前 C 帧之前的外层栈值。
+func TestNativeLuaSetTableRespectsCurrentCFrameBase(t *testing.T) {
+	// registry 目标不需要当前 C 帧内 table 参数，可直接暴露“缺少 key/value 时是否穿透外层栈”的边界。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 C frame 边界。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'o', 'u', 't', 'e', 'r', '_', 'k', 'e', 'y', 0}[0]))
+	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'o', 'u', 't', 'e', 'r', '_', 'v', 'a', 'l', 'u', 'e', 0}[0]))
+	if !pushNativeStateCallFrame(luaState, state.StackTop(), nil) {
+		// 无法建立 C 调用帧时，后续索引语义不可验证。
+		t.Fatal("pushNativeStateCallFrame failed")
+	}
+	defer popNativeStateCallFrame(luaState)
+
+	nativeLuaSetTable(luaState, runtime.RegistryPseudoIndex)
+	if got := state.StackTop(); got != 2 {
+		// 当前 C 帧没有可见 key/value 时，settable 不得弹掉外层 sentinel。
+		t.Fatalf("lua_settable global top = %d, want 2", got)
+	}
+	if key := state.ValueAt(1); key.Kind != runtime.KindString || key.String != "outer_key" {
+		// 外层 key sentinel 必须原样保留给调用者。
+		t.Fatalf("outer key value = %#v, want outer_key", key)
+	}
+	if value := state.ValueAt(2); value.Kind != runtime.KindString || value.String != "outer_value" {
+		// 外层 value sentinel 必须原样保留给调用者。
+		t.Fatalf("outer value = %#v, want outer_value", value)
+	}
+	if value := state.Registry().RawGetString("outer_key"); !value.IsNil() {
+		// 缺少可见 key/value 时不得向 registry 写入错误值。
+		t.Fatalf("registry.outer_key = %#v, want nil", value)
+	}
+}
+
 // TestNativeCAPISetTableUsesTableNewIndex 验证 lua_settable 遵守 table 型 __newindex。
 func TestNativeCAPISetTableUsesTableNewIndex(t *testing.T) {
 	// 当前 native shim 使用 runtime.Table.Set，至少覆盖 table 型 __newindex 链。
