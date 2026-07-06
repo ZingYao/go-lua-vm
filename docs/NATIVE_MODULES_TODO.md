@@ -137,7 +137,7 @@
       - [x] macOS `.so` 与 `.dylib` 两种后缀分别独立验收。
     - [x] 新增 `scripts/test-native-cjson.sh`，把真实模块运行期验收固化为可重复 CLI 脚本。
   - [ ] `lua-cjson` 官方 Lua 5.3 ABI 二进制模块验收：验证 `lua_*` / `luaL_*` 符号由本项目 shim 满足。
-  - [ ] 固定 `lpeg` 或等价纯 C 模块源码到仓库或 `third_party/`，记录来源、版本和许可证。
+  - [x] 固定 `lpeg` 或等价纯 C 模块源码到仓库或 `third_party/`，记录来源、版本和许可证。
   - [ ] `lpeg` 或等价纯 C 模块验收：覆盖 userdata、metatable、registry 和复杂 C function 行为。
   - [ ] LuaSocket 或等价网络库验收：仅在 userdata/metatable/registry/错误边界稳定后进入平台闭环。
 - [ ] 增加交叉编译验证脚本：
@@ -264,3 +264,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：更新 `README.md`；将动态库与 `require` 边界改为默认 no-CGO 与显式 `native_modules` 可选构建并列口径，并在对外文档列表中加入 `NATIVE_MODULES_PLAN.md`、`NATIVE_MODULES_BUILD.md` 和 `NATIVE_MODULES_SOURCE_INVENTORY.md`。
 - 2026-07-06：收敛 fixture 兼容边界 TODO；`docs/NATIVE_MODULES_BUILD.md` 已说明 fixture 只验证 loader smoke、不作为最终兼容结论，`docs/NATIVE_MODULES_SOURCE_INVENTORY.md` 已说明自编 fixture 只证明 loader、opaque `lua_State*`、基础 C API shim 和 require 链路贯通，不能解释为任意第三方 Lua C 模块兼容。
 - 2026-07-06：增强 `scripts/check-native-cross-compile.sh`；`NATIVE_CC_*` / `CC` 现在可传入带参数的编译器命令，脚本只校验第一个命令词是否存在，完整命令仍原样传给 Go/cgo，方便后续 Linux/Windows CI 使用 `zig cc -target ...` 或等价 cross toolchain。
+- 2026-07-06：固定第二真实模块 LPeg 1.1.0 到 `third_party/lpeg/`，新增 `GLUA_VENDOR.md` 记录官方源码包 URL、版本、许可位置和本项目未改源码；该切口只完成源码自包含门禁，尚未声明 `require("lpeg")` 运行期验收通过。
