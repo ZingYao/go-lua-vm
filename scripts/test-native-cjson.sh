@@ -31,12 +31,10 @@ fi
 
 case "${target_goos}" in
   darwin)
-    cpath_pattern="${build_dir}/?.so;${build_dir}/?.dylib"
-    required_modules=("${build_dir}/cjson.so" "${build_dir}/cjson.dylib")
+    runtime_extensions=(".so" ".dylib")
     ;;
   linux)
-    cpath_pattern="${build_dir}/?.so"
-    required_modules=("${build_dir}/cjson.so")
+    runtime_extensions=(".so")
     ;;
   windows)
     echo "skip: Windows lua-cjson runtime acceptance requires lua53.dll shim or import library, not implemented yet" >&2
@@ -61,13 +59,6 @@ fi
 
 BUILD_DIR="${build_dir}" CGO_ENABLED=1 "${repo_root}/scripts/build-native-cjson.sh"
 
-for module_path in "${required_modules[@]}"; do
-  if [[ ! -f "${module_path}" ]]; then
-    echo "lua-cjson module output missing: ${module_path}" >&2
-    exit 1
-  fi
-done
-
 lua_string_literal() {
   local text="$1"
   text="${text//\\/\\\\}"
@@ -76,10 +67,20 @@ lua_string_literal() {
 }
 
 package_path_literal="$(lua_string_literal "${work_dir}/missing/?.lua")"
-package_cpath_literal="$(lua_string_literal "${cpath_pattern}")"
-acceptance_source="${work_dir}/cjson_acceptance.lua"
 
-cat >"${acceptance_source}" <<EOF
+for extension in "${runtime_extensions[@]}"; do
+  module_path="${build_dir}/cjson${extension}"
+  if [[ ! -f "${module_path}" ]]; then
+    echo "lua-cjson module output missing for ${extension}: ${module_path}" >&2
+    exit 1
+  fi
+
+  suffix_name="${extension#.}"
+  cpath_pattern="${build_dir}/?${extension}"
+  package_cpath_literal="$(lua_string_literal "${cpath_pattern}")"
+  acceptance_source="${work_dir}/cjson_acceptance_${suffix_name}.lua"
+
+  cat >"${acceptance_source}" <<EOF
 package.path = ${package_path_literal}
 package.cpath = ${package_cpath_literal}
 
@@ -108,10 +109,11 @@ local encode_ok, encode_message = pcall(cjson.encode, function() end)
 assert(encode_ok == false, "function unexpectedly encoded")
 assert(type(encode_message) == "string" and string.find(encode_message, "Cannot serialise", 1, true), encode_message)
 
-print("native lua-cjson runtime acceptance passed", cjson._NAME, cjson._VERSION, encoded)
+print("native lua-cjson runtime acceptance passed", "${extension}", cjson._NAME, cjson._VERSION, encoded)
 EOF
 
-echo "run native lua-cjson acceptance: ${acceptance_source}"
-"${glua_bin}" "${acceptance_source}"
+  echo "run native lua-cjson acceptance (${extension}): ${acceptance_source}"
+  "${glua_bin}" "${acceptance_source}"
+done
 
 echo "native lua-cjson runtime acceptance passed"

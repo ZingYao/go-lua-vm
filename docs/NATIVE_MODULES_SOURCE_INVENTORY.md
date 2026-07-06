@@ -29,7 +29,7 @@
 | Fixture Go harness | `internal/native/loadlib_fixture_unix_test.go` | 编译仓库内 fixture C 文件，并验证 `package.loadlib`、`require`、错误传播和 userdata 状态 | 已固定 |
 | 真实模块源码 | `third_party/lua-cjson/` | 第一真实模块验收源码，固定 upstream `mpx/lua-cjson` tag `2.1.0` / commit `4bc5e917c8cd5fc2f6b217512ef530007529322f`，许可证见目录内 `LICENSE` | 已固定 |
 | 真实模块构建脚本 | `scripts/build-native-cjson.sh` | 使用仓库内 Lua 5.3 public headers 和固定 `third_party/lua-cjson/` 源码编译当前平台 `cjson` 动态模块，显式输出目标平台、`CC`、源码路径和产物路径 | 已固定 |
-| 真实模块运行期脚本 | `scripts/test-native-cjson.sh` | 构建 native tag `glua` 与 `cjson` 动态模块，并执行 `require("cjson")`、`encode/decode`、`cjson.null`、非法 JSON `pcall` 和不可序列化 function `pcall` 验收 | 已固定 |
+| 真实模块运行期脚本 | `scripts/test-native-cjson.sh` | 构建 native tag `glua` 与 `cjson` 动态模块，并执行 `require("cjson")`、`encode/decode`、`cjson.null`、非法 JSON `pcall` 和不可序列化 function `pcall` 验收；macOS 分别覆盖 `.so` 与 `.dylib` 后缀 | 已固定 |
 
 ## 尚未入仓清单
 
@@ -42,7 +42,7 @@
 
 - 默认构建仍以 `CGO_ENABLED=0 go test ./...` 和 `./scripts/check-go-gates.sh` 作为必过门禁。
 - `native_modules` 构建当前可通过 `CGO_ENABLED=1 go test -tags native_modules ./...` 验证仓库内 Go/CGO shim、平台 loader 和 Unix 内嵌 fixture。
-- `lua-cjson` 真实模块源码可通过 `CGO_ENABLED=1 scripts/build-native-cjson.sh` 做源码编译级验收，也可通过 `scripts/test-native-cjson.sh` 做运行期验收；运行期脚本覆盖 `require("cjson")`、`encode/decode`、`cjson.null` identity、非法 JSON `pcall` 和不可序列化 function `pcall`。
+- `lua-cjson` 真实模块源码可通过 `CGO_ENABLED=1 scripts/build-native-cjson.sh` 做源码编译级验收，也可通过 `scripts/test-native-cjson.sh` 做运行期验收；运行期脚本覆盖 `require("cjson")`、`encode/decode`、`cjson.null` identity、非法 JSON `pcall` 和不可序列化 function `pcall`，并在 macOS 上分别验证 `.so` 与 `.dylib` 两类候选。
 - 现阶段不得把内嵌 smoke fixture 的通过结果解释为“任意第三方 Lua C 模块兼容”；它只证明项目侧 loader、opaque `lua_State*`、基础 C API shim 和 require 链路已经贯通。
 
 ## 后续维护规则

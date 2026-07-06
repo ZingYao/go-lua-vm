@@ -134,6 +134,7 @@
   - [x] `lua-cjson` 源码编译验收：`require("cjson")`、`encode/decode`、错误输入 `pcall`。
     - [x] 新增 `scripts/build-native-cjson.sh`，使用仓库内 Lua 5.3 public headers 和固定源码编译当前平台 `cjson` 动态模块。
     - [x] 运行期 `require("cjson")`、`encode/decode` 和错误输入 `pcall` 验收。
+      - [x] macOS `.so` 与 `.dylib` 两种后缀分别独立验收。
     - [x] 新增 `scripts/test-native-cjson.sh`，把真实模块运行期验收固化为可重复 CLI 脚本。
   - [ ] `lua-cjson` 官方 Lua 5.3 ABI 二进制模块验收：验证 `lua_*` / `luaL_*` 符号由本项目 shim 满足。
   - [ ] 固定 `lpeg` 或等价纯 C 模块源码到仓库或 `third_party/`，记录来源、版本和许可证。
@@ -254,3 +255,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：新增 `scripts/test-native-cjson.sh`，把 `lua-cjson` 真实模块运行期验收固化为脚本：脚本先构建 native tag `glua` 和仓库内 `third_party/lua-cjson` 动态模块，再执行 `require("cjson")`、对象/数组/标量 `encode/decode`、`cjson.null` identity、非法 JSON `pcall` 和不可序列化 function `pcall`。当前 macOS arm64 验收通过；Windows 仍在 `lua53.dll` shim/import library 落地前明确 skip。
 - 2026-07-06：扩展 fixture 构建与 CLI smoke 脚本；macOS 现在同时产出 `glua_native_smoke` / `glua_native_failopen` 的 `.dylib` 和 `.so` 两种后缀，并分别通过 `package.cpath` 执行 require 成功路径与 luaopen 初始化失败路径，覆盖 Lua 生态在 macOS 上常见的双后缀候选。
 - 2026-07-06：执行 `scripts/check-native-cross-compile.sh`；当前 macOS arm64 已完成 `internal/native` 测试二进制和 native tag `cmd/glua` 编译验证，Linux arm64 与 Windows arm64 因未配置 `NATIVE_CC_LINUX_ARM64` / `NATIVE_CC_WINDOWS_ARM64` 或 `CC` 明确 skip，未冒充跨平台通过。
+- 2026-07-06：扩展 `scripts/test-native-cjson.sh`；macOS 上不再用合并 `package.cpath` 只验证搜索顺序首个候选，而是分别用 `?.so` 和 `?.dylib` 独立执行 `require("cjson")`、对象/数组/标量 `encode/decode`、`cjson.null`、非法 JSON `pcall` 和不可序列化 function `pcall`，真实第三方模块双后缀运行期验收均通过。
