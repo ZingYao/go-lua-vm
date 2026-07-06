@@ -25,13 +25,13 @@
 | Fixture Lua 脚本 | `tests/native_modules/fixtures/glua_native_smoke.lua` | 复用 `require("glua_native_smoke")`、C function、userdata、错误传播、traceback 和 `package.loaded` smoke 验收 | 已固定 |
 | Fixture 构建脚本 | `scripts/build-native-fixtures.sh` | 使用仓库内 Lua public headers 和 fixture C 源码构建当前平台动态库，并输出 `GOOS`、`GOARCH`、`CC`、`CGO_ENABLED` 与产物路径 | 已固定 |
 | Fixture 测试脚本 | `scripts/test-native-modules.sh` | 构建 native tag `glua`，调用 fixture 构建脚本，并执行成功 require 与 luaopen 初始化失败两条 CLI smoke | 已固定 |
+| 交叉编译脚本 | `scripts/check-native-cross-compile.sh` | 编译 `internal/native` 测试二进制和 `cmd/glua` native 产物，显式输出目标平台、`CC`、产物路径和 skip 原因 | 已固定 |
 | Fixture Go harness | `internal/native/loadlib_fixture_unix_test.go` | 编译仓库内 fixture C 文件，并验证 `package.loadlib`、`require`、错误传播和 userdata 状态 | 已固定 |
 
 ## 尚未入仓清单
 
 | 类别 | 目标路径 | 用途 | 阻塞影响 |
 | --- | --- | --- | --- |
-| 交叉编译脚本 | `scripts/check-native-cross-compile.sh` | 输出 `GOOS`、`GOARCH`、`CC`、`CGO_ENABLED` 和 skip 原因 | Windows/macOS/Linux 编译闭环暂缺 |
 | 真实模块源码 | `third_party/lua-cjson/` | 第一真实模块验收，覆盖 `require("cjson")`、`encode/decode` 和错误输入 `pcall` | 不能宣称真实第三方 C 模块兼容 |
 | 真实模块源码 | `third_party/lpeg/` 或等价纯 C 模块目录 | 第二层真实模块验收，覆盖复杂 userdata、metatable、registry 和 C function 行为 | 复杂 C API 兼容面仍未闭环 |
 | Windows shim 产物源码 | 待定 `native/lua53/windows/` 或 `tests/native_modules/windows/` | 提供 `lua53.dll` shim 或等价 import library 验证入口 | Windows 现成 Lua 5.3 ABI 模块验收暂缺 |

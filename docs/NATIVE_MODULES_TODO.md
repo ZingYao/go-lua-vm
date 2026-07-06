@@ -130,7 +130,7 @@
   - [ ] `lpeg` 或等价纯 C 模块验收：覆盖 userdata、metatable、registry 和复杂 C function 行为。
   - [ ] LuaSocket 或等价网络库验收：仅在 userdata/metatable/registry/错误边界稳定后进入平台闭环。
 - [ ] 增加交叉编译验证脚本：
-  - [ ] `scripts/check-native-cross-compile.sh`：显式输出 `GOOS`、`GOARCH`、`CC`、产物路径和缺失 toolchain 时的 skip 原因。
+  - [x] `scripts/check-native-cross-compile.sh`：显式输出 `GOOS`、`GOARCH`、`CC`、产物路径和缺失 toolchain 时的 skip 原因。
   - [ ] Linux native build/test 编译验证。
   - [ ] macOS native build/test 编译验证。
   - [ ] Windows native build/test 编译验证。
@@ -235,3 +235,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：将 Unix require smoke 的 Lua 脚本从 Go 测试内嵌字符串迁移到 `tests/native_modules/fixtures/glua_native_smoke.lua`；Go 测试通过占位符注入 `package.path` / `package.cpath`，后续 CLI smoke 和跨平台脚本可复用同一份 Lua 验收逻辑。
 - 2026-07-06：新增 `scripts/build-native-fixtures.sh`，使用仓库内 `native/lua53/include/` 和 `tests/native_modules/fixtures/glua_native_smoke.c` 构建当前平台 `glua_native_smoke` / `glua_native_failopen` 动态库，并显式输出 `GOOS`、`GOARCH`、`CC`、`CGO_ENABLED`、源码路径和产物路径；Windows 目标在 `lua53.dll` shim/import library 落地前明确 skip。
 - 2026-07-06：新增 `scripts/test-native-modules.sh`，默认构建 native tag 的 `glua`，调用 `scripts/build-native-fixtures.sh` 生成当前平台 fixture，并实际执行 `glua_native_smoke.lua` require 成功路径和 `glua_native_failopen` 初始化失败路径；Windows CLI smoke 在 `lua53.dll` shim/import library 落地前明确 skip。
+- 2026-07-06：新增 `scripts/check-native-cross-compile.sh`，按 `NATIVE_CROSS_TARGETS` 或默认当前架构的 Linux/macOS/Windows 目标编译 `internal/native` 测试二进制和 native tag `cmd/glua`，并为缺失 C toolchain 的目标显式输出 skip 原因；脚本只做编译级闭环，不运行异平台产物。
