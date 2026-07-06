@@ -40,6 +40,7 @@
 - [x] Windows 实现 `LoadLibraryW` / `GetProcAddress` / `FreeLibrary` 封装。
 - [ ] 动态库 loader 返回 Lua 可调用 loader，接入 `PackageDynamicLibraryLoader`。
 - [ ] `package.loadlib(path, symbol)` 在 native 构建下可加载 fixture 入口。
+  - [x] 已验证 Linux/macOS 真实 fixture 可解析到 `luaopen_*`，并在 C API shim 未实现时返回 `init` 分类。
 - [ ] `require("mod")` 在 native 构建下可通过 `package.cpath` 命中 fixture。
 - [ ] 保持默认构建 `package.loadlib` 禁用说明不变。
 
@@ -178,3 +179,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：新增 `docs/NATIVE_MODULES_BUILD.md`，说明默认构建、native 构建、平台前置条件、当前限制和后续 fixture 验收命令。本轮未修改 Go 代码。
 - 2026-07-06：新增 Linux/macOS `dlopen` / `dlsym` / `dlclose` 封装和系统库 smoke 测试；`Loader()` 现在能区分打开失败、符号缺失和已解析但 shim 未实现三类边界。默认门禁脚本改为只允许 `native_modules` build tag 文件使用 CGO。
 - 2026-07-06：新增 Windows `LoadLibraryW` / `GetProcAddress` / `FreeLibrary` 封装和系统 DLL smoke 测试；本机非 Windows 环境通过 `GOOS=windows go test -c -tags native_modules ./internal/native` 做交叉编译验证，运行时 fixture 留到 Windows 平台闭环阶段。
+- 2026-07-06：新增 Unix `package.loadlib` 真实 Lua C fixture 测试；fixture 使用 Lua 5.3 public `lua.h` 编译并导出 `luaopen_glua_native_smoke`，当前可证明动态库与符号解析已贯通到 package.loadlib，返回值停在 C API shim 未实现的 `init` 分类。
