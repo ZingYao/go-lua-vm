@@ -10,15 +10,18 @@ if [[ "${actual_go_version}" != "${expected_go_version}" ]]; then
   exit 1
 fi
 
-if command -v rg >/dev/null 2>&1; then
-  rg -n 'import\s+"C"|^\s*"C"\s*$' --glob '*.go' . >/tmp/go-lua-vm-cgo-check.txt || true
-else
-  git grep -nE 'import[[:space:]]+"C"|^[[:space:]]*"C"[[:space:]]*$' -- '*.go' >/tmp/go-lua-vm-cgo-check.txt || true
-fi
+: >/tmp/go-lua-vm-cgo-check.txt
+while IFS= read -r go_file; do
+  if grep -Eq 'import[[:space:]]+"C"|^[[:space:]]*"C"[[:space:]]*$' "${go_file}"; then
+    if ! grep -Eq '^//go:build .*native_modules' "${go_file}"; then
+      echo "${go_file}: CGO is only allowed in native_modules-tagged files" >>/tmp/go-lua-vm-cgo-check.txt
+    fi
+  fi
+done < <(git ls-files '*.go')
 
 if [[ -s /tmp/go-lua-vm-cgo-check.txt ]]; then
   cat /tmp/go-lua-vm-cgo-check.txt >&2
-  echo "CGO is forbidden: remove import \"C\"" >&2
+  echo "CGO is forbidden outside native_modules build tag" >&2
   exit 1
 fi
 

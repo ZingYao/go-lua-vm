@@ -23,10 +23,15 @@ func Loader() func(filename string, symbol string) (runtime.Value, error) {
 				Message:  fmt.Sprintf("native module loader requires filename and symbol, got filename=%q symbol=%q", filename, symbol),
 			}
 		}
-		// 平台 loader 尚未实现，返回 absent 分类，保持 require 诊断清晰且不伪装成功。
+		err := resolveDynamicSymbol(filename, symbol)
+		if err != nil {
+			// 平台动态库或符号解析失败时保留底层兼容分类，交给 package.loadlib 转三返回。
+			return runtime.NilValue(), err
+		}
+		// 当前阶段只证明动态库和符号可解析；Lua C API shim 尚未实现，不能伪装成可调用 loader。
 		return runtime.NilValue(), packagelib.DynamicLibraryError{
-			Category: "absent",
-			Message:  "native module loader skeleton is enabled but platform loader is not implemented yet",
+			Category: "init",
+			Message:  "native module loader resolved symbol but Lua C API shim is not implemented yet",
 		}
 	}
 }
