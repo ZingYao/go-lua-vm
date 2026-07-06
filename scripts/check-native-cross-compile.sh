@@ -79,6 +79,17 @@ target_cc_for() {
   return 1
 }
 
+cc_executable_for() {
+  local cc_command="$1"
+  local cc_executable
+
+  # 允许 NATIVE_CC_* / CC 传入带参数的编译器命令，例如：
+  # NATIVE_CC_LINUX_ARM64="zig cc -target aarch64-linux-musl"
+  # command -v 只校验第一个可执行文件，完整命令仍原样交给 Go/cgo 的 CC。
+  read -r cc_executable _ <<< "${cc_command}"
+  echo "${cc_executable}"
+}
+
 status=0
 for target in "${targets[@]}"; do
   target_goos="${target%%/*}"
@@ -105,7 +116,8 @@ for target in "${targets[@]}"; do
   fi
 
   echo "CC=${cc}"
-  if ! command -v "${cc}" >/dev/null 2>&1; then
+  cc_executable="$(cc_executable_for "${cc}")"
+  if ! command -v "${cc_executable}" >/dev/null 2>&1; then
     echo "skip: C compiler not found for ${target_goos}/${target_goarch}: ${cc}" >&2
     continue
   fi

@@ -100,7 +100,7 @@ fixture loader smoke：
 ./scripts/check-native-cross-compile.sh
 ```
 
-该脚本需要显式输出每个目标的 `GOOS`、`GOARCH`、`CC`、`CGO_ENABLED` 和产物路径。缺少目标 C toolchain 时可以跳过对应目标，但必须打印明确 skip 原因，不能静默视为通过。
+该脚本需要显式输出每个目标的 `GOOS`、`GOARCH`、`CC`、`CGO_ENABLED` 和产物路径。缺少目标 C toolchain 时可以跳过对应目标，但必须打印明确 skip 原因，不能静默视为通过。目标编译器可通过 `NATIVE_CC_<GOOS>_<GOARCH>` 指定，值可以包含编译器参数，例如 `NATIVE_CC_LINUX_ARM64="zig cc -target aarch64-linux-musl"`；脚本只用第一个命令词做存在性检查，完整字符串会原样传给 Go/cgo 的 `CC`。
 
 fixture 只验证 loader smoke，不作为最终兼容结论。真实兼容验收必须包含：
 
