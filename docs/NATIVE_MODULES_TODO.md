@@ -37,7 +37,7 @@
 ## 第二阶段：动态库加载器
 
 - [x] Linux/macOS 实现 `dlopen` / `dlsym` / `dlclose` 封装。
-- [ ] Windows 实现 `LoadLibraryW` / `GetProcAddress` / `FreeLibrary` 封装。
+- [x] Windows 实现 `LoadLibraryW` / `GetProcAddress` / `FreeLibrary` 封装。
 - [ ] 动态库 loader 返回 Lua 可调用 loader，接入 `PackageDynamicLibraryLoader`。
 - [ ] `package.loadlib(path, symbol)` 在 native 构建下可加载 fixture 入口。
 - [ ] `require("mod")` 在 native 构建下可通过 `package.cpath` 命中 fixture。
@@ -177,3 +177,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：新增 `internal/native.Loader()` 包骨架；默认构建返回 nil，`native_modules` 构建返回明确未实现错误分类。已补默认与 native tag 定向测试，尚未接入 CLI。
 - 2026-07-06：新增 `docs/NATIVE_MODULES_BUILD.md`，说明默认构建、native 构建、平台前置条件、当前限制和后续 fixture 验收命令。本轮未修改 Go 代码。
 - 2026-07-06：新增 Linux/macOS `dlopen` / `dlsym` / `dlclose` 封装和系统库 smoke 测试；`Loader()` 现在能区分打开失败、符号缺失和已解析但 shim 未实现三类边界。默认门禁脚本改为只允许 `native_modules` build tag 文件使用 CGO。
+- 2026-07-06：新增 Windows `LoadLibraryW` / `GetProcAddress` / `FreeLibrary` 封装和系统 DLL smoke 测试；本机非 Windows 环境通过 `GOOS=windows go test -c -tags native_modules ./internal/native` 做交叉编译验证，运行时 fixture 留到 Windows 平台闭环阶段。
