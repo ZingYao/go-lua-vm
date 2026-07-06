@@ -190,6 +190,7 @@
         - [x] 2026-07-06 复核：`local c = ...` shadow 形态与官方外层 `c = ...` 形态表现不同，说明问题不在动态库解析，而更可能在 native C frame 与 Go VM 嵌套执行 Lua callback 时的栈/寄存器隔离、`lua_call`、`lua_remove`/`lua_rotate` 或借用 VM 清理边界。
         - [x] 2026-07-06 复核：已在 native smoke fixture 中模拟 `runtimecap` 的 `lua_call(..., LUA_MULTRET)` + `lua_remove` 旧动态 capture 清理路径，macOS `.dylib`/`.so` 均通过；基础 C frame 可见 `lua_gettop` 与 `lua_remove` 清理未单独复现 1159 行错位。
         - [x] 2026-07-06 复核：已在 native smoke fixture 中加入多次 runtime callback、lightuserdata stackbase、旧动态 capture 多轮残留和外层 Lua 变量覆盖场景，macOS `.dylib`/`.so` 均通过；通用 C API 多轮 callback 与清理路径继续被证伪为非单独根因。
+        - [x] 2026-07-06 复核：修正 C frame 内过深负索引边界，`lua_type`、`lua_pushvalue`、`lua_copy`、`lua_rotate` 均不得通过 `-3` 等越界负索引读写 frame base 之前的外层 Go VM 栈；该语义边界已由 `internal/native` 定向测试覆盖，但不直接宣称解决 LPeg 1159。
         - [ ] 下一轮优先收窄 LPeg 自身 pattern userdata / grammar 编译状态：对比官方测试前缀后新建 pattern 的 bytecode/ktable/capture 初始化，确认是否为 `lua_setuservalue`、pattern user value ktable、`luaL_ref`/registry 或 LPeg VM backtracking 状态污染。
   - [ ] LuaSocket 或等价网络库验收：仅在 userdata/metatable/registry/错误边界稳定后进入平台闭环。
 - [ ] 增加交叉编译验证脚本：
@@ -336,3 +337,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：新增 `lua_copy` 栈槽复制 API；覆盖普通栈目标替换、不改变栈顶、无效索引 no-op，以及 C function 调用帧内正索引相对基址的复制语义。LPeg 1.1.0 macOS arm64 运行期探针确认阻塞点已从 `_lua_copy` 前移到 `_lua_getallocf`，下一轮应补齐 allocator 查询 API。
 - 2026-07-06：新增 `lua_getallocf` allocator 查询 API；返回 native shim 的 C heap `realloc/free` 分配器且 `ud == NULL`，native smoke fixture 新增 `alloc_roundtrip()` 覆盖 C 模块侧分配、扩容、释放。LPeg 1.1.0 macOS arm64 运行期探针确认阻塞点已从 `_lua_getallocf` 前移到 `_lua_gettable`，下一轮应补齐通用表读取 API。
 - 2026-07-06：新增 `lua_gettable` 通用 table 读取 API；覆盖栈顶 key 查询、弹 key、压结果、返回 Lua C API 类型编号，以及无效目标 no-op 的当前最小 shim 边界。LPeg 1.1.0 macOS arm64 运行期探针确认阻塞点已从 `_lua_gettable` 前移到 `_lua_getuservalue`，下一轮应补齐 userdata user value API。
+- 2026-07-06：修正 C function frame 内负索引可见栈边界；`nativeLuaValueAt`、`lua_copy` 目标索引和 `lua_rotate` 区间均禁止通过过深负索引穿透到调用帧之前的外层 Go VM 栈。新增定向测试覆盖 `lua_type(-3)` 返回 none、`lua_pushvalue(-3)` no-op、`lua_copy` 无效 source/target no-op 和 `lua_rotate(-3)` 不改变外层栈。该切口补强通用 C API 栈隔离语义，LPeg 1159 仍需继续对比 pattern userdata / ktable / registry 状态。

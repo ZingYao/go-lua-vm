@@ -112,11 +112,14 @@ func nativeLuaRotate(luaState unsafe.Pointer, index int, rotateCount int) {
 	}
 	top := state.StackTop()
 	absoluteIndex := state.AbsIndex(index)
-	if index > 0 {
-		// C function 内正索引从当前调用帧参数区开始。
-		if baseTop, ok := currentNativeStateCallBase(luaState); ok {
+	if baseTop, ok := currentNativeStateCallBase(luaState); ok {
+		if index > 0 {
+			// C function 内正索引从当前调用帧参数区开始。
 			// index 是 1-based 可见槽位，因此全局绝对索引需要加上调用进入前栈顶。
 			absoluteIndex = baseTop + index
+		} else if index < 0 && absoluteIndex <= baseTop {
+			// C function 内负索引不得把旋转区间扩展到调用帧之前的外层 Go VM 栈。
+			return
 		}
 	}
 	if absoluteIndex <= 0 || absoluteIndex > top {
@@ -161,11 +164,14 @@ func nativeLuaAbsoluteStackIndex(luaState unsafe.Pointer, state *runtime.State, 
 		return 0, false
 	}
 	absoluteIndex := state.AbsIndex(index)
-	if index > 0 {
-		// C function 内正索引从当前调用帧参数区开始。
-		if baseTop, ok := currentNativeStateCallBase(luaState); ok {
+	if baseTop, ok := currentNativeStateCallBase(luaState); ok {
+		if index > 0 {
+			// C function 内正索引从当前调用帧参数区开始。
 			// index 是 1-based 可见槽位，因此全局绝对索引需要加上调用进入前栈顶。
 			absoluteIndex = baseTop + index
+		} else if index < 0 && absoluteIndex <= baseTop {
+			// C function 内负索引只能写当前调用帧可见栈槽，不能覆盖外层 Go VM 栈。
+			return 0, false
 		}
 	}
 	if absoluteIndex <= 0 || absoluteIndex > state.StackTop() {

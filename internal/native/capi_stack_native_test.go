@@ -262,6 +262,80 @@ func TestNativeLuaCopyUsesCallFramePositiveIndexes(t *testing.T) {
 	}
 }
 
+// TestNativeCAPIFrameNegativeIndexesDoNotCrossBase 验证 C frame 内过深负索引不能穿透外层栈。
+func TestNativeCAPIFrameNegativeIndexesDoNotCrossBase(t *testing.T) {
+	// 外层栈槽不属于当前 C function 可见栈，负索引越过 frame base 时必须按 none/no-op 处理。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证调用帧负索引边界。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+	pushText := func(text string) {
+		// 测试字符串只在本次调用内使用；native helper 会立即复制为 Go VM string。
+		buffer := append([]byte(text), 0)
+		nativeLuaPushString(luaState, unsafe.Pointer(&buffer[0]))
+	}
+
+	pushText("outer")
+	pushText("first")
+	pushText("second")
+	if !pushNativeStateCallFrame(luaState, 1, nil) {
+		// 无法建立调用帧时，本测试不能继续验证负索引基址。
+		t.Fatalf("pushNativeStateCallFrame failed")
+	}
+	defer popNativeStateCallFrame(luaState)
+
+	if got := nativeLuaStackTop(luaState); got != 2 {
+		// C function 内只能看到两个参数槽。
+		t.Fatalf("call frame visible top = %d, want 2", got)
+	}
+	if got := nativeLuaType(luaState, -1); got != nativeLuaTypeString {
+		// -1 指向当前 C frame 的栈顶 second。
+		t.Fatalf("lua_type(-1) = %d, want %d", got, nativeLuaTypeString)
+	}
+	if got := nativeLuaType(luaState, -2); got != nativeLuaTypeString {
+		// -2 指向当前 C frame 的第一个参数 first。
+		t.Fatalf("lua_type(-2) = %d, want %d", got, nativeLuaTypeString)
+	}
+	if got := nativeLuaType(luaState, -3); got != nativeLuaTypeNone {
+		// -3 会越过 frame base，不能读到外层 outer。
+		t.Fatalf("lua_type(-3) = %d, want %d", got, nativeLuaTypeNone)
+	}
+
+	nativeLuaPushValueAt(luaState, -3)
+	if got := nativeLuaStackTop(luaState); got != 2 {
+		// 无效负索引 pushvalue 必须保持 no-op，避免把外层栈值暴露给 C 模块。
+		t.Fatalf("lua_pushvalue(-3) top = %d, want 2", got)
+	}
+	nativeLuaCopy(luaState, -3, 1)
+	if value := state.ValueAt(2); value.Kind != runtime.KindString || value.String != "first" {
+		// 无效负索引 source 不能覆盖当前 frame 第一个参数。
+		t.Fatalf("lua_copy invalid source changed frame[1] = %#v, want first", value)
+	}
+	nativeLuaCopy(luaState, -1, -3)
+	if value := state.ValueAt(1); value.Kind != runtime.KindString || value.String != "outer" {
+		// 无效负索引 target 不能覆盖调用帧之前的外层槽位。
+		t.Fatalf("lua_copy invalid target changed outer = %#v, want outer", value)
+	}
+	nativeLuaRotate(luaState, -3, 1)
+	if value := state.ValueAt(1); value.Kind != runtime.KindString || value.String != "outer" {
+		// 无效旋转区间不能把外层栈纳入 C frame 操作范围。
+		t.Fatalf("lua_rotate invalid index changed outer = %#v, want outer", value)
+	}
+	if value := state.ValueAt(2); value.Kind != runtime.KindString || value.String != "first" {
+		// 当前 frame 参数顺序也必须保持不变。
+		t.Fatalf("lua_rotate invalid index changed frame[1] = %#v, want first", value)
+	}
+	if value := state.ValueAt(3); value.Kind != runtime.KindString || value.String != "second" {
+		// 当前 frame 栈顶参数也必须保持不变。
+		t.Fatalf("lua_rotate invalid index changed frame[2] = %#v, want second", value)
+	}
+}
+
 // TestNativeCAPIStackPrimitivesRejectInvalidState 验证失效 State handle 的最小安全边界。
 func TestNativeCAPIStackPrimitivesRejectInvalidState(t *testing.T) {
 	// nil lua_State* 没有可映射 State，所有操作必须保持失败安全。

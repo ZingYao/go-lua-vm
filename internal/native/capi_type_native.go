@@ -68,11 +68,14 @@ func nativeLuaValueAt(luaState unsafe.Pointer, index int) (runtime.Value, bool) 
 		return value, true
 	}
 	absoluteIndex := state.AbsIndex(index)
-	if index > 0 {
-		// C function 内正索引从当前 C 调用帧参数区开始，而不是整个 Go State 栈底。
-		if baseTop, ok := currentNativeStateCallBase(luaState); ok {
+	if baseTop, ok := currentNativeStateCallBase(luaState); ok {
+		if index > 0 {
+			// C function 内正索引从当前 C 调用帧参数区开始，而不是整个 Go State 栈底。
 			// index 是 1-based 可见槽位，因此全局绝对索引需要加上调用进入前栈顶。
 			absoluteIndex = baseTop + index
+		} else if index < 0 && absoluteIndex <= baseTop {
+			// C function 内负索引只能访问当前调用帧可见栈，不能穿透读取外层 Go VM 栈槽。
+			return runtime.NilValue(), false
 		}
 	}
 	if absoluteIndex <= 0 || absoluteIndex > state.StackTop() {
