@@ -114,6 +114,35 @@ func TestNativeCAPICheckLString(t *testing.T) {
 	}
 }
 
+// TestNativeCAPICheckAny 验证 luaL_checkany 只拒绝缺失参数，允许 nil 参数存在。
+func TestNativeCAPICheckAny(t *testing.T) {
+	// 使用真实 State 和 opaque handle 验证参数存在性检查。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 checkany。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	nativeLuaPushNil(luaState)
+	if !nativeLuaCheckAny(luaState, 1) {
+		// nil 是存在的 Lua 值，luaL_checkany 必须允许。
+		t.Fatalf("nativeLuaCheckAny nil = false, want true")
+	}
+	if nativeLuaCheckAny(luaState, 2) {
+		// 第二个参数不存在，应按 none 触发参数错误。
+		t.Fatalf("nativeLuaCheckAny missing = true, want false")
+	}
+	errorObject, ok := takeNativeStatePendingError(luaState)
+	if !ok || errorObject.Kind != runtime.KindString || errorObject.String != "bad argument #2 (value expected)" {
+		// 缺失参数必须记录 lauxlib 兼容的 value expected 错误。
+		t.Fatalf("nativeLuaCheckAny pending error = %#v ok=%v, want value expected", errorObject, ok)
+	}
+}
+
 // TestNativeCAPICheckOption 验证 luaL_checkoption 的默认值、匹配和错误边界。
 func TestNativeCAPICheckOption(t *testing.T) {
 	// cjson 使用 checkoption 读取 encode/decode 配置项，必须支持 NULL 终止选项数组。

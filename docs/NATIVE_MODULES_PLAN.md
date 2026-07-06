@@ -178,6 +178,8 @@ state := lua.NewStateWithOptions(options)
 - `luaL_newlib`
 - `luaL_checkinteger`
 - `luaL_checklstring`
+- `luaL_checkany`
+- `luaL_checktype`
 - `luaL_error`
 
 ### Phase 2：C function 与多返回

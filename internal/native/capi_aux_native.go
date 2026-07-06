@@ -171,6 +171,18 @@ func nativeLuaCheckLString(luaState unsafe.Pointer, index int) (unsafe.Pointer, 
 	return nativeLuaToLString(luaState, index)
 }
 
+// nativeLuaCheckAny 实现 luaL_checkany 的参数存在性检查；nil 是存在值，只有 none 会触发参数错误。
+func nativeLuaCheckAny(luaState unsafe.Pointer, index int) bool {
+	// luaL_checkany 只检查参数槽是否存在，不要求非 nil。
+	if _, ok := nativeLuaValueAt(luaState, index); ok {
+		return true
+	}
+	// 缺失参数按 Lua 5.3 lauxlib 语义报告 value expected。
+	message := fmt.Sprintf("bad argument #%d (value expected)", index)
+	_ = setNativeStatePendingError(luaState, runtime.StringValue(message))
+	return false
+}
+
 // lua_tointegerx 导出 Lua 5.3 C API integer 转换入口。
 //
 //export lua_tointegerx
@@ -275,4 +287,12 @@ func luaL_checklstring(luaState *C.lua_State, index C.int, length *C.size_t) *C.
 		return nil
 	}
 	return (*C.char)(buffer)
+}
+
+// luaL_checkany 导出 Lua 5.3 lauxlib 参数存在性检查入口。
+//
+//export luaL_checkany
+func luaL_checkany(luaState *C.lua_State, index C.int) {
+	// 当前 Go export 只记录 pending error；C 层 longjmp 完整语义由后续 api_check 阶段统一收口。
+	nativeLuaCheckAny(unsafe.Pointer(luaState), int(index))
 }
