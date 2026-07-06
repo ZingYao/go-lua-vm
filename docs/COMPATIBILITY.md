@@ -6,7 +6,8 @@
 
 - Lua 版本：`lua-5.3.6`。
 - 源码形态：Lua 官方 C 源码。
-- Go 实现：纯 Go，无 CGO，不接入 Lua C API。
+- 默认 Go 实现：纯 Go，无 CGO，不接入 Lua C API。
+- 可选 native 实现：显式 `native_modules` build tag + `CGO_ENABLED=1`，用于 Lua C 原生模块加载，不属于默认构建承诺。
 - CLI 主产物：`glua`。
 - 字节码工具产物：`gluac`。
 
@@ -48,6 +49,28 @@
 - `io`、`os`、`package` 标准库在宿主权限、路径和平台差异上允许有 Go 运行时约束。
 - `package.loadlib` 默认不内置动态 C 库打开逻辑；无 CGO 约束下未注入 loader 时返回明确不支持。宿主可通过 `lua.Options.PackageDynamicLibraryLoader`、`stdlib/package` 环境注入或覆盖 `package.loadlib` 接入自己的动态库加载层。
 - 默认跨平台构建不依赖 C 头文件、系统动态库或 Lua C API 开发包；`require` 不直接加载普通 Lua C 模块。普通 Lua C 模块需要 `lua_State*` 和 Lua C ABI 兼容层，该能力不属于首版默认纯 Go 构建承诺。
+- `native_modules` 可选构建允许使用 CGO 和仓库内 Lua 5.3 public headers，目标是支持按 Lua 5.3 public C API 编写并导出 `luaopen_*` 的 `.so/.dylib/.dll`。该能力必须保持默认 `CGO_ENABLED=0` 构建、测试和发布路径不受影响。
+
+## native_modules 可选构建兼容状态
+
+`native_modules` 是独立于默认纯 Go 构建的可选能力。启用方式为：
+
+```bash
+CGO_ENABLED=1 go build -tags native_modules -o bin/glua-native ./cmd/glua
+```
+
+当前状态：
+
+- macOS arm64 已通过仓库内 `lua-cjson` 源码运行期验收，且 `.so` 与 `.dylib` 两种后缀分别独立覆盖 `require("cjson")`、`encode/decode`、`cjson.null`、非法 JSON `pcall` 和不可序列化 function `pcall`。
+- 已有 fixture 覆盖 `package.cpath` 命中、`luaopen_*` 调用、C function、多返回、userdata、metatable、registry、`lua_error` / `luaL_error` 和 traceback 基础路径。
+- 默认构建仍不加载 C 原生模块；只有 `native_modules` 构建下 CLI 才自动注入 State-aware native loader。
+
+兼容边界：
+
+- 仅承诺 Lua 5.3 public C API 模块；依赖 `lstate.h`、`lobject.h`、`lapi.h` 等内部头文件或访问 `lua_State` 内部结构的模块不兼容。
+- 当前不承诺完整 Lua 5.3 C API；未覆盖的 API、C continuation/yield、debug hook C API 和官方 Lua 5.3 ABI 二进制模块边界见 `docs/NATIVE_MODULES_BUILD.md`。
+- Linux `.so` 与 Windows `.dll` 运行期验收仍需要对应平台或 CI 闭环；Windows 还需要 `lua53.dll` shim 或等价 import library 方案。
+- native 模块执行本机机器码，拥有进程权限；库模式默认不启用，嵌入方必须显式选择该能力并承担动态库来源风险。
 
 ## Release 阻塞项
 
