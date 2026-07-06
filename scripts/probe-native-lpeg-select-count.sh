@@ -108,9 +108,69 @@ if count ~= 2 then
 end
 LUA
       ;;
+    select-count-inline-if)
+      cat <<'LUA'
+if select("#", "alpha", "beta") ~= 2 then
+  error("unexpected inline select count")
+end
+LUA
+      ;;
+    select-count-do-block)
+      cat <<'LUA'
+do
+  local count = select("#", "alpha", "beta")
+  if count ~= 2 then
+    error("unexpected do-block select count")
+  end
+end
+LUA
+      ;;
+    select-count-nil-after-use)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+if count ~= 2 then
+  error("unexpected nil-after-use select count")
+end
+count = nil
+LUA
+      ;;
+    select-count-overwrite-args-nil)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+local clear1, clear2 = nil, nil
+if count ~= 2 or clear1 ~= nil or clear2 ~= nil then
+  error("unexpected nil-overwrite select count")
+end
+LUA
+      ;;
+    select-count-overwrite-args-false)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+local clear1, clear2 = false, false
+if count ~= 2 or clear1 ~= false or clear2 ~= false then
+  error("unexpected false-overwrite select count")
+end
+LUA
+      ;;
     select-count-nonempty-discard)
       cat <<'LUA'
 select("#", "alpha", "beta")
+LUA
+      ;;
+    select-count-two-nil)
+      cat <<'LUA'
+local count = select("#", nil, nil)
+if count ~= 2 then
+  error("unexpected two-nil select count")
+end
+LUA
+      ;;
+    select-count-three-strings)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta", "gamma")
+if count ~= 3 then
+  error("unexpected three-string select count")
+end
 LUA
       ;;
     select-count-one-string)
@@ -150,6 +210,22 @@ LUA
 local packed = {select("#", "alpha", "beta")}
 if #packed ~= 1 or packed[1] ~= 2 then
   error("unexpected table constructor select count")
+end
+LUA
+      ;;
+    literal-integer-two)
+      cat <<'LUA'
+local count = 2
+if count ~= 2 then
+  error("unexpected literal integer")
+end
+LUA
+      ;;
+    table-length-two)
+      cat <<'LUA'
+local count = #{"alpha", "beta"}
+if count ~= 2 then
+  error("unexpected table length")
 end
 LUA
       ;;
@@ -251,12 +327,21 @@ modes=(
   select-count-empty
   select-index-nonempty
   select-count-nonempty
+  select-count-inline-if
+  select-count-do-block
+  select-count-nil-after-use
+  select-count-overwrite-args-nil
+  select-count-overwrite-args-false
   select-count-nonempty-discard
+  select-count-two-nil
+  select-count-three-strings
   select-count-one-string
   select-count-one-number
   select-count-two-numbers
   select-count-multivar
   select-count-table-constructor
+  literal-integer-two
+  table-length-two
   lua-return-integer-two
   lua-return-integer-two-after-vararg
   lua-return-select-count-nonempty
