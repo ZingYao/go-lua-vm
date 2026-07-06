@@ -183,6 +183,7 @@ state := lua.NewStateWithOptions(options)
 - `luaL_checkany`
 - `luaL_checktype`
 - `luaL_error`
+- `lua_getallocf`
 
 ### Phase 2：C function 与多返回
 

@@ -145,6 +145,85 @@ func TestNativeCAPILightUserdataStableIdentity(t *testing.T) {
 	}
 }
 
+// TestNativeLuaCopyReplacesTargetWithoutChangingTop 验证 lua_copy 原地替换目标槽且不改变栈顶。
+func TestNativeLuaCopyReplacesTargetWithoutChangingTop(t *testing.T) {
+	// 测试直接使用 Go State 栈，确保 copy 不依赖额外影子存储。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 lua_copy。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'s', 'r', 'c', 0}[0]))
+	nativeLuaPushInteger(luaState, 7)
+	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'d', 's', 't', 0}[0]))
+	nativeLuaCopy(luaState, 1, 3)
+	if got := nativeLuaStackTop(luaState); got != 3 {
+		// lua_copy 只能替换目标槽，不能压栈或弹栈。
+		t.Fatalf("lua_copy top = %d, want 3", got)
+	}
+	if value := state.ValueAt(3); value.Kind != runtime.KindString || value.String != "src" {
+		// 第三个槽位应被第一个槽位的字符串替换。
+		t.Fatalf("lua_copy target value = %#v, want src", value)
+	}
+	nativeLuaCopy(luaState, -1, 2)
+	if value := state.ValueAt(2); value.Kind != runtime.KindString || value.String != "src" {
+		// 负索引 source 应从当前栈顶读取。
+		t.Fatalf("lua_copy negative source value = %#v, want src", value)
+	}
+	nativeLuaCopy(luaState, 99, 1)
+	nativeLuaCopy(luaState, 1, 99)
+	if got := nativeLuaStackTop(luaState); got != 3 {
+		// 无效索引按当前最小 shim 策略保持 no-op。
+		t.Fatalf("invalid lua_copy top = %d, want 3", got)
+	}
+	if value := state.ValueAt(1); value.Kind != runtime.KindString || value.String != "src" {
+		// 无效 copy 不能破坏已有槽位。
+		t.Fatalf("invalid lua_copy changed stack[1] = %#v", value)
+	}
+}
+
+// TestNativeLuaCopyUsesCallFramePositiveIndexes 验证 C function 内正索引相对当前调用帧。
+func TestNativeLuaCopyUsesCallFramePositiveIndexes(t *testing.T) {
+	// 外层栈保留一个值，调用帧基址之后才是 C function 可见参数。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证调用帧索引。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'o', 'u', 't', 'e', 'r', 0}[0]))
+	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'f', 'i', 'r', 's', 't', 0}[0]))
+	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'s', 'e', 'c', 'o', 'n', 'd', 0}[0]))
+	if !pushNativeStateCallFrame(luaState, 1, nil) {
+		// 无法建立调用帧时，本测试不能继续验证正索引基址。
+		t.Fatalf("pushNativeStateCallFrame failed")
+	}
+	defer popNativeStateCallFrame(luaState)
+
+	nativeLuaCopy(luaState, 2, 1)
+	if value := state.ValueAt(1); value.Kind != runtime.KindString || value.String != "outer" {
+		// 正确基址下 lua_copy(L, 2, 1) 只能修改调用帧第一个参数，不能覆盖外层槽位。
+		t.Fatalf("outer stack slot = %#v, want outer", value)
+	}
+	if value := state.ValueAt(2); value.Kind != runtime.KindString || value.String != "second" {
+		// 调用帧内第一个可见参数应被第二个可见参数替换。
+		t.Fatalf("call frame target = %#v, want second", value)
+	}
+	if got := nativeLuaStackTop(luaState); got != 2 {
+		// C function 内可见栈顶仍应只包含两个参数槽。
+		t.Fatalf("call frame lua_copy visible top = %d, want 2", got)
+	}
+}
+
 // TestNativeCAPIStackPrimitivesRejectInvalidState 验证失效 State handle 的最小安全边界。
 func TestNativeCAPIStackPrimitivesRejectInvalidState(t *testing.T) {
 	// nil lua_State* 没有可映射 State，所有操作必须保持失败安全。

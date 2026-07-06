@@ -153,6 +153,66 @@ func nativeLuaRotate(luaState unsafe.Pointer, index int, rotateCount int) {
 	}
 }
 
+// nativeLuaAbsoluteStackIndex 把 native C API 栈索引转换为 Go State 的绝对栈槽。
+func nativeLuaAbsoluteStackIndex(luaState unsafe.Pointer, state *runtime.State, index int) (int, bool) {
+	// pseudo-index 不能作为普通栈槽写入；registry/upvalue 的写入语义后续随完整 API 扩展。
+	if index <= runtime.RegistryPseudoIndex {
+		// 当前 helper 只服务 lua_copy 的目标槽和 rotate 区间，不接受 pseudo-index。
+		return 0, false
+	}
+	absoluteIndex := state.AbsIndex(index)
+	if index > 0 {
+		// C function 内正索引从当前调用帧参数区开始。
+		if baseTop, ok := currentNativeStateCallBase(luaState); ok {
+			// index 是 1-based 可见槽位，因此全局绝对索引需要加上调用进入前栈顶。
+			absoluteIndex = baseTop + index
+		}
+	}
+	if absoluteIndex <= 0 || absoluteIndex > state.StackTop() {
+		// 栈索引 0、越界正索引和越界负索引都不是可写目标槽。
+		return 0, false
+	}
+	return absoluteIndex, true
+}
+
+// nativeLuaCopy 按 Lua 5.3 C API 的 lua_copy 语义复制 fromidx 到 toidx。
+func nativeLuaCopy(luaState unsafe.Pointer, fromIndex int, toIndex int) {
+	// 入口先解析 State；失效 handle 不能修改任何 Go VM 状态。
+	state, ok := lookupNativeStateHandle(luaState)
+	if !ok {
+		// native 模块持有无效 State 时保持 no-op，避免破坏外层 VM。
+		return
+	}
+	value, ok := nativeLuaValueAt(luaState, fromIndex)
+	if !ok {
+		// fromidx 必须是可读索引；当前最小 shim 对无效索引保持 no-op。
+		return
+	}
+	absoluteTarget, ok := nativeLuaAbsoluteStackIndex(luaState, state, toIndex)
+	if !ok {
+		// toidx 必须是当前栈上的有效槽位；pseudo-index 写入留到后续完整 API 阶段。
+		return
+	}
+	top := state.StackTop()
+	suffix := make([]runtime.Value, top-absoluteTarget)
+	for valueIndex := range suffix {
+		// 先保存目标槽之后的后缀，避免重建栈段时丢失原顺序。
+		suffix[valueIndex] = state.ValueAt(absoluteTarget + 1 + valueIndex)
+	}
+	nativeLuaRestoreStackTop(state, absoluteTarget-1)
+	if err := state.Push(value); err != nil {
+		// 理论上不会超过原栈深；失败时停止写回，交给后续 State 错误边界暴露。
+		return
+	}
+	for valueIndex := range suffix {
+		// 重新压回后缀，保持 lua_copy 不改变栈顶和其他槽位的语义。
+		if err := state.Push(suffix[valueIndex]); err != nil {
+			// 写回失败时停止，避免继续扩大副作用。
+			return
+		}
+	}
+}
+
 // nativeLuaPushValue 把一个运行期值压入 native C API 对应的 Go State 栈。
 func nativeLuaPushValue(luaState unsafe.Pointer, value runtime.Value) {
 	// 入口先解析 State，失效 handle 不能修改任何 Go VM 状态。
@@ -296,6 +356,14 @@ func lua_checkstack(luaState *C.lua_State, extraSlots C.int) C.int {
 func lua_rotate(luaState *C.lua_State, index C.int, rotateCount C.int) {
 	// C API 入口只做类型转换，具体区间读写由 Go helper 维护。
 	nativeLuaRotate(unsafe.Pointer(luaState), int(index), int(rotateCount))
+}
+
+// lua_copy 导出 Lua 5.3 C API 栈槽复制入口。
+//
+//export lua_copy
+func lua_copy(luaState *C.lua_State, fromIndex C.int, toIndex C.int) {
+	// C API 入口只做类型转换，具体索引解析和不变栈顶语义由 Go helper 统一维护。
+	nativeLuaCopy(unsafe.Pointer(luaState), int(fromIndex), int(toIndex))
 }
 
 // lua_pushvalue 导出 Lua 5.3 C API 值复制入口。
