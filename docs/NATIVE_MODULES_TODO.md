@@ -209,7 +209,8 @@
         - [x] 2026-07-06 复核：继续扩展 `scripts/probe-native-lpeg-1159.sh` 的 Lua 调用帧对照组；该长线性 probe 一度显示空 Lua 函数、局部变量函数和 `pcall(function() end)` 均退化为 `12`，但后续独立短矩阵复核证明该结论不够隔离，保留为历史证据，不再作为最终 CALL 边界结论。
         - [x] 2026-07-06 复核：新增 `scripts/bisect-native-lpeg-1159-prefix.sh`，将 LPeg 1159 prefix 边界改为机械二分定位；默认 `LOW=620`、`HIGH=651` 下自动验证 `620` 为 good、`651` 为 bad，并输出 `last_good_prefix_line=646`、`first_bad_prefix_line=647`。后续 prefix 边界复核优先用该脚本，避免继续靠长线性 probe 手工排查。
         - [x] 2026-07-06 复核：新增 `scripts/probe-native-lpeg-1159-call-kinds.sh`，用独立短矩阵复核 `1-620` 前序状态后的单操作影响；只定义局部函数、匿名函数赋值、table 字段读取函数、不带副作用的空 Lua 调用、局部变量 Lua 调用、`type`、`tostring`、`pcall(function() end)` 和单次 LPeg parity match 均保持 `18`，只有 `select("#", "alpha", "beta")` 退化为 `12`；`select("#")` 和 `select(1, "alpha", "beta")` 仍为 `18`。当前边界修正为 base `select` 的非空变参数量查询路径或其返回帧清理，而不是普通 Lua closure/CALL 本身。
-        - [ ] 下一轮优先使用 gopls 定位并审查 base `select` 实现与 vararg 返回搬运路径；先新增 Go/CLI 定向测试或更小 Lua probe 覆盖 `select("#", 非空变参)` 后续 LPeg match，不直接改 VM 调用帧。
+        - [x] 2026-07-07 复核：使用 `gopls check stdlib/base/base.go lua/api.go runtime/vm.go` 确认目标包无诊断；新增 `scripts/probe-native-lpeg-select-count.sh`，把 `1-620` 前序状态后的 `baseline`、`select("#")`、`select(1, ...)`、`select("#", "alpha", "beta")` 四组单独固化为可复跑 probe。当前输出显示前三组为 good，非空 `select("#", ...)` 为 bad，进一步排除 `select` 空计数和索引返回路径。
+        - [ ] 下一轮继续使用 gopls 审查 base `select` 调用后的 Go closure 结果写回、Lua open return 和 vararg 搬运路径；优先定位为什么只有非空 `#` 分支的一返回值会扰动后续 LPeg match，再决定是否进入 VM 调用帧小切口。
   - [ ] LuaSocket 或等价网络库验收：仅在 userdata/metatable/registry/错误边界稳定后进入平台闭环。
 - [ ] 增加交叉编译验证脚本：
   - [x] `scripts/check-native-cross-compile.sh`：显式输出 `GOOS`、`GOARCH`、`CC`、产物路径和缺失 toolchain 时的 skip 原因。
@@ -240,6 +241,7 @@
   - [x] `scripts/probe-native-lpeg-1159.sh`
   - [x] `scripts/bisect-native-lpeg-1159-prefix.sh`
   - [x] `scripts/probe-native-lpeg-1159-call-kinds.sh`
+  - [x] `scripts/probe-native-lpeg-select-count.sh`
 - [ ] 增加最终验收记录。
 
 ## 每轮推进规则
