@@ -108,6 +108,22 @@ if count ~= 2 then
 end
 LUA
       ;;
+    select-count-assign-unused)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+LUA
+      ;;
+    select-count-move-only)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+local mirror = count
+LUA
+      ;;
+    select-count-global-assign-unused)
+      cat <<'LUA'
+_G.__glua_select_count_probe = select("#", "alpha", "beta")
+LUA
+      ;;
     select-count-gc-before)
       cat <<'LUA'
 collectgarbage()
