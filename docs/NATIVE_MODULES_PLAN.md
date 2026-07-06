@@ -205,6 +205,7 @@ state := lua.NewStateWithOptions(options)
 - `lua_tolstring`
 - `lua_compare`
 - `lua_is*` 系列常用入口
+  - `lua_isstring` 是 LPeg 1.1.0 在 `lua_getuservalue` 后暴露的下一动态链接阻塞点。
 
 ### Phase 3：userdata、metatable、registry
 

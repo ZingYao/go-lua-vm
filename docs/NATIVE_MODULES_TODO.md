@@ -117,6 +117,9 @@
     - [x] 当前覆盖普通栈槽复制，以及 C function 调用帧内正索引相对基址复制；pseudo-index 目标写入留到完整 API 阶段。
   - [x] `lua_getallocf`
     - [x] 当前返回 native shim 的 C heap `realloc/free` 分配器，`ud` 固定为 `NULL`；fixture 覆盖 allocate/reallocate/free roundtrip。
+  - [ ] `lua_is*` 系列常用入口：
+    - [ ] `lua_isstring`
+      - [ ] LPeg 1.1.0 当前运行期探针已越过 `_lua_getuservalue`，阻塞前移到 `_lua_isstring`。
 - [x] 支持 C function 读取 Lua 参数并返回多值。
 - [x] fixture：C 模块函数 `add(a, b)`、`echo(s)`、`multi()`。
 
@@ -126,8 +129,8 @@
   - [x] `lua_newuserdata`
   - [x] `lua_touserdata`
   - [x] `luaL_checkudata`
-  - [ ] `lua_getuservalue`
-    - [ ] LPeg 1.1.0 当前运行期探针阻塞在 `_lua_getuservalue`。
+  - [x] `lua_getuservalue`
+    - [x] 当前覆盖 native full userdata 的 user value 压栈和类型码返回；非 full userdata、lightuserdata、无效索引按 nil 回退。
 - [ ] 实现 metatable：
   - [x] `luaL_newmetatable`
   - [x] `luaL_getmetatable`
@@ -258,6 +261,7 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：新增 `LoaderForState`，动态库符号解析后会保留库句柄并返回可调用 Go closure，调用时通过当前 State 的 opaque `lua_State*` 执行 `luaopen_*`。Unix fixture 已验证 `package.loadlib(path, "luaopen_glua_native_smoke")` 可返回 callable 并实际调用入口；无状态 `Loader()` 仍只做解析验证并返回 `init` 边界，防止误用错误 State。
 - 2026-07-06：扩展 Unix native smoke fixture；C 模块现在通过真实 Lua 5.3 public header 的 `luaL_newlib` 宏返回模块 table，并暴露 `add(a,b)`、`echo(s)`、`multi()` 三个 C function，覆盖 integer/string 参数读取、`lua_push*` 返回值和 C function 多返回值搬运。为支持 `luaL_newlib` 宏补充 `luaL_checkversion_` 最小 no-op shim；版本不匹配错误与 longjmp 仍留到错误边界阶段。
 - 2026-07-06：补齐 C function 调用基址和 Unix `require` 端到端测试；native shim 现在会在进入 C function 时记录 Go State 栈基址，使 `luaL_checkinteger(L, 1)` 等正索引相对当前 C 调用帧，而不是误读外层 Lua 栈。Lua 源码层已验证 `package.cpath` 命中 `glua_native_smoke` fixture、`require` 返回模块 table、`add/echo/multi` 可调用且二次 `require` 命中缓存。
+- 2026-07-06：补齐 `lua_getuservalue`；native full userdata 可按 Lua 5.3 C API 把 user value 压栈并返回类型码，默认零值为 nil，lightuserdata/非 userdata/无效 State 回退 nil。LPeg 1.1.0 运行期探针已从 `_lua_getuservalue` 前移到 `_lua_isstring`。
 - 2026-07-06：接入 CLI native loader 注入点；默认构建下 `applyNativeModuleOptions` 保持 no-op，`native_modules` 构建下 CLI 创建 State 时自动设置 `PackageDynamicLibraryLoaderForState = native.LoaderForState`，并保留无状态 loader 作为 `package.loadlib` 解析诊断路径。该切口只影响 native tag 构建，默认 no-CGO 行为由专门测试锁定。
 - 2026-07-06：新增 `lua_error` 与 `luaL_error` 最小错误传播；native shim 不跨 Go/C 边界 longjmp，而是在 opaque `lua_State*` handle 上暂存 Lua error object，C function 返回 Go 边界后转换为 `runtime.RaiseError`。Unix fixture 已验证 `pcall(mod.fail, "boom")` 捕获 `luaL_error` 文本，`pcall(mod.raise)` 捕获 `lua_error` 栈顶对象。C module 初始化期 `pcall(require, "mod")` 与 C frame traceback 展示仍在后续错误阶段补齐。
 - 2026-07-06：新增 C module 初始化错误验收；同一 Unix fixture 额外导出 `luaopen_glua_native_failopen`，并以模块名匹配的动态库文件走标准 `package.cpath` 和 `require` 路径。测试已验证 `pcall(require, "glua_native_failopen")` 捕获 luaopen 阶段的 `luaL_error("native open failure")`，且失败后不污染 `package.loaded`。
