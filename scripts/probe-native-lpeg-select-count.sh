@@ -387,6 +387,49 @@ end
 collectgarbage()
 LUA
       ;;
+    select-count-gc-stop-before)
+      cat <<'LUA'
+collectgarbage("stop")
+local count = select("#", "alpha", "beta")
+if count ~= 2 then
+  error("unexpected gc-stop-before select count")
+end
+LUA
+      ;;
+    select-count-gc-stop-after-call)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+collectgarbage("stop")
+if count ~= 2 then
+  error("unexpected gc-stop-after-call select count")
+end
+LUA
+      ;;
+    select-count-gc-stop-after-consume)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+if count ~= 2 then
+  error("unexpected gc-stop-after-consume select count")
+end
+collectgarbage("stop")
+LUA
+      ;;
+    select-count-error-message-gc-stop-before)
+      cat <<'LUA'
+collectgarbage("stop")
+local count = select("#", "alpha", "beta")
+local skipped = error
+local message = "unexpected falsy select count"
+LUA
+      ;;
+    select-count-error-message-gc-stop-after-call)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+collectgarbage("stop")
+local skipped = error
+local message = "unexpected falsy select count"
+LUA
+      ;;
     select-count-then-rawequal)
       cat <<'LUA'
 local count = select("#", "alpha", "beta")
@@ -780,6 +823,11 @@ modes=(
   select-count-gc-before
   select-count-gc-after-call
   select-count-gc-after-consume
+  select-count-gc-stop-before
+  select-count-gc-stop-after-call
+  select-count-gc-stop-after-consume
+  select-count-error-message-gc-stop-before
+  select-count-error-message-gc-stop-after-call
   select-count-then-rawequal
   select-count-then-tonumber
   select-count-then-discard-select
