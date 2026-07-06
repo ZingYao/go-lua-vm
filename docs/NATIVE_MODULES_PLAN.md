@@ -215,6 +215,14 @@ state := lua.NewStateWithOptions(options)
 - `luaL_unref`
 - `lua_rawgeti`
 - `lua_rawseti`
+- `luaL_buffinit`
+- `luaL_prepbuffsize`
+- `luaL_addlstring`
+- `luaL_addstring`
+- `luaL_addvalue`
+- `luaL_pushresult`
+- `luaL_pushresultsize`
+- `luaL_buffinitsize`
 
 ### Phase 4：错误、longjmp 与调试边界
 

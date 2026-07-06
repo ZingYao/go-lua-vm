@@ -76,9 +76,19 @@
 - [ ] 实现基础参数检查：
   - [x] `luaL_checkinteger`
   - [x] `luaL_checklstring`
+  - [ ] `luaL_checkany`
   - [x] `luaL_argerror`
   - [x] `luaL_checkoption`
   - [x] `luaL_error`
+- [x] 实现 lauxlib buffer 基础：
+  - [x] `luaL_buffinit`
+  - [x] `luaL_prepbuffsize`
+  - [x] `luaL_addlstring`
+  - [x] `luaL_addstring`
+  - [x] `luaL_addvalue`
+  - [x] `luaL_pushresult`
+  - [x] `luaL_pushresultsize`
+  - [x] `luaL_buffinitsize`
 - [x] fixture：C 模块 `luaopen_glua_native_smoke` 返回 table，并暴露一个简单函数。
 
 ## 第四阶段：C function 调用
@@ -269,3 +279,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：固定第二真实模块 LPeg 1.1.0 到 `third_party/lpeg/`，新增 `GLUA_VENDOR.md` 记录官方源码包 URL、版本、许可位置和本项目未改源码；该切口只完成源码自包含门禁，尚未声明 `require("lpeg")` 运行期验收通过。
 - 2026-07-06：新增 `scripts/build-native-lpeg.sh`，直接使用仓库内 `native/lua53/include/` 与 `third_party/lpeg/` 固定源码编译当前平台 `lpeg` 动态模块；macOS 同时产出 `.so` 与 `.dylib`，Linux 产出 `.so`，Windows 在 `lua53.dll` shim/import library 落地前明确 skip。该切口只证明 LPeg 源码可自包含编译，`require("lpeg")` 运行期验收仍等待独立脚本闭环。
 - 2026-07-06：复核 `package.loadlib` 门禁并同步 TODO；`go test ./stdlib/package -run 'TestLoadLibDisabled|TestCLoadingPolicyDocumentsUnsupportedDynamicLibraries|TestLoadLibUsesDynamicLibraryLoader'` 确认默认 no-CGO 禁用说明和宿主 loader 覆盖稳定，`CGO_ENABLED=1 go test -tags native_modules ./internal/native -run 'TestUnixPackageLoadLibResolvesNativeFixture|TestUnixPackageLoadLibReturnsCallableNativeFixture'` 确认 native fixture 可通过 `package.loadlib` 解析并在 state-aware loader 下调用。LPeg 运行期探测已进入动态库打开阶段，但当前被 `_luaL_addlstring` 等尚未导出的 public C API 阻塞，后续需按 `luaL_Buffer`、table/user value、raw length/equality/call 等 API 组分批补齐。
+- 2026-07-06：新增 `luaL_Buffer` 基础 API 组：`luaL_buffinit`、`luaL_prepbuffsize`、`luaL_addlstring`、`luaL_addstring`、`luaL_addvalue`、`luaL_pushresult`、`luaL_pushresultsize`、`luaL_buffinitsize`。本轮用仓库内 LPeg 1.1.0 源码重新编译 macOS arm64 `.so/.dylib` 并执行 `require("lpeg")` 运行期探针，确认阻塞点已从 `_luaL_addlstring` 前移到 `_luaL_checkany`；说明 buffer 符号组已由本项目 shim 满足，LPeg 完整验收仍待参数检查、table/user value、raw length/equality/call 等剩余 API 组继续补齐。
