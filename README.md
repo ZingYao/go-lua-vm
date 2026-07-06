@@ -118,9 +118,17 @@ go build -tags with_switch ./cmd/glua
 
 ## 动态库与 require 边界
 
-首版默认不支持 `require` 直接加载普通 Lua C 模块形式的 `.so/.dylib/.dll`。普通 Lua C 模块依赖 `lua_State*` 和 Lua C ABI 兼容层；本项目默认纯 Go 构建不提供该 ABI，也不为此引入 CGO。
+默认构建不支持 `require` 直接加载普通 Lua C 模块形式的 `.so/.dylib/.dll`。默认路径保持纯 Go、无 CGO，不提供 Lua C ABI，也不要求系统安装 Lua C 开发包。
 
-当前支持的是动态库 loader 接入协议：`package.searchers` 会按 `package.cpath` 展开候选路径，`package.loadlib` 或 `lua.Options.PackageDynamicLibraryLoader` 可由 Go 宿主注入实现。需要动态库能力时，应由宿主加载外部库，再把能力包装成本 VM 可调用的 Go/Lua callable。
+动态库 loader 接入协议始终是显式 opt-in：`package.searchers` 会按 `package.cpath` 展开候选路径，`package.loadlib`、`lua.Options.PackageDynamicLibraryLoader` 或 `lua.Options.PackageDynamicLibraryLoaderForState` 可由 Go 宿主注入实现。普通动态库不是 Lua C 模块；只有导出 `luaopen_*` 并使用 Lua 5.3 public C API 的模块才能按 `require` 语义加载。
+
+`native_modules` 是可选 CGO 构建能力：
+
+```bash
+CGO_ENABLED=1 go build -tags native_modules -o bin/glua-native ./cmd/glua
+```
+
+该构建在 CLI 中注入 State-aware native loader，用仓库内 Lua 5.3 public headers 和 native shim 支持 Lua C 模块。当前 macOS arm64 已通过仓库内 `lua-cjson` 源码的 `.so` 与 `.dylib` 运行期验收；Linux `.so`、Windows `.dll`、官方 Lua 5.3 ABI 现成二进制模块和更复杂第三方模块仍按文档继续闭环。native 模块执行本机机器码，拥有进程权限；生产环境需要限制动态库来源和 `package.cpath`。
 
 ## 验证命令
 
@@ -192,6 +200,9 @@ GLUAC_BIN=./bin/gluac \
 - [docs/LUAC.md](docs/LUAC.md)：`gluac` 兼容工具设计、参数策略、反汇编和 binary chunk 输出。
 - [docs/CONTROL_FLOW_EXTENSIONS.md](docs/CONTROL_FLOW_EXTENSIONS.md)：`continue`、`switch/case/default` 语法扩展开关与语义。
 - [docs/CUSTOM_CHUNK.md](docs/CUSTOM_CHUNK.md)：自定义加密 chunk 的 encoder/decoder 接入规划与最小 Demo。
+- [docs/NATIVE_MODULES_PLAN.md](docs/NATIVE_MODULES_PLAN.md)：Lua C 原生模块加载方案、目标、非目标、架构和分期。
+- [docs/NATIVE_MODULES_BUILD.md](docs/NATIVE_MODULES_BUILD.md)：`native_modules` 构建方式、平台前置条件、验收命令和当前 API 覆盖边界。
+- [docs/NATIVE_MODULES_SOURCE_INVENTORY.md](docs/NATIVE_MODULES_SOURCE_INVENTORY.md)：native shim、Lua public headers、fixture、真实模块源码和脚本的自包含清单。
 
 ### 运行时与标准库语义
 
