@@ -86,6 +86,55 @@ static int glua_native_runtimecap_cleanup_probe(lua_State *L) {
 	return 2;
 }
 
+static int glua_native_runtimecap_sequence_probe(lua_State *L) {
+	static char stackbase_sentinel;
+	struct glua_native_runtimecap_case {
+		lua_Integer position;
+		const char *left;
+		const char *right;
+	};
+	static const struct glua_native_runtimecap_case cases[] = {
+		{7, "", "=="},
+		{12, "====", "=="},
+		{13, "", "=="},
+		{14, "", "=="},
+		{15, "", "=="},
+		{18, "==", "=="},
+	};
+	luaL_checktype(L, 1, LUA_TFUNCTION);
+	lua_pushlightuserdata(L, &stackbase_sentinel);
+	int sentinel_index = lua_gettop(L);
+	int matched = 0;
+
+	for (int case_index = 0; case_index < 6; case_index++) {
+		lua_pushstring(L, "old-dyncap-1");
+		lua_pushstring(L, "old-dyncap-2");
+		int id = lua_gettop(L) - 1;
+		int otop = lua_gettop(L);
+
+		lua_pushvalue(L, 1);
+		lua_pushstring(L, "subject");
+		lua_pushinteger(L, cases[case_index].position);
+		lua_pushstring(L, cases[case_index].left);
+		lua_pushstring(L, cases[case_index].right);
+		lua_call(L, 4, LUA_MULTRET);
+
+		for (int i = id; i <= otop; i++) {
+			lua_remove(L, id);
+		}
+		if (lua_toboolean(L, -1)) {
+			matched++;
+		}
+	}
+
+	int final_top = lua_gettop(L);
+	int sentinel_stable = lua_touserdata(L, sentinel_index) == &stackbase_sentinel;
+	lua_pushinteger(L, matched);
+	lua_pushinteger(L, final_top);
+	lua_pushboolean(L, sentinel_stable);
+	return 3;
+}
+
 typedef struct glua_native_counter {
 	lua_Integer value;
 } glua_native_counter;
@@ -137,6 +186,7 @@ static const luaL_Reg glua_native_smoke_funcs[] = {
 	{"raise", glua_native_raise},
 	{"alloc_roundtrip", glua_native_alloc_roundtrip},
 	{"runtimecap_cleanup_probe", glua_native_runtimecap_cleanup_probe},
+	{"runtimecap_sequence_probe", glua_native_runtimecap_sequence_probe},
 	{NULL, NULL},
 };
 

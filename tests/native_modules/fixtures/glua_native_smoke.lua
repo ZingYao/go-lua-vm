@@ -19,6 +19,20 @@ end)
 assert(cleanup_result == true)
 assert(cleanup_top == 2, cleanup_top)
 
+local outer_capture_marker = "before"
+local seen_positions = {}
+local sequence_matches, sequence_top, sentinel_stable = mod.runtimecap_sequence_probe(function(subject, position, s1, s2)
+	assert(subject == "subject")
+	outer_capture_marker = tostring(position)
+	seen_positions[#seen_positions + 1] = tostring(position)
+	return s1 == s2
+end)
+assert(table.concat(seen_positions, ",") == "7,12,13,14,15,18", table.concat(seen_positions, ","))
+assert(outer_capture_marker == "18", outer_capture_marker)
+assert(sequence_matches == 1, sequence_matches)
+assert(sequence_top == 8, sequence_top)
+assert(sentinel_stable == true)
+
 local counter = mod.new_counter(10)
 assert(counter:add(5) == 15)
 assert(counter:get() == 15)
