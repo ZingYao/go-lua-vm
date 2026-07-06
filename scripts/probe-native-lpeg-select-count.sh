@@ -135,6 +135,39 @@ end
 collectgarbage()
 LUA
       ;;
+    select-count-then-rawequal)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+if count ~= 2 then
+  error("unexpected select then rawequal count")
+end
+local same = rawequal("alpha", "beta")
+if same then
+  error("unexpected select then rawequal result")
+end
+LUA
+      ;;
+    select-count-then-tonumber)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+if count ~= 2 then
+  error("unexpected select then tonumber count")
+end
+local number = tonumber("17", 10)
+if number ~= 17 then
+  error("unexpected select then tonumber result")
+end
+LUA
+      ;;
+    select-count-then-discard-select)
+      cat <<'LUA'
+local count = select("#", "alpha", "beta")
+if count ~= 2 then
+  error("unexpected select then discard count")
+end
+select("#", "alpha", "beta")
+LUA
+      ;;
     select-count-inline-if)
       cat <<'LUA'
 if select("#", "alpha", "beta") ~= 2 then
@@ -495,6 +528,9 @@ modes=(
   select-count-gc-before
   select-count-gc-after-call
   select-count-gc-after-consume
+  select-count-then-rawequal
+  select-count-then-tonumber
+  select-count-then-discard-select
   select-count-inline-if
   select-count-do-block
   select-count-nil-after-use
