@@ -111,6 +111,42 @@ func TestNativeCAPITableFieldPrimitivesRejectInvalidTarget(t *testing.T) {
 	}
 }
 
+// TestNativeLuaSetFieldRespectsCurrentCFrameBase 验证 lua_setfield 不会弹出当前 C 帧之前的外层栈值。
+func TestNativeLuaSetFieldRespectsCurrentCFrameBase(t *testing.T) {
+	// registry 目标不需要当前 C 帧内 table 参数，可直接暴露“缺少 value 时是否穿透外层栈”的边界。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 C frame 边界。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'o', 'u', 't', 'e', 'r', 0}[0]))
+	if !pushNativeStateCallFrame(luaState, state.StackTop(), nil) {
+		// 无法建立 C 调用帧时，后续索引语义不可验证。
+		t.Fatal("pushNativeStateCallFrame failed")
+	}
+	defer popNativeStateCallFrame(luaState)
+
+	keyBytes := []byte{'f', 'i', 'e', 'l', 'd', 0}
+	nativeLuaSetField(luaState, runtime.RegistryPseudoIndex, unsafe.Pointer(&keyBytes[0]))
+	if got := state.StackTop(); got != 1 {
+		// 当前 C 帧没有可见 value 时，setfield 不得弹掉外层 sentinel。
+		t.Fatalf("lua_setfield global top = %d, want 1", got)
+	}
+	if value := state.ValueAt(1); value.Kind != runtime.KindString || value.String != "outer" {
+		// 外层栈值必须原样保留给调用者。
+		t.Fatalf("outer stack value = %#v, want outer", value)
+	}
+	if value := state.Registry().RawGetString("field"); !value.IsNil() {
+		// 缺少可见 value 时不得向 registry 写入错误值。
+		t.Fatalf("registry.field = %#v, want nil", value)
+	}
+}
+
 // TestNativeCAPIGetTableUsesStackKey 验证 lua_gettable 使用栈顶 key 读取并替换为结果。
 func TestNativeCAPIGetTableUsesStackKey(t *testing.T) {
 	// LPeg 会用 lua_gettable 查询普通 Lua table，本测试锁定最小 raw table 查询语义。

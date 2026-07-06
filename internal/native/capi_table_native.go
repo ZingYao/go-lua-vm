@@ -120,9 +120,9 @@ func nativeLuaSetField(luaState unsafe.Pointer, index int, keyPointer unsafe.Poi
 		// 非 table 目标暂不触发元方法或错误，保持栈不变便于定位语义缺口。
 		return
 	}
-	value, err := state.Pop()
-	if err != nil {
-		// 空栈或关闭 State 时不能取得待写入值。
+	value, ok := nativeLuaPopVisible(luaState, state)
+	if !ok {
+		// 当前 C 帧没有可见待写入值时保持栈不变，避免穿透外层 VM 栈。
 		return
 	}
 	table.RawSetString(nativeLuaCString(keyPointer), value)

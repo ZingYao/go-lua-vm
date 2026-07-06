@@ -39,6 +39,30 @@ func nativeLuaStackTop(luaState unsafe.Pointer) int {
 	return state.StackTop()
 }
 
+// nativeLuaPopVisible 从当前 C API 可见栈顶弹出一个值。
+func nativeLuaPopVisible(luaState unsafe.Pointer, state *runtime.State) (runtime.Value, bool) {
+	// 弹栈前先确认当前调用帧基址，防止 C API 在参数不足时穿透外层 Go VM 栈。
+	if state == nil || state.IsClosed() {
+		// 无效或已关闭 State 没有可安全消费的栈值。
+		return runtime.NilValue(), false
+	}
+	baseTop := 0
+	if currentBaseTop, ok := currentNativeStateCallBase(luaState); ok {
+		// C function 内只能消费进入该 C 帧之后的可见槽位。
+		baseTop = currentBaseTop
+	}
+	if state.StackTop() <= baseTop {
+		// 当前 C 帧没有可见值时保持栈不变，避免弹掉调用者栈上的值。
+		return runtime.NilValue(), false
+	}
+	value, err := state.Pop()
+	if err != nil {
+		// Pop 失败说明 State 生命周期或栈边界异常，调用方应保持 no-op。
+		return runtime.NilValue(), false
+	}
+	return value, true
+}
+
 // nativeLuaSetTop 按 Lua 5.3 lua_settop 语义调整栈顶。
 func nativeLuaSetTop(luaState unsafe.Pointer, index int) {
 	// 入口先解析 State，失效 handle 不能修改任何 Go VM 状态。
