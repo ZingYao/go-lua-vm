@@ -26,6 +26,7 @@ echo "BUILD_DIR=${build_dir}"
 echo "PREFIX_LINE=${prefix_line}"
 echo "GOOD_RESULT=${good_result}"
 echo "PROBE_PREBUILD_PATTERN=${PROBE_PREBUILD_PATTERN:-0}"
+echo "PROBE_PREBUILD_PARTS=${PROBE_PREBUILD_PARTS:-0}"
 
 expected_go_version="go1.26.4"
 actual_go_version="$(go version | awk '{print $3}')"
@@ -93,6 +94,25 @@ LUA
 emit_probe_prebuilt_match_tail() {
   cat <<'LUA'
 attempts = {}
+print("PROBE", c:match'[==[]]====]]]]==]===[]', table.concat(attempts, ","))
+LUA
+}
+
+emit_probe_prebuild_parts() {
+  cat <<'LUA'
+local attempts = {}
+local probe_open = '[' * m.Cg(m.P'='^0, "init") * '['
+local probe_close = m.Cmt(']' * m.C(m.P'='^0) * ']' * m.Cb("init"), function (_, pos, s1, s2)
+                                               attempts[#attempts + 1] = pos .. ':' .. s1 .. ':' .. s2
+                                               return s1 == s2 end)
+local probe_any = m.P(1)
+LUA
+}
+
+emit_probe_prebuilt_parts_tail() {
+  cat <<'LUA'
+attempts = {}
+c = probe_open * { probe_close + probe_any * m.V(1) } / 0
 print("PROBE", c:match'[==[]]====]]]]==]===[]', table.concat(attempts, ","))
 LUA
 }
@@ -965,10 +985,14 @@ probe_mode() {
     sed "1,4d;$((prefix_line + 1)),\$d" "${repo_root}/third_party/lpeg/test.lua"
     if [[ "${PROBE_PREBUILD_PATTERN:-0}" == "1" ]]; then
       emit_probe_prebuild
+    elif [[ "${PROBE_PREBUILD_PARTS:-0}" == "1" ]]; then
+      emit_probe_prebuild_parts
     fi
     emit_mode_body "${mode}"
     if [[ "${PROBE_PREBUILD_PATTERN:-0}" == "1" ]]; then
       emit_probe_prebuilt_match_tail
+    elif [[ "${PROBE_PREBUILD_PARTS:-0}" == "1" ]]; then
+      emit_probe_prebuilt_parts_tail
     else
       emit_probe_tail
     fi
