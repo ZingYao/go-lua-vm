@@ -73,10 +73,12 @@
 
 ## 第四阶段：C function 调用
 
-- [ ] 实现 `lua_CFunction` 到 Go VM callable 的包装。
+- [x] 实现 `lua_CFunction` 到 Go VM callable 的包装。
+  - [x] 当前覆盖 `nup == 0` 的 C function；C closure upvalue 后续随 registry/upvalue 阶段补齐。
 - [ ] 实现：
-  - [ ] `lua_pushcclosure`
-  - [ ] `lua_pushcfunction`
+  - [x] `lua_pushcclosure`
+    - [x] 当前覆盖 `nup == 0`，`nup > 0` 保持 no-op 以避免错误暴露半成品 closure。
+  - [x] `lua_pushcfunction`
   - [x] `lua_type`
   - [x] `lua_typename`
   - [x] `lua_toboolean`
@@ -206,3 +208,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：新增 integer 参数检查/转换 shim：`lua_tointegerx` 与 `luaL_checkinteger` 可读取 number/integer 栈值；当前不做字符串转数字，也不在失败时 longjmp，后续与 `luaL_error` 一并补齐。
 - 2026-07-06：新增字符串转换/检查 shim：`lua_tolstring` 与 `luaL_checklstring` 返回绑定到 native State handle 生命周期的 C 分配 buffer，支持 string 和 number-to-string；当前不回写 number 栈槽，失败时也暂不 longjmp，后续与 `luaL_error` 一并补齐。
 - 2026-07-06：新增类型、truthiness 和 number 转换 shim：`lua_type`、`lua_typename`、`lua_toboolean`、`lua_tonumberx` 可区分 `LUA_TNONE` 与 `nil`，并按 Lua 5.3 规则读取 boolean/number；当前 `lua_tonumberx` 只覆盖 integer/float number，不做字符串转数字，错误 longjmp 留到 `luaL_error` 阶段。
+- 2026-07-06：新增 `lua_CFunction` 最小包装：`lua_pushcclosure`/`lua_pushcfunction` 可把 `nup==0` 的 C 函数指针压为 Go VM 可调用 closure；调用时临时把 Go 参数压入 native State 栈，执行 C 函数后按返回数量取结果并恢复调用前栈顶。当前不支持 C closure upvalue，`nup>0` 保持 no-op，`lua_error`/`luaL_error` 和 C frame traceback 留到错误阶段。

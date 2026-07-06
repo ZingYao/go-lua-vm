@@ -151,6 +151,63 @@ func TestUnixPackageLoadLibMissingFixtureSymbol(t *testing.T) {
 	}
 }
 
+// TestUnixNativeLuaPushCClosureCallsResolvedFixture 验证解析出的 C 函数可包装为 Go closure。
+func TestUnixNativeLuaPushCClosureCallsResolvedFixture(t *testing.T) {
+	// fixture 的 luaopen_* 入口是符合 lua_CFunction ABI 的真实动态库符号，当前返回 0 个结果。
+	fixturePath := buildUnixNativeFixture(t)
+	library, err := openDynamicLibrary(fixturePath)
+	if err != nil {
+		// fixture 已构建成功，打开失败说明动态库 loader 退化。
+		t.Fatalf("open native fixture failed: %v", err)
+	}
+	defer func() {
+		if closeErr := library.close(); closeErr != nil {
+			// 动态库关闭失败需要暴露，避免隐藏句柄生命周期问题。
+			t.Fatalf("close native fixture failed: %v", closeErr)
+		}
+	}()
+	symbol, err := library.lookupSymbol("luaopen_glua_native_smoke")
+	if err != nil {
+		// 符号缺失会使 C function wrapper 无法验收。
+		t.Fatalf("lookup native fixture symbol failed: %v", err)
+	}
+
+	state := luaruntime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 C function wrapper。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	nativeLuaPushCClosure(luaState, symbol, 0)
+	closureValue := state.ValueAt(-1)
+	if closureValue.Kind != luaruntime.KindGoClosure {
+		// C function 必须被包装成当前 VM 可调用的 Go closure。
+		t.Fatalf("native C closure value = %#v, want Go closure", closureValue)
+	}
+	closure, ok := closureValue.Ref.(luaruntime.GoResultsFunction)
+	if !ok || closure == nil {
+		// 当前 wrapper 使用 GoResultsFunction 承接多返回值语义。
+		t.Fatalf("native C closure payload = %#v, want GoResultsFunction", closureValue.Ref)
+	}
+	results, err := closure(luaruntime.IntegerValue(1), luaruntime.StringValue("arg"))
+	if err != nil {
+		// fixture 返回 0，调用不应产生错误。
+		t.Fatalf("native C closure call failed: %v", err)
+	}
+	if len(results) != 0 {
+		// fixture luaopen_* 返回 0 个结果，wrapper 应保持空结果。
+		t.Fatalf("native C closure results = %#v, want empty", results)
+	}
+	if got := nativeLuaStackTop(luaState); got != 1 {
+		// 调用期间临时压入的参数必须在返回后恢复，只保留原本压入的 closure。
+		t.Fatalf("native C closure top after call = %d, want 1", got)
+	}
+}
+
 // TestDynamicLibraryExtensionDocumentsFixtureSuffix 验证 fixture 后缀选择保持平台可读。
 func TestDynamicLibraryExtensionDocumentsFixtureSuffix(t *testing.T) {
 	// 该测试锁定后缀策略，避免后续 cpath fixture 与构建脚本产生分歧。
