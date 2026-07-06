@@ -69,8 +69,8 @@
   - [x] `lua_createtable`
   - [x] `lua_setfield`
   - [x] `lua_getfield`
-  - [ ] `lua_gettable`
-    - [ ] LPeg 1.1.0 当前运行期探针阻塞在 `_lua_gettable`。
+  - [x] `lua_gettable`
+    - [x] 当前覆盖 table raw 查询、弹出栈顶 key 并压入结果；`__index` 元方法语义后续按真实模块需求扩展。
   - [x] `lua_rawset`
   - [x] `lua_next`
   - [x] `luaL_newlib`
@@ -126,6 +126,8 @@
   - [x] `lua_newuserdata`
   - [x] `lua_touserdata`
   - [x] `luaL_checkudata`
+  - [ ] `lua_getuservalue`
+    - [ ] LPeg 1.1.0 当前运行期探针阻塞在 `_lua_getuservalue`。
 - [ ] 实现 metatable：
   - [x] `luaL_newmetatable`
   - [x] `luaL_getmetatable`
@@ -299,3 +301,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：新增 `lua_compare` 基础比较 API；`LUA_OPEQ` 覆盖 raw equality，`LUA_OPLT` / `LUA_OPLE` 覆盖 number 与 string 基础比较，不可比较类型记录 pending error。LPeg 1.1.0 macOS arm64 运行期探针确认阻塞点已从 `_lua_compare` 前移到 `_lua_copy`，下一轮应补齐栈槽复制 API。
 - 2026-07-06：新增 `lua_copy` 栈槽复制 API；覆盖普通栈目标替换、不改变栈顶、无效索引 no-op，以及 C function 调用帧内正索引相对基址的复制语义。LPeg 1.1.0 macOS arm64 运行期探针确认阻塞点已从 `_lua_copy` 前移到 `_lua_getallocf`，下一轮应补齐 allocator 查询 API。
 - 2026-07-06：新增 `lua_getallocf` allocator 查询 API；返回 native shim 的 C heap `realloc/free` 分配器且 `ud == NULL`，native smoke fixture 新增 `alloc_roundtrip()` 覆盖 C 模块侧分配、扩容、释放。LPeg 1.1.0 macOS arm64 运行期探针确认阻塞点已从 `_lua_getallocf` 前移到 `_lua_gettable`，下一轮应补齐通用表读取 API。
+- 2026-07-06：新增 `lua_gettable` 通用 table 读取 API；覆盖栈顶 key 查询、弹 key、压结果、返回 Lua C API 类型编号，以及无效目标 no-op 的当前最小 shim 边界。LPeg 1.1.0 macOS arm64 运行期探针确认阻塞点已从 `_lua_gettable` 前移到 `_lua_getuservalue`，下一轮应补齐 userdata user value API。

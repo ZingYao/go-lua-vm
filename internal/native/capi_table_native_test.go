@@ -111,6 +111,94 @@ func TestNativeCAPITableFieldPrimitivesRejectInvalidTarget(t *testing.T) {
 	}
 }
 
+// TestNativeCAPIGetTableUsesStackKey 验证 lua_gettable 使用栈顶 key 读取并替换为结果。
+func TestNativeCAPIGetTableUsesStackKey(t *testing.T) {
+	// LPeg 会用 lua_gettable 查询普通 Lua table，本测试锁定最小 raw table 查询语义。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 gettable。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	nativeLuaCreateTable(luaState, 0, 2)
+	tableValue := state.ValueAt(1)
+	tableRef, ok := tableValue.Ref.(*runtime.Table)
+	if tableValue.Kind != runtime.KindTable || !ok || tableRef == nil {
+		// 栈底必须是 gettable 操作的 table。
+		t.Fatalf("table value = %#v, want table", tableValue)
+	}
+	tableRef.RawSetString("name", runtime.StringValue("glua"))
+	tableRef.RawSetInteger(2, runtime.IntegerValue(200))
+
+	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'n', 'a', 'm', 'e', 0}[0]))
+	typeCode := nativeLuaGetTable(luaState, 1)
+	if typeCode != nativeLuaTypeString {
+		// string key 命中时返回 string 类型编号。
+		t.Fatalf("lua_gettable string type = %d, want %d", typeCode, nativeLuaTypeString)
+	}
+	if got := nativeLuaStackTop(luaState); got != 2 {
+		// gettable 必须弹出 key 并压入 value，因此总栈高保持 table,value。
+		t.Fatalf("lua_gettable string top = %d, want 2", got)
+	}
+	if value := state.ValueAt(-1); value.Kind != runtime.KindString || value.String != "glua" {
+		// 栈顶必须是 table["name"] 的值。
+		t.Fatalf("lua_gettable string value = %#v, want glua", value)
+	}
+
+	nativeLuaSetTop(luaState, 1)
+	nativeLuaPushInteger(luaState, 2)
+	typeCode = nativeLuaGetTable(luaState, 1)
+	if typeCode != nativeLuaTypeNumber {
+		// integer key 命中 integer 值时返回 number 类型编号。
+		t.Fatalf("lua_gettable integer type = %d, want %d", typeCode, nativeLuaTypeNumber)
+	}
+	if value := state.ValueAt(-1); value.Kind != runtime.KindInteger || value.Integer != 200 {
+		// 栈顶必须是 table[2] 的值。
+		t.Fatalf("lua_gettable integer value = %#v, want 200", value)
+	}
+
+	nativeLuaSetTop(luaState, 1)
+	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'m', 'i', 's', 's', 0}[0]))
+	typeCode = nativeLuaGetTable(luaState, 1)
+	if typeCode != nativeLuaTypeNil {
+		// 缺失 key 应按 Lua table 语义压入 nil。
+		t.Fatalf("lua_gettable missing type = %d, want %d", typeCode, nativeLuaTypeNil)
+	}
+	if value := state.ValueAt(-1); !value.IsNil() {
+		// 缺失 key 的查询结果必须是 nil。
+		t.Fatalf("lua_gettable missing value = %#v, want nil", value)
+	}
+}
+
+// TestNativeCAPIGetTableRejectsInvalidTarget 验证 lua_gettable 对无效目标保持失败安全。
+func TestNativeCAPIGetTableRejectsInvalidTarget(t *testing.T) {
+	// 当前最小 shim 不做 api_check；非 table 目标保持 key 不被吞掉。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 invalid gettable。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	nativeLuaPushInteger(luaState, 1)
+	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'x', 0}[0]))
+	if typeCode := nativeLuaGetTable(luaState, 1); typeCode != nativeLuaTypeNone {
+		// 非 table 目标在当前阶段返回 none。
+		t.Fatalf("invalid lua_gettable type = %d, want %d", typeCode, nativeLuaTypeNone)
+	}
+	if got := nativeLuaStackTop(luaState); got != 2 {
+		// 无效目标不能弹出 key，避免掩盖后续错误边界。
+		t.Fatalf("invalid lua_gettable top = %d, want 2", got)
+	}
+}
+
 // TestNativeCAPIRawIntegerPrimitives 验证 lua_rawgeti/lua_rawseti 的整数 key raw 语义。
 func TestNativeCAPIRawIntegerPrimitives(t *testing.T) {
 	// 测试覆盖 table 数组区写入、读取、nil 删除和返回类型编号。

@@ -218,6 +218,7 @@ state := lua.NewStateWithOptions(options)
 - `luaL_getmetatable`
 - `lua_setmetatable`
 - `lua_getmetatable`
+- `lua_getuservalue`
 - `luaL_checkudata`
 - `luaL_ref`
 - `luaL_unref`
