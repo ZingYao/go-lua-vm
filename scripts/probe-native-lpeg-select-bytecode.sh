@@ -32,6 +32,36 @@ if count ~= 2 then
 end
 LUA
       ;;
+    fixed-result-select-one-string-error-number)
+      cat <<'LUA'
+local count = select("#", "alpha")
+if count ~= 1 then
+  error("unexpected one-string select count")
+end
+local skipped = error
+local payload = 17
+LUA
+      ;;
+    fixed-result-select-two-numbers-error-number)
+      cat <<'LUA'
+local count = select("#", 17, 25)
+if count ~= 2 then
+  error("unexpected numeric select count")
+end
+local skipped = error
+local payload = 17
+LUA
+      ;;
+    fixed-result-select-two-booleans-error-number)
+      cat <<'LUA'
+local count = select("#", true, false)
+if count ~= 2 then
+  error("unexpected boolean select count")
+end
+local skipped = error
+local payload = 17
+LUA
+      ;;
     select-count-discard)
       cat <<'LUA'
 select("#", "alpha", "beta")
@@ -258,6 +288,36 @@ if same then
 end
 LUA
       ;;
+    fixed-result-rawequal-strings-false-error-number)
+      cat <<'LUA'
+local count = rawequal("alpha", "beta")
+if count ~= false then
+  error("unexpected rawequal false result")
+end
+local skipped = error
+local payload = 17
+LUA
+      ;;
+    fixed-result-rawequal-strings-true-error-number)
+      cat <<'LUA'
+local count = rawequal("alpha", "alpha")
+if count ~= true then
+  error("unexpected rawequal true result")
+end
+local skipped = error
+local payload = 17
+LUA
+      ;;
+    fixed-result-rawequal-numbers-false-error-number)
+      cat <<'LUA'
+local count = rawequal(17, 25)
+if count ~= false then
+  error("unexpected numeric rawequal false result")
+end
+local skipped = error
+local payload = 17
+LUA
+      ;;
     builtin-tonumber-string-base)
       cat <<'LUA'
 local number = tonumber("17", 10)
@@ -275,6 +335,9 @@ LUA
 
 modes=(
   select-count-consume
+  fixed-result-select-one-string-error-number
+  fixed-result-select-two-numbers-error-number
+  fixed-result-select-two-booleans-error-number
   select-count-discard
   select-count-table-constructor
   error-message-no-select
@@ -305,6 +368,9 @@ modes=(
   select-count-go-arg-rawequal
   select-count-arith-add-zero
   builtin-rawequal-two-strings
+  fixed-result-rawequal-strings-false-error-number
+  fixed-result-rawequal-strings-true-error-number
+  fixed-result-rawequal-numbers-false-error-number
   builtin-tonumber-string-base
 )
 
