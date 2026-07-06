@@ -199,6 +199,110 @@ func TestNativeCAPIGetTableRejectsInvalidTarget(t *testing.T) {
 	}
 }
 
+// TestNativeCAPISetTableUsesStackKeyAndValue 验证 lua_settable 使用栈顶 key/value 写入 table。
+func TestNativeCAPISetTableUsesStackKeyAndValue(t *testing.T) {
+	// LPeg 构建位置表时依赖 lua_settable 写入普通 table。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 settable。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	nativeLuaCreateTable(luaState, 0, 1)
+	tableValue := state.ValueAt(1)
+	tableRef, ok := tableValue.Ref.(*runtime.Table)
+	if tableValue.Kind != runtime.KindTable || !ok || tableRef == nil {
+		// 栈底必须是 settable 操作的 table。
+		t.Fatalf("table value = %#v, want table", tableValue)
+	}
+	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'n', 'a', 'm', 'e', 0}[0]))
+	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'g', 'l', 'u', 'a', 0}[0]))
+	nativeLuaSetTable(luaState, 1)
+	if got := nativeLuaStackTop(luaState); got != 1 {
+		// settable 必须弹出 key/value，只保留 table。
+		t.Fatalf("lua_settable top = %d, want 1", got)
+	}
+	if value := tableRef.RawGetString("name"); value.Kind != runtime.KindString || value.String != "glua" {
+		// table["name"] 必须写入栈顶 value。
+		t.Fatalf("table.name = %#v, want glua", value)
+	}
+
+	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'n', 'a', 'm', 'e', 0}[0]))
+	nativeLuaPushNil(luaState)
+	nativeLuaSetTable(luaState, 1)
+	if value := tableRef.RawGetString("name"); !value.IsNil() {
+		// 既有 raw 字段写入 nil 应删除该字段，不触发 __newindex。
+		t.Fatalf("table.name after nil settable = %#v, want nil", value)
+	}
+}
+
+// TestNativeCAPISetTableUsesTableNewIndex 验证 lua_settable 遵守 table 型 __newindex。
+func TestNativeCAPISetTableUsesTableNewIndex(t *testing.T) {
+	// 当前 native shim 使用 runtime.Table.Set，至少覆盖 table 型 __newindex 链。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+	sourceTable := runtime.NewTable()
+	targetTable := runtime.NewTable()
+	metatable := runtime.NewTable()
+	metatable.RawSetString("__newindex", runtime.ReferenceValue(runtime.KindTable, targetTable))
+	sourceTable.SetMetatable(metatable)
+	nativeLuaPushValue(luaState, runtime.ReferenceValue(runtime.KindTable, sourceTable))
+
+	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'k', 0}[0]))
+	nativeLuaPushInteger(luaState, 7)
+	nativeLuaSetTable(luaState, 1)
+	if got := nativeLuaStackTop(luaState); got != 1 {
+		// settable 必须消费 key/value。
+		t.Fatalf("newindex lua_settable top = %d, want 1", got)
+	}
+	if value := sourceTable.RawGetString("k"); !value.IsNil() {
+		// raw 未命中且存在 __newindex table 时，源 table 不应落盘。
+		t.Fatalf("source table k = %#v, want nil", value)
+	}
+	if value := targetTable.RawGetString("k"); !value.RawEqual(runtime.IntegerValue(7)) {
+		// 写入必须转发到 __newindex table。
+		t.Fatalf("target table k = %#v, want 7", value)
+	}
+}
+
+// TestNativeCAPISetTableRejectsInvalidTarget 验证 lua_settable 对无效目标保持失败安全。
+func TestNativeCAPISetTableRejectsInvalidTarget(t *testing.T) {
+	// 当前最小 shim 不做 api_check；非 table 目标保持 key/value 不被吞掉。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	nativeLuaPushInteger(luaState, 1)
+	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'x', 0}[0]))
+	nativeLuaPushInteger(luaState, 2)
+	nativeLuaSetTable(luaState, 1)
+	if got := nativeLuaStackTop(luaState); got != 3 {
+		// 无效目标不能弹出 key/value，避免掩盖后续错误边界。
+		t.Fatalf("invalid lua_settable top = %d, want 3", got)
+	}
+	if errorObject, hasError := takeNativeStatePendingError(luaState); hasError {
+		// 无效目标 no-op 不应留下 pending error。
+		t.Fatalf("invalid lua_settable pending error = %#v", errorObject)
+	}
+}
+
 // TestNativeCAPIRawIntegerPrimitives 验证 lua_rawgeti/lua_rawseti 的整数 key raw 语义。
 func TestNativeCAPIRawIntegerPrimitives(t *testing.T) {
 	// 测试覆盖 table 数组区写入、读取、nil 删除和返回类型编号。
