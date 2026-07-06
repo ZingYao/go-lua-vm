@@ -461,6 +461,33 @@ LUA
   rg '^PROBE' "${output}" || tail -n 3 "${output}"
 }
 
+run_prefix620_loadlib_branch_probe() {
+  local mode="$1"
+  local label="$2"
+  local target_path="${build_dir}/no_such_native_module${module_extension}"
+  local source="${work_dir}/${label}.lua"
+  local output="${work_dir}/${label}.out"
+
+  {
+    printf 'package.path = "%s"\n' "${repo_root}/third_party/lpeg/?.lua"
+    printf 'package.cpath = "%s"\n' "${build_dir}/?${module_extension}"
+    sed "1,4d;621,\$d" "${repo_root}/third_party/lpeg/test.lua"
+    cat <<LUA
+local f, message, where = package.loadlib("${target_path}", "luaopen_missing")
+assert(f == nil and where == "open", tostring(message) .. " / " .. tostring(where))
+assert(tostring(message):find("${mode}", 1, true), tostring(message))
+LUA
+    emit_probe_tail
+  } >"${source}"
+
+  echo "run prefix620 + package.loadlib branch diagnostic ${mode} probe"
+  GLUA_PACKAGE_LOADLIB_DIAGNOSTIC="${mode}" \
+    GLUA_PACKAGE_LOADLIB_DIAGNOSTIC_MATCH="no_such_native_module" \
+    "${glua_bin}" "${source}" >"${output}"
+  printf '%s ' "${label}"
+  rg '^PROBE' "${output}" || tail -n 3 "${output}"
+}
+
 run_prefix620_loadlib_existing_symbol_probe() {
   local source="${work_dir}/prefix620_loadlib_existing_symbol.lua"
   local output="${work_dir}/prefix620_loadlib_existing_symbol.out"
@@ -532,6 +559,8 @@ run_prefix620_loader_diagnostic_probe dynamic-error prefix620_loader_diag_dynami
 run_prefix620_loader_diagnostic_probe plain-error prefix620_loader_diag_plain_error "${build_dir}/no_such_native_module${module_extension}" luaopen_missing no_such_native_module open
 run_prefix620_loader_diagnostic_probe noncallable prefix620_loader_diag_noncallable "${build_dir}/no_such_native_module${module_extension}" luaopen_missing no_such_native_module init "not return a callable"
 run_prefix620_loader_diagnostic_probe after-open-dynamic-error prefix620_loader_diag_after_open_dynamic_error "${smoke_module_path}" luaopen_glua_native_smoke glua_native_smoke open
+run_prefix620_loadlib_branch_probe before-loader-fixed prefix620_loadlib_branch_before_loader_fixed
+run_prefix620_loadlib_branch_probe after-loader-fixed prefix620_loadlib_branch_after_loader_fixed
 run_prefix620_loadlib_existing_symbol_probe
 run_prefix620_parity_matches_loadlib_missing_file_probe
 

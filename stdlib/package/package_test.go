@@ -439,6 +439,49 @@ func TestLoadLibKeepsTripleReturnForDynamicLoaderFailure(t *testing.T) {
 	}
 }
 
+// TestLoadLibDiagnosticFailureModes 验证 LPeg 定位用 loadlib 诊断模式只改变匹配路径。
+func TestLoadLibDiagnosticFailureModes(t *testing.T) {
+	// 诊断模式只应命中指定文件名片段，避免误伤其它 package.loadlib 调用。
+	t.Setenv("GLUA_PACKAGE_LOADLIB_DIAGNOSTIC_MATCH", "glua_loadlib_diag_target")
+
+	callCount := 0
+	environment := NewEnvironmentWithLoaders(nil, func(filename string, symbol string) (runtime.Value, error) {
+		// loader 调用次数用于区分 before/after 两个诊断阶段。
+		callCount++
+		return runtime.NilValue(), DynamicLibraryError{Category: "init", Message: "loader should be bypassed by fixed diagnostic"}
+	})
+
+	t.Setenv("GLUA_PACKAGE_LOADLIB_DIAGNOSTIC", "before-loader-fixed")
+	values, err := environment.LoadLib(runtime.StringValue("/tmp/glua_loadlib_diag_target.so"), runtime.StringValue("luaopen_diag"))
+	if err != nil {
+		// 固定诊断三返回不应抛出 Lua error。
+		t.Fatalf("before-loader-fixed loadlib returned error: %v", err)
+	}
+	if callCount != 0 {
+		// before-loader-fixed 必须在宿主 loader 调用前返回。
+		t.Fatalf("before-loader-fixed callCount = %d, want 0", callCount)
+	}
+	if len(values) != 3 || !values[0].IsNil() || values[2].String != "open" || !strings.Contains(values[1].String, "before-loader-fixed") {
+		// 诊断三返回必须保持 nil,message,open 形态并携带模式名。
+		t.Fatalf("before-loader-fixed values = %#v", values)
+	}
+
+	t.Setenv("GLUA_PACKAGE_LOADLIB_DIAGNOSTIC", "after-loader-fixed")
+	values, err = environment.LoadLib(runtime.StringValue("/tmp/glua_loadlib_diag_target.so"), runtime.StringValue("luaopen_diag"))
+	if err != nil {
+		// after-loader-fixed 也应通过三返回表达失败。
+		t.Fatalf("after-loader-fixed loadlib returned error: %v", err)
+	}
+	if callCount != 1 {
+		// after-loader-fixed 必须先调用一次宿主 loader，再改写为固定三返回。
+		t.Fatalf("after-loader-fixed callCount = %d, want 1", callCount)
+	}
+	if len(values) != 3 || !values[0].IsNil() || values[2].String != "open" || !strings.Contains(values[1].String, "after-loader-fixed") {
+		// 诊断三返回必须使用固定文本，而不是 loader 的错误文本。
+		t.Fatalf("after-loader-fixed values = %#v", values)
+	}
+}
+
 // TestCLoadingPolicyDocumentsUnsupportedDynamicLibraries 验证内置 C 动态库 loader 的固定策略。
 //
 // 本项目默认构建纯 Go 且禁用 CGO，因此默认 loadlib、C searcher 和 C root searcher 都必须明确不支持。

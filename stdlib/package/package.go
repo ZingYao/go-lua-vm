@@ -471,7 +471,15 @@ func (environment *Environment) LoadLib(args ...runtime.Value) ([]runtime.Value,
 		// 第二个参数错误直接返回。
 		return nil, err
 	}
+	if loadLibDiagnosticMode() == "before-loader-fixed" && loadLibDiagnosticApplies(filename) {
+		// 诊断模式在调用宿主 loader 前直接返回三返回，用于隔离 LoadLib 固定失败分支。
+		return diagnosticLoadLibFailure(filename, "before-loader-fixed"), nil
+	}
 	loader, loadErr := environment.loadDynamicLibrary(filename, symbol)
+	if loadLibDiagnosticMode() == "after-loader-fixed" && loadLibDiagnosticApplies(filename) {
+		// 诊断模式已调用宿主 loader，但跳过 dynamicLibraryFailure，直接返回固定三返回。
+		return diagnosticLoadLibFailure(filename, "after-loader-fixed"), nil
+	}
 	if loadErr == nil && (loader.Kind == runtime.KindGoClosure || loader.Kind == runtime.KindLuaClosure) {
 		// 宿主 loader 返回 Lua 可调用函数时，package.loadlib 成功。
 		return []runtime.Value{loader}, nil
@@ -486,6 +494,37 @@ func (environment *Environment) LoadLib(args ...runtime.Value) ([]runtime.Value,
 		runtime.StringValue(message),
 		runtime.StringValue(category),
 	}, nil
+}
+
+// loadLibDiagnosticMode 返回 package.loadlib 失败分支诊断模式。
+//
+// 该环境变量只供 LPeg/native loader 边界定位脚本使用，不属于公开 API；未设置时不改变默认语义。
+func loadLibDiagnosticMode() string {
+	// 每次 loadlib 调用时读取环境变量，便于同一个 glua 二进制执行不同诊断脚本。
+	return os.Getenv("GLUA_PACKAGE_LOADLIB_DIAGNOSTIC")
+}
+
+// loadLibDiagnosticApplies 判断当前 filename 是否命中 package.loadlib 诊断范围。
+//
+// GLUA_PACKAGE_LOADLIB_DIAGNOSTIC_MATCH 为空时诊断模式影响全部 loadlib 请求；非空时只匹配包含该片段的路径。
+func loadLibDiagnosticApplies(filename string) bool {
+	// 文件片段为空时允许手工调试直接覆盖所有 loadlib 请求。
+	filenameFragment := os.Getenv("GLUA_PACKAGE_LOADLIB_DIAGNOSTIC_MATCH")
+	if filenameFragment == "" {
+		// 空匹配条件表示调用者明确要让诊断模式覆盖全部请求。
+		return true
+	}
+	return strings.Contains(filename, filenameFragment)
+}
+
+// diagnosticLoadLibFailure 构造 package.loadlib 兼容的固定诊断三返回。
+func diagnosticLoadLibFailure(filename string, mode string) []runtime.Value {
+	// 诊断返回保持 nil,message,"open" 形态，方便与真实 native loader 失败路径对照。
+	return []runtime.Value{
+		runtime.NilValue(),
+		runtime.StringValue(fmt.Sprintf("diagnostic package.loadlib failure at %s for %q", mode, filename)),
+		runtime.StringValue("open"),
+	}
 }
 
 // SearchPath 实现 Lua 5.3 `package.searchpath` 的模板解析与文件查找语义。
