@@ -451,8 +451,23 @@ func TestLoadLibDiagnosticFailureModes(t *testing.T) {
 		return runtime.NilValue(), DynamicLibraryError{Category: "init", Message: "loader should be bypassed by fixed diagnostic"}
 	})
 
-	t.Setenv("GLUA_PACKAGE_LOADLIB_DIAGNOSTIC", "before-loader-fixed")
+	t.Setenv("GLUA_PACKAGE_LOADLIB_DIAGNOSTIC", "before-args-fixed")
 	values, err := environment.LoadLib(runtime.StringValue("/tmp/glua_loadlib_diag_target.so"), runtime.StringValue("luaopen_diag"))
+	if err != nil {
+		// 参数解析前固定诊断三返回不应抛出 Lua error。
+		t.Fatalf("before-args-fixed loadlib returned error: %v", err)
+	}
+	if callCount != 0 {
+		// before-args-fixed 必须在正式参数解析和宿主 loader 调用前返回。
+		t.Fatalf("before-args-fixed callCount = %d, want 0", callCount)
+	}
+	if len(values) != 3 || !values[0].IsNil() || values[2].String != "open" || !strings.Contains(values[1].String, "before-args-fixed") {
+		// 诊断三返回必须保持 nil,message,open 形态并携带模式名。
+		t.Fatalf("before-args-fixed values = %#v", values)
+	}
+
+	t.Setenv("GLUA_PACKAGE_LOADLIB_DIAGNOSTIC", "before-loader-fixed")
+	values, err = environment.LoadLib(runtime.StringValue("/tmp/glua_loadlib_diag_target.so"), runtime.StringValue("luaopen_diag"))
 	if err != nil {
 		// 固定诊断三返回不应抛出 Lua error。
 		t.Fatalf("before-loader-fixed loadlib returned error: %v", err)
@@ -464,6 +479,36 @@ func TestLoadLibDiagnosticFailureModes(t *testing.T) {
 	if len(values) != 3 || !values[0].IsNil() || values[2].String != "open" || !strings.Contains(values[1].String, "before-loader-fixed") {
 		// 诊断三返回必须保持 nil,message,open 形态并携带模式名。
 		t.Fatalf("before-loader-fixed values = %#v", values)
+	}
+
+	t.Setenv("GLUA_PACKAGE_LOADLIB_DIAGNOSTIC", "after-args-one-return")
+	values, err = environment.LoadLib(runtime.StringValue("/tmp/glua_loadlib_diag_target.so"), runtime.StringValue("luaopen_diag"))
+	if err != nil {
+		// 单返回诊断不应抛出 Lua error。
+		t.Fatalf("after-args-one-return loadlib returned error: %v", err)
+	}
+	if callCount != 0 {
+		// after-args-one-return 仍应在宿主 loader 调用前返回。
+		t.Fatalf("after-args-one-return callCount = %d, want 0", callCount)
+	}
+	if len(values) != 1 || !values[0].IsNil() {
+		// 单返回诊断必须只返回 nil。
+		t.Fatalf("after-args-one-return values = %#v", values)
+	}
+
+	t.Setenv("GLUA_PACKAGE_LOADLIB_DIAGNOSTIC", "after-args-two-return")
+	values, err = environment.LoadLib(runtime.StringValue("/tmp/glua_loadlib_diag_target.so"), runtime.StringValue("luaopen_diag"))
+	if err != nil {
+		// 双返回诊断不应抛出 Lua error。
+		t.Fatalf("after-args-two-return loadlib returned error: %v", err)
+	}
+	if callCount != 0 {
+		// after-args-two-return 仍应在宿主 loader 调用前返回。
+		t.Fatalf("after-args-two-return callCount = %d, want 0", callCount)
+	}
+	if len(values) != 2 || !values[0].IsNil() || !strings.Contains(values[1].String, "after-args-two-return") {
+		// 双返回诊断必须返回 nil,message 并携带模式名。
+		t.Fatalf("after-args-two-return values = %#v", values)
 	}
 
 	t.Setenv("GLUA_PACKAGE_LOADLIB_DIAGNOSTIC", "after-loader-fixed")

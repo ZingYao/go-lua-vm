@@ -460,6 +460,13 @@ func (environment *Environment) Require(args ...runtime.Value) ([]runtime.Value,
 // filename 和 symbol 参数都必须是 string。当前默认构建不绑定外部动态库，内置 loadlib
 // 返回 nil 与错误文本；宿主程序可通过覆盖 package.loadlib 提供自定义实现。
 func (environment *Environment) LoadLib(args ...runtime.Value) ([]runtime.Value, error) {
+	if loadLibDiagnosticMode() == "before-args-fixed" {
+		// 诊断模式在正式参数校验前只读取原始字符串参数，用于隔离参数解析是否触发 LPeg 状态退化。
+		if filename, ok := loadLibDiagnosticFilename(args); ok && loadLibDiagnosticApplies(filename) {
+			// 命中目标路径时提前返回固定三返回，避免影响前置 require("lpeg")。
+			return diagnosticLoadLibFailure(filename, "before-args-fixed"), nil
+		}
+	}
 	// filename 必须是 string。
 	filename, err := stringArgument(args, 1, "loadlib")
 	if err != nil {
@@ -471,9 +478,19 @@ func (environment *Environment) LoadLib(args ...runtime.Value) ([]runtime.Value,
 		// 第二个参数错误直接返回。
 		return nil, err
 	}
-	if loadLibDiagnosticMode() == "before-loader-fixed" && loadLibDiagnosticApplies(filename) {
-		// 诊断模式在调用宿主 loader 前直接返回三返回，用于隔离 LoadLib 固定失败分支。
-		return diagnosticLoadLibFailure(filename, "before-loader-fixed"), nil
+	if loadLibDiagnosticApplies(filename) {
+		// 诊断模式在合法参数解析后、宿主 loader 调用前返回，用于区分参数解析和返回值形态影响。
+		switch loadLibDiagnosticMode() {
+		case "before-loader-fixed":
+			// 固定三返回用于与真实 loadlib open 失败路径对照。
+			return diagnosticLoadLibFailure(filename, "before-loader-fixed"), nil
+		case "after-args-one-return":
+			// 单返回 nil 用于判断失败三返回的返回数量是否触发 LPeg 后续退化。
+			return []runtime.Value{runtime.NilValue()}, nil
+		case "after-args-two-return":
+			// 双返回 nil,message 用于判断 category 第三返回是否触发 LPeg 后续退化。
+			return diagnosticLoadLibPartialFailure(filename, "after-args-two-return"), nil
+		}
 	}
 	loader, loadErr := environment.loadDynamicLibrary(filename, symbol)
 	if loadLibDiagnosticMode() == "after-loader-fixed" && loadLibDiagnosticApplies(filename) {
@@ -504,6 +521,21 @@ func loadLibDiagnosticMode() string {
 	return os.Getenv("GLUA_PACKAGE_LOADLIB_DIAGNOSTIC")
 }
 
+// loadLibDiagnosticFilename 从原始参数中读取诊断路径。
+//
+// 该 helper 不执行 Lua 参数错误语义，只服务于 before-args-fixed 诊断分支，避免误把参数解析本身纳入观测窗口。
+func loadLibDiagnosticFilename(args []runtime.Value) (string, bool) {
+	if len(args) == 0 {
+		// 参数缺失时无法做路径匹配，交回正常 loadlib 参数错误路径。
+		return "", false
+	}
+	if args[0].Kind != runtime.KindString {
+		// 非字符串参数不能作为诊断路径，保持普通参数校验语义。
+		return "", false
+	}
+	return args[0].String, true
+}
+
 // loadLibDiagnosticApplies 判断当前 filename 是否命中 package.loadlib 诊断范围。
 //
 // GLUA_PACKAGE_LOADLIB_DIAGNOSTIC_MATCH 为空时诊断模式影响全部 loadlib 请求；非空时只匹配包含该片段的路径。
@@ -515,6 +547,15 @@ func loadLibDiagnosticApplies(filename string) bool {
 		return true
 	}
 	return strings.Contains(filename, filenameFragment)
+}
+
+// diagnosticLoadLibPartialFailure 构造 package.loadlib 诊断用 nil,message 双返回。
+func diagnosticLoadLibPartialFailure(filename string, mode string) []runtime.Value {
+	// 双返回保留 message 文本，便于脚本确认命中的诊断分支。
+	return []runtime.Value{
+		runtime.NilValue(),
+		runtime.StringValue(fmt.Sprintf("diagnostic package.loadlib failure at %s for %q", mode, filename)),
+	}
 }
 
 // diagnosticLoadLibFailure 构造 package.loadlib 兼容的固定诊断三返回。
