@@ -135,6 +135,36 @@ func TestGCRootsClosureUpvalueRoot(t *testing.T) {
 	}
 }
 
+// TestGCRootsLuaClosureUpvalueCellCurrentValue 验证 Lua closure root 使用 upvalue cell 当前值。
+//
+// 共享 upvalue cell 是闭包运行期真实读写来源；创建时 Upvalues 快照可能在外层局部变量变化后过期。
+// GC root 采样必须扫描当前 cell，避免构造期或闭包回调中被外层局部更新的新对象失根。
+func TestGCRootsLuaClosureUpvalueCellCurrentValue(t *testing.T) {
+	state := NewState()
+	staleTable := NewTable()
+	currentTable := NewTable()
+	closure := &LuaClosure{
+		Upvalues:     []Value{ReferenceValue(KindTable, staleTable)},
+		UpvalueCells: []*UpvalueCell{NewClosedUpvalueCell(ReferenceValue(KindTable, currentTable))},
+	}
+	thread := state.NewThread(ReferenceValue(KindLuaClosure, closure))
+
+	snapshot := state.SnapshotGCRoots()
+	closureRoots := snapshot.Batches[GCRootTypeClosureUpvalue]
+	if !containsValue(closureRoots, thread.function) {
+		// 闭包本体仍应作为 closure root 出现。
+		t.Fatalf("closure root should include thread entry closure")
+	}
+	if !containsValue(closureRoots, ReferenceValue(KindTable, currentTable)) {
+		// 当前 upvalue cell 值必须进入 root，而不是只保留创建时快照。
+		t.Fatalf("closure roots should include current upvalue cell value: %#v", closureRoots)
+	}
+	if containsValue(closureRoots, ReferenceValue(KindTable, staleTable)) {
+		// 共享 cell 存在时过期快照不应继续作为当前 upvalue 强根。
+		t.Fatalf("closure roots should not retain stale upvalue snapshot: %#v", closureRoots)
+	}
+}
+
 // TestGCRootsGoClosureWithUpvaluesRoot 验证显式 Go closure upvalue 被纳入根采样。
 //
 // native C closure、string.gmatch 与 dofile trampoline 都会使用 GoClosureWithUpvalues；这些
@@ -312,6 +342,40 @@ func TestSweepWeakTablesKeepsGoClosureUpvalueValues(t *testing.T) {
 	if got := weakValueTable.RawGetString("from-go-upvalue"); got.IsNil() {
 		// Go closure upvalue 间接引用的对象必须保活 weak value 项。
 		t.Fatalf("weak value reachable through Go closure upvalue was removed")
+	}
+}
+
+// TestSweepWeakTablesKeepsLuaClosureUpvalueCellValues 验证 Lua closure upvalue cell 保活 weak value。
+//
+// 内层 Lua closure 捕获外层局部后，外层局部可能在闭包创建后改写；weak sweep 必须跟随共享
+// cell 的当前值，而不是只扫描创建时 Upvalues 快照。
+func TestSweepWeakTablesKeepsLuaClosureUpvalueCellValues(t *testing.T) {
+	state := NewState()
+	weakValueTable := NewTable()
+	weakMetatable := NewTable()
+	weakMetatable.RawSetString("__mode", StringValue("v"))
+	weakValueTable.SetMetatable(weakMetatable)
+	state.SetGlobal("weak", ReferenceValue(KindTable, weakValueTable))
+
+	upvalueTarget := NewTable()
+	weakValueTable.RawSetString("from-lua-upvalue-cell", ReferenceValue(KindTable, upvalueTarget))
+
+	upvalueRoot := NewTable()
+	upvalueRoot.RawSetString("target", ReferenceValue(KindTable, upvalueTarget))
+	staleRoot := NewTable()
+	closure := &LuaClosure{
+		Upvalues:     []Value{ReferenceValue(KindTable, staleRoot)},
+		UpvalueCells: []*UpvalueCell{NewClosedUpvalueCell(ReferenceValue(KindTable, upvalueRoot))},
+	}
+	if err := state.Push(ReferenceValue(KindLuaClosure, closure)); err != nil {
+		// Lua closure 需要作为主栈强根进入 weak sweep。
+		t.Fatalf("push Lua closure failed: %v", err)
+	}
+
+	state.SweepWeakTables()
+	if got := weakValueTable.RawGetString("from-lua-upvalue-cell"); got.IsNil() {
+		// 当前 upvalue cell 间接引用的对象必须保活 weak value 项。
+		t.Fatalf("weak value reachable through Lua closure upvalue cell was removed")
 	}
 }
 

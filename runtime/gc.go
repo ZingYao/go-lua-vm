@@ -1222,25 +1222,20 @@ func (state *State) valueStronglyReferencesTable(value Value, target Value, visi
 		return true
 	}
 	if value.Kind == KindLuaClosure {
-		if closure, ok := value.Ref.(*LuaClosure); ok && closure != nil {
-			if visitedClosures[closure] {
-				// 闭包/upvalue 图可能自引用，已访问闭包不能继续递归。
-				return false
-			}
-			visitedClosures[closure] = true
-			// Lua closure 的 upvalue 可能间接持有目标 table。
-			for index := range closure.Upvalues {
-				if state.valueStronglyReferencesTable(closure.Upvalues[index], target, visitedTables, visitedClosures) {
-					// upvalue 快照命中目标 table。
-					return true
-				}
-			}
-			for index := range closure.UpvalueCells {
-				cell := closure.UpvalueCells[index]
-				if cell != nil && state.valueStronglyReferencesTable(cell.Value(), target, visitedTables, visitedClosures) {
-					// 共享 upvalue cell 当前值命中目标 table。
-					return true
-				}
+		upvalues, visitKey, ok := closureUpvalueValues(value)
+		if !ok {
+			// 损坏 Lua closure 无法间接命中目标 table。
+			return false
+		}
+		if visitedClosures[visitKey] {
+			// 闭包/upvalue 图可能自引用，已访问闭包不能继续递归。
+			return false
+		}
+		visitedClosures[visitKey] = true
+		for index := range upvalues {
+			if state.valueStronglyReferencesTable(upvalues[index], target, visitedTables, visitedClosures) {
+				// 当前 upvalue 值命中目标 table。
+				return true
 			}
 		}
 	}
@@ -1444,26 +1439,20 @@ func (state *State) valueReferencesTable(value Value, target *Table, visitedTabl
 		}
 		return false
 	case KindLuaClosure:
-		// Lua closure 需要扫描 upvalue 快照和共享 cell。
-		closure, ok := value.Ref.(*LuaClosure)
-		if !ok || closure == nil {
+		// Lua closure 需要扫描当前 upvalue 值。
+		upvalues, visitKey, ok := closureUpvalueValues(value)
+		if !ok {
 			// 损坏闭包引用无法继续扫描。
 			return false
 		}
-		if visitedClosures[closure] {
+		if visitedClosures[visitKey] {
 			// 循环闭包图只扫描一次。
 			return false
 		}
-		visitedClosures[closure] = true
-		for index := range closure.Upvalues {
-			if state.valueReferencesTable(closure.Upvalues[index], target, visitedTables, visitedClosures) {
-				// upvalue 快照间接命中目标 table。
-				return true
-			}
-		}
-		for index := range closure.UpvalueCells {
-			if closure.UpvalueCells[index] != nil && state.valueReferencesTable(closure.UpvalueCells[index].Value(), target, visitedTables, visitedClosures) {
-				// 共享 upvalue cell 间接命中目标 table。
+		visitedClosures[visitKey] = true
+		for index := range upvalues {
+			if state.valueReferencesTable(upvalues[index], target, visitedTables, visitedClosures) {
+				// 当前 upvalue 值间接命中目标 table。
 				return true
 			}
 		}
@@ -1540,14 +1529,14 @@ func (state *State) collectStrongReferencesFromValue(value Value, strongRefs map
 		}
 	case KindLuaClosure:
 		// Lua closure 的 upvalue 是强边。
-		closure, ok := value.Ref.(*LuaClosure)
-		if !ok || closure == nil {
+		upvalues, _, ok := closureUpvalueValues(value)
+		if !ok {
 			// 损坏闭包引用无法继续扫描。
 			return
 		}
-		for index := range closure.Upvalues {
+		for index := range upvalues {
 			// upvalue 继续按强根递归。
-			state.collectStrongReferencesFromValue(closure.Upvalues[index], strongRefs, visited)
+			state.collectStrongReferencesFromValue(upvalues[index], strongRefs, visited)
 		}
 	case KindGoClosure:
 		// Go closure with explicit upvalues 的 upvalue 是强边。
@@ -1693,14 +1682,14 @@ func (state *State) expandEphemeronFromValue(value Value, strongRefs map[tableKe
 		return changed
 	case KindLuaClosure:
 		// closure upvalue 可能包含 weak-key table。
-		closure, ok := value.Ref.(*LuaClosure)
-		if !ok || closure == nil {
+		upvalues, _, ok := closureUpvalueValues(value)
+		if !ok {
 			// 损坏闭包引用无法传播。
 			return false
 		}
 		changed := false
-		for index := range closure.Upvalues {
-			if state.expandEphemeronFromValue(closure.Upvalues[index], strongRefs, visited) {
+		for index := range upvalues {
+			if state.expandEphemeronFromValue(upvalues[index], strongRefs, visited) {
 				changed = true
 			}
 		}
@@ -1765,15 +1754,15 @@ func (state *State) sweepWeakTablesFromValue(value Value, visited map[*Table]boo
 		return state.sweepWeakTableGraph(table, visited, strongRefs)
 	case KindLuaClosure:
 		// Lua closure 的 upvalue 可能间接持有弱表。
-		closure, ok := value.Ref.(*LuaClosure)
-		if !ok || closure == nil {
+		upvalues, _, ok := closureUpvalueValues(value)
+		if !ok {
 			// 损坏闭包引用无法继续扫描。
 			return 0
 		}
 		removed := 0
-		for index := range closure.Upvalues {
+		for index := range upvalues {
 			// 逐个 upvalue 递归查找弱表。
-			removed += state.sweepWeakTablesFromValue(closure.Upvalues[index], visited, strongRefs)
+			removed += state.sweepWeakTablesFromValue(upvalues[index], visited, strongRefs)
 		}
 		return removed
 	case KindGoClosure:
@@ -1816,15 +1805,15 @@ func (state *State) sweepWeakValuesFromValue(value Value, visited map[*Table]boo
 		return state.sweepWeakValueTableGraph(table, visited, strongRefs, allowWeakKV)
 	case KindLuaClosure:
 		// Lua closure 的 upvalue 可能间接持有 weak value 表。
-		closure, ok := value.Ref.(*LuaClosure)
-		if !ok || closure == nil {
+		upvalues, _, ok := closureUpvalueValues(value)
+		if !ok {
 			// 损坏闭包引用无法继续扫描。
 			return 0
 		}
 		removed := 0
-		for index := range closure.Upvalues {
+		for index := range upvalues {
 			// 逐个 upvalue 递归查找 weak value 表。
-			removed += state.sweepWeakValuesFromValue(closure.Upvalues[index], visited, strongRefs, allowWeakKV)
+			removed += state.sweepWeakValuesFromValue(upvalues[index], visited, strongRefs, allowWeakKV)
 		}
 		return removed
 	case KindGoClosure:
@@ -1979,18 +1968,35 @@ func (state *State) appendClosureUpvalueRoots(function Value, out []Value) []Val
 	return out
 }
 
-// closureUpvalueValues 返回 Lua closure 或显式 Go closure 的 upvalue 快照与访问键。
+// closureUpvalueValues 返回 Lua closure 或显式 Go closure 的当前 upvalue 值与访问键。
 //
 // 返回 ok=false 表示当前值不是可枚举 upvalue 的 closure；访问键用于 GC 图遍历时阻断循环闭包。
 func closureUpvalueValues(function Value) ([]Value, any, bool) {
 	if function.Kind == KindLuaClosure {
-		// Lua closure 直接暴露 Upvalues 快照。
+		// Lua closure 的共享 cell 优先代表运行期当前值；缺失 cell 时才回退创建快照。
 		closure, ok := function.Ref.(*LuaClosure)
 		if !ok || closure == nil {
 			// 损坏 Lua closure 引用不能继续扫描。
 			return nil, nil, false
 		}
-		return closure.Upvalues, closure, true
+		upvalueCount := len(closure.Upvalues)
+		if len(closure.UpvalueCells) > upvalueCount {
+			// 共享 cell 可能多于调试快照，必须以更长边界覆盖全部运行期 upvalue。
+			upvalueCount = len(closure.UpvalueCells)
+		}
+		upvalues := make([]Value, 0, upvalueCount)
+		for index := 0; index < upvalueCount; index++ {
+			if index < len(closure.UpvalueCells) && closure.UpvalueCells[index] != nil {
+				// cell 当前值是 VM 读写 upvalue 的真实来源，避免 GC 扫描到过期快照。
+				upvalues = append(upvalues, closure.UpvalueCells[index].Value())
+				continue
+			}
+			if index < len(closure.Upvalues) {
+				// 没有共享 cell 的 closure 继续使用创建时捕获的 upvalue 快照。
+				upvalues = append(upvalues, closure.Upvalues[index])
+			}
+		}
+		return upvalues, closure, true
 	}
 	if function.Kind == KindGoClosure {
 		// GoClosureWithUpvalues 是标准库、native C closure 和协程薄包装使用的显式 upvalue 载体。
