@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"testing"
 
@@ -138,6 +139,29 @@ func TestVMLoadKLoadsConstants(t *testing.T) {
 			// 目标寄存器必须得到常量转换后的运行时值。
 			t.Fatalf("%s loadk value mismatch: value=%#v ok=%v", testCase.name, value, ok)
 		}
+	}
+}
+
+// TestVMLoadKLoadsDoubleDigitConstantIndex 验证 LOADK 可读取 0-based 下标大于等于 10 的常量。
+//
+// LPeg native 定位中出现 K(9)/K(10) 翻转信号；该测试锁定 VM 常量读取本身不含前 10 项边界。
+func TestVMLoadKLoadsDoubleDigitConstantIndex(t *testing.T) {
+	// 构造 11 个字符串常量，确保目标值位于 constants[10] 而不是前 10 个槽位。
+	constants := make([]bytecode.Constant, 11)
+	for constantIndex := range constants {
+		// 每个常量值写入自身下标，便于确认 LOADK 没有误读相邻常量。
+		constants[constantIndex] = bytecode.StringConstant(fmt.Sprintf("k%d", constantIndex))
+	}
+	vm := NewVMWithConstants(1, constants)
+
+	if err := vm.Step(bytecode.CreateABx(bytecode.OpLoadK, 0, 10)); err != nil {
+		// constants[10] 是合法常量下标，LOADK 必须执行成功。
+		t.Fatalf("loadk constants[10] failed: %v", err)
+	}
+	value, ok := vm.Register(0)
+	if !ok || !value.RawEqual(StringValue("k10")) {
+		// 目标寄存器必须得到 constants[10] 的值，而不是前 10 项中的任意值。
+		t.Fatalf("loadk constants[10] value mismatch: value=%#v ok=%v", value, ok)
 	}
 }
 
