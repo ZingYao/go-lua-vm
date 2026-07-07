@@ -652,6 +652,65 @@ func TestNativeLuaCheckUDataMatchesNamedMetatable(t *testing.T) {
 	}
 }
 
+// TestNativeLuaTestUDataMatchesNamedMetatable 验证 luaL_testudata 复用命名元表匹配但失败不抛错。
+func TestNativeLuaTestUDataMatchesNamedMetatable(t *testing.T) {
+	// 通过同一个 State 构造匹配、错类型和非 userdata 三类路径，确认 testudata 无错误副作用。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 native State 映射不可用。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+	typeNameBytes := []byte{'g', 'l', 'u', 'a', '.', 'u', 'd', 0}
+	typeNamePointer := unsafe.Pointer(&typeNameBytes[0])
+	otherTypeNameBytes := []byte{'o', 't', 'h', 'e', 'r', '.', 'u', 'd', 0}
+	otherTypeNamePointer := unsafe.Pointer(&otherTypeNameBytes[0])
+
+	userdataPointer := nativeLuaNewUserdata(luaState, 16)
+	if userdataPointer == nil {
+		// 测试需要一个 native full userdata。
+		t.Fatalf("lua_newuserdata returned nil")
+	}
+	if got := nativeLuaLNewMetatable(luaState, typeNamePointer); got != 1 {
+		// 创建命名元表后才能绑定 userdata 类型。
+		t.Fatalf("luaL_newmetatable = %d, want 1", got)
+	}
+	if got := nativeLuaSetMetatable(luaState, 1); got != 1 {
+		// 将命名元表绑定到 userdata。
+		t.Fatalf("lua_setmetatable(userdata) = %d, want 1", got)
+	}
+	sentinelBytes := []byte{'s', 'e', 'n', 't', 'i', 'n', 'e', 'l', 0}
+	nativeLuaPushString(luaState, unsafe.Pointer(&sentinelBytes[0]))
+
+	if got := nativeLuaTestUData(luaState, 1, typeNamePointer); got != userdataPointer {
+		// 类型名匹配时必须返回同一 C full userdata 数据区指针。
+		t.Fatalf("luaL_testudata match = %p, want %p", got, userdataPointer)
+	}
+	if got := nativeLuaTestUData(luaState, 1, otherTypeNamePointer); got != nil {
+		// 错误类型名只返回 NULL，不能伪装成匹配。
+		t.Fatalf("luaL_testudata mismatch = %p, want nil", got)
+	}
+	if got := nativeLuaTestUData(luaState, 2, typeNamePointer); got != nil {
+		// 非 userdata 也只返回 NULL。
+		t.Fatalf("luaL_testudata non-userdata = %p, want nil", got)
+	}
+	if got := nativeLuaTestUData(luaState, 1, nil); got != nil {
+		// 空类型名指针不能匹配任何命名元表。
+		t.Fatalf("luaL_testudata nil type = %p, want nil", got)
+	}
+	if _, hasError := takeNativeStatePendingError(luaState); hasError {
+		// luaL_testudata 失败路径不能记录 pending error；调用方通常用它做可选探测。
+		t.Fatalf("luaL_testudata left pending error")
+	}
+	if got := nativeLuaStackTop(luaState); got != 2 {
+		// luaL_testudata 不应压栈或弹栈。
+		t.Fatalf("top after luaL_testudata = %d, want 2", got)
+	}
+}
+
 // TestNativeLuaCheckUDataRejectsMismatchedType 验证 luaL_checkudata 失败时记录 pending error。
 func TestNativeLuaCheckUDataRejectsMismatchedType(t *testing.T) {
 	// 构造一个有元表但 registry 类型名不匹配的 native userdata。

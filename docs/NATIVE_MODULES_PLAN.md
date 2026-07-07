@@ -231,6 +231,7 @@ state := lua.NewStateWithOptions(options)
 - `lua_setuservalue`
   - 已覆盖 native full userdata 的 user value 写入，导出 C ABI 保持 Lua 5.3 public header 的 `void` 签名；LPeg 1.1.0 已可完成 `require("lpeg")` 和基础 pattern/match runtime smoke。
 - `luaL_checkudata`
+- `luaL_testudata`
 - `luaL_ref`
 - `luaL_unref`
 - `lua_rawgeti`

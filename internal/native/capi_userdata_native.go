@@ -207,52 +207,74 @@ func nativeLuaCheckUDataFailure(luaState unsafe.Pointer, index int, typeName str
 	return nil
 }
 
-// nativeLuaCheckUData 实现 Lua 5.3 lauxlib 的 luaL_checkudata。
-func nativeLuaCheckUData(luaState unsafe.Pointer, index int, typeNamePointer unsafe.Pointer) unsafe.Pointer {
+// nativeLuaNamedFullUserdata 查找与 registry 命名元表匹配的 native full userdata。
+func nativeLuaNamedFullUserdata(luaState unsafe.Pointer, index int, typeNamePointer unsafe.Pointer) (unsafe.Pointer, string, bool) {
 	// type name 是 registry 命名元表的 key，缺失时无法做可靠类型检查。
 	if typeNamePointer == nil {
-		// 保留错误对象，避免 C 模块把 nil 当作有效 full userdata 指针继续使用。
-		return nativeLuaCheckUDataFailure(luaState, index, "userdata")
+		// 空类型名指针不能参与 registry identity 判断。
+		return nil, "userdata", false
 	}
 	typeName := nativeLuaCString(typeNamePointer)
 	value, ok := nativeLuaValueAt(luaState, index)
 	if !ok || value.Kind != runtime.KindUserdata {
 		// 目标不是 userdata 时不能返回 C full userdata 指针。
-		return nativeLuaCheckUDataFailure(luaState, index, typeName)
+		return nil, typeName, false
 	}
 	userdata, ok := value.Ref.(*runtime.Userdata)
 	if !ok || userdata == nil {
 		// userdata 引用损坏时按类型检查失败处理。
-		return nativeLuaCheckUDataFailure(luaState, index, typeName)
+		return nil, typeName, false
 	}
 	block, ok := userdata.Data.(*nativeUserdataBlock)
 	if !ok || block == nil {
 		// 纯 Go userdata 没有 C full userdata 数据区，不能通过 Lua C API 暴露。
-		return nativeLuaCheckUDataFailure(luaState, index, typeName)
+		return nil, typeName, false
 	}
 	metatable := userdata.GetMetatable()
 	if metatable == nil {
 		// 没有 raw 元表说明尚未绑定命名 userdata 类型。
-		return nativeLuaCheckUDataFailure(luaState, index, typeName)
+		return nil, typeName, false
 	}
 	registry, ok := nativeLuaTableAt(luaState, runtime.RegistryPseudoIndex)
 	if !ok {
 		// registry 不可用时无法验证类型名。
-		return nativeLuaCheckUDataFailure(luaState, index, typeName)
+		return nil, typeName, false
 	}
 	expectedValue := registry.RawGetString(typeName)
 	if expectedValue.Kind != runtime.KindTable {
 		// registry 中不存在命名元表或类型不匹配，检查失败。
-		return nativeLuaCheckUDataFailure(luaState, index, typeName)
+		return nil, typeName, false
 	}
 	expectedMetatable, ok := expectedValue.Ref.(*runtime.Table)
 	if !ok || expectedMetatable == nil || expectedMetatable != metatable {
 		// Lua 5.3 以 registry[tname] 与 userdata raw metatable 的 identity 判断类型。
-		return nativeLuaCheckUDataFailure(luaState, index, typeName)
+		return nil, typeName, false
 	}
 
 	// 类型匹配时返回 native full userdata 的 C 数据区指针。
-	return block.data()
+	return block.data(), typeName, true
+}
+
+// nativeLuaTestUData 实现 Lua 5.3 lauxlib 的 luaL_testudata。
+func nativeLuaTestUData(luaState unsafe.Pointer, index int, typeNamePointer unsafe.Pointer) unsafe.Pointer {
+	// testudata 与 checkudata 使用同一命名元表匹配规则，但失败时只返回 NULL。
+	pointer, _, ok := nativeLuaNamedFullUserdata(luaState, index, typeNamePointer)
+	if !ok {
+		// luaL_testudata 是非抛错探测入口，失败不能设置 pending error。
+		return nil
+	}
+	return pointer
+}
+
+// nativeLuaCheckUData 实现 Lua 5.3 lauxlib 的 luaL_checkudata。
+func nativeLuaCheckUData(luaState unsafe.Pointer, index int, typeNamePointer unsafe.Pointer) unsafe.Pointer {
+	// checkudata 与 testudata 共享命名元表匹配，失败时额外记录 lauxlib 参数错误。
+	pointer, typeName, ok := nativeLuaNamedFullUserdata(luaState, index, typeNamePointer)
+	if !ok {
+		// 保留错误对象，避免 C 模块把 nil 当作有效 full userdata 指针继续使用。
+		return nativeLuaCheckUDataFailure(luaState, index, typeName)
+	}
+	return pointer
 }
 
 // lua_newuserdata 导出 Lua 5.3 C API full userdata 创建入口。
@@ -293,4 +315,12 @@ func lua_setuservalue(luaState *C.lua_State, index C.int) {
 func luaL_checkudata(luaState *C.lua_State, index C.int, typeName *C.char) unsafe.Pointer {
 	// C API 入口只做类型转换；当前失败时记录 pending error 并返回 nil，等待 Go 边界传播。
 	return nativeLuaCheckUData(unsafe.Pointer(luaState), int(index), unsafe.Pointer(typeName))
+}
+
+// luaL_testudata 导出 Lua 5.3 lauxlib full userdata 非抛错类型探测入口。
+//
+//export luaL_testudata
+func luaL_testudata(luaState *C.lua_State, index C.int, typeName *C.char) unsafe.Pointer {
+	// C API 入口只做类型转换；失败路径必须保持无错误副作用。
+	return nativeLuaTestUData(unsafe.Pointer(luaState), int(index), unsafe.Pointer(typeName))
 }
