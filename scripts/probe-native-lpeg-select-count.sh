@@ -38,6 +38,8 @@ echo "PROBE_PREBUILD_DUMMY_CAPTURE=${PROBE_PREBUILD_DUMMY_CAPTURE:-0}"
 echo "PROBE_PREBUILD_DUMMY_BACK=${PROBE_PREBUILD_DUMMY_BACK:-0}"
 echo "PROBE_PREBUILD_DUMMY_VALUE=${PROBE_PREBUILD_DUMMY_VALUE:-}"
 echo "PROBE_PREBUILD_DECLS_ONLY=${PROBE_PREBUILD_DECLS_ONLY:-0}"
+echo "PROBE_SELECTED_DECLS_DEFAULT_TAIL=${PROBE_SELECTED_DECLS_DEFAULT_TAIL:-0}"
+echo "PROBE_SELECTED_TAIL_ONLY=${PROBE_SELECTED_TAIL_ONLY:-0}"
 echo "PROBE_PREBUILD_PADDING_LOCALS=${PROBE_PREBUILD_PADDING_LOCALS:-0}"
 echo "PROBE_CONTINUE_ON_CRASH=${PROBE_CONTINUE_ON_CRASH:-0}"
 
@@ -228,6 +230,36 @@ LUA
       return 1
       ;;
   esac
+}
+
+uses_selected_prebuild_decls() {
+  [[ "${PROBE_PREBUILD_OPEN:-0}" == "1" ||
+     "${PROBE_PREBUILD_CLOSE:-0}" == "1" ||
+     "${PROBE_PREBUILD_ANY:-0}" == "1" ||
+     "${PROBE_PREBUILD_CLOSE_HEAD:-0}" == "1" ||
+     "${PROBE_PREBUILD_CLOSE_BACK:-0}" == "1" ||
+     "${PROBE_PREBUILD_CLOSE_FUNC:-0}" == "1" ||
+     "${PROBE_PREBUILD_DUMMY_FUNC:-0}" == "1" ||
+     "${PROBE_PREBUILD_DUMMY_CAPTURE:-0}" == "1" ||
+     "${PROBE_PREBUILD_DUMMY_BACK:-0}" == "1" ||
+     -n "${PROBE_PREBUILD_DUMMY_VALUE:-}" ||
+     "${PROBE_PREBUILD_DECLS_ONLY:-0}" == "1" ||
+     "${PROBE_SELECTED_DECLS_DEFAULT_TAIL:-0}" == "1" ]]
+}
+
+uses_selected_tail() {
+  [[ "${PROBE_PREBUILD_OPEN:-0}" == "1" ||
+     "${PROBE_PREBUILD_CLOSE:-0}" == "1" ||
+     "${PROBE_PREBUILD_ANY:-0}" == "1" ||
+     "${PROBE_PREBUILD_CLOSE_HEAD:-0}" == "1" ||
+     "${PROBE_PREBUILD_CLOSE_BACK:-0}" == "1" ||
+     "${PROBE_PREBUILD_CLOSE_FUNC:-0}" == "1" ||
+     "${PROBE_PREBUILD_DUMMY_FUNC:-0}" == "1" ||
+     "${PROBE_PREBUILD_DUMMY_CAPTURE:-0}" == "1" ||
+     "${PROBE_PREBUILD_DUMMY_BACK:-0}" == "1" ||
+     -n "${PROBE_PREBUILD_DUMMY_VALUE:-}" ||
+     "${PROBE_PREBUILD_DECLS_ONLY:-0}" == "1" ||
+     "${PROBE_SELECTED_TAIL_ONLY:-0}" == "1" ]]
 }
 
 emit_probe_selected_parts_tail() {
@@ -1349,7 +1381,7 @@ probe_mode() {
       emit_probe_prebuild
     elif [[ "${PROBE_PREBUILD_PARTS:-0}" == "1" ]]; then
       emit_probe_prebuild_parts
-    elif [[ "${PROBE_PREBUILD_OPEN:-0}" == "1" || "${PROBE_PREBUILD_CLOSE:-0}" == "1" || "${PROBE_PREBUILD_ANY:-0}" == "1" || "${PROBE_PREBUILD_CLOSE_HEAD:-0}" == "1" || "${PROBE_PREBUILD_CLOSE_BACK:-0}" == "1" || "${PROBE_PREBUILD_CLOSE_FUNC:-0}" == "1" || "${PROBE_PREBUILD_DUMMY_FUNC:-0}" == "1" || "${PROBE_PREBUILD_DUMMY_CAPTURE:-0}" == "1" || "${PROBE_PREBUILD_DUMMY_BACK:-0}" == "1" || -n "${PROBE_PREBUILD_DUMMY_VALUE:-}" || "${PROBE_PREBUILD_DECLS_ONLY:-0}" == "1" ]]; then
+    elif uses_selected_prebuild_decls; then
       emit_probe_prebuild_selected_parts
     fi
     emit_probe_prebuild_padding_locals
@@ -1358,7 +1390,7 @@ probe_mode() {
       emit_probe_prebuilt_match_tail
     elif [[ "${PROBE_PREBUILD_PARTS:-0}" == "1" ]]; then
       emit_probe_prebuilt_parts_tail
-    elif [[ "${PROBE_PREBUILD_OPEN:-0}" == "1" || "${PROBE_PREBUILD_CLOSE:-0}" == "1" || "${PROBE_PREBUILD_ANY:-0}" == "1" || "${PROBE_PREBUILD_CLOSE_HEAD:-0}" == "1" || "${PROBE_PREBUILD_CLOSE_BACK:-0}" == "1" || "${PROBE_PREBUILD_CLOSE_FUNC:-0}" == "1" || "${PROBE_PREBUILD_DUMMY_FUNC:-0}" == "1" || "${PROBE_PREBUILD_DUMMY_CAPTURE:-0}" == "1" || "${PROBE_PREBUILD_DUMMY_BACK:-0}" == "1" || -n "${PROBE_PREBUILD_DUMMY_VALUE:-}" || "${PROBE_PREBUILD_DECLS_ONLY:-0}" == "1" ]]; then
+    elif uses_selected_tail; then
       emit_probe_selected_parts_tail
     else
       emit_probe_tail
