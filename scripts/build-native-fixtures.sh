@@ -29,7 +29,8 @@ if [[ ! -d "${include_dir}" ]]; then
   exit 1
 fi
 
-if ! command -v "${cc}" >/dev/null 2>&1; then
+read -r -a cc_parts <<<"${cc}"
+if [[ "${#cc_parts[@]}" -eq 0 ]] || ! command -v "${cc_parts[0]}" >/dev/null 2>&1; then
   echo "skip: C compiler not found: ${cc}" >&2
   exit 0
 fi
@@ -65,10 +66,10 @@ build_module() {
   args+=("${source_file}")
 
   printf 'compile %s%s:' "${module_name}" "${extension}"
-  printf ' %q' "${cc}" "${args[@]}"
+  printf ' %q' "${cc_parts[@]}" "${args[@]}"
   printf '\n'
 
-  "${cc}" "${args[@]}"
+  "${cc_parts[@]}" "${args[@]}"
   echo "built ${output_path}"
 }
 

@@ -42,7 +42,8 @@ for source_file in "${sources[@]}"; do
   fi
 done
 
-if ! command -v "${cc}" >/dev/null 2>&1; then
+read -r -a cc_parts <<<"${cc}"
+if [[ "${#cc_parts[@]}" -eq 0 ]] || ! command -v "${cc_parts[0]}" >/dev/null 2>&1; then
   echo "skip: C compiler not found: ${cc}" >&2
   exit 0
 fi
@@ -85,10 +86,10 @@ build_cjson_module() {
   args+=("${sources[@]}")
 
   printf 'compile lua-cjson%s:' "${extension}"
-  printf ' %q' "${cc}" "${args[@]}"
+  printf ' %q' "${cc_parts[@]}" "${args[@]}"
   printf '\n'
 
-  "${cc}" "${args[@]}"
+  "${cc_parts[@]}" "${args[@]}"
   echo "built ${output_path}"
 }
 
