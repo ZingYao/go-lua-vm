@@ -615,6 +615,21 @@ if false then
 end
 LUA
       ;;
+    string-dead-pads8-only)
+      cat <<'LUA'
+if false then
+  local probe_pad1 = 'pad-before-close-1'
+  local probe_pad2 = 'pad-before-close-2'
+  local probe_pad3 = 'pad-before-close-3'
+  local probe_pad4 = 'pad-before-close-4'
+  local probe_pad5 = 'pad-before-close-5'
+  local probe_pad6 = 'pad-before-close-6'
+  local probe_pad7 = 'pad-before-close-7'
+  local probe_pad8 = 'pad-before-close-8'
+end
+local probe_warmup = nil
+LUA
+      ;;
     string-close-dead-function)
       cat <<'LUA'
 local function probe_warmup_const()

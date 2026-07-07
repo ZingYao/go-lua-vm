@@ -107,6 +107,23 @@ probe_warmup = nil
 LUA
 }
 
+emit_lpeg_warmup_string_dead_pads8_only() {
+  cat <<'LUA'
+if false then
+  local probe_pad1 = 'pad-before-close-1'
+  local probe_pad2 = 'pad-before-close-2'
+  local probe_pad3 = 'pad-before-close-3'
+  local probe_pad4 = 'pad-before-close-4'
+  local probe_pad5 = 'pad-before-close-5'
+  local probe_pad6 = 'pad-before-close-6'
+  local probe_pad7 = 'pad-before-close-7'
+  local probe_pad8 = 'pad-before-close-8'
+end
+local probe_warmup = nil
+probe_warmup = nil
+LUA
+}
+
 emit_lpeg_warmup_string_close_dead_function() {
   cat <<'LUA'
 local function probe_warmup_const()
@@ -559,6 +576,11 @@ LUA
       emit_lpeg_error_number_perturbation
       emit_lpeg_default_tail
       ;;
+    lpeg-warmup-string-dead-pads8-only-default-tail-error-number)
+      emit_lpeg_warmup_string_dead_pads8_only
+      emit_lpeg_error_number_perturbation
+      emit_lpeg_default_tail
+      ;;
     lpeg-warmup-string-close-dead-function-default-tail-error-number)
       emit_lpeg_warmup_string_close_dead_function
       emit_lpeg_error_number_perturbation
@@ -625,6 +647,7 @@ modes=(
   lpeg-warmup-string-close-dead-branch-default-tail-error-number
   lpeg-warmup-string-close-dead-branch-after-dead-pad-default-tail-error-number
   lpeg-warmup-string-close-dead-branch-after-dead-pads8-default-tail-error-number
+  lpeg-warmup-string-dead-pads8-only-default-tail-error-number
   lpeg-warmup-string-close-dead-function-default-tail-error-number
   lpeg-warmup-string-close-called-function-default-tail-error-number
 )
