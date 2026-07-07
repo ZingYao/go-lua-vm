@@ -53,6 +53,48 @@ func TestNativeLuaCallKCallsGoClosure(t *testing.T) {
 	}
 }
 
+// TestNativeLuaCallKPushesTemporaryCFrame 验证 C API 调用会暴露临时 C 帧。
+func TestNativeLuaCallKPushesTemporaryCFrame(t *testing.T) {
+	// error(level) 和 debug traceback 需要看到 C 模块通过 lua_callk 进入 Lua/Go callback 的边界。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 callk。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	observedFrame := false
+	nativeLuaPushValue(luaState, runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(func(args ...runtime.Value) ([]runtime.Value, error) {
+		// callback 执行期间，当前帧应是 native lua_call 暴露出的 Go/C 边界。
+		frames := state.TracebackFrames()
+		if len(frames) == 0 {
+			return nil, runtime.RaiseError(runtime.StringValue("missing lua_call frame"))
+		}
+		if frames[0].Kind != runtime.CallFrameKindGo || frames[0].Name != "lua_call" || frames[0].NameWhat != "C" {
+			return nil, runtime.RaiseError(runtime.StringValue("wrong lua_call frame"))
+		}
+		observedFrame = true
+		return []runtime.Value{runtime.IntegerValue(1)}, nil
+	})))
+	nativeLuaCallK(luaState, 0, 0)
+
+	if !observedFrame {
+		// callback 必须实际执行并观察到临时 C 帧。
+		t.Fatalf("native lua_call frame was not observed")
+	}
+	if errorObject, hasError := takeNativeStatePendingError(luaState); hasError {
+		// 成功路径不应留下 pending error。
+		t.Fatalf("nativeLuaCallK frame pending error = %#v", errorObject)
+	}
+	if frames := state.TracebackFrames(); len(frames) != 0 {
+		// 调用完成后临时 C 帧必须弹出。
+		t.Fatalf("native lua_call frame leaked: %#v", frames)
+	}
+}
+
 // TestNativeLuaCallKCallsUnaryGoClosureShapes 验证 lua_callk 覆盖一元 Go closure 负载。
 func TestNativeLuaCallKCallsUnaryGoClosureShapes(t *testing.T) {
 	// native C 模块通过 lua_callk 调 Lua/Go 函数时，必须支持标准库常用的一元热路径闭包形态；

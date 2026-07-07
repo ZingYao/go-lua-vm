@@ -577,6 +577,38 @@ func formatDirective(code byte, current time.Time) (string, bool) {
 	case '%':
 		// %% 输出单个百分号。
 		return "%", true
+	case 'a':
+		// 缩写星期名。
+		return current.Format("Mon"), true
+	case 'A':
+		// 完整星期名。
+		return current.Format("Monday"), true
+	case 'b', 'h':
+		// 缩写月份名；POSIX %h 是 %b 的别名。
+		return current.Format("Jan"), true
+	case 'B':
+		// 完整月份名。
+		return current.Format("January"), true
+	case 'C':
+		// 年份的世纪部分。
+		return fmt.Sprintf("%02d", current.Year()/100), true
+	case 'D':
+		// POSIX %D 等价于 %m/%d/%y。
+		return current.Format("01/02/06"), true
+	case 'e':
+		// 空格填充的月内日期。
+		return fmt.Sprintf("%2d", current.Day()), true
+	case 'F':
+		// ISO 日期，等价于 %Y-%m-%d。
+		return current.Format("2006-01-02"), true
+	case 'g':
+		// ISO 周年份的两位形式。
+		isoYear, _ := current.ISOWeek()
+		return fmt.Sprintf("%02d", positiveModulo(isoYear, 100)), true
+	case 'G':
+		// ISO 周年份的四位形式。
+		isoYear, _ := current.ISOWeek()
+		return fmt.Sprintf("%04d", isoYear), true
 	case 'Y':
 		// 四位年份。
 		return fmt.Sprintf("%04d", current.Year()), true
@@ -589,27 +621,85 @@ func formatDirective(code byte, current time.Time) (string, bool) {
 	case 'd':
 		// 两位日期。
 		return fmt.Sprintf("%02d", current.Day()), true
+	case 'I':
+		// 12 小时制小时，01..12。
+		return fmt.Sprintf("%02d", twelveHour(current.Hour())), true
 	case 'H':
 		// 两位 24 小时。
 		return fmt.Sprintf("%02d", current.Hour()), true
+	case 'k':
+		// 空格填充的 24 小时。
+		return fmt.Sprintf("%2d", current.Hour()), true
+	case 'l':
+		// 空格填充的 12 小时。
+		return fmt.Sprintf("%2d", twelveHour(current.Hour())), true
 	case 'M':
 		// 两位分钟。
 		return fmt.Sprintf("%02d", current.Minute()), true
+	case 'n':
+		// 换行符。
+		return "\n", true
+	case 'p':
+		// 本地 AM/PM 标记；当前固定 C locale 英文输出。
+		if current.Hour() < 12 {
+			// 0..11 点为 AM。
+			return "AM", true
+		}
+		// 12..23 点为 PM。
+		return "PM", true
+	case 'r':
+		// 12 小时制完整时间。
+		return fmt.Sprintf("%02d:%02d:%02d %s", twelveHour(current.Hour()), current.Minute(), current.Second(), amPM(current.Hour())), true
+	case 'R':
+		// 24 小时制小时和分钟。
+		return fmt.Sprintf("%02d:%02d", current.Hour(), current.Minute()), true
+	case 's':
+		// Unix 秒时间戳。
+		return fmt.Sprintf("%d", current.Unix()), true
 	case 'S':
 		// 两位秒。
 		return fmt.Sprintf("%02d", current.Second()), true
+	case 't':
+		// 水平制表符。
+		return "\t", true
+	case 'T':
+		// 24 小时制完整时间。
+		return fmt.Sprintf("%02d:%02d:%02d", current.Hour(), current.Minute(), current.Second()), true
+	case 'u':
+		// ISO 星期序号，Monday=1 到 Sunday=7。
+		return fmt.Sprintf("%d", isoWeekday(current)), true
+	case 'U':
+		// Sunday 作为每周第一天的周序号。
+		return fmt.Sprintf("%02d", posixWeekNumber(current, time.Sunday)), true
+	case 'V':
+		// ISO 8601 周序号。
+		_, isoWeek := current.ISOWeek()
+		return fmt.Sprintf("%02d", isoWeek), true
 	case 'w':
 		// 星期序号，Lua/strftime 使用 0=Sunday 到 6=Saturday。
 		return fmt.Sprintf("%d", int(current.Weekday())), true
+	case 'W':
+		// Monday 作为每周第一天的周序号。
+		return fmt.Sprintf("%02d", posixWeekNumber(current, time.Monday)), true
 	case 'j':
 		// 年内天数，范围 001..366。
 		return fmt.Sprintf("%03d", current.YearDay()), true
 	case 'x':
 		// 本地日期展示；Go 不依赖 C locale，使用稳定的月/日/年格式。
 		return current.Format("01/02/06"), true
+	case 'X':
+		// 本地时间展示；当前固定为 C locale 的 HH:MM:SS。
+		return fmt.Sprintf("%02d:%02d:%02d", current.Hour(), current.Minute(), current.Second()), true
 	case 'c':
 		// 本地日期时间常见展示。
 		return current.Format("Mon Jan _2 15:04:05 2006"), true
+	case 'z':
+		// 数字时区偏移，格式为 +HHMM。
+		return formatTimezoneOffset(current), true
+	case 'Z':
+		// 时区缩写名称。
+		zoneName, _ := current.Zone()
+		return zoneName, true
 	case 'E', 'O':
 		// POSIX 扩展修饰符需要后续指令；单独出现非法。
 		return "", false
@@ -617,6 +707,88 @@ func formatDirective(code byte, current time.Time) (string, bool) {
 		// 未支持控制符保持非法转换，便于官方 tests 捕获错误。
 		return "", false
 	}
+}
+
+// twelveHour 将 24 小时制小时转换为 strftime 的 12 小时制小时。
+//
+// hour 可为 0..23；返回值范围为 1..12，午夜和正午都映射为 12。
+func twelveHour(hour int) int {
+	// 先按 12 取余，得到 0..11。
+	value := hour % 12
+	if value == 0 {
+		// strftime 的 12 小时制用 12 表示 0 点或 12 点。
+		return 12
+	}
+	return value
+}
+
+// amPM 返回固定 C locale 的 AM/PM 文本。
+//
+// hour 可为 0..23；返回值用于 `%p` 和 `%r`，当前不受系统 locale 影响。
+func amPM(hour int) string {
+	// 0..11 点为 AM。
+	if hour < 12 {
+		return "AM"
+	}
+	// 12..23 点为 PM。
+	return "PM"
+}
+
+// isoWeekday 返回 ISO 8601 星期序号。
+//
+// current 是已按调用方时区选择后的时间；返回 Monday=1 到 Sunday=7。
+func isoWeekday(current time.Time) int {
+	// Go 的 Sunday 为 0，需要特判成 ISO 的 7。
+	if current.Weekday() == time.Sunday {
+		return 7
+	}
+	return int(current.Weekday())
+}
+
+// posixWeekNumber 计算 POSIX `%U` 和 `%W` 周序号。
+//
+// current 是目标时间；firstWeekday 必须是 time.Sunday 或 time.Monday。返回值为 0..53，
+// 表示第一个指定 weekday 之前的日期属于第 0 周。
+func posixWeekNumber(current time.Time, firstWeekday time.Weekday) int {
+	// 构造同年 1 月 1 日，用于计算第一周起点。
+	yearStart := time.Date(current.Year(), time.January, 1, 0, 0, 0, 0, current.Location())
+	yearDayIndex := current.YearDay() - 1
+	daysToFirstWeekday := positiveModulo(int(firstWeekday)-int(yearStart.Weekday()), 7)
+	if yearDayIndex < daysToFirstWeekday {
+		// 第一周起点之前的日期属于第 0 周。
+		return 0
+	}
+	return (yearDayIndex-daysToFirstWeekday)/7 + 1
+}
+
+// positiveModulo 返回非负取模结果。
+//
+// value 可为任意整数；modulus 必须大于 0。返回范围为 0..modulus-1。
+func positiveModulo(value int, modulus int) int {
+	// Go 的 % 会保留负号，因此先做一次普通取模。
+	result := value % modulus
+	if result < 0 {
+		// 负结果需要补回 modulus，得到非负余数。
+		return result + modulus
+	}
+	return result
+}
+
+// formatTimezoneOffset 格式化 time.Time 的数字时区偏移。
+//
+// current 是目标时间；返回 `+HHMM` 或 `-HHMM`，与 strftime `%z` 兼容。
+func formatTimezoneOffset(current time.Time) string {
+	// 从 time.Time 读取当前时区相对 UTC 的秒偏移。
+	_, offsetSeconds := current.Zone()
+	sign := "+"
+	if offsetSeconds < 0 {
+		// 负偏移需要输出负号并转为绝对秒数。
+		sign = "-"
+		offsetSeconds = -offsetSeconds
+	}
+	hours := offsetSeconds / 3600
+	minutes := (offsetSeconds % 3600) / 60
+	return fmt.Sprintf("%s%02d%02d", sign, hours, minutes)
 }
 
 // invalidDateConversion 构造 os.date 非法格式错误。
@@ -636,7 +808,7 @@ func integerArgument(args []runtime.Value, position int, functionName string) (i
 		// Lua 标准库把缺失参数报告为 integer expected。
 		return 0, badArgument(functionName, position, "integer expected")
 	}
-	value, ok := args[position-1].ToInteger()
+	value, ok := integerValue(args[position-1])
 	if !ok {
 		// 非 integer 参数返回 Lua 参数错误。
 		return 0, badArgument(functionName, position, "integer expected")
@@ -658,12 +830,39 @@ func tableIntegerField(table *runtime.Table, name string, required bool, default
 		}
 		return defaultValue, nil
 	}
-	integer, ok := value.ToInteger()
+	integer, ok := integerValue(value)
 	if !ok {
 		// 字段存在但不是 integer 时返回 Lua 错误。
 		return 0, runtime.RaiseError(runtime.StringValue(fmt.Sprintf("field '%s' is not an integer", name)))
 	}
 	return integer, nil
+}
+
+// integerValue 按 Lua 5.3 C API 的整数读取规则转换值。
+//
+// value 可为 integer、可无损转换为 integer 的 float number，或 numeric string；返回 ok=false
+// 表示调用方应按对应标准库上下文报告 integer 参数或字段错误。
+func integerValue(value runtime.Value) (int64, bool) {
+	// 先复用当前 number 到 integer 的基础转换。
+	if integer, ok := value.ToInteger(); ok {
+		// 已经是 integer 或可无损转换的 float，直接返回。
+		return integer, true
+	}
+	if value.Kind != runtime.KindString {
+		// 非字符串没有 Lua 5.3 的隐式 numeric string 入口。
+		return 0, false
+	}
+	converted, ok := value.StringToNumber()
+	if !ok {
+		// 字符串不是合法 Lua number，不能作为 integer 使用。
+		return 0, false
+	}
+	integer, ok := converted.ToInteger()
+	if !ok {
+		// numeric string 对应非整数 number 时仍不能通过 integer 检查。
+		return 0, false
+	}
+	return integer, true
 }
 
 // badArgument 构造 Lua 标准库参数错误。

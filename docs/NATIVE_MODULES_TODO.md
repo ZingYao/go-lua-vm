@@ -181,7 +181,7 @@
 
 ## 第七阶段：平台闭环
 
-- [ ] 真实第三方模块验收：
+- [x] 真实第三方模块验收：当前 macOS arm64 平台已闭环，Linux/Windows 运行期验收仍由后续平台项单独跟踪。
   - [x] 明确自编 fixture 只作为 loader smoke，不作为最终兼容性依据。
   - [x] 固定 `lua-cjson` 源码到仓库或 `third_party/`，记录来源、版本和许可证，构建不得联网下载。
   - [x] `lua-cjson` 源码编译验收：`require("cjson")`、`encode/decode`、错误输入 `pcall`。
@@ -349,7 +349,7 @@
         - [x] 2026-07-07 修复：使用 `gopls check internal/native/capi_type_native.go internal/native/capi_type_native_test.go` 复核后，补齐 `lua_version` 导出入口；`L == NULL` 与有效 State 均返回同一个 Lua 5.3 `lua_Number(503)` 静态地址，满足 `luaL_checkversion_` 比较地址和值的一致性边界。`TestNativeLuaVersionReturnsLua53Constant` 已覆盖版本值、nil State、有效 State 和指针一致性。短 probe 仍为 `error-number result=12 class=bad`、`type-number result=18 class=good`，因此该 public C API 版本查询缺口需要修复，但不是当前 select-count 退化的充分根因。
         - [x] 修复门禁：LPeg 只作为真实第三方 C 模块集成验收和问题暴露样本，禁止通过模块名、测试行号、特定 pattern、特定返回值或 LPeg 私有行为做特向性修复；任何生产代码修复都必须能解释为通用 Lua 5.3 C API、VM 调用帧、vararg、返回值写回、栈隔离、registry/metatable/userdata 或错误恢复语义，并补充模块无关的定向测试或 probe。2026-07-07 已按该门禁完成通用 `safeRKOperand`、native Go closure 调用形态、numeric string 兼容和非 protected `lua_callk` 错误跳转语义修复，且补充模块无关回归/fixture，LPeg 不作为特例处理。
         - [x] 2026-07-07 收敛：构造期生命周期与错误路径缺口已分别落到通用 codegen RK 临时寄存器生命周期、native Go closure 调用形态、math numeric string 兼容和非 protected `lua_callk` longjmp 语义；完整 LPeg `.so/.dylib` 官方测试均已通过，当前无继续围绕 LPeg select-count 的活动阻塞。
-  - [ ] LuaSocket 或等价网络库验收：仅在 userdata/metatable/registry/错误边界稳定后进入平台闭环。
+  - [x] LuaSocket 或等价网络库验收：仅在 userdata/metatable/registry/错误边界稳定后进入平台闭环。
     - [x] 固定 LuaSocket 源码到 `third_party/luasocket/`，来源为 `lunarmodules/luasocket` tag `v3.1.0` / commit `95b7efa9da506ef968c1347edf3fc56370f0deed`，保留 MIT-style `LICENSE` 并新增 `GLUA_VENDOR.md` 记录本项目未做源码修改。
     - [x] 新增 LuaSocket 源码编译脚本，使用仓库内 Lua 5.3 public headers 编译 `socket.core` 和 `mime.core`，禁止读取系统 Lua 开发包。
       - [x] macOS arm64 `.so` 与 `.dylib` 两种后缀已通过源码编译级验收。
@@ -561,3 +561,6 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-07：修正 `scripts/test-native-real-modules.sh` 的异平台边界；总验收入口现在只允许宿主同平台执行，`TARGET_GOOS=windows` 等异平台目标会在子脚本前明确 `skip:`，避免多个子验收各自 skip 后仍输出 `native real module acceptance suite passed`。同步扩展 `scripts/check-native-skip-reasons.sh` 覆盖该 Windows 总验收 skip 文本。
 - 2026-07-07：收紧 `scripts/test-native-real-modules.sh` 的 Windows 目标判定；Windows 目标现在无论宿主平台是否 Windows 都会在子验收前明确 skip，直到 `lua53.dll` shim 或 import library 落地，避免未来 Windows host 上把子脚本 skip 汇总成总验收 passed。
 - 2026-07-07：扩展 `scripts/check-native-skip-reasons.sh`，新增非 Windows 异平台总验收误用门禁；脚本会根据宿主平台选择 `linux` 或 `darwin` 作为不同目标，并断言 `scripts/test-native-real-modules.sh` 输出目标/宿主不一致的明确 `skip:`，防止把 macOS/Linux 宿主验收误当成另一平台运行期闭环。
+- 2026-07-07：自动轮次复核平台 skip 门禁时，初始非交互 shell 的 PATH 上没有 `go` 或 `gopls`；按本机环境要求显式 `source ~/.zshrc` 后，`go version` 恢复为 `go1.26.4 darwin/arm64`，并完成 `CGO_ENABLED=0 ./scripts/check-native-skip-reasons.sh`，确认 Windows shim 未落地、Linux cross compiler 缺失、异平台真实模块总验收误用等场景均输出明确 `skip:` 且脚本通过。随后使用项目 Go 工具链执行 `go install golang.org/x/tools/gopls@latest`，安装并验证 `gopls v0.22.0` 位于 `/Users/quanquan/go/go1.26.4/bin/gopls`，`gopls check runtime/vm.go lua/api.go internal/native/loader_native.go` 无诊断。本轮未修改 Go 代码、未声明新增 Linux/Windows 运行期验收。
+- 2026-07-07：自动化提示词已补充每轮执行命令前先 `source ~/.zshrc`，避免非交互 shell 丢失 go1.26.4 与 gopls 环境。本轮复跑 `CGO_ENABLED=1 ./scripts/test-native-real-modules.sh`，macOS arm64 当前平台总验收通过，串联 fixture、lua-cjson、LPeg 和 LuaSocket 的 `.so` / `.dylib` runtime acceptance；因此将 LuaSocket 或等价网络库验收父项收敛为完成。该结论仍只覆盖 macOS arm64，Linux/Windows 运行期闭环和 Windows `lua53.dll` shim/import library 仍保持未完成。
+- 2026-07-07：按用户纠正的“LPeg 日志相关模块”方向，临时克隆并运行 `mozilla-services/lua_sandbox_extensions` 的 `lpeg/tests/test.lua`。第一层证伪为外部套件自身 Lua 5.1/旧 LPeg 假设：模块使用 `setfenv`、测试假设 `_G.lpeg`、本地时区需固定为 `TZ=UTC`，且纳秒断言混用 Lua 5.1 double 期望与 Lua 5.3 integer。排除这些外部噪音后，确认项目侧真实缺口为三类通用语义：`os.time` date table 字段未接受 numeric string、`os.date` 常见 POSIX strftime 指令覆盖不足、native `lua_callk` 从 C 模块调用 Lua callback 时缺少可见 C frame，导致 `error(msg, 2)` 越过 C 边界给 `re.lua` 错误对象误加源码前缀。已修复上述通用语义并补充模块无关测试；`pcall(re.compile, "@{:foo")` 现返回裸 `pattern error near '@{:foo'`，临时 LPeg 日志 suite 已在 macOS arm64 native LPeg 下通过。该外部 suite 未入仓库，当前仅作为诊断压力样本，不替代正式真实模块门禁。

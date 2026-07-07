@@ -407,15 +407,19 @@ func errorLevelPrefix(state *runtime.State, level int) string {
 		return ""
 	}
 	remaining := level
-	for _, frame := range state.TracebackFrames() {
-		if frame.Kind != runtime.CallFrameKindLua {
-			// Go closure 帧不参与 Lua level 计数。
+	for frameIndex, frame := range state.TracebackFrames() {
+		if frameIndex == 0 && frame.Kind == runtime.CallFrameKindGo {
+			// 当前 base.error 自身的 Go/C 帧不参与 Lua level 计数；调用点名称在 native 回调中可能为空。
 			continue
 		}
 		remaining--
 		if remaining != 0 {
 			// 尚未到达目标 Lua 帧，继续向外层查找。
 			continue
+		}
+		if frame.Kind != runtime.CallFrameKindLua {
+			// 命中 Go/C 帧时没有 Lua 源码位置；该帧仍然消耗 level，防止越过 C 回调边界。
+			return ""
 		}
 		closure, ok := frame.Function.Ref.(*runtime.LuaClosure)
 		if !ok || closure == nil || closure.Proto == nil {

@@ -30,6 +30,18 @@ func nativeLuaCallValue(state *runtime.State, function runtime.Value, args []run
 		// nil State 无法执行任何 closure。
 		return nil, runtime.ErrClosedState
 	}
+	callFrameFunction := runtime.ReferenceValue(runtime.KindGoClosure, "native lua_call")
+	frame := runtime.NewGoCallFrame(callFrameFunction, state.StackTop()+1, -1)
+	frame.Name = "lua_call"
+	frame.NameWhat = "C"
+	if err := state.PushCallFrame(frame); err != nil {
+		// C API 调 Lua/Go closure 时也需要可见 C 帧，否则 error(level) 会越过 native 边界。
+		return nil, err
+	}
+	defer func() {
+		// 调用完成后恢复调用栈，避免 C API 临时帧泄漏到后续 Lua 执行。
+		_, _ = state.PopCallFrame()
+	}()
 	switch function.Kind {
 	case runtime.KindLuaClosure:
 		// Lua closure 使用 State 注入的 runner，保持 VM 栈帧与 upvalue 语义。

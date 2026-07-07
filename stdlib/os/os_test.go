@@ -83,7 +83,7 @@ func TestDateFormatsAndTable(t *testing.T) {
 		// 非法转换符必须返回 Lua error。
 		t.Fatalf("Date invalid conversion error = %v, want Lua error", err)
 	}
-	if _, err := Date(runtime.StringValue("%Ea")); !errors.Is(err, runtime.ErrLuaError) {
+	if _, err := Date(runtime.StringValue("%E9")); !errors.Is(err, runtime.ErrLuaError) {
 		// E/O 修饰符后的未知转换同样非法。
 		t.Fatalf("Date invalid modifier error = %v, want Lua error", err)
 	}
@@ -113,6 +113,24 @@ func TestDateFormatsAndTable(t *testing.T) {
 	if table.RawGetString("wday").Integer != int64(time.Friday)+1 {
 		// Lua wday 使用 1=Sunday。
 		t.Fatalf("Date table wday = %d", table.RawGetString("wday").Integer)
+	}
+}
+
+// TestDateSupportsCommonStrftimeDirectives 验证日志解析常用 POSIX strftime 指令。
+//
+// 固定使用 UTC 时间戳，避免本地时区和宿主 locale 影响断言；覆盖 Lua 5.3 `os.date`
+// 通过 C strftime 常见可用的格式子集。
+func TestDateSupportsCommonStrftimeDirectives(t *testing.T) {
+	// 2014-02-10 16:46:36 UTC 是 Monday，便于同时覆盖星期、月份和 ISO week。
+	values, err := Date(runtime.StringValue("!%a|%A|%b|%B|%C|%D|%e|%F|%g|%G|%h|%I|%k|%l|%n|%p|%r|%R|%s|%t|%T|%u|%U|%V|%W|%x|%X|%z|%Z"), runtime.IntegerValue(1392050796))
+	if err != nil {
+		// 常用 strftime 指令不应被误判为非法转换。
+		t.Fatalf("Date common strftime failed: %v", err)
+	}
+	want := "Mon|Monday|Feb|February|20|02/10/14|10|2014-02-10|14|2014|Feb|04|16| 4|\n|PM|04:46:36 PM|16:46|1392050796|\t|16:46:36|1|06|07|06|02/10/14|16:46:36|+0000|UTC"
+	if len(values) != 1 || values[0].Kind != runtime.KindString || values[0].String != want {
+		// 输出文本必须稳定匹配 C locale 兼容格式。
+		t.Fatalf("Date common strftime = %#v, want %q", values, want)
 	}
 }
 
@@ -353,6 +371,27 @@ func TestTimeReturnsCurrentOrTableTimestamp(t *testing.T) {
 	if len(values) != 1 || values[0].Integer != want {
 		// table 参数必须按本地时区转换。
 		t.Fatalf("Time table = %#v, want %d", values, want)
+	}
+	stringFieldTable := runtime.NewTable()
+	stringFieldTable.RawSetString("year", runtime.StringValue("1970"))
+	stringFieldTable.RawSetString("month", runtime.StringValue("1"))
+	stringFieldTable.RawSetString("day", runtime.StringValue("2"))
+	stringFieldTable.RawSetString("hour", runtime.StringValue("3"))
+	stringFieldTable.RawSetString("min", runtime.StringValue("4"))
+	stringFieldTable.RawSetString("sec", runtime.StringValue("5"))
+	stringFieldValues, err := Time(runtime.ReferenceValue(runtime.KindTable, stringFieldTable))
+	if err != nil {
+		// Lua 5.3 C 标准库通过 luaL_checkinteger 读取字段，numeric string 应可转换。
+		t.Fatalf("Time numeric string table failed: %v", err)
+	}
+	if len(stringFieldValues) != 1 || stringFieldValues[0].Integer != want {
+		// numeric string 字段应与 integer 字段构造同一个时间戳。
+		t.Fatalf("Time numeric string table = %#v, want %d", stringFieldValues, want)
+	}
+	if stringFieldTable.RawGetString("year").Kind != runtime.KindInteger ||
+		stringFieldTable.RawGetString("sec").Kind != runtime.KindInteger {
+		// os.time(table) 成功后仍要把归一化 integer 字段写回原 table。
+		t.Fatalf("Time numeric string table was not normalized")
 	}
 	normalizingTable := runtime.NewTable()
 	normalizingTable.RawSetString("year", runtime.IntegerValue(2005))

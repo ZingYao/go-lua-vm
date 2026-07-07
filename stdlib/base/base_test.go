@@ -547,6 +547,48 @@ func TestErrorRaisesObject(t *testing.T) {
 	}
 }
 
+// TestErrorLevelPrefixCountsGoFrames 验证 error(level) 会把 Go/C 帧计入层级。
+//
+// native C 模块通过 lua_call 调用 Lua callback 时，中间 C frame 必须消耗 level；若目标层是
+// Go/C frame，则没有 Lua source:line 前缀，避免错误对象越过 C 边界指向外层 Lua 文件。
+func TestErrorLevelPrefixCountsGoFrames(t *testing.T) {
+	state := runtime.NewState()
+	errorFrame := runtime.NewGoCallFrame(runtime.ReferenceValue(runtime.KindGoClosure, "error"), 1, -1)
+	errorFrame.Name = "error"
+	errorFrame.NameWhat = "global"
+
+	callbackProto := bytecode.NewProto("@callback.lua")
+	callbackProto.LineInfo = []int{7}
+	callbackClosure := &runtime.LuaClosure{Proto: callbackProto}
+	callbackFrame := runtime.NewLuaCallFrame(runtime.ReferenceValue(runtime.KindLuaClosure, callbackClosure), 1, -1)
+	callbackFrame.CurrentPC = 0
+
+	nativeFrame := runtime.NewGoCallFrame(runtime.ReferenceValue(runtime.KindGoClosure, "native"), 1, -1)
+	nativeFrame.Name = "match"
+	nativeFrame.NameWhat = "field"
+
+	outerProto := bytecode.NewProto("@outer.lua")
+	outerProto.LineInfo = []int{21}
+	outerClosure := &runtime.LuaClosure{Proto: outerProto}
+	outerFrame := runtime.NewLuaCallFrame(runtime.ReferenceValue(runtime.KindLuaClosure, outerClosure), 1, -1)
+	outerFrame.CurrentPC = 0
+
+	for _, frame := range []runtime.CallFrame{outerFrame, nativeFrame, callbackFrame, errorFrame} {
+		// 按真实调用顺序压栈，TracebackFrames 会从当前帧向外返回。
+		if err := state.PushCallFrame(frame); err != nil {
+			t.Fatalf("PushCallFrame failed: %v", err)
+		}
+	}
+	if prefix := errorLevelPrefix(state, 1); prefix != "callback.lua:7: " {
+		// level=1 应指向调用 error 的 Lua callback。
+		t.Fatalf("level 1 prefix = %q, want callback.lua:7: ", prefix)
+	}
+	if prefix := errorLevelPrefix(state, 2); prefix != "" {
+		// level=2 命中中间 Go/C frame，不应越过它指向 outer.lua。
+		t.Fatalf("level 2 prefix = %q, want empty C-frame prefix", prefix)
+	}
+}
+
 // TestGetMetatableSemantics 验证 getmetatable 返回公开元表值。
 //
 // 未保护元表返回真实 table，存在 `__metatable` 时返回保护字段。

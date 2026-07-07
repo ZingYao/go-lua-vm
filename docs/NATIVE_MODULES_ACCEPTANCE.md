@@ -6,7 +6,7 @@
 
 - 日期：2026-07-07
 - 分支：`quanquan/feature/glua-native-module-loader`
-- 默认构建边界：默认无 build tag、`CGO_ENABLED=0` 路径不启用 native loader；当前记录未改变默认构建代码。
+- 默认构建边界：默认无 build tag、`CGO_ENABLED=0` 路径不启用 native loader；标准库语义修复仍必须通过默认 no-CGO 门禁。
 - native 构建边界：`CGO_ENABLED=1 -tags native_modules`，只承诺按 Lua 5.3 public C API 编写并导出 `luaopen_*` 的 C 模块。
 
 ## macOS arm64
@@ -24,10 +24,15 @@
 最近一次本机真实模块总验收：
 
 ```bash
-./scripts/test-native-real-modules.sh
+source ~/.zshrc && CGO_ENABLED=1 ./scripts/test-native-real-modules.sh
 ```
 
-结果：macOS arm64 `.so` 与 `.dylib` 均通过 fixture、lua-cjson、LPeg 和 LuaSocket runtime acceptance。
+结果：2026-07-07 自动轮次复跑通过；macOS arm64 `.so` 与 `.dylib` 均通过 fixture、lua-cjson、LPeg 和 LuaSocket runtime acceptance。
+
+额外诊断样本：
+
+- 2026-07-07 使用外部临时副本 `/tmp/glua-lua-sandbox-extensions` 运行 LPeg 日志解析 suite，覆盖 `common_log_format`、`date_time`、`logfmt`、`lpeg_heka`、`mysql`、`phabricator`、`postfix`、`printf`、`uri` 等上层 Lua grammar 对 native LPeg 的压力路径。
+- 该样本需要临时 Lua 5.1/旧 LPeg 兼容垫片（`setfenv`、`_G.lpeg` 别名、`TZ=UTC`、纳秒 double 期望容差和测试路径补齐），因此不作为仓库内正式验收门禁；它用于证明本轮修复后的 native LPeg C frame、`os.time` / `os.date` 标准库语义可支撑真实日志 grammar。
 
 最近一次 native Go 门禁：
 
