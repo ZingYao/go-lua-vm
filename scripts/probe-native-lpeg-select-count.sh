@@ -44,6 +44,8 @@ echo "PROBE_SELECTED_ATTEMPTS_DECL_ONLY=${PROBE_SELECTED_ATTEMPTS_DECL_ONLY:-0}"
 echo "PROBE_SELECTED_PROBES_DECL_ONLY=${PROBE_SELECTED_PROBES_DECL_ONLY:-0}"
 echo "PROBE_SELECTED_CORE_DECLS_ONLY=${PROBE_SELECTED_CORE_DECLS_ONLY:-0}"
 echo "PROBE_SELECTED_PROBE_LOCALS=${PROBE_SELECTED_PROBE_LOCALS:-}"
+echo "PROBE_SELECTED_HEAD_LOCALS=${PROBE_SELECTED_HEAD_LOCALS:-}"
+echo "PROBE_SELECTED_HEAD_SPLIT_TAIL_ONLY=${PROBE_SELECTED_HEAD_SPLIT_TAIL_ONLY:-0}"
 echo "PROBE_PREBUILD_PADDING_LOCALS=${PROBE_PREBUILD_PADDING_LOCALS:-0}"
 echo "PROBE_CONTINUE_ON_CRASH=${PROBE_CONTINUE_ON_CRASH:-0}"
 
@@ -141,6 +143,34 @@ emit_probe_prebuild_selected_parts() {
     cat <<'LUA'
 local attempts = {}
 LUA
+  elif [[ "${PROBE_SELECTED_HEAD_SPLIT_TAIL_ONLY:-0}" == "1" ]]; then
+    true
+  elif [[ -n "${PROBE_SELECTED_HEAD_LOCALS:-}" ]]; then
+    local selected_head_locals=",${PROBE_SELECTED_HEAD_LOCALS},"
+    local selected_head_local
+    IFS=',' read -r -a selected_head_local_entries <<<"${PROBE_SELECTED_HEAD_LOCALS}"
+    for selected_head_local in "${selected_head_local_entries[@]}"; do
+      case "${selected_head_local}" in
+        left|unit|capture|right)
+          ;;
+        *)
+          echo "unknown PROBE_SELECTED_HEAD_LOCALS entry: ${selected_head_local}" >&2
+          return 1
+          ;;
+      esac
+    done
+    if [[ "${selected_head_locals}" == *",left,"* ]]; then
+      printf '%s\n' "local probe_head_left"
+    fi
+    if [[ "${selected_head_locals}" == *",unit,"* ]]; then
+      printf '%s\n' "local probe_head_unit"
+    fi
+    if [[ "${selected_head_locals}" == *",capture,"* ]]; then
+      printf '%s\n' "local probe_head_capture"
+    fi
+    if [[ "${selected_head_locals}" == *",right,"* ]]; then
+      printf '%s\n' "local probe_head_right"
+    fi
   elif [[ -n "${PROBE_SELECTED_PROBE_LOCALS:-}" ]]; then
     local selected_locals=",${PROBE_SELECTED_PROBE_LOCALS},"
     local selected_local
@@ -309,7 +339,9 @@ uses_selected_prebuild_decls() {
      "${PROBE_SELECTED_ATTEMPTS_DECL_ONLY:-0}" == "1" ||
      "${PROBE_SELECTED_PROBES_DECL_ONLY:-0}" == "1" ||
      "${PROBE_SELECTED_CORE_DECLS_ONLY:-0}" == "1" ||
-     -n "${PROBE_SELECTED_PROBE_LOCALS:-}" ]]
+     -n "${PROBE_SELECTED_PROBE_LOCALS:-}" ||
+     -n "${PROBE_SELECTED_HEAD_LOCALS:-}" ||
+     "${PROBE_SELECTED_HEAD_SPLIT_TAIL_ONLY:-0}" == "1" ]]
 }
 
 uses_selected_tail() {
@@ -328,11 +360,52 @@ uses_selected_tail() {
      "${PROBE_SELECTED_ATTEMPTS_DECL_ONLY:-0}" == "1" ||
      "${PROBE_SELECTED_PROBES_DECL_ONLY:-0}" == "1" ||
      "${PROBE_SELECTED_CORE_DECLS_ONLY:-0}" == "1" ||
-     -n "${PROBE_SELECTED_PROBE_LOCALS:-}" ]]
+     -n "${PROBE_SELECTED_PROBE_LOCALS:-}" ||
+     -n "${PROBE_SELECTED_HEAD_LOCALS:-}" ||
+     "${PROBE_SELECTED_HEAD_SPLIT_TAIL_ONLY:-0}" == "1" ]]
 }
 
 emit_probe_selected_parts_tail() {
-  cat <<'LUA'
+  if [[ -n "${PROBE_SELECTED_HEAD_LOCALS:-}" || "${PROBE_SELECTED_HEAD_SPLIT_TAIL_ONLY:-0}" == "1" ]]; then
+    cat <<'LUA'
+attempts = {}
+if probe_open == nil then
+  probe_open = '[' * m.Cg(m.P'='^0, "init") * '['
+end
+if probe_close == nil then
+  if probe_close_head == nil then
+    if probe_head_left == nil then
+      probe_head_left = ']'
+    end
+    if probe_head_unit == nil then
+      probe_head_unit = m.P'='^0
+    end
+    if probe_head_capture == nil then
+      probe_head_capture = m.C(probe_head_unit)
+    end
+    if probe_head_right == nil then
+      probe_head_right = ']'
+    end
+    probe_close_head = probe_head_left * probe_head_capture * probe_head_right
+  end
+  if probe_close_back == nil then
+    probe_close_back = m.Cb("init")
+  end
+  if probe_close_func == nil then
+    probe_close_func = function (_, pos, s1, s2)
+                                               attempts[#attempts + 1] = pos .. ':' .. s1 .. ':' .. s2
+                                               return s1 == s2 end
+  end
+  probe_close = m.Cmt(probe_close_head * probe_close_back, probe_close_func)
+end
+if probe_any == nil then
+  probe_any = m.P(1)
+end
+c = probe_open * { probe_close + probe_any * m.V(1) } / 0
+print("PROBE", c:match'[==[]]====]]]]==]===[]', table.concat(attempts, ","))
+LUA
+  else
+    cat <<'LUA'
 attempts = {}
 if probe_open == nil then
   probe_open = '[' * m.Cg(m.P'='^0, "init") * '['
@@ -357,6 +430,7 @@ end
 c = probe_open * { probe_close + probe_any * m.V(1) } / 0
 print("PROBE", c:match'[==[]]====]]]]==]===[]', table.concat(attempts, ","))
 LUA
+  fi
 }
 
 emit_probe_prebuild_padding_locals() {
