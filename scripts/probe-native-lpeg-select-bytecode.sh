@@ -47,6 +47,42 @@ local payload = 17
 LUA
 }
 
+emit_lpeg_warmup_string_close() {
+  cat <<'LUA'
+local probe_warmup = ']'
+probe_warmup = nil
+LUA
+}
+
+emit_lpeg_warmup_string_close_dead_branch() {
+  cat <<'LUA'
+local probe_warmup
+if false then
+  probe_warmup = ']'
+end
+probe_warmup = nil
+LUA
+}
+
+emit_lpeg_warmup_string_close_dead_function() {
+  cat <<'LUA'
+local function probe_warmup_const()
+  return ']'
+end
+local probe_warmup = nil
+LUA
+}
+
+emit_lpeg_warmup_string_close_called_function() {
+  cat <<'LUA'
+local function probe_warmup_const()
+  return ']'
+end
+local probe_warmup = probe_warmup_const()
+probe_warmup = nil
+LUA
+}
+
 emit_lpeg_default_tail() {
   cat <<'LUA'
 local attempts = {}
@@ -455,6 +491,26 @@ LUA
       emit_lpeg_error_number_perturbation
       emit_lpeg_split_head_tail
       ;;
+    lpeg-warmup-string-close-default-tail-error-number)
+      emit_lpeg_warmup_string_close
+      emit_lpeg_error_number_perturbation
+      emit_lpeg_default_tail
+      ;;
+    lpeg-warmup-string-close-dead-branch-default-tail-error-number)
+      emit_lpeg_warmup_string_close_dead_branch
+      emit_lpeg_error_number_perturbation
+      emit_lpeg_default_tail
+      ;;
+    lpeg-warmup-string-close-dead-function-default-tail-error-number)
+      emit_lpeg_warmup_string_close_dead_function
+      emit_lpeg_error_number_perturbation
+      emit_lpeg_default_tail
+      ;;
+    lpeg-warmup-string-close-called-function-default-tail-error-number)
+      emit_lpeg_warmup_string_close_called_function
+      emit_lpeg_error_number_perturbation
+      emit_lpeg_default_tail
+      ;;
     *)
       echo "unknown select bytecode probe mode: ${mode}" >&2
       return 1
@@ -506,6 +562,10 @@ modes=(
   lpeg-selected-tail-only-error-number
   lpeg-decls-only-selected-tail-error-number
   lpeg-split-head-tail-only-error-number
+  lpeg-warmup-string-close-default-tail-error-number
+  lpeg-warmup-string-close-dead-branch-default-tail-error-number
+  lpeg-warmup-string-close-dead-function-default-tail-error-number
+  lpeg-warmup-string-close-called-function-default-tail-error-number
 )
 
 if (($# > 0)); then
