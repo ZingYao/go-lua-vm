@@ -323,6 +323,78 @@ func TestNativeLuaSetUserValueRespectsCurrentCFrameBase(t *testing.T) {
 	}
 }
 
+// TestNativeLuaUserValueCopyBetweenVisibleUserdata 验证 userdata user value 可在当前 C 帧内复制。
+func TestNativeLuaUserValueCopyBetweenVisibleUserdata(t *testing.T) {
+	// LPeg 的 copyktable 路径依赖 lua_getuservalue(source) + lua_setuservalue(-2)，这里用通用 userdata 语义锁定该组合。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 native State 映射不可用，无法验证 user value 复制。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'o', 'u', 't', 'e', 'r', 0}[0]))
+	if pointer := nativeLuaNewUserdata(luaState, 4); pointer == nil {
+		// 测试需要一个 source native full userdata。
+		t.Fatalf("source lua_newuserdata returned nil")
+	}
+	sourceValue := state.ValueAt(2)
+	sourceUserdata, ok := sourceValue.Ref.(*runtime.Userdata)
+	if !ok || sourceUserdata == nil {
+		// source userdata 必须能解析为 runtime.Userdata。
+		t.Fatalf("source userdata ref = %#v, want *runtime.Userdata", sourceValue.Ref)
+	}
+	userValueTable := runtime.NewTable()
+	sourceUserdata.UserValue = runtime.ReferenceValue(runtime.KindTable, userValueTable)
+	if pointer := nativeLuaNewUserdata(luaState, 4); pointer == nil {
+		// 测试需要一个 target native full userdata。
+		t.Fatalf("target lua_newuserdata returned nil")
+	}
+	targetValue := state.ValueAt(3)
+	targetUserdata, ok := targetValue.Ref.(*runtime.Userdata)
+	if !ok || targetUserdata == nil {
+		// target userdata 必须能解析为 runtime.Userdata。
+		t.Fatalf("target userdata ref = %#v, want *runtime.Userdata", targetValue.Ref)
+	}
+	if !pushNativeStateCallFrame(luaState, 1, nil) {
+		// 无法建立调用帧时，本测试不能验证 C frame 内 user value 复制。
+		t.Fatalf("pushNativeStateCallFrame failed")
+	}
+	defer popNativeStateCallFrame(luaState)
+
+	if gotType := nativeLuaGetUserValue(luaState, 1); gotType != nativeLuaTypeTable {
+		// source 的 user value 是 table，读取后必须把同一个 table 压入当前 C frame 栈顶。
+		t.Fatalf("lua_getuservalue(source) = %d, want table", gotType)
+	}
+	if got := nativeLuaStackTop(luaState); got != 3 {
+		// 当前 C frame 应可见 source、target 和刚压入的 user value。
+		t.Fatalf("visible top after lua_getuservalue = %d, want 3", got)
+	}
+	if got := nativeLuaSetUserValue(luaState, -2); got != 1 {
+		// -2 在当前 C frame 中指向 target userdata，必须接受栈顶 user value。
+		t.Fatalf("lua_setuservalue(target) = %d, want 1", got)
+	}
+	if got := nativeLuaStackTop(luaState); got != 2 {
+		// 成功写入后只弹出可见栈顶 user value，保留 source 和 target 两个参数槽。
+		t.Fatalf("visible top after lua_setuservalue = %d, want 2", got)
+	}
+	if got := state.StackTop(); got != 3 {
+		// 全局栈仍应是 outer、source、target，不能残留复制用的临时 user value。
+		t.Fatalf("global top after user value copy = %d, want 3", got)
+	}
+	if value := state.ValueAt(1); value.Kind != runtime.KindString || value.String != "outer" {
+		// C frame 内复制 user value 不能覆盖外层调用者栈。
+		t.Fatalf("outer stack value = %#v, want outer", value)
+	}
+	if targetUserdata.UserValue.Kind != runtime.KindTable || targetUserdata.UserValue.Ref != userValueTable {
+		// target 必须持有 source user value 的同一 table identity，供 ktable/capture 引用继续可达。
+		t.Fatalf("target user value = %#v, want %p", targetUserdata.UserValue, userValueTable)
+	}
+}
+
 // TestNativeLuaToUserdataRejectsNonUserdata 验证非 native userdata 不会被误暴露为 C 指针。
 func TestNativeLuaToUserdataRejectsNonUserdata(t *testing.T) {
 	// 构造普通栈值和纯 Go userdata，覆盖转换失败边界。
