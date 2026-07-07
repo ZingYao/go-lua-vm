@@ -130,6 +130,14 @@ NATIVE_CROSS_REQUIRE_ALL=1 NATIVE_CROSS_TARGETS="linux/arm64 windows/arm64" ./sc
 
 该脚本不替代 Linux/Windows 真实运行期验收，只验证 Windows shim 未落地、缺失 cross C compiler、交叉编译严格模式缺失 toolchain、当前平台总验收被误用于 Windows 或非 Windows 异平台等不可用场景会输出明确 `skip:` 原因。
 
+当前平台 Lua 5.3 ABI 符号覆盖门禁：
+
+```bash
+./scripts/check-native-lua-abi-symbols.sh
+```
+
+该脚本构建 native `glua`、fixture、lua-cjson、LPeg 和 LuaSocket，收集真实模块未解析的 `lua_*` / `luaL_*` 符号，并确认这些符号同时存在于 native 源码声明（Go `//export` 加 C wrapper 定义）和当前 native `glua` 二进制导出中。它为后续 Windows `lua53.dll` shim 或 import library 提供可复用的符号覆盖门禁，但不替代 Windows 目标平台运行期验收。
+
 fixture 只验证 loader smoke，不作为最终兼容结论。真实兼容验收必须包含：
 
 - `lua-cjson`：第一真实模块，覆盖 `require`、`encode/decode` 和错误输入 `pcall`。

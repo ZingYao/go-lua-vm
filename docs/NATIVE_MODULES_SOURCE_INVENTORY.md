@@ -27,6 +27,7 @@
 | Fixture 测试脚本 | `scripts/test-native-modules.sh` | 构建 native tag `glua`，调用 fixture 构建脚本，并按当前平台后缀执行成功 require 与 luaopen 初始化失败两条 CLI smoke；macOS 覆盖 `.dylib` 与 `.so` 两类候选 | 已固定 |
 | 交叉编译脚本 | `scripts/check-native-cross-compile.sh` | 编译 `internal/native` 测试二进制和 `cmd/glua` native 产物，显式输出目标平台、`CC`、产物路径、skip 原因和 `compiled/skipped/targets` 汇总；`NATIVE_CROSS_REQUIRE_ALL=1` 可把缺失目标 toolchain 从可跳过变为失败 | 已固定 |
 | Skip 原因检查脚本 | `scripts/check-native-skip-reasons.sh` | 验证 Windows shim 未落地、LuaSocket/真实模块总验收 Windows runtime 暂不可用、真实模块总验收非 Windows 异平台误用、缺失 cross C compiler 和交叉编译严格模式缺失 toolchain 等场景必须输出明确 `skip:` 原因，防止平台不可用被静默视为通过 | 已固定 |
+| ABI 符号检查脚本 | `scripts/check-native-lua-abi-symbols.sh` | 构建当前平台 native `glua`、fixture、lua-cjson、LPeg 和 LuaSocket，收集真实模块未解析 `lua_*` / `luaL_*` 符号，并确认 native 源码声明（Go `//export` 加 C wrapper 定义）和 native `glua` 二进制导出均覆盖这些符号；Windows 在 `lua53.dll` shim/import library 落地前明确 skip | 已固定 |
 | Fixture Go harness | `internal/native/loadlib_fixture_unix_test.go` | 编译仓库内 fixture C 文件，并验证 `package.loadlib`、`require`、错误传播和 userdata 状态 | 已固定 |
 | 真实模块源码 | `third_party/lua-cjson/` | 第一真实模块验收源码，固定 upstream `mpx/lua-cjson` tag `2.1.0` / commit `4bc5e917c8cd5fc2f6b217512ef530007529322f`，许可证见目录内 `LICENSE` | 已固定 |
 | 真实模块构建脚本 | `scripts/build-native-cjson.sh` | 使用仓库内 Lua 5.3 public headers 和固定 `third_party/lua-cjson/` 源码编译当前平台 `cjson` 动态模块，显式输出目标平台、`CC`、源码路径和产物路径 | 已固定 |
@@ -54,6 +55,7 @@
 - `third_party/lpeg/` 当前可通过 `CGO_ENABLED=1 scripts/build-native-lpeg.sh` 做源码编译级验收，也可通过 `scripts/test-native-lpeg.sh` 做运行期验收；macOS arm64 `.so` 与 `.dylib` 后缀已通过基础 smoke 和完整官方 `test.lua`。
 - `third_party/luasocket/` 当前可通过 `CGO_ENABLED=1 scripts/build-native-luasocket.sh` 做 `socket.core` / `mime.core` 源码编译级验收，也可通过 `scripts/test-native-luasocket.sh` 做当前平台运行期验收；脚本覆盖 `require("socket")`、`require("mime")`、MIME 编解码和可控本机 TCP/UDP loopback。
 - `scripts/test-native-real-modules.sh` 可作为当前平台真实模块总验收入口，串联 fixture、lua-cjson、LPeg 和 LuaSocket 运行期脚本；该入口只聚合宿主同平台结果，Windows 目标和其他异平台目标会在执行子验收前明确 skip，不把缺失目标平台的 skip 解释为 Linux/Windows 已闭环。
+- `scripts/check-native-lua-abi-symbols.sh` 可作为当前平台 Lua 5.3 ABI 符号覆盖入口，确认真实模块需要的未解析 `lua_*` / `luaL_*` 符号已由 native 源码声明和 native `glua` 二进制导出共同覆盖；该检查为后续 Windows import library/shim 提供符号清单依据，但不替代 Windows 目标平台运行期验收。
 - 现阶段不得把内嵌 smoke fixture 的通过结果解释为“任意第三方 Lua C 模块兼容”；它只证明项目侧 loader、opaque `lua_State*`、基础 C API shim 和 require 链路已经贯通。
 
 ## 后续维护规则

@@ -101,6 +101,11 @@ run_and_require_skip \
   env TARGET_GOOS=windows "${repo_root}/scripts/test-native-real-modules.sh"
 
 run_and_require_skip \
+  "windows Lua ABI symbol coverage" \
+  "skip: Windows Lua ABI symbol coverage requires lua53.dll shim or import library, not implemented yet" \
+  env TARGET_GOOS=windows "${repo_root}/scripts/check-native-lua-abi-symbols.sh"
+
+run_and_require_skip \
   "non windows real module aggregate target mismatch" \
   "skip: native real module acceptance requires running on target platform ${mismatch_goos}/${host_goarch}; host is ${host_goos}/${host_goarch}" \
   env TARGET_GOOS="${mismatch_goos}" "${repo_root}/scripts/test-native-real-modules.sh"
