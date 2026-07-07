@@ -72,7 +72,17 @@ func nativeLuaLSetFuncs(luaState unsafe.Pointer, functions []nativeLuaLibraryFun
 		// 无效 State 不能注册任何函数。
 		return false
 	}
-	if upvalueCount > state.StackTop() {
+	baseTop := 0
+	if currentBaseTop, ok := currentNativeStateCallBase(luaState); ok {
+		// C function 内只能从当前调用帧可见栈读取 table 和 upvalue，不能穿透外层 Go VM 栈。
+		baseTop = currentBaseTop
+	}
+	visibleTop := state.StackTop() - baseTop
+	if visibleTop < 0 {
+		// 调用帧基址损坏时保持 no-op，避免继续读写错误栈区间。
+		return false
+	}
+	if upvalueCount > visibleTop {
 		// 调用方没有提供足够 upvalue，保持栈不变便于定位错误 C 模块。
 		return false
 	}
@@ -82,9 +92,8 @@ func nativeLuaLSetFuncs(luaState unsafe.Pointer, functions []nativeLuaLibraryFun
 		// luaL_setfuncs 要求目标 table 在 upvalue 下方；当前错误 longjmp 尚未接入，失败时保持 no-op。
 		return false
 	}
-	originalTop := state.StackTop()
 	upvalues := make([]runtime.Value, upvalueCount)
-	firstUpvalueIndex := originalTop - upvalueCount + 1
+	firstUpvalueIndex := baseTop + visibleTop - upvalueCount + 1
 	for upvalueIndex := 0; upvalueIndex < upvalueCount; upvalueIndex++ {
 		// 每个函数都需要捕获同一组 upvalue 副本，不能共享后续被弹出的栈槽。
 		upvalues[upvalueIndex] = state.ValueAt(firstUpvalueIndex + upvalueIndex)
@@ -100,14 +109,14 @@ func nativeLuaLSetFuncs(luaState unsafe.Pointer, functions []nativeLuaLibraryFun
 			nativeLuaPushValue(luaState, upvalues[upvalueIndex])
 		}
 		nativeLuaPushCClosure(luaState, functions[functionIndex].function, upvalueCount)
-		value, err := state.Pop()
-		if err != nil {
+		value, ok := nativeLuaPopVisible(luaState, state)
+		if !ok {
 			// 压 closure 后无法弹出说明 State 已损坏，停止处理避免继续扩大副作用。
 			return false
 		}
 		table.RawSetString(functions[functionIndex].name, value)
 	}
-	nativeLuaRestoreStackTop(state, originalTop-upvalueCount)
+	nativeLuaRestoreStackTop(state, baseTop+visibleTop-upvalueCount)
 	return true
 }
 

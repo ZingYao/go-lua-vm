@@ -96,6 +96,108 @@ func TestNativeLuaLSetFuncsRegistersUpvalueClosures(t *testing.T) {
 	}
 }
 
+// TestNativeLuaLSetFuncsUsesCurrentCFrameVisibleStack 验证 setfuncs 只读取当前 C 帧可见 table/upvalue。
+func TestNativeLuaLSetFuncsUsesCurrentCFrameVisibleStack(t *testing.T) {
+	// 外层 sentinel 模拟 Go VM 调用者栈；当前 C 帧只应消费其后压入的 table/upvalue。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 setfuncs 调用帧隔离。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	if err := state.Push(runtime.StringValue("outer")); err != nil {
+		// 外层 sentinel 压栈失败时无法验证调用帧隔离。
+		t.Fatalf("push outer sentinel failed: %v", err)
+	}
+	baseTop := state.StackTop()
+	if !pushNativeStateCallFrame(luaState, baseTop, nil) {
+		// C frame 基址记录失败时无法验证 visible table/upvalue 读取。
+		t.Fatalf("pushNativeStateCallFrame failed")
+	}
+	defer popNativeStateCallFrame(luaState)
+
+	nativeLuaCreateTable(luaState, 0, 1)
+	nativeLuaPushInteger(luaState, 11)
+	if !nativeLuaLSetFuncs(luaState, []nativeLuaLibraryFunction{{name: "add", function: luaState}}, 1) {
+		// visible table/upvalue 足够时必须注册成功。
+		t.Fatalf("nativeLuaLSetFuncs visible nup returned false")
+	}
+	if got := state.StackTop(); got != baseTop+1 {
+		// 成功注册后只保留 visible table，并弹出原始 upvalue，外层 sentinel 保留。
+		t.Fatalf("global top after visible setfuncs = %d, want %d", got, baseTop+1)
+	}
+	if got := nativeLuaStackTop(luaState); got != 1 {
+		// 当前 C 帧只应看到目标 table。
+		t.Fatalf("visible top after visible setfuncs = %d, want 1", got)
+	}
+	if value := state.ValueAt(1); value.Kind != runtime.KindString || value.String != "outer" {
+		// 外层 sentinel 不能被 upvalue 恢复或 closure 弹栈误消费。
+		t.Fatalf("outer sentinel after visible setfuncs = %#v, want outer string", value)
+	}
+	tableValue := state.ValueAt(-1)
+	tableRef, ok := tableValue.Ref.(*runtime.Table)
+	if tableValue.Kind != runtime.KindTable || !ok || tableRef == nil {
+		// 当前 C 帧保留的可见值必须是目标 table。
+		t.Fatalf("visible setfuncs table = %#v, want table", tableValue)
+	}
+	closureValue := tableRef.RawGetString("add")
+	closure, ok := closureValue.Ref.(*runtime.GoClosureWithUpvalues)
+	if closureValue.Kind != runtime.KindGoClosure || !ok || closure == nil {
+		// 注册字段必须是捕获 visible upvalue 的 Go closure。
+		t.Fatalf("visible setfuncs add = %#v, want GoClosureWithUpvalues", closureValue)
+	}
+	if len(closure.Upvalues) != 1 || !closure.Upvalues[0].RawEqual(runtime.IntegerValue(11)) {
+		// 捕获值必须来自当前 C 帧可见栈，而不是外层 sentinel。
+		t.Fatalf("visible setfuncs upvalues = %#v, want [11]", closure.Upvalues)
+	}
+}
+
+// TestNativeLuaLSetFuncsRejectsUpvaluesOutsideCurrentCFrame 验证 setfuncs 不穿透外层栈读取 upvalue。
+func TestNativeLuaLSetFuncsRejectsUpvaluesOutsideCurrentCFrame(t *testing.T) {
+	// 当前 C 帧为空而外层有 sentinel 时，nup=1 必须失败且保持栈不变。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 setfuncs upvalue 边界。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	if err := state.Push(runtime.StringValue("outer")); err != nil {
+		// 外层 sentinel 压栈失败时无法验证调用帧隔离。
+		t.Fatalf("push outer sentinel failed: %v", err)
+	}
+	baseTop := state.StackTop()
+	if !pushNativeStateCallFrame(luaState, baseTop, nil) {
+		// C frame 基址记录失败时无法验证 upvalue 数量边界。
+		t.Fatalf("pushNativeStateCallFrame failed")
+	}
+	defer popNativeStateCallFrame(luaState)
+
+	if nativeLuaLSetFuncs(luaState, []nativeLuaLibraryFunction{{name: "add", function: luaState}}, 1) {
+		// visible upvalue 不足时必须失败，不能把外层 sentinel 当作 upvalue。
+		t.Fatalf("nativeLuaLSetFuncs missing visible upvalue returned true")
+	}
+	if got := state.StackTop(); got != baseTop {
+		// 失败路径不得弹掉或写入调用者栈。
+		t.Fatalf("global top after missing visible upvalue = %d, want %d", got, baseTop)
+	}
+	if got := nativeLuaStackTop(luaState); got != 0 {
+		// 当前 C 帧仍应为空。
+		t.Fatalf("visible top after missing visible upvalue = %d, want 0", got)
+	}
+	if value := state.ValueAt(1); value.Kind != runtime.KindString || value.String != "outer" {
+		// 外层 sentinel 不能被注册流程读取、捕获或弹出。
+		t.Fatalf("outer sentinel after missing visible upvalue = %#v, want outer string", value)
+	}
+}
+
 // TestNativeLuaLNewLibCreatesTable 验证 luaL_newlib 宏等价路径能创建并填充 table。
 func TestNativeLuaLNewLibCreatesTable(t *testing.T) {
 	// newlib helper 应创建 table 并复用 setfuncs 注册无 upvalue 函数。
