@@ -139,6 +139,36 @@ func TestNativeCAPITypeAndNumberPrimitives(t *testing.T) {
 		t.Fatalf("nativeLuaIsInteger nil state = %v, want false", got)
 	}
 
+	if pointer := nativeLuaNewUserdata(luaState, 4); pointer == nil {
+		// full userdata 构造失败时无法验证 lua_isuserdata。
+		t.Fatal("nativeLuaNewUserdata returned nil")
+	}
+	lightMarker := 73
+	nativeLuaPushLightUserdata(luaState, unsafe.Pointer(&lightMarker))
+	userdataCases := []struct {
+		name  string
+		index int
+		want  bool
+	}{
+		{name: "nil", index: 1, want: false},
+		{name: "integer", index: 4, want: false},
+		{name: "table", index: 7, want: false},
+		{name: "plain string", index: 8, want: false},
+		{name: "full userdata", index: 10, want: true},
+		{name: "light userdata", index: 11, want: true},
+		{name: "missing", index: 12, want: false},
+	}
+	for _, tc := range userdataCases {
+		// lua_isuserdata 对 full userdata 和 lightuserdata 为真，其余类型和 none 为假。
+		if got := nativeLuaIsUserdata(luaState, tc.index); got != tc.want {
+			t.Fatalf("nativeLuaIsUserdata %s = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	if got := nativeLuaIsUserdata(nil, 1); got {
+		// nil State 不能读取任何 userdata。
+		t.Fatalf("nativeLuaIsUserdata nil state = %v, want false", got)
+	}
+
 	numberValue, ok := nativeLuaToNumber(luaState, 4)
 	if !ok || numberValue != 7 {
 		// integer 必须可按 number 读取。
