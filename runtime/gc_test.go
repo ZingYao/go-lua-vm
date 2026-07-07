@@ -194,6 +194,42 @@ func TestGCRootsGoClosureWithUpvaluesRoot(t *testing.T) {
 	}
 }
 
+// TestGCRootsStackGoClosureWithUpvaluesRoot 验证栈上显式 Go closure upvalue 被纳入根采样。
+//
+// native C closure 作为普通 Lua 值压在栈或寄存器中时，本体已经属于 stack root；它携带的显式
+// upvalue 也必须进入 closure root，避免 root 快照漏掉构造期关联表或 registry 引用。
+func TestGCRootsStackGoClosureWithUpvaluesRoot(t *testing.T) {
+	state := NewState()
+	upvalueTable := NewTable()
+	upvalueTable.RawSetString("marker", StringValue("stack-go-upvalue"))
+	closure := &GoClosureWithUpvalues{
+		Function: GoResultsFunction(func(values ...Value) ([]Value, error) {
+			// 测试只关注 root 采样，不实际调用该 closure。
+			return values, nil
+		}),
+		Upvalues: []Value{StringValue("stack-upvalue"), ReferenceValue(KindTable, upvalueTable)},
+	}
+	stackClosure := ReferenceValue(KindGoClosure, closure)
+	if err := state.Push(stackClosure); err != nil {
+		// Go closure 需要作为主栈值进入根采样。
+		t.Fatalf("push Go closure failed: %v", err)
+	}
+
+	snapshot := state.SnapshotGCRoots()
+	stackRoots := snapshot.Batches[GCRootTypeStack]
+	if !containsValue(stackRoots, stackClosure) {
+		// closure 本体应由 stack root 承载。
+		t.Fatalf("stack root should include Go closure")
+	}
+	closureRoots := snapshot.Batches[GCRootTypeClosureUpvalue]
+	for index := 0; index < len(closure.Upvalues); index++ {
+		// 每个显式 upvalue 都应从栈上 closure 展开到 closure root。
+		if !containsValue(closureRoots, closure.Upvalues[index]) {
+			t.Fatalf("closure root should include stack Go upvalue #%d", index)
+		}
+	}
+}
+
 // TestGCRootsTableKeyValueRoot 验证 table 中 key/value 会进入专门 root 扫描。
 //
 // table key/value 扫描用于为第一阶段 Lua 风格的 GC 可达性补齐 table 内部边。

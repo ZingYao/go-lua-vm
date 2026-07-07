@@ -416,8 +416,9 @@ func (state *State) SnapshotGCRoots() GCRootSnapshot {
 	// stack root 需要完整复制，避免外部修改主栈破坏快照。
 	snapshot.Batches[GCRootTypeStack] = append(snapshot.Batches[GCRootTypeStack], state.stack...)
 	for index := range state.stack {
-		// 主栈上的 table 值会触发 key/value 采样。
+		// 主栈上的 table/userdata/closure 值会触发关联边与 upvalue 采样。
 		state.appendAssociatedRoots(state.stack[index], &snapshot)
+		snapshot.Batches[GCRootTypeClosureUpvalue] = state.appendClosureUpvalueRoots(state.stack[index], snapshot.Batches[GCRootTypeClosureUpvalue])
 	}
 	for _, vm := range state.activeVMs {
 		if vm == nil {
@@ -427,8 +428,9 @@ func (state *State) SnapshotGCRoots() GCRootSnapshot {
 		registers := vm.ActiveRegistersSnapshot()
 		snapshot.Batches[GCRootTypeStack] = append(snapshot.Batches[GCRootTypeStack], registers...)
 		for index := range registers {
-			// 活动 Lua VM 的存活局部寄存器同样属于运行栈根，table 值需要继续采样 key/value。
+			// 活动 Lua VM 的存活局部寄存器同样属于运行栈根，闭包值需要继续采样 upvalue。
 			state.appendAssociatedRoots(registers[index], &snapshot)
+			snapshot.Batches[GCRootTypeClosureUpvalue] = state.appendClosureUpvalueRoots(registers[index], snapshot.Batches[GCRootTypeClosureUpvalue])
 		}
 	}
 
@@ -443,8 +445,9 @@ func (state *State) SnapshotGCRoots() GCRootSnapshot {
 			snapshot.Batches[GCRootTypeCoroutineStack] = append(snapshot.Batches[GCRootTypeCoroutineStack], thread.stack...)
 		}
 		for index := range thread.stack {
-			// 每个协程栈项中的 table 都要进行 key/value 继续采样。
+			// 每个协程栈项中的 table/userdata/closure 都要进行关联边继续采样。
 			state.appendAssociatedRoots(thread.stack[index], &snapshot)
+			snapshot.Batches[GCRootTypeClosureUpvalue] = state.appendClosureUpvalueRoots(thread.stack[index], snapshot.Batches[GCRootTypeClosureUpvalue])
 		}
 
 		if !thread.function.IsNil() {
