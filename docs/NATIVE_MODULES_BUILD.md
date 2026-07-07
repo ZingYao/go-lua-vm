@@ -104,7 +104,7 @@ fixture loader smoke：
 ./scripts/test-native-real-modules.sh
 ```
 
-该入口串联 fixture、lua-cjson、LPeg 和 LuaSocket 当前平台运行期验收，便于本机或 CI 做一次性回归；它只允许在宿主同平台运行，异平台目标会明确 `skip:`，不替代 Linux/Windows 目标平台的独立运行期闭环。
+该入口串联 fixture、lua-cjson、LPeg 和 LuaSocket 当前平台运行期验收，便于本机或 CI 做一次性回归；它只允许在宿主同平台运行，Windows 目标和其他异平台目标会明确 `skip:`，不替代 Linux/Windows 目标平台的独立运行期闭环。
 
 交叉编译验证入口：
 

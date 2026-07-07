@@ -553,3 +553,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-07：新增 `docs/NATIVE_MODULES_ACCEPTANCE.md` 作为当前验收台账，记录 macOS arm64 fixture、lua-cjson、LPeg、LuaSocket 已验证范围，明确 Linux/Windows 仍未声明运行期通过，并列出 native_modules 不可夸大的兼容边界。该记录不是全平台最终完成声明；Linux/Windows 闭环后需继续更新。
 - 2026-07-07：新增 `scripts/test-native-real-modules.sh` 作为当前平台真实模块总验收入口，串联 fixture、lua-cjson、LPeg 和 LuaSocket 运行期脚本，并统一输出目标平台与 CGO 状态。该入口只聚合当前平台验收结果，不把 Linux/Windows 缺失环境或 skip 视为全平台闭环；Linux/Windows 运行期仍需按目标平台独立执行并更新验收记录。
 - 2026-07-07：修正 `scripts/test-native-real-modules.sh` 的异平台边界；总验收入口现在只允许宿主同平台执行，`TARGET_GOOS=windows` 等异平台目标会在子脚本前明确 `skip:`，避免多个子验收各自 skip 后仍输出 `native real module acceptance suite passed`。同步扩展 `scripts/check-native-skip-reasons.sh` 覆盖该 Windows 总验收 skip 文本。
+- 2026-07-07：收紧 `scripts/test-native-real-modules.sh` 的 Windows 目标判定；Windows 目标现在无论宿主平台是否 Windows 都会在子验收前明确 skip，直到 `lua53.dll` shim 或 import library 落地，避免未来 Windows host 上把子脚本 skip 汇总成总验收 passed。

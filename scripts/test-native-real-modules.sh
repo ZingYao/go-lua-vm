@@ -23,12 +23,13 @@ if [[ "${actual_go_version}" != "${expected_go_version}" ]]; then
   exit 1
 fi
 
+if [[ "${target_goos}" == "windows" ]]; then
+  echo "skip: native real module acceptance requires target platform runtime; Windows requires lua53.dll shim or import library, not implemented yet" >&2
+  exit 0
+fi
+
 if [[ "${target_goos}/${target_goarch}" != "${host_goos}/${host_goarch}" ]]; then
-  if [[ "${target_goos}" == "windows" ]]; then
-    echo "skip: native real module acceptance requires target platform runtime; Windows requires lua53.dll shim or import library, not implemented yet" >&2
-  else
-    echo "skip: native real module acceptance requires running on target platform ${target_goos}/${target_goarch}; host is ${host_goos}/${host_goarch}" >&2
-  fi
+  echo "skip: native real module acceptance requires running on target platform ${target_goos}/${target_goarch}; host is ${host_goos}/${host_goarch}" >&2
   exit 0
 fi
 
