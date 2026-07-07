@@ -40,6 +40,9 @@ echo "PROBE_PREBUILD_DUMMY_VALUE=${PROBE_PREBUILD_DUMMY_VALUE:-}"
 echo "PROBE_PREBUILD_DECLS_ONLY=${PROBE_PREBUILD_DECLS_ONLY:-0}"
 echo "PROBE_SELECTED_DECLS_DEFAULT_TAIL=${PROBE_SELECTED_DECLS_DEFAULT_TAIL:-0}"
 echo "PROBE_SELECTED_TAIL_ONLY=${PROBE_SELECTED_TAIL_ONLY:-0}"
+echo "PROBE_SELECTED_ATTEMPTS_DECL_ONLY=${PROBE_SELECTED_ATTEMPTS_DECL_ONLY:-0}"
+echo "PROBE_SELECTED_PROBES_DECL_ONLY=${PROBE_SELECTED_PROBES_DECL_ONLY:-0}"
+echo "PROBE_SELECTED_CORE_DECLS_ONLY=${PROBE_SELECTED_CORE_DECLS_ONLY:-0}"
 echo "PROBE_PREBUILD_PADDING_LOCALS=${PROBE_PREBUILD_PADDING_LOCALS:-0}"
 echo "PROBE_CONTINUE_ON_CRASH=${PROBE_CONTINUE_ON_CRASH:-0}"
 
@@ -133,7 +136,31 @@ LUA
 }
 
 emit_probe_prebuild_selected_parts() {
-  cat <<'LUA'
+  if [[ "${PROBE_SELECTED_ATTEMPTS_DECL_ONLY:-0}" == "1" ]]; then
+    cat <<'LUA'
+local attempts = {}
+LUA
+  elif [[ "${PROBE_SELECTED_PROBES_DECL_ONLY:-0}" == "1" ]]; then
+    cat <<'LUA'
+local probe_open
+local probe_close
+local probe_any
+local probe_close_head
+local probe_close_back
+local probe_close_func
+LUA
+  elif [[ "${PROBE_SELECTED_CORE_DECLS_ONLY:-0}" == "1" ]]; then
+    cat <<'LUA'
+local attempts = {}
+local probe_open
+local probe_close
+local probe_any
+local probe_close_head
+local probe_close_back
+local probe_close_func
+LUA
+  else
+    cat <<'LUA'
 local attempts = {}
 local probe_open
 local probe_close
@@ -146,6 +173,7 @@ local dummy_capture
 local dummy_back
 local dummy_value
 LUA
+  fi
   if [[ "${PROBE_PREBUILD_OPEN:-0}" == "1" ]]; then
     cat <<'LUA'
 probe_open = '[' * m.Cg(m.P'='^0, "init") * '['
@@ -244,7 +272,10 @@ uses_selected_prebuild_decls() {
      "${PROBE_PREBUILD_DUMMY_BACK:-0}" == "1" ||
      -n "${PROBE_PREBUILD_DUMMY_VALUE:-}" ||
      "${PROBE_PREBUILD_DECLS_ONLY:-0}" == "1" ||
-     "${PROBE_SELECTED_DECLS_DEFAULT_TAIL:-0}" == "1" ]]
+     "${PROBE_SELECTED_DECLS_DEFAULT_TAIL:-0}" == "1" ||
+     "${PROBE_SELECTED_ATTEMPTS_DECL_ONLY:-0}" == "1" ||
+     "${PROBE_SELECTED_PROBES_DECL_ONLY:-0}" == "1" ||
+     "${PROBE_SELECTED_CORE_DECLS_ONLY:-0}" == "1" ]]
 }
 
 uses_selected_tail() {
@@ -259,7 +290,10 @@ uses_selected_tail() {
      "${PROBE_PREBUILD_DUMMY_BACK:-0}" == "1" ||
      -n "${PROBE_PREBUILD_DUMMY_VALUE:-}" ||
      "${PROBE_PREBUILD_DECLS_ONLY:-0}" == "1" ||
-     "${PROBE_SELECTED_TAIL_ONLY:-0}" == "1" ]]
+     "${PROBE_SELECTED_TAIL_ONLY:-0}" == "1" ||
+     "${PROBE_SELECTED_ATTEMPTS_DECL_ONLY:-0}" == "1" ||
+     "${PROBE_SELECTED_PROBES_DECL_ONLY:-0}" == "1" ||
+     "${PROBE_SELECTED_CORE_DECLS_ONLY:-0}" == "1" ]]
 }
 
 emit_probe_selected_parts_tail() {
