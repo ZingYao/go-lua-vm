@@ -540,6 +540,41 @@ LUA
 local probe_warmup = m.P'a'
 LUA
       ;;
+    string-close)
+      cat <<'LUA'
+local probe_warmup = ']'
+LUA
+      ;;
+    string-open)
+      cat <<'LUA'
+local probe_warmup = '['
+LUA
+      ;;
+    string-eq)
+      cat <<'LUA'
+local probe_warmup = '='
+LUA
+      ;;
+    string-a)
+      cat <<'LUA'
+local probe_warmup = 'a'
+LUA
+      ;;
+    string2-close)
+      cat <<'LUA'
+local probe_warmup = ']]'
+LUA
+      ;;
+    string-concat-close)
+      cat <<'LUA'
+local probe_warmup = ']' .. ''
+LUA
+      ;;
+    table-key-close)
+      cat <<'LUA'
+local probe_warmup = { [']'] = true }
+LUA
+      ;;
     pstring2)
       cat <<'LUA'
 local probe_warmup = m.P'ab'
