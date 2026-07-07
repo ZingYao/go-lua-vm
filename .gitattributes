@@ -6,3 +6,4 @@
 *.kts text eol=lf
 *.properties text eol=lf
 *.md text eol=lf
+third_party/luasocket/** -whitespace
