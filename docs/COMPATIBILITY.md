@@ -61,14 +61,14 @@ CGO_ENABLED=1 go build -tags native_modules -o bin/glua-native ./cmd/glua
 
 当前状态：
 
-- macOS arm64 已通过仓库内 `lua-cjson` 源码运行期验收，且 `.so` 与 `.dylib` 两种后缀分别独立覆盖 `require("cjson")`、`encode/decode`、`cjson.null`、非法 JSON `pcall` 和不可序列化 function `pcall`。
+- macOS arm64 已通过仓库内 `lua-cjson` 源码的 Lua 5.3 ABI 符号验收和运行期验收，且 `.so` 与 `.dylib` 两种后缀分别独立确认 `lua_*` / `luaL_*` 未解析符号由 native `glua` shim 满足，并覆盖 `require("cjson")`、`encode/decode`、`cjson.null`、非法 JSON `pcall` 和不可序列化 function `pcall`。
 - 已有 fixture 覆盖 `package.cpath` 命中、`luaopen_*` 调用、C function、多返回、userdata、metatable、registry、`lua_error` / `luaL_error` 和 traceback 基础路径。
 - 默认构建仍不加载 C 原生模块；只有 `native_modules` 构建下 CLI 才自动注入 State-aware native loader。
 
 兼容边界：
 
 - 仅承诺 Lua 5.3 public C API 模块；依赖 `lstate.h`、`lobject.h`、`lapi.h` 等内部头文件或访问 `lua_State` 内部结构的模块不兼容。
-- 当前不承诺完整 Lua 5.3 C API；未覆盖的 API、C continuation/yield、debug hook C API 和官方 Lua 5.3 ABI 二进制模块边界见 `docs/NATIVE_MODULES_BUILD.md`。
+- 当前不承诺完整 Lua 5.3 C API；未覆盖的 API、C continuation/yield、debug hook C API 和 Linux/Windows 官方 Lua 5.3 ABI 二进制模块边界见 `docs/NATIVE_MODULES_BUILD.md`。
 - Linux `.so` 与 Windows `.dll` 运行期验收仍需要对应平台或 CI 闭环；Windows 还需要 `lua53.dll` shim 或等价 import library 方案。
 - native 模块执行本机机器码，拥有进程权限；库模式默认不启用，嵌入方必须显式选择该能力并承担动态库来源风险。
 

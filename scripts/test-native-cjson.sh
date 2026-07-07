@@ -66,6 +66,93 @@ lua_string_literal() {
   printf '"%s"' "${text}"
 }
 
+list_undefined_lua_abi_symbols() {
+  local module_path="$1"
+  local output
+  output="$(nm -u "${module_path}")"
+  printf '%s\n' "${output}" \
+    | awk '{print $NF}' \
+    | sed 's/^_//' \
+    | grep -E '^lua(L)?_' \
+    | sort -u \
+    || true
+}
+
+list_exported_lua_abi_symbols() {
+  local binary_path="$1"
+  local output
+  output="$(nm -g "${binary_path}" 2>/dev/null || true)"
+  if [[ -z "${output}" ]]; then
+    output="$(nm -D "${binary_path}" 2>/dev/null || true)"
+  fi
+  printf '%s\n' "${output}" \
+    | awk '{print $NF}' \
+    | sed 's/^_//' \
+    | grep -E '^lua(L)?_' \
+    | sort -u \
+    || true
+}
+
+check_module_does_not_link_external_lua() {
+  local module_path="$1"
+  case "${target_goos}" in
+    darwin)
+      if command -v otool >/dev/null 2>&1; then
+        if otool -L "${module_path}" | grep -E 'liblua|lua5[.0-9-]*|lua53' >/dev/null; then
+          echo "lua-cjson module links an external Lua runtime: ${module_path}" >&2
+          otool -L "${module_path}" >&2
+          exit 1
+        fi
+      fi
+      ;;
+    linux)
+      if command -v ldd >/dev/null 2>&1; then
+        if ldd "${module_path}" | grep -E 'liblua|lua5[.0-9-]*|lua53' >/dev/null; then
+          echo "lua-cjson module links an external Lua runtime: ${module_path}" >&2
+          ldd "${module_path}" >&2
+          exit 1
+        fi
+      fi
+      ;;
+  esac
+}
+
+check_lua_abi_symbols_resolve_to_glua() {
+  local module_path="$1"
+  local undefined_file="${work_dir}/undefined_lua_abi.txt"
+  local exported_file="${work_dir}/exported_lua_abi.txt"
+  local missing_file="${work_dir}/missing_lua_abi.txt"
+
+  if ! command -v nm >/dev/null 2>&1; then
+    echo "nm is required for lua-cjson ABI symbol validation" >&2
+    exit 1
+  fi
+
+  list_undefined_lua_abi_symbols "${module_path}" >"${undefined_file}"
+  if [[ ! -s "${undefined_file}" ]]; then
+    echo "lua-cjson module does not expose unresolved Lua ABI symbols: ${module_path}" >&2
+    exit 1
+  fi
+
+  list_exported_lua_abi_symbols "${glua_bin}" >"${exported_file}"
+  if [[ ! -s "${exported_file}" ]]; then
+    echo "native glua binary does not export Lua ABI shim symbols: ${glua_bin}" >&2
+    exit 1
+  fi
+
+  comm -23 "${undefined_file}" "${exported_file}" >"${missing_file}"
+  if [[ -s "${missing_file}" ]]; then
+    echo "native glua binary is missing Lua ABI symbols required by ${module_path}:" >&2
+    cat "${missing_file}" >&2
+    exit 1
+  fi
+
+  check_module_does_not_link_external_lua "${module_path}"
+
+  echo "lua-cjson ABI symbols resolved by native glua shim (${module_path}):"
+  sed 's/^/  /' "${undefined_file}"
+}
+
 package_path_literal="$(lua_string_literal "${work_dir}/missing/?.lua")"
 
 for extension in "${runtime_extensions[@]}"; do
@@ -74,6 +161,8 @@ for extension in "${runtime_extensions[@]}"; do
     echo "lua-cjson module output missing for ${extension}: ${module_path}" >&2
     exit 1
   fi
+
+  check_lua_abi_symbols_resolve_to_glua "${module_path}"
 
   suffix_name="${extension#.}"
   cpath_pattern="${build_dir}/?${extension}"
