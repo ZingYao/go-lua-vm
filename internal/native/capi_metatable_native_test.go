@@ -184,6 +184,48 @@ func TestNativeLuaSetMetatableUsesCurrentCFrameTop(t *testing.T) {
 	}
 }
 
+// TestNativeLuaGetMetatableRespectsCurrentCFrameBase 验证 lua_getmetatable 读取正索引时不穿透当前 C 帧基址。
+func TestNativeLuaGetMetatableRespectsCurrentCFrameBase(t *testing.T) {
+	// 外层 table 带 raw metatable，当前 C frame 为空；正索引 1 必须视为当前帧内无效索引。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 native State 映射不可用。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	nativeLuaCreateTable(luaState, 0, 0)
+	outer := state.ValueAt(-1).Ref.(*runtime.Table)
+	metatable := runtime.NewTable()
+	outer.SetMetatable(metatable)
+	baseTop := state.StackTop()
+	if !pushNativeStateCallFrame(luaState, baseTop, nil) {
+		// C frame 基址记录失败时无法验证正索引读取边界。
+		t.Fatalf("pushNativeStateCallFrame failed")
+	}
+	defer popNativeStateCallFrame(luaState)
+
+	if got := nativeLuaGetMetatable(luaState, 1); got != 0 {
+		// 当前 C 帧为空，正索引 1 不能读取外层 table 的元表。
+		t.Fatalf("lua_getmetatable(empty frame index 1) = %d, want 0", got)
+	}
+	if got := state.StackTop(); got != baseTop {
+		// 无效索引路径不得把外层 table 的元表压入全局栈。
+		t.Fatalf("global top after hidden getmetatable = %d, want %d", got, baseTop)
+	}
+	if got := nativeLuaStackTop(luaState); got != 0 {
+		// 当前 C API 视角下没有可见值，外层 table 不应被计入可见栈。
+		t.Fatalf("visible top after hidden getmetatable = %d, want 0", got)
+	}
+	if outer.GetMetatable() != metatable {
+		// 失败读取只能影响压栈行为，不能改写外层对象的 raw metatable。
+		t.Fatalf("outer table metatable changed")
+	}
+}
+
 // TestNativeLuaLNewMetatableCreatesAndReusesRegistryEntry 验证 luaL_newmetatable 命名元表语义。
 func TestNativeLuaLNewMetatableCreatesAndReusesRegistryEntry(t *testing.T) {
 	// 命名元表必须存放在 registry，后续 luaL_checkudata 会按同一名字取回。
