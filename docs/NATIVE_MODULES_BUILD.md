@@ -87,6 +87,14 @@ fixture loader smoke：
 ./scripts/test-native-modules.sh
 ```
 
+Windows fixture `.dll` 源码构建入口：
+
+```bash
+TARGET_GOOS=windows TARGET_GOARCH=amd64 NATIVE_CC_WINDOWS_AMD64="zig cc -target x86_64-windows-gnu" ./scripts/build-native-fixtures.sh
+```
+
+该入口使用仓库内 Lua public headers 和 `native/lua53/windows/lua53.def` 派生的 import library 构建 `glua_native_smoke.dll` / `glua_native_failopen.dll`。缺少 Windows C compiler 或 `liblua53.dll.a` / `lua53.lib` 时会明确 `skip:`；它只覆盖 fixture `.dll` 源码构建，不代表 Windows `glua` 运行期 `require` 已通过。
+
 真实第三方模块源码编译与运行期验收：
 
 ```bash

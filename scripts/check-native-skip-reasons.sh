@@ -65,15 +65,21 @@ run_and_require_failure_skip() {
 }
 
 cross_cc_var="NATIVE_CC_LINUX_$(printf '%s' "${host_goarch}" | tr '[:lower:]-' '[:upper:]_')"
+windows_cc_var="NATIVE_CC_WINDOWS_$(printf '%s' "${host_goarch}" | tr '[:lower:]-' '[:upper:]_')"
 mismatch_goos="linux"
 if [[ "${host_goos}" == "linux" ]]; then
   mismatch_goos="darwin"
 fi
 
 run_and_require_skip \
-  "windows fixture build" \
-  "skip: Windows fixture build requires lua53.dll shim or import library, not implemented yet" \
+  "windows fixture build missing compiler" \
+  "skip: no C compiler configured for windows/${host_goarch}; set ${windows_cc_var} or CC" \
   env TARGET_GOOS=windows "${repo_root}/scripts/build-native-fixtures.sh"
+
+run_and_require_skip \
+  "windows fixture build missing import library" \
+  "skip: Windows fixture build requires lua53 import library; set LUA53_IMPORT_LIB or install llvm-dlltool, dlltool, lib.exe, or llvm-lib" \
+  env TARGET_GOOS=windows CC=cc NATIVE_WINDOWS_IMPORT_TOOL=__glua_missing_import_tool__ "${repo_root}/scripts/build-native-fixtures.sh"
 
 run_and_require_skip \
   "windows cjson build" \

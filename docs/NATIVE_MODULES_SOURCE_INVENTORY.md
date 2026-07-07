@@ -23,7 +23,7 @@
 | Go/CGO loader | `internal/native/dlopen_windows.go` | Windows `LoadLibraryW` / `GetProcAddress` / `FreeLibrary` 封装 | 已固定 |
 | Fixture C source | `tests/native_modules/fixtures/glua_native_smoke.c` | 构建 `glua_native_smoke` / `glua_native_failopen`，覆盖 `luaopen_*`、C function、userdata、metatable、registry 和错误 smoke | 已固定 |
 | Fixture Lua 脚本 | `tests/native_modules/fixtures/glua_native_smoke.lua` | 复用 `require("glua_native_smoke")`、C function、userdata、错误传播、traceback 和 `package.loaded` smoke 验收 | 已固定 |
-| Fixture 构建脚本 | `scripts/build-native-fixtures.sh` | 使用仓库内 Lua public headers 和 fixture C 源码构建当前平台动态库；Linux 产出 `.so`，macOS 同时产出 `.dylib` 与 `.so`，并输出 `GOOS`、`GOARCH`、`CC`、`CGO_ENABLED` 与产物路径 | 已固定 |
+| Fixture 构建脚本 | `scripts/build-native-fixtures.sh` | 使用仓库内 Lua public headers 和 fixture C 源码构建动态库；Linux 产出 `.so`，macOS 同时产出 `.dylib` 与 `.so`，Windows 在显式 C compiler 和 Lua import library 齐备时产出 `.dll`；脚本输出宿主/目标平台、`CC`、`CGO_ENABLED` 与产物路径，缺少 Windows 输入时明确 skip | 已固定 |
 | Fixture 测试脚本 | `scripts/test-native-modules.sh` | 构建 native tag `glua`，调用 fixture 构建脚本，并按当前平台后缀执行成功 require 与 luaopen 初始化失败两条 CLI smoke；macOS 覆盖 `.dylib` 与 `.so` 两类候选 | 已固定 |
 | 交叉编译脚本 | `scripts/check-native-cross-compile.sh` | 编译 `internal/native` 测试二进制和 `cmd/glua` native 产物，显式输出目标平台、`CC`、产物路径、skip 原因和 `compiled/skipped/targets` 汇总；`NATIVE_CROSS_REQUIRE_ALL=1` 可把缺失目标 toolchain 从可跳过变为失败 | 已固定 |
 | Skip 原因检查脚本 | `scripts/check-native-skip-reasons.sh` | 验证 Windows shim 未落地、LuaSocket/真实模块总验收 Windows runtime 暂不可用、真实模块总验收非 Windows 异平台误用、缺失 cross C compiler 和交叉编译严格模式缺失 toolchain 等场景必须输出明确 `skip:` 原因，防止平台不可用被静默视为通过 | 已固定 |
@@ -61,6 +61,7 @@
 - `scripts/check-native-lua-abi-symbols.sh` 可作为当前平台 Lua 5.3 ABI 符号覆盖入口，确认真实模块需要的未解析 `lua_*` / `luaL_*` 符号已由 native 源码声明和 native `glua` 二进制导出共同覆盖；该检查为后续 Windows import library/shim 提供符号清单依据，但不替代 Windows 目标平台运行期验收。
 - `scripts/check-native-windows-def.sh` 可作为 Windows 链接期符号清单入口，确认 `native/lua53/windows/lua53.def` 与当前 native 源码声明一致；该检查只证明导出定义文件未漂移，不替代 Windows import library 构建或 `.dll` require 运行期验收。
 - `scripts/build-native-windows-lua53-importlib.sh` 可作为 Windows import library 生成入口；缺少 `llvm-dlltool`、`dlltool`、`lib.exe` 或 `llvm-lib` 时会明确 skip。该脚本只覆盖链接期产物生成，不替代 Windows `lua53.dll` shim、fixture `.dll` 构建、`require` 或真实模块运行期验收。
+- `scripts/build-native-fixtures.sh` 的 Windows 分支可在显式配置 `NATIVE_CC_WINDOWS_<ARCH>` / `CC` 且已有 `LUA53_IMPORT_LIB` 或可生成 import library 时构建 fixture `.dll`；该入口仍不替代 Windows 目标平台上的 `require` 运行期验收。
 - 现阶段不得把内嵌 smoke fixture 的通过结果解释为“任意第三方 Lua C 模块兼容”；它只证明项目侧 loader、opaque `lua_State*`、基础 C API shim 和 require 链路已经贯通。
 
 ## 后续维护规则
