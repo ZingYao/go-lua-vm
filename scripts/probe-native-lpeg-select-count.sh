@@ -50,6 +50,7 @@ echo "PROBE_SELECTED_HEAD_WARMUP_DEFAULT_TAIL=${PROBE_SELECTED_HEAD_WARMUP_DEFAU
 echo "PROBE_SELECTED_HEAD_WARMUP_GC_BEFORE_TAIL=${PROBE_SELECTED_HEAD_WARMUP_GC_BEFORE_TAIL:-0}"
 echo "PROBE_SELECTED_WARMUP_MATCH=${PROBE_SELECTED_WARMUP_MATCH:-0}"
 echo "PROBE_SELECTED_WARMUP_KIND=${PROBE_SELECTED_WARMUP_KIND:-}"
+echo "PROBE_SELECTED_WARMUP_BEFORE_MODE=${PROBE_SELECTED_WARMUP_BEFORE_MODE:-0}"
 echo "PROBE_SELECTED_CLEAR_BEFORE_MATCH=${PROBE_SELECTED_CLEAR_BEFORE_MATCH:-0}"
 echo "PROBE_SELECTED_GC_BEFORE_MATCH=${PROBE_SELECTED_GC_BEFORE_MATCH:-0}"
 echo "PROBE_GC_BEFORE_TAIL=${PROBE_GC_BEFORE_TAIL:-0}"
@@ -472,7 +473,7 @@ LUA
   fi
 }
 
-emit_probe_warmup_default_tail() {
+emit_probe_warmup_only() {
   local warmup_kind="${PROBE_SELECTED_WARMUP_KIND:-}"
   if [[ -z "${warmup_kind}" && "${PROBE_SELECTED_HEAD_WARMUP_DEFAULT_TAIL:-0}" == "1" ]]; then
     warmup_kind="head"
@@ -605,6 +606,10 @@ LUA
 collectgarbage()
 LUA
   fi
+}
+
+emit_probe_warmup_default_tail() {
+  emit_probe_warmup_only
   cat <<'LUA'
 local attempts = {}
 c = '[' * m.Cg(m.P'='^0, "init") * '[' *
@@ -1718,6 +1723,9 @@ probe_mode() {
       emit_probe_prebuild_selected_parts
     fi
     emit_probe_prebuild_padding_locals
+    if [[ "${PROBE_SELECTED_WARMUP_BEFORE_MODE:-0}" == "1" ]]; then
+      emit_probe_warmup_only
+    fi
     emit_mode_body "${mode}"
     if [[ "${PROBE_GC_BEFORE_TAIL:-0}" == "1" ]]; then
       printf '%s\n' 'collectgarbage()'
@@ -1726,7 +1734,8 @@ probe_mode() {
       emit_probe_prebuilt_match_tail
     elif [[ "${PROBE_PREBUILD_PARTS:-0}" == "1" ]]; then
       emit_probe_prebuilt_parts_tail
-    elif [[ -n "${PROBE_SELECTED_WARMUP_KIND:-}" || "${PROBE_SELECTED_HEAD_WARMUP_DEFAULT_TAIL:-0}" == "1" ]]; then
+    elif [[ "${PROBE_SELECTED_WARMUP_BEFORE_MODE:-0}" != "1" &&
+            ( -n "${PROBE_SELECTED_WARMUP_KIND:-}" || "${PROBE_SELECTED_HEAD_WARMUP_DEFAULT_TAIL:-0}" == "1" ) ]]; then
       emit_probe_warmup_default_tail
     elif uses_selected_tail; then
       emit_probe_selected_parts_tail
