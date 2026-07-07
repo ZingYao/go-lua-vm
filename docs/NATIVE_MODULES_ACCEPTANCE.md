@@ -1,0 +1,60 @@
+# native_modules 验收记录
+
+本文记录 `native_modules` 可选构建的真实模块验收状态。它是当前验收台账，不等同于全平台最终完成声明；Linux 与 Windows 仍需按 TODO 继续闭环。
+
+## 当前记录
+
+- 日期：2026-07-07
+- 分支：`quanquan/feature/glua-native-module-loader`
+- 默认构建边界：默认无 build tag、`CGO_ENABLED=0` 路径不启用 native loader；当前记录未改变默认构建代码。
+- native 构建边界：`CGO_ENABLED=1 -tags native_modules`，只承诺按 Lua 5.3 public C API 编写并导出 `luaopen_*` 的 C 模块。
+
+## macOS arm64
+
+当前 macOS arm64 已完成源码自包含构建与运行期验收：
+
+| 模块 | 脚本 | 后缀 | 验收点 |
+| --- | --- | --- | --- |
+| fixture | `scripts/test-native-modules.sh` | `.so`、`.dylib` | `require` 成功路径、`luaopen_*` 初始化失败、userdata/metatable/registry/error smoke |
+| lua-cjson | `scripts/test-native-cjson.sh` | `.so`、`.dylib` | ABI 符号由 native `glua` shim 覆盖、`require("cjson")`、`encode/decode`、错误输入 `pcall` |
+| LPeg | `scripts/test-native-lpeg.sh` | `.so`、`.dylib` | `require("lpeg")`、基础 pattern/match；完整 `third_party/lpeg/test.lua` 已在排查闭环中通过 |
+| LuaSocket | `scripts/test-native-luasocket.sh` | `.so`、`.dylib` | `require("mime")`、MIME 编解码、`require("socket")`、TCP echo loopback、UDP sendto/receivefrom loopback |
+
+最近一次本机运行期验收：
+
+```bash
+./scripts/test-native-luasocket.sh
+```
+
+结果：macOS arm64 `.so` 与 `.dylib` 均通过 LuaSocket runtime acceptance。
+
+最近一次 native Go 门禁：
+
+```bash
+CGO_ENABLED=1 go test -tags native_modules ./...
+```
+
+结果：通过。
+
+## Linux
+
+Linux `.so` 是目标支持面，但当前记录尚未声明 Linux 实机运行期通过：
+
+- `scripts/build-native-cjson.sh`、`scripts/build-native-lpeg.sh`、`scripts/build-native-luasocket.sh` 均设计为 Linux 输出 `.so`。
+- `scripts/test-native-cjson.sh`、`scripts/test-native-lpeg.sh`、`scripts/test-native-luasocket.sh` 均包含 Linux `.so` 运行期入口。
+- 仍需在 Linux 主机或等价 CI 环境执行真实运行期验收，并记录结果。
+
+## Windows
+
+Windows `.dll` 是目标支持面，但当前记录尚未声明 Windows 运行期通过：
+
+- `LoadLibraryW` / `GetProcAddress` loader 代码路径已存在。
+- 真实模块构建与运行期脚本在 `lua53.dll` shim 或等价 import library 落地前明确 `skip`。
+- `scripts/check-native-skip-reasons.sh` 已覆盖 Windows fixture、cjson、LPeg、LuaSocket build/runtime 的 skip 文本，防止不可用平台静默通过。
+
+## 不可夸大的结论
+
+- 通过上述验收不代表任意动态库都能被 `require`；模块必须是 Lua 5.3 public C API 模块并导出 `luaopen_*`。
+- 不承诺依赖 Lua 内部头文件或访问 `lua_State` 内部结构的模块兼容。
+- 不承诺完整 Lua 5.3 C API 已覆盖；兼容范围以 `docs/NATIVE_MODULES_PLAN.md` 和现有 shim 实现为准。
+- 默认 no-CGO 构建仍必须独立通过 `CGO_ENABLED=0 go test ./...` 与 `./scripts/check-go-gates.sh`，native 验收不能替代默认构建门禁。

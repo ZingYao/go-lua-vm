@@ -14,6 +14,7 @@ CGO_ENABLED=1 go build -tags native_modules ./cmd/glua
 
 - 构建模式、平台前置条件和当前限制见 [native_modules 构建说明](NATIVE_MODULES_BUILD.md)。
 - C 源码、headers、fixture、真实模块源码和脚本的自包含状态见 [native_modules C 源码自包含清单](NATIVE_MODULES_SOURCE_INVENTORY.md)。
+- 当前真实模块验收状态见 [native_modules 验收记录](NATIVE_MODULES_ACCEPTANCE.md)。
 - 复用现有 `package.cpath`、`package.loadlib`、`package.searchers[3]`、`package.searchers[4]` 和 `luaopen_*` 符号生成规则。
 - 为 Lua C 模块提供统一的 Lua 5.3 C API shim，使用户自定义模块无需针对每个模块单独写胶水。
 - `native_modules` 路径允许引入 CGO；但所有项目侧 C shim、Lua 5.3 public headers、fixture、真实模块验收源码和构建脚本必须随仓库提交，不能依赖系统已安装的 Lua C 开发包或临时下载源码。

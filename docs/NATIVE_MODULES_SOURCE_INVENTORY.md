@@ -37,6 +37,7 @@
 | 真实模块源码 | `third_party/luasocket/` | 网络库验收源码，固定 `lunarmodules/luasocket` tag `v3.1.0` / commit `95b7efa9da506ef968c1347edf3fc56370f0deed`，用于后续覆盖 `socket.core`、`mime.core`、系统 socket 依赖和平台网络行为；许可证和来源见目录内 `LICENSE` 与 `GLUA_VENDOR.md` | 已固定 |
 | 真实模块构建脚本 | `scripts/build-native-luasocket.sh` | 使用仓库内 Lua 5.3 public headers 和固定 `third_party/luasocket/` 源码编译当前平台 `socket/core` 与 `mime/core` 动态模块，显式输出目标平台、`CC`、源码路径和产物路径；Windows 在 `lua53.dll` shim/import library 落地前明确 skip | 已固定 |
 | 真实模块运行期脚本 | `scripts/test-native-luasocket.sh` | 构建 native tag `glua` 与 LuaSocket 动态模块，按当前平台后缀执行 `require("mime")`、MIME 编解码、`require("socket")`、TCP loopback 和 UDP loopback 运行期验收；Windows 在 `lua53.dll` shim/import library 落地前明确 skip | 已固定 |
+| 真实模块验收记录 | `docs/NATIVE_MODULES_ACCEPTANCE.md` | 记录当前 macOS arm64 已通过的真实模块验收、Linux/Windows 未闭环状态和不可夸大的兼容边界 | 已固定 |
 
 ## 尚未入仓清单
 
