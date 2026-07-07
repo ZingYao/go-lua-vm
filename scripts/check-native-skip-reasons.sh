@@ -106,6 +106,11 @@ run_and_require_skip \
   env TARGET_GOOS=windows "${repo_root}/scripts/check-native-lua-abi-symbols.sh"
 
 run_and_require_skip \
+  "windows import library missing tool" \
+  "skip: Windows lua53 import library tool not found: __glua_missing_import_tool__" \
+  env TARGET_GOOS=windows NATIVE_WINDOWS_IMPORT_TOOL=__glua_missing_import_tool__ "${repo_root}/scripts/build-native-windows-lua53-importlib.sh"
+
+run_and_require_skip \
   "non windows real module aggregate target mismatch" \
   "skip: native real module acceptance requires running on target platform ${mismatch_goos}/${host_goarch}; host is ${host_goos}/${host_goarch}" \
   env TARGET_GOOS="${mismatch_goos}" "${repo_root}/scripts/test-native-real-modules.sh"

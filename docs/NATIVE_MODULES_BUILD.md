@@ -146,6 +146,14 @@ Windows `lua53.dll` / import library 导出定义门禁：
 
 该脚本从 native 源码声明重新生成 Lua 5.3 ABI 导出列表，并比对 `native/lua53/windows/lua53.def`。该 `.def` 文件是后续 Windows import library 或 `lua53.dll` shim 的链接期输入，不代表 Windows `.dll` 运行期验收已完成。
 
+Windows `lua53.dll` import library 构建入口：
+
+```bash
+TARGET_GOOS=windows TARGET_GOARCH=amd64 ./scripts/build-native-windows-lua53-importlib.sh
+```
+
+该脚本先复用 `scripts/check-native-windows-def.sh` 确认 `lua53.def` 未漂移，再使用 `llvm-dlltool`、`dlltool`、`lib.exe` 或 `llvm-lib` 生成 `liblua53.dll.a` / `lua53.lib`。本机缺少上述工具时会明确输出 `skip:`；它只完成 Windows 链接期 import library 产物，不代表 Windows `lua53.dll` shim、fixture `.dll` 构建、`require` 运行期或真实模块验收已经闭环。
+
 fixture 只验证 loader smoke，不作为最终兼容结论。真实兼容验收必须包含：
 
 - `lua-cjson`：第一真实模块，覆盖 `require`、`encode/decode` 和错误输入 `pcall`。

@@ -30,6 +30,7 @@
 | ABI 符号检查脚本 | `scripts/check-native-lua-abi-symbols.sh` | 构建当前平台 native `glua`、fixture、lua-cjson、LPeg 和 LuaSocket，收集真实模块未解析 `lua_*` / `luaL_*` 符号，并确认 native 源码声明（Go `//export` 加 C wrapper 定义）和 native `glua` 二进制导出均覆盖这些符号；Windows 在 `lua53.dll` shim/import library 落地前明确 skip | 已固定 |
 | Windows 导出定义 | `native/lua53/windows/lua53.def` | 固定当前 native shim 暴露的 Lua 5.3 ABI 导出符号，供后续 Windows import library 或 `lua53.dll` shim 使用 | 已固定 |
 | Windows 导出定义检查脚本 | `scripts/check-native-windows-def.sh` | 从 native 源码声明重新生成 `lua53.def` 并与入仓文件比对，防止 Windows 链接期导出清单与 Go/CGO shim 漂移 | 已固定 |
+| Windows import library 构建入口 | `scripts/build-native-windows-lua53-importlib.sh` | 根据 `native/lua53/windows/lua53.def` 生成 `llvm-dlltool` / `dlltool` 可用的 `liblua53.dll.a` 或 MSVC/LLVM `lua53.lib`，并在缺失工具时输出明确 `skip:`；该入口只证明链接期 import library 可生成，不替代 Windows `.dll` require 运行期验收 | 已固定 |
 | Fixture Go harness | `internal/native/loadlib_fixture_unix_test.go` | 编译仓库内 fixture C 文件，并验证 `package.loadlib`、`require`、错误传播和 userdata 状态 | 已固定 |
 | 真实模块源码 | `third_party/lua-cjson/` | 第一真实模块验收源码，固定 upstream `mpx/lua-cjson` tag `2.1.0` / commit `4bc5e917c8cd5fc2f6b217512ef530007529322f`，许可证见目录内 `LICENSE` | 已固定 |
 | 真实模块构建脚本 | `scripts/build-native-cjson.sh` | 使用仓库内 Lua 5.3 public headers 和固定 `third_party/lua-cjson/` 源码编译当前平台 `cjson` 动态模块，显式输出目标平台、`CC`、源码路径和产物路径 | 已固定 |
@@ -47,7 +48,6 @@
 
 | 类别 | 目标路径 | 用途 | 阻塞影响 |
 | --- | --- | --- | --- |
-| Windows import library 构建入口 | 待定 `scripts/build-native-windows-lua53-importlib.sh` 或等价路径 | 根据 `native/lua53/windows/lua53.def` 生成具体工具链可用的 import library，并接入 Windows fixture/真实模块构建 | Windows 现成 Lua 5.3 ABI 模块链接期验收暂缺 |
 | Windows shim DLL 运行期方案 | 待定 `native/lua53/windows/` 或等价路径 | 如 import library 不能直接绑定 native `glua` 导出符号，则提供 `lua53.dll` shim 运行期方案 | Windows 现成 Lua 5.3 ABI 模块运行期验收暂缺 |
 
 ## 当前可验证边界
@@ -60,6 +60,7 @@
 - `scripts/test-native-real-modules.sh` 可作为当前平台真实模块总验收入口，串联 fixture、lua-cjson、LPeg 和 LuaSocket 运行期脚本；该入口只聚合宿主同平台结果，Windows 目标和其他异平台目标会在执行子验收前明确 skip，不把缺失目标平台的 skip 解释为 Linux/Windows 已闭环。
 - `scripts/check-native-lua-abi-symbols.sh` 可作为当前平台 Lua 5.3 ABI 符号覆盖入口，确认真实模块需要的未解析 `lua_*` / `luaL_*` 符号已由 native 源码声明和 native `glua` 二进制导出共同覆盖；该检查为后续 Windows import library/shim 提供符号清单依据，但不替代 Windows 目标平台运行期验收。
 - `scripts/check-native-windows-def.sh` 可作为 Windows 链接期符号清单入口，确认 `native/lua53/windows/lua53.def` 与当前 native 源码声明一致；该检查只证明导出定义文件未漂移，不替代 Windows import library 构建或 `.dll` require 运行期验收。
+- `scripts/build-native-windows-lua53-importlib.sh` 可作为 Windows import library 生成入口；缺少 `llvm-dlltool`、`dlltool`、`lib.exe` 或 `llvm-lib` 时会明确 skip。该脚本只覆盖链接期产物生成，不替代 Windows `lua53.dll` shim、fixture `.dll` 构建、`require` 或真实模块运行期验收。
 - 现阶段不得把内嵌 smoke fixture 的通过结果解释为“任意第三方 Lua C 模块兼容”；它只证明项目侧 loader、opaque `lua_State*`、基础 C API shim 和 require 链路已经贯通。
 
 ## 后续维护规则
