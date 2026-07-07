@@ -6420,6 +6420,100 @@ func (vm *VM) SetRegister(index int, value Value) error {
 	return nil
 }
 
+// ClearFixedCallArgumentTemporaries 清理固定返回 CALL 后不再属于结果区的临时实参槽。
+//
+// proto 可为空；为空时无法识别活动 local，只按 CALL 布局清理。request 必须来自刚完成写回的
+// CALL 请求；nextPC 是 CALL 后下一条指令位置，用于避免清掉该位置仍可见的 local。开放返回和
+// TFORCALL 不会被清理，因为它们的结果边界或写回区间需要由后续指令继续消费。
+func (vm *VM) ClearFixedCallArgumentTemporaries(proto *bytecode.Proto, request *CallRequest, nextPC int) {
+	if vm == nil || request == nil {
+		// 缺少 VM 或 CALL 请求时没有可清理目标。
+		return
+	}
+	if request.GenericFor || request.ArgumentCount < 0 || request.ReturnCount < 0 {
+		// 泛型 for、开放实参或开放返回的寄存器边界不能按固定 CALL 临时区处理。
+		return
+	}
+	firstTemporary := request.FunctionIndex + request.ReturnCount
+	lastTemporary := request.FunctionIndex + request.ArgumentCount
+	if firstTemporary > lastTemporary {
+		// 固定结果区已经覆盖全部调用输入槽，无剩余临时实参需要清理。
+		return
+	}
+	if firstTemporary < 0 {
+		// 损坏请求不能从负寄存器开始清理。
+		firstTemporary = 0
+	}
+	for registerIndex := firstTemporary; registerIndex <= lastTemporary && registerIndex < len(vm.registers); registerIndex++ {
+		// 活动 local 仍可能与调用实参槽共享寄存器，必须保留 Lua 5.3 可见值。
+		if fixedCallTemporaryRegisterActiveLocal(proto, registerIndex, nextPC) {
+			// 当前槽仍是活动 local，跳过清理避免破坏后续语义和 debug.getlocal。
+			continue
+		}
+		vm.registers[registerIndex] = NilValue()
+	}
+}
+
+// CanClearFixedCallArgumentTemporaries 判断指定 CALL 是否适合清理非结果实参槽。
+//
+// function 是 CALL 指令读取到的被调值；request 是同一 CALL 的固定布局。当前只允许普通 Lua
+// closure 和无 C/native 调用帧状态的普通 Go 回调适配器触发清理，避免 native C closure 与带
+// upvalue 的 Go wrapper 依赖调用寄存器作为临时根时被提前置 nil。
+func CanClearFixedCallArgumentTemporaries(function Value, request *CallRequest) bool {
+	if request == nil || request.GenericFor || request.ArgumentCount < 0 || request.ReturnCount < 0 {
+		// 缺少请求、泛型 for 或开放边界都不能按固定 CALL 临时区清理。
+		return false
+	}
+	if function.Kind == KindLuaClosure {
+		// 普通 Lua closure 的固定 CALL 结束后，非结果实参槽不再属于可见结果区。
+		return true
+	}
+	if function.Kind != KindGoClosure {
+		// 非 Go/Lua closure 不进入清理边界。
+		return false
+	}
+	switch function.Ref.(type) {
+	case GoResultsFunction:
+		// 普通多返回 Go 回调没有 native C frame，可在返回写回后释放实参临时根。
+		return true
+	case GoFunction:
+		// 普通单返回 Go 回调没有 native C frame，可在返回写回后释放实参临时根。
+		return true
+	case GoUnaryFunction:
+		// 一元 Go 回调是普通 GoFunction 的热路径形态。
+		return true
+	case *GoFastUnaryFunction:
+		// 显式 fast unary 回调不携带 native C frame 状态。
+		return true
+	case *GoFixedResultsFunction:
+		// 固定结果 Go 回调声明了结果上限，写回后可清理多余实参槽。
+		return true
+	default:
+		// GoClosureWithUpvalues 等 wrapper 可能承载 native C closure 或闭包 upvalue 根，保守跳过。
+		return false
+	}
+}
+
+// fixedCallTemporaryRegisterActiveLocal 判断寄存器在指定 PC 是否属于活动 local。
+//
+// proto 为空或调试信息缺失时返回 false；调用方会按临时槽处理。该 helper 只保护明确可见的
+// local，不保留编译器临时值，从而减少固定返回 CALL 后历史实参对象被 GC/root 继续观察的机会。
+func fixedCallTemporaryRegisterActiveLocal(proto *bytecode.Proto, registerIndex int, pc int) bool {
+	if proto == nil || registerIndex < 0 || pc < 0 {
+		// 缺少 Proto、寄存器非法或 PC 非法时无法证明该槽是活动 local。
+		return false
+	}
+	for localIndex := range proto.LocalVars {
+		// 逐项检查 LocalVar 调试范围；同一寄存器命中任意活动 local 即需要保留。
+		localVar := proto.LocalVars[localIndex]
+		if localVar.Register == registerIndex && localVar.ActiveAt(pc) {
+			// 命中 CALL 后仍活动的 local，调用方不能清理该寄存器。
+			return true
+		}
+	}
+	return false
+}
+
 // ResetForTailCall 将当前 VM 复位为同一 Proto 的尾调用入口状态。
 //
 // 该方法只用于 Lua closure 自尾调用优化：调用方必须保证当前 VM 仍执行同一 Proto，且会在复位后

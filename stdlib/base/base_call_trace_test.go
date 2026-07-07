@@ -207,8 +207,12 @@ func traceBaseLuaCallEvents(t *testing.T, source string) []string {
 			if err != nil {
 				t.Fatalf("call pc=%d failed: %v", pc, err)
 			}
-			if err := writeBaseLuaCallResults(vm, callRequest, results); err != nil {
+			if err := writeBaseLuaCallResults(vm, proto, pc, callRequest, results); err != nil {
 				t.Fatalf("write results pc=%d failed: %v", pc, err)
+			}
+			if runtime.CanClearFixedCallArgumentTemporaries(functionValue, callRequest) {
+				// trace 输出必须对齐 base 执行器真实的普通 Go 回调临时槽清理语义。
+				finishBaseLuaFixedCallResults(vm, proto, pc, callRequest)
 			}
 			events = append(events, formatBaseCallTraceEvent(pc, proto, instruction, callRequest, arguments, results, vm.RegistersSnapshot()))
 		}

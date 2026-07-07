@@ -2440,7 +2440,7 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 		}
 		if continuation.callRequest != nil {
 			// 普通 Lua CALL yield 后，resume 参数作为 coroutine.yield 的返回值写回调用结果区。
-			if err := writeLuaCallResults(vm, continuation.callRequest, args); err != nil {
+			if err := writeLuaCallResults(vm, proto, resumeNextPC-1, continuation.callRequest, args); err != nil {
 				return nil, err
 			}
 		} else if isConcatContinuationInstruction(continuation.resumeInstruction) {
@@ -3686,6 +3686,10 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 					return contextErr
 				}
 				if handled, fastErr := vm.TryExecuteSelfRecursiveIntegerFibInCaller(selfRecursiveClosure, callRequest); handled || fastErr != nil {
+					if handled && fastErr == nil && runtime.CanClearFixedCallArgumentTemporaries(functionValue, callRequest) {
+						// caller-side Lua closure fast path 已完成写回，可按固定 CALL 边界清理临时实参槽。
+						finishLuaFixedCallResults(vm, proto, callPC, callRequest)
+					}
 					// 命中 fast path 时已完成结果写回；guard 错误直接返回边界错误。
 					return fastErr
 				}
@@ -3709,8 +3713,8 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 						// CALL C=0 需要记录实际开放返回上界，供后续 CALL B=0 消费单个结果。
 						vm.SetOpenTop(callRequest.FunctionIndex + 1)
 					} else {
-						// 固定单返回不形成开放列表。
-						vm.SetOpenTop(-1)
+						// 固定单返回不形成开放列表，并可清理未被结果覆盖的临时实参槽。
+						finishLuaFixedCallResults(vm, proto, callPC, callRequest)
 					}
 					return nil
 				}
@@ -3729,8 +3733,8 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 						// CALL C=0 需要记录实际开放返回上界，供后续 CALL B=0 消费单个结果。
 						vm.SetOpenTop(callRequest.FunctionIndex + 1)
 					} else {
-						// 固定单返回不形成开放列表。
-						vm.SetOpenTop(-1)
+						// 固定单返回不形成开放列表，并可清理未被结果覆盖的临时实参槽。
+						finishLuaFixedCallResults(vm, proto, callPC, callRequest)
 					}
 					return nil
 				}
@@ -3755,8 +3759,8 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 					// CALL C=0 需要记录实际开放返回上界，供后续 CALL B=0 消费单个结果。
 					vm.SetOpenTop(callRequest.FunctionIndex + 1)
 				} else {
-					// 固定单返回不形成开放列表。
-					vm.SetOpenTop(-1)
+					// 固定单返回不形成开放列表，并可清理未被结果覆盖的临时实参槽。
+					finishLuaFixedCallResults(vm, proto, callPC, callRequest)
 				}
 				return nil
 			}
@@ -3801,7 +3805,7 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 						// 写回超过寄存器窗口时返回边界错误。
 						return setErr
 					}
-					vm.SetOpenTop(-1)
+					finishLuaFixedCallResults(vm, proto, callPC, callRequest)
 					return nil
 				}
 				if callErr != nil {
@@ -3831,13 +3835,14 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 						// 写回超过寄存器窗口时返回边界错误。
 						return setErr
 					}
-					vm.SetOpenTop(-1)
+					finishLuaFixedCallResults(vm, proto, callPC, callRequest)
 					return nil
 				}
-				if writeErr := writeLuaCallResults(vm, callRequest, resultSlots[:resultCount]); writeErr != nil {
+				if writeErr := writeLuaCallResults(vm, proto, callPC, callRequest, resultSlots[:resultCount]); writeErr != nil {
 					// 固定结果写回失败时返回寄存器边界错误。
 					return writeErr
 				}
+				finishLuaFixedCallResults(vm, proto, callPC, callRequest)
 				return nil
 			}
 			if callErr != nil {
@@ -3873,7 +3878,7 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 					// 写回超过寄存器窗口时返回边界错误。
 					return setErr
 				}
-				vm.SetOpenTop(-1)
+				finishLuaFixedCallResults(vm, proto, callPC, callRequest)
 				return nil
 			}
 		} else if fixedFunction, ok := functionValue.Ref.(*runtime.GoFixedResultsFunction); ok && callRequest.ReturnCount >= 0 && !callRequest.GenericFor {
@@ -3898,10 +3903,11 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 				resultCount, handled, err = callGoFixedResultsFunctionWithDebugFrame(state, functionValue, fixedFunction, resultSlots, debugName, debugNameWhat, false, arguments...)
 			}
 			if err == nil && handled {
-				if writeErr := writeLuaCallResults(vm, callRequest, resultSlots[:resultCount]); writeErr != nil {
+				if writeErr := writeLuaCallResults(vm, proto, callPC, callRequest, resultSlots[:resultCount]); writeErr != nil {
 					// 固定结果写回失败时返回寄存器边界错误。
 					return writeErr
 				}
+				finishLuaFixedCallResults(vm, proto, callPC, callRequest)
 				return nil
 			}
 			if err != nil && !hooksEnabled {
@@ -3909,10 +3915,11 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 				ensureDebugName()
 				resultCount, handled, err = callGoFixedResultsFunctionWithDebugFrame(state, functionValue, fixedFunction, resultSlots, debugName, debugNameWhat, false, arguments...)
 				if err == nil && handled {
-					if writeErr := writeLuaCallResults(vm, callRequest, resultSlots[:resultCount]); writeErr != nil {
+					if writeErr := writeLuaCallResults(vm, proto, callPC, callRequest, resultSlots[:resultCount]); writeErr != nil {
 						// 固定结果写回失败时返回寄存器边界错误。
 						return writeErr
 					}
+					finishLuaFixedCallResults(vm, proto, callPC, callRequest)
 					return nil
 				}
 			}
@@ -3961,9 +3968,17 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 	}
 	if directResultsWritten {
 		// caller-side direct CALL 已完成写回，不再用空 results 覆盖目标寄存器。
+		if runtime.CanClearFixedCallArgumentTemporaries(functionValue, callRequest) {
+			// caller-side Lua closure direct CALL 成功后也遵循固定 CALL 临时槽清理边界。
+			finishLuaFixedCallResults(vm, proto, callPC, callRequest)
+		}
 		return nil
 	}
-	writeErr := writeLuaCallResults(vm, callRequest, results)
+	writeErr := writeLuaCallResults(vm, proto, callPC, callRequest, results)
+	if writeErr == nil && runtime.CanClearFixedCallArgumentTemporaries(functionValue, callRequest) {
+		// 普通 Go 回调完成固定返回写回后，可释放非结果实参临时槽。
+		finishLuaFixedCallResults(vm, proto, callPC, callRequest)
+	}
 	if directCallVM != nil {
 		// direct CALL 的结果切片可能指向 callee VM 内部数组，必须在 caller 写回后再归还 VM。
 		((*runtime.State)(state)).ReturnLuaVMToPool(directCallVM)
@@ -5043,10 +5058,20 @@ func luaCallArguments(vm *runtime.VM, callRequest *runtime.CallRequest) ([]Value
 	return arguments, nil
 }
 
+// finishLuaFixedCallResults 完成固定返回 CALL 的开放栈顶收口和临时实参槽清理。
+//
+// proto/callPC 来自调用方闭包；callRequest 必须是刚完成结果写回的 CALL 请求。开放返回、开放实参
+// 和 TFORCALL 会由 runtime helper 自动跳过，只保留 SetOpenTop(-1) 的固定返回语义。
+func finishLuaFixedCallResults(vm *runtime.VM, proto *bytecode.Proto, callPC int, callRequest *runtime.CallRequest) {
+	// 固定返回不形成开放列表，先关闭 openTop 供后续 CALL/SETLIST 判定。
+	vm.SetOpenTop(-1)
+	vm.ClearFixedCallArgumentTemporaries(proto, callRequest, callPC+1)
+}
+
 // writeLuaCallResults 将调用结果写回 VM 寄存器窗口。
 //
 // 固定返回数量会用 nil 补齐；开放返回数量写入所有结果，当前由寄存器窗口边界控制。
-func writeLuaCallResults(vm *runtime.VM, callRequest *runtime.CallRequest, results []Value) error {
+func writeLuaCallResults(vm *runtime.VM, proto *bytecode.Proto, callPC int, callRequest *runtime.CallRequest, results []Value) error {
 	resultCount := callRequest.ReturnCount
 	if resultCount == 1 && !callRequest.GenericFor {
 		// 普通 Lua 函数最常见的单返回值直接覆盖函数槽，避免进入通用结果循环和开放返回分支。

@@ -1807,7 +1807,15 @@ func executeBaseLuaCallRequest(state *runtime.State, vm *runtime.VM, proto *byte
 		// 被调函数错误向上传播，由外层 pcall/xpcall 处理。
 		return err
 	}
-	return writeBaseLuaCallResults(vm, callRequest, results)
+	if err := writeBaseLuaCallResults(vm, proto, callPC, callRequest, results); err != nil {
+		// 结果写回失败时返回寄存器边界错误。
+		return err
+	}
+	if runtime.CanClearFixedCallArgumentTemporaries(functionValue, callRequest) {
+		// 普通 Go 回调完成固定返回写回后，可释放非结果实参临时槽。
+		finishBaseLuaFixedCallResults(vm, proto, callPC, callRequest)
+	}
+	return nil
 }
 
 // baseLuaCallDebugNameAtCall 按 pcall/xpcall 内部执行器的 CALL 指令上下文推断调试名称。
@@ -2085,10 +2093,20 @@ func baseLuaCallArguments(vm *runtime.VM, callRequest *runtime.CallRequest) ([]r
 	return arguments, nil
 }
 
+// finishBaseLuaFixedCallResults 完成 base protected-call 执行器中的固定返回 CALL 收口。
+//
+// proto/callPC 来自调用方闭包；callRequest 必须是刚完成结果写回的 CALL 请求。runtime helper 会
+// 跳过开放返回、开放实参和 TFORCALL，仅清理固定 CALL 后非结果且非活动 local 的临时实参槽。
+func finishBaseLuaFixedCallResults(vm *runtime.VM, proto *bytecode.Proto, callPC int, callRequest *runtime.CallRequest) {
+	// 固定返回不形成开放列表，先关闭 openTop 再清理 CALL 临时区。
+	vm.SetOpenTop(-1)
+	vm.ClearFixedCallArgumentTemporaries(proto, callRequest, callPC+1)
+}
+
 // writeBaseLuaCallResults 将调用结果写回 VM 寄存器窗口。
 //
 // 固定返回数量会用 nil 补齐；开放返回数量写入所有结果，当前由寄存器窗口边界控制。
-func writeBaseLuaCallResults(vm *runtime.VM, callRequest *runtime.CallRequest, results []runtime.Value) error {
+func writeBaseLuaCallResults(vm *runtime.VM, proto *bytecode.Proto, callPC int, callRequest *runtime.CallRequest, results []runtime.Value) error {
 	resultCount := callRequest.ReturnCount
 	if resultCount < 0 {
 		// 开放返回写入被调函数实际返回的所有结果。
