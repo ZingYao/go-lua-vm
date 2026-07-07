@@ -125,4 +125,4 @@ done
 
 echo "native LuaSocket outputs:"
 find "${build_dir}" -type f -print | sort
-echo "note: this script validates source compilation only; runtime require(\"socket\") and require(\"mime\") acceptance is tracked separately."
+echo "note: this script validates source compilation only; run scripts/test-native-luasocket.sh for runtime require(\"socket\")/require(\"mime\") and loopback acceptance."

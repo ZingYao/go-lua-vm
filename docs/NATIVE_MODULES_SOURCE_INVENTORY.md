@@ -36,6 +36,7 @@
 | LPeg 运行期脚本 | `scripts/test-native-lpeg.sh` | 使用仓库内 `third_party/lpeg/` 和 Lua 5.3 public headers 编译并运行第二真实模块验收；macOS 覆盖 `.so` 与 `.dylib` 后缀 | 已固定 |
 | 真实模块源码 | `third_party/luasocket/` | 网络库验收源码，固定 `lunarmodules/luasocket` tag `v3.1.0` / commit `95b7efa9da506ef968c1347edf3fc56370f0deed`，用于后续覆盖 `socket.core`、`mime.core`、系统 socket 依赖和平台网络行为；许可证和来源见目录内 `LICENSE` 与 `GLUA_VENDOR.md` | 已固定 |
 | 真实模块构建脚本 | `scripts/build-native-luasocket.sh` | 使用仓库内 Lua 5.3 public headers 和固定 `third_party/luasocket/` 源码编译当前平台 `socket/core` 与 `mime/core` 动态模块，显式输出目标平台、`CC`、源码路径和产物路径；Windows 在 `lua53.dll` shim/import library 落地前明确 skip | 已固定 |
+| 真实模块运行期脚本 | `scripts/test-native-luasocket.sh` | 构建 native tag `glua` 与 LuaSocket 动态模块，按当前平台后缀执行 `require("mime")`、MIME 编解码、`require("socket")`、TCP loopback 和 UDP loopback 运行期验收；Windows 在 `lua53.dll` shim/import library 落地前明确 skip | 已固定 |
 
 ## 尚未入仓清单
 
@@ -49,7 +50,7 @@
 - `native_modules` 构建当前可通过 `CGO_ENABLED=1 go test -tags native_modules ./...` 验证仓库内 Go/CGO shim、平台 loader 和 Unix 内嵌 fixture。
 - `lua-cjson` 真实模块源码可通过 `CGO_ENABLED=1 scripts/build-native-cjson.sh` 做源码编译级验收，也可通过 `scripts/test-native-cjson.sh` 做 ABI 符号和运行期验收；运行期脚本覆盖 `require("cjson")`、`encode/decode`、`cjson.null` identity、非法 JSON `pcall` 和不可序列化 function `pcall`，并在 macOS 上分别验证 `.so` 与 `.dylib` 两类候选。
 - `third_party/lpeg/` 当前可通过 `CGO_ENABLED=1 scripts/build-native-lpeg.sh` 做源码编译级验收，也可通过 `scripts/test-native-lpeg.sh` 做运行期验收；macOS arm64 `.so` 与 `.dylib` 后缀已通过基础 smoke 和完整官方 `test.lua`。
-- `third_party/luasocket/` 当前可通过 `CGO_ENABLED=1 scripts/build-native-luasocket.sh` 做 `socket.core` / `mime.core` 源码编译级验收；后续仍需新增可控本机 loopback 用例验证 `require("socket")` 与 `require("mime")`，不能把源码编译解释为运行期验收通过。
+- `third_party/luasocket/` 当前可通过 `CGO_ENABLED=1 scripts/build-native-luasocket.sh` 做 `socket.core` / `mime.core` 源码编译级验收，也可通过 `scripts/test-native-luasocket.sh` 做当前平台运行期验收；脚本覆盖 `require("socket")`、`require("mime")`、MIME 编解码和可控本机 TCP/UDP loopback。
 - 现阶段不得把内嵌 smoke fixture 的通过结果解释为“任意第三方 Lua C 模块兼容”；它只证明项目侧 loader、opaque `lua_State*`、基础 C API shim 和 require 链路已经贯通。
 
 ## 后续维护规则

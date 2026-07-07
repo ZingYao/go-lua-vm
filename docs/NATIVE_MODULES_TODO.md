@@ -353,7 +353,8 @@
     - [x] 固定 LuaSocket 源码到 `third_party/luasocket/`，来源为 `lunarmodules/luasocket` tag `v3.1.0` / commit `95b7efa9da506ef968c1347edf3fc56370f0deed`，保留 MIT-style `LICENSE` 并新增 `GLUA_VENDOR.md` 记录本项目未做源码修改。
     - [x] 新增 LuaSocket 源码编译脚本，使用仓库内 Lua 5.3 public headers 编译 `socket.core` 和 `mime.core`，禁止读取系统 Lua 开发包。
       - [x] macOS arm64 `.so` 与 `.dylib` 两种后缀已通过源码编译级验收。
-    - [ ] 新增 LuaSocket 运行期验收脚本，覆盖 `require("socket")`、`require("mime")`、基础 MIME 编解码和本机 loopback TCP/UDP 边界；网络用例必须可控、可超时、失败原因明确。
+    - [x] 新增 LuaSocket 运行期验收脚本，覆盖 `require("socket")`、`require("mime")`、基础 MIME 编解码和本机 loopback TCP/UDP 边界；网络用例必须可控、可超时、失败原因明确。
+      - [x] `scripts/test-native-luasocket.sh` 会构建 native `glua` 和 LuaSocket 模块，macOS 分别覆盖 `.so` 与 `.dylib`，Linux 覆盖 `.so`，Windows 在 `lua53.dll` shim/import library 落地前明确 skip。
 - [ ] 增加交叉编译验证脚本：
   - [x] `scripts/check-native-cross-compile.sh`：显式输出 `GOOS`、`GOARCH`、`CC`、产物路径和缺失 toolchain 时的 skip 原因。
     - [x] 支持 `NATIVE_CC_*` / `CC` 使用带参数的编译器命令，便于 CI 传入 `zig cc -target ...` 或等价 cross toolchain。
@@ -382,6 +383,7 @@
   - [x] `scripts/build-native-lpeg.sh`
   - [x] `scripts/test-native-lpeg.sh`
   - [x] `scripts/build-native-luasocket.sh`
+  - [x] `scripts/test-native-luasocket.sh`
   - [x] `scripts/check-native-skip-reasons.sh`
   - [x] `scripts/probe-native-lpeg-1159.sh`
   - [x] `scripts/bisect-native-lpeg-1159-prefix.sh`
@@ -542,3 +544,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-07：补齐 native lauxlib 数字与可选字符串 API：`luaL_checknumber`、`luaL_optnumber`、`luaL_optlstring`。这些入口复用 Lua 5.3 numeric string 转换、none/nil 默认值和 `lua_tolstring` 的 number-to-string 回写语义，不包含 LuaSocket 专用逻辑。重建 native `glua` 与 LuaSocket 后，macOS arm64 `require("mime")` 已通过，并完成 `mime.b64("hello") == "aGVsbG8="`、`mime.unb64(...) == "hello"` 的运行期 smoke；`socket.core` 直接 `package.loadlib` 的下一阻塞符号前移为 `_luaL_testudata`，后续应按通用 userdata lauxlib 探测 API 补齐后再继续 loopback 验收脚本。
 - 2026-07-07：补齐 native `luaL_testudata`，与 `luaL_checkudata` 共享 registry 命名元表 identity 匹配逻辑，但失败路径只返回 `NULL` 且不记录 pending error，符合 lauxlib 非抛错探测语义。重建 native `glua` 后，macOS arm64 `socket/core.so` 直接 `package.loadlib(..., "luaopen_socket_core")` 阻塞点已从 `_luaL_testudata` 前移到 `_lua_rawget`；后续应按通用 raw table 读取 API 补齐后继续 `require("socket")` 和 loopback 验收。
 - 2026-07-07：补齐 native `lua_rawget`，按 Lua 5.3 raw table 读取语义弹出栈顶 key、压入原始值并返回类型码，不触发 `__index` 元方法，且遵守当前 C frame 可见栈边界。重建 native `glua` 后，macOS arm64 `socket/core.so` 直接 `package.loadlib(..., "luaopen_socket_core")` 已成功返回模块 table，`require("socket")` / `require("mime")` 均通过；短 smoke 已验证 `socket.tcp()`、`socket.udp()` 创建 userdata 并可 `close()`。后续应把这些探针升级为可复跑脚本，并继续补齐可控 loopback TCP/UDP 行为验收。
+- 2026-07-07：新增 `scripts/test-native-luasocket.sh`，把 LuaSocket 运行期验收固化为脚本：脚本构建 native `glua` 与仓库内固定 LuaSocket 动态模块，按平台后缀执行 `require("mime")`、`mime.b64/unb64`、`require("socket")`、`socket.tcp()` / `socket.udp()` 基础创建关闭，以及带 2 秒超时的本机 TCP echo loopback 与 UDP sendto/receivefrom loopback。Windows 在 `lua53.dll` shim/import library 落地前继续明确 skip；Linux 仍需在对应平台实际运行闭环。
