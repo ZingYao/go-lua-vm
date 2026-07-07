@@ -103,6 +103,14 @@ TARGET_GOOS=windows TARGET_GOARCH=amd64 NATIVE_CC_WINDOWS_AMD64="zig cc -target 
 
 该入口使用仓库内 Lua public headers、固定 `third_party/lua-cjson/` 源码和 Windows Lua import library 构建 `cjson.dll`。缺少 Windows C compiler 或 import library 时会明确 `skip:`；它只覆盖真实模块源码构建，不代表 Windows `require("cjson")`、ABI 符号解析或运行期验收已通过。
 
+Windows `LPeg` `.dll` 源码构建入口：
+
+```bash
+TARGET_GOOS=windows TARGET_GOARCH=amd64 NATIVE_CC_WINDOWS_AMD64="zig cc -target x86_64-windows-gnu" ./scripts/build-native-lpeg.sh
+```
+
+该入口使用仓库内 Lua public headers、固定 `third_party/lpeg/` 源码和 Windows Lua import library 构建 `lpeg.dll`。缺少 Windows C compiler 或 import library 时会明确 `skip:`；它只覆盖真实模块源码构建，不代表 Windows `require("lpeg")`、复杂 pattern/capture 或官方测试运行期验收已通过。
+
 真实第三方模块源码编译与运行期验收：
 
 ```bash

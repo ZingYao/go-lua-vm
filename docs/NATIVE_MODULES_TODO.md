@@ -195,10 +195,12 @@
     - [x] macOS arm64 已在 `scripts/test-native-cjson.sh` 中固化：`cjson.so` / `cjson.dylib` 必须保留未解析 `lua_*` / `luaL_*` ABI 符号、不得链接外部 Lua runtime，且这些符号必须由 native `glua` 导出的 shim 覆盖后再执行运行期验收。
   - [x] 固定 `lpeg` 或等价纯 C 模块源码到仓库或 `third_party/`，记录来源、版本和许可证。
     - [x] 新增 `scripts/build-native-lpeg.sh`，使用仓库内 Lua 5.3 public headers 和固定源码编译当前平台 `lpeg` 动态模块。
+    - [x] `scripts/build-native-lpeg.sh` 支持 Windows `lpeg.dll` 源码构建入口：显式配置 `NATIVE_CC_WINDOWS_<ARCH>` / `CC` 且 `LUA53_IMPORT_LIB` 或 import library 生成工具可用时构建；缺少 Windows C compiler 或 import library 时必须明确 `skip:`。
     - [x] 新增 `scripts/test-native-lpeg.sh`，覆盖 `require("lpeg")` 和基础 pattern/match runtime smoke。
   - [x] `lpeg` 或等价纯 C 模块验收：覆盖 userdata、metatable、registry 和复杂 C function 行为。
     - [x] macOS arm64 `.so` 与 `.dylib` 两种后缀已通过基础 LPeg runtime smoke。
     - [x] 完整 `third_party/lpeg/test.lua`、复杂 capture、grammar 和错误边界已通过 macOS arm64 native 验收。
+    - [ ] Windows 目标平台执行 `require("lpeg")`、基础 pattern/match 和完整 `third_party/lpeg/test.lua` 验收。
       - [x] 已修复完整测试在 1084 行触发的 `string.char("98")` Lua 5.3 numeric string 转 integer 兼容断点。
       - [x] 当前完整测试推进到 1159 行；同一 pattern 独立运行返回 18，但完整前序状态后返回 12，疑似 LPeg match-time capture / named capture 前序状态污染，需继续缩小最小复现。
         - [x] 2026-07-06 复核：替换 1159 行断言为打印后，官方测试同路径下 `c:match('[==[]]====]]]]==]===[]')` 实际返回 `12`。
@@ -585,3 +587,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-07：新增 `scripts/build-native-windows-lua53-importlib.sh`，在 `lua53.def` 未漂移的前提下生成 Windows Lua 5.3 ABI import library：MinGW/LLVM dlltool 路径产出 `liblua53.dll.a`，MSVC/LLVM lib 路径产出 `lua53.lib`，并支持 `NATIVE_WINDOWS_IMPORT_TOOL` / `NATIVE_WINDOWS_IMPORT_TOOL_KIND` 指定工具。当前 macOS arm64 本机缺少 `llvm-dlltool`、`dlltool`、`lib.exe` 和 `llvm-lib`，脚本输出明确 `skip:`，并已纳入 `scripts/check-native-skip-reasons.sh`；本轮只完成 Windows 链接期构建入口，不声明 Windows `.dll` fixture 构建、`require` 或真实模块运行期闭环完成。
 - 2026-07-07：扩展 `scripts/build-native-fixtures.sh` 的 Windows 分支；脚本现在支持通过显式 `NATIVE_CC_WINDOWS_<ARCH>` / `CC` 和 `LUA53_IMPORT_LIB` 或 `scripts/build-native-windows-lua53-importlib.sh` 产物构建 `glua_native_smoke.dll` / `glua_native_failopen.dll`，并在缺 Windows C compiler 或 import library 时输出可门禁的 `skip:`。当前 macOS arm64 本机缺少 Windows C toolchain 和 import library 工具，因此只验证 skip 路径和当前平台 macOS fixture/真实模块验收；本轮不声明 Windows 目标平台 `require` 或真实模块运行期闭环完成。
 - 2026-07-07：扩展 `scripts/build-native-cjson.sh` 的 Windows 分支；脚本现在支持通过显式 `NATIVE_CC_WINDOWS_<ARCH>` / `CC` 和 `LUA53_IMPORT_LIB` 或 `scripts/build-native-windows-lua53-importlib.sh` 产物构建 `cjson.dll`，并在缺 Windows C compiler 或 import library 时输出可门禁的 `skip:`。当前 macOS arm64 本机缺少 Windows C toolchain 和 import library 工具，因此只验证 skip 路径和当前平台 macOS `lua-cjson` 源码/运行期验收；本轮不声明 Windows `require("cjson")` 或真实模块运行期闭环完成。
+- 2026-07-07：扩展 `scripts/build-native-lpeg.sh` 的 Windows 分支；脚本现在支持通过显式 `NATIVE_CC_WINDOWS_<ARCH>` / `CC` 和 `LUA53_IMPORT_LIB` 或 `scripts/build-native-windows-lua53-importlib.sh` 产物构建 `lpeg.dll`，并在缺 Windows C compiler 或 import library 时输出可门禁的 `skip:`。当前 macOS arm64 本机缺少 Windows C toolchain 和 import library 工具，因此只验证 skip 路径和当前平台 macOS LPeg 源码/运行期验收；本轮不声明 Windows `require("lpeg")` 或完整 LPeg 运行期闭环完成。
