@@ -57,7 +57,7 @@
 - [x] 实现基础版本查询：
   - [x] `lua_version`
     - [x] 当前返回同一个 Lua 5.3 `lua_Number(503)` 静态地址，`L == NULL` 与有效 State 一致。
-- [ ] 实现 C API 栈基本操作：
+- [x] 实现 C API 栈基本操作：
   - [x] `lua_absindex`
     - [x] 当前按当前 C frame 可见栈规范化负索引；registry/upvalue pseudo-index 保持原值。
   - [x] `lua_gettop`
@@ -74,7 +74,7 @@
     - [x] 当前通过 C wrapper 处理 varargs 和 `vsnprintf` 格式化，再由 Go helper 压入 Lua string 并返回 State 生命周期内的 C 字符串指针。
   - [x] `lua_pushvfstring`
     - [x] 与 `lua_pushfstring` 共用 C wrapper 格式化路径，供直接使用 `va_list` 的 C 模块调用。
-- [ ] 实现 table 和 newlib 基础：
+- [x] 实现 table 和 newlib 基础：
   - [x] `lua_createtable`
   - [x] `lua_setfield`
   - [x] `lua_getfield`
@@ -86,7 +86,7 @@
   - [x] `lua_next`
   - [x] `luaL_newlib`
     - [x] 当前通过 `luaL_setfuncs` 覆盖 Lua 5.3 头文件中的 `luaL_newlib` 宏展开路径，并支持 `nup >= 0` 的 C closure upvalue 复制。
-- [ ] 实现基础参数检查：
+- [x] 实现基础参数检查：
   - [x] `luaL_checkinteger`
   - [x] `luaL_optinteger`
   - [x] `luaL_checklstring`
@@ -110,7 +110,7 @@
 
 - [x] 实现 `lua_CFunction` 到 Go VM callable 的包装。
   - [x] 当前覆盖 `nup == 0` 的 C function；C closure upvalue 后续随 registry/upvalue 阶段补齐。
-- [ ] 实现：
+- [x] 实现：
   - [x] `lua_pushcclosure`
     - [x] 当前覆盖 `nup >= 0`，通过 `GoClosureWithUpvalues` 保存 C closure upvalue，并支持 `lua_upvalueindex(i)` 读取。
   - [x] `lua_pushcfunction`
@@ -132,7 +132,7 @@
     - [x] 当前覆盖普通栈槽复制，以及 C function 调用帧内正索引相对基址复制；pseudo-index 目标写入留到完整 API 阶段。
   - [x] `lua_getallocf`
     - [x] 当前返回 native shim 的 C heap `realloc/free` 分配器，`ud` 固定为 `NULL`；fixture 覆盖 allocate/reallocate/free roundtrip。
-  - [ ] `lua_is*` 系列常用入口：
+  - [x] `lua_is*` 系列常用入口：
     - [x] `lua_isnumber`
       - [x] 当前按 Lua 5.3 语义对 number 和 numeric string 返回 true，对 nil、boolean、table、none 和普通 string 返回 false。
     - [x] `lua_isstring`
@@ -148,7 +148,7 @@
 
 ## 第五阶段：userdata、metatable、registry
 
-- [ ] 实现 userdata：
+- [x] 实现 userdata：
   - [x] `lua_newuserdata`
   - [x] `lua_touserdata`
   - [x] `luaL_checkudata`
@@ -157,12 +157,12 @@
   - [x] `lua_setuservalue`
     - [x] 当前覆盖 native full userdata 的 user value 写入；失败路径保持栈顶值不被消费。
     - [x] 导出 C ABI 保持 Lua 5.3 public header 的 `void lua_setuservalue(lua_State*, int)` 签名。
-- [ ] 实现 metatable：
+- [x] 实现 metatable：
   - [x] `luaL_newmetatable`
   - [x] `luaL_getmetatable`
   - [x] `lua_setmetatable`
   - [x] `lua_getmetatable`
-- [ ] 实现 registry/ref：
+- [x] 实现 registry/ref：
   - [x] `luaL_ref`
   - [x] `luaL_unref`
   - [x] `lua_rawgeti`
@@ -346,8 +346,8 @@
         - [x] 2026-07-07 修复：使用 `gopls check internal/native/capi_type_native.go internal/native/capi_type_native_test.go` 复核后，补齐 `lua_iscfunction` 导出入口；宿主侧 Go closure 和 native C closure wrapper 返回 true，Lua closure、带 `__call` 的 table、userdata、number、nil、none 和无效 State 返回 false。`TestNativeCAPITypeAndNumberPrimitives` 已覆盖 C closure、host Go closure、Lua closure 和 callable table 边界。短 probe 仍为 `error-number result=12 class=bad`、`type-number result=18 class=good`，因此该 public C API 判断入口缺口需要修复，但不是当前 select-count 退化的充分根因。
         - [x] 2026-07-07 修复：使用 `gopls check internal/native/capi_stack_native.go internal/native/capi_stack_native_test.go` 复核后，补齐 `lua_absindex` 导出入口；负索引按当前 C frame 可见栈顶规范化为稳定正索引，registry/upvalue pseudo-index 原样返回，正索引不转换成 Go State 全局槽位。`TestNativeLuaAbsIndexUsesCurrentCFrame` 已覆盖普通栈、C frame、pseudo-index、nil State 和 `lua_pushvalue(L, lua_absindex(L, -1))` 后续读取边界。短 probe 仍为 `error-number result=12 class=bad`、`type-number result=18 class=good`，因此该 public C API 索引规范化缺口需要修复，但不是当前 select-count 退化的充分根因。
         - [x] 2026-07-07 修复：使用 `gopls check internal/native/capi_type_native.go internal/native/capi_type_native_test.go` 复核后，补齐 `lua_version` 导出入口；`L == NULL` 与有效 State 均返回同一个 Lua 5.3 `lua_Number(503)` 静态地址，满足 `luaL_checkversion_` 比较地址和值的一致性边界。`TestNativeLuaVersionReturnsLua53Constant` 已覆盖版本值、nil State、有效 State 和指针一致性。短 probe 仍为 `error-number result=12 class=bad`、`type-number result=18 class=good`，因此该 public C API 版本查询缺口需要修复，但不是当前 select-count 退化的充分根因。
-        - [ ] 修复门禁：LPeg 只作为真实第三方 C 模块集成验收和问题暴露样本，禁止通过模块名、测试行号、特定 pattern、特定返回值或 LPeg 私有行为做特向性修复；任何生产代码修复都必须能解释为通用 Lua 5.3 C API、VM 调用帧、vararg、返回值写回、栈隔离、registry/metatable/userdata 或错误恢复语义，并补充模块无关的定向测试或 probe。
-        - [ ] 下一步继续定位构造期生命周期缺口：已证伪基本 userdata uservalue table 合并、负索引 rawseti 路径、非 native 固定返回 CALL 临时实参槽清理、native C frame 可见临时栈 weak sweep 强根、C closure 多 upvalue 后缀消费/前缀保留边界、栈上 Go/C closure upvalue 根快照缺失、userdata 关联弱表可达性缺失、C closure 调用期 native external root 缺失、registry/metatable 关联边漏扫、fixed-result CALL 后构造期 userdata/user value 可见根组合、`lua_pushstring` / `lua_pushlstring` 返回指针借用、`lua_tolstring` number 回写缺失、`lua_tonumberx` / `lua_tointegerx` numeric string 转换缺失，以及 `lua_isnumber` / `lua_isinteger` / `lua_isuserdata` / `lua_iscfunction` 导出缺失、`lua_absindex` 缺失和 `lua_version` 缺失是充分根因；后续继续比较 vararg/fixed CALL 与 native 构造期对象挂接、closure/root 形态和 Proto 常量布局的组合。任何生产修复仍必须落到通用 Lua 5.3 C API 或 VM/GC 生命周期语义，不能按 LPeg pattern 特例处理。
+        - [x] 修复门禁：LPeg 只作为真实第三方 C 模块集成验收和问题暴露样本，禁止通过模块名、测试行号、特定 pattern、特定返回值或 LPeg 私有行为做特向性修复；任何生产代码修复都必须能解释为通用 Lua 5.3 C API、VM 调用帧、vararg、返回值写回、栈隔离、registry/metatable/userdata 或错误恢复语义，并补充模块无关的定向测试或 probe。2026-07-07 已按该门禁完成通用 `safeRKOperand`、native Go closure 调用形态、numeric string 兼容和非 protected `lua_callk` 错误跳转语义修复，且补充模块无关回归/fixture，LPeg 不作为特例处理。
+        - [x] 2026-07-07 收敛：构造期生命周期与错误路径缺口已分别落到通用 codegen RK 临时寄存器生命周期、native Go closure 调用形态、math numeric string 兼容和非 protected `lua_callk` longjmp 语义；完整 LPeg `.so/.dylib` 官方测试均已通过，当前无继续围绕 LPeg select-count 的活动阻塞。
   - [ ] LuaSocket 或等价网络库验收：仅在 userdata/metatable/registry/错误边界稳定后进入平台闭环。
 - [ ] 增加交叉编译验证脚本：
   - [x] `scripts/check-native-cross-compile.sh`：显式输出 `GOOS`、`GOARCH`、`CC`、产物路径和缺失 toolchain 时的 skip 原因。
@@ -368,7 +368,7 @@
 - [x] 更新 `docs/RELEASE_LIMITS.md`，说明 native 模块安全风险。
 - [x] 更新 `docs/API.md`，展示嵌入方如何启用 native loader。
 - [x] 更新 README，对外链接 native module 文档。
-- [ ] 增加脚本：
+- [x] 增加脚本：
   - [x] `scripts/build-native-fixtures.sh`
   - [x] `scripts/test-native-modules.sh`
   - [x] `scripts/build-native-cjson.sh`
