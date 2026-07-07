@@ -43,6 +43,7 @@ echo "PROBE_SELECTED_TAIL_ONLY=${PROBE_SELECTED_TAIL_ONLY:-0}"
 echo "PROBE_SELECTED_ATTEMPTS_DECL_ONLY=${PROBE_SELECTED_ATTEMPTS_DECL_ONLY:-0}"
 echo "PROBE_SELECTED_PROBES_DECL_ONLY=${PROBE_SELECTED_PROBES_DECL_ONLY:-0}"
 echo "PROBE_SELECTED_CORE_DECLS_ONLY=${PROBE_SELECTED_CORE_DECLS_ONLY:-0}"
+echo "PROBE_SELECTED_PROBE_LOCALS=${PROBE_SELECTED_PROBE_LOCALS:-}"
 echo "PROBE_PREBUILD_PADDING_LOCALS=${PROBE_PREBUILD_PADDING_LOCALS:-0}"
 echo "PROBE_CONTINUE_ON_CRASH=${PROBE_CONTINUE_ON_CRASH:-0}"
 
@@ -140,6 +141,38 @@ emit_probe_prebuild_selected_parts() {
     cat <<'LUA'
 local attempts = {}
 LUA
+  elif [[ -n "${PROBE_SELECTED_PROBE_LOCALS:-}" ]]; then
+    local selected_locals=",${PROBE_SELECTED_PROBE_LOCALS},"
+    local selected_local
+    IFS=',' read -r -a selected_probe_locals <<<"${PROBE_SELECTED_PROBE_LOCALS}"
+    for selected_local in "${selected_probe_locals[@]}"; do
+      case "${selected_local}" in
+        open|close|any|head|back|func)
+          ;;
+        *)
+          echo "unknown PROBE_SELECTED_PROBE_LOCALS entry: ${selected_local}" >&2
+          return 1
+          ;;
+      esac
+    done
+    if [[ "${selected_locals}" == *",open,"* ]]; then
+      printf '%s\n' "local probe_open"
+    fi
+    if [[ "${selected_locals}" == *",close,"* ]]; then
+      printf '%s\n' "local probe_close"
+    fi
+    if [[ "${selected_locals}" == *",any,"* ]]; then
+      printf '%s\n' "local probe_any"
+    fi
+    if [[ "${selected_locals}" == *",head,"* ]]; then
+      printf '%s\n' "local probe_close_head"
+    fi
+    if [[ "${selected_locals}" == *",back,"* ]]; then
+      printf '%s\n' "local probe_close_back"
+    fi
+    if [[ "${selected_locals}" == *",func,"* ]]; then
+      printf '%s\n' "local probe_close_func"
+    fi
   elif [[ "${PROBE_SELECTED_PROBES_DECL_ONLY:-0}" == "1" ]]; then
     cat <<'LUA'
 local probe_open
@@ -275,7 +308,8 @@ uses_selected_prebuild_decls() {
      "${PROBE_SELECTED_DECLS_DEFAULT_TAIL:-0}" == "1" ||
      "${PROBE_SELECTED_ATTEMPTS_DECL_ONLY:-0}" == "1" ||
      "${PROBE_SELECTED_PROBES_DECL_ONLY:-0}" == "1" ||
-     "${PROBE_SELECTED_CORE_DECLS_ONLY:-0}" == "1" ]]
+     "${PROBE_SELECTED_CORE_DECLS_ONLY:-0}" == "1" ||
+     -n "${PROBE_SELECTED_PROBE_LOCALS:-}" ]]
 }
 
 uses_selected_tail() {
@@ -293,7 +327,8 @@ uses_selected_tail() {
      "${PROBE_SELECTED_TAIL_ONLY:-0}" == "1" ||
      "${PROBE_SELECTED_ATTEMPTS_DECL_ONLY:-0}" == "1" ||
      "${PROBE_SELECTED_PROBES_DECL_ONLY:-0}" == "1" ||
-     "${PROBE_SELECTED_CORE_DECLS_ONLY:-0}" == "1" ]]
+     "${PROBE_SELECTED_CORE_DECLS_ONLY:-0}" == "1" ||
+     -n "${PROBE_SELECTED_PROBE_LOCALS:-}" ]]
 }
 
 emit_probe_selected_parts_tail() {
