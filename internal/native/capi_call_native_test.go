@@ -140,9 +140,9 @@ func TestNativeLuaCallKCallsUnaryGoClosureShapes(t *testing.T) {
 	}
 }
 
-// TestNativeLuaCallKRecordsPendingError 验证 lua_callk 失败时记录非 protected pending error。
+// TestNativeLuaCallKRecordsPendingError 验证 lua_callk Go helper 失败时记录非 protected pending error。
 func TestNativeLuaCallKRecordsPendingError(t *testing.T) {
-	// lua_callk 没有错误码返回，错误需要等待当前 C function 返回 Go 边界后传播。
+	// Go helper 只记录错误对象；真实 C 入口会在看到错误标记后 longjmp，避免 C 调用点继续执行。
 	state := runtime.NewState()
 	defer state.Close()
 	handle, err := newNativeStateHandle(state)

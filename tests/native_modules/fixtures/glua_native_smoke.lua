@@ -60,6 +60,12 @@ assert(ok == false and string.find(message, "native failure: boom", 1, true), me
 local raised, object = pcall(mod.raise)
 assert(raised == false and object == "native lua_error object", object)
 
+local call_error_ok, call_error_message = pcall(mod.call_error_no_resume, function()
+	error("inner lua_call failure")
+end)
+assert(call_error_ok == false, "native lua_call unexpectedly resumed")
+assert(string.find(call_error_message, "inner lua_call failure", 1, true), call_error_message)
+
 local traced, traceback = xpcall(function()
 	return mod.fail("trace")
 end, debug.traceback)

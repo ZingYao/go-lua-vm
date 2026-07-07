@@ -4,17 +4,21 @@ package native
 
 /*
 #include <setjmp.h>
+#include <stddef.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 
 typedef struct lua_State lua_State;
 typedef int (*lua_CFunction)(lua_State *L);
+typedef ptrdiff_t lua_KContext;
+typedef int (*lua_KFunction)(lua_State *L, int status, lua_KContext ctx);
 
 extern int glua_lua_error_record(lua_State *L);
 extern int glua_luaL_argerror_record(lua_State *L, int arg, const char *extra);
 extern int glua_luaL_error_message(lua_State *L, const char *message);
 extern const char* glua_lua_pushfstring_message(lua_State *L, const char *message);
+extern int glua_lua_callk_record(lua_State *L, int argument_count, int result_count);
 
 #if defined(_MSC_VER)
 #define GLUA_THREAD_LOCAL __declspec(thread)
@@ -29,6 +33,14 @@ static void glua_lua_error_jump(void) {
 		longjmp(*glua_native_error_target, 1);
 	}
 	abort();
+}
+
+void lua_callk(lua_State *L, int argument_count, int result_count, lua_KContext context, lua_KFunction continuation) {
+	(void)context;
+	(void)continuation;
+	if (glua_lua_callk_record(L, argument_count, result_count) != 0) {
+		glua_lua_error_jump();
+	}
 }
 
 static int glua_call_lua_cfunction(void* function, lua_State* L) {

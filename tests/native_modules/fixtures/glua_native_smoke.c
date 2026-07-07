@@ -33,6 +33,14 @@ static int glua_native_raise(lua_State *L) {
 	return lua_error(L);
 }
 
+static int glua_native_call_error_no_resume(lua_State *L) {
+	luaL_checktype(L, 1, LUA_TFUNCTION);
+	lua_pushvalue(L, 1);
+	lua_call(L, 0, 0);
+	lua_pushstring(L, "continued after lua_call error");
+	return 1;
+}
+
 static int glua_native_alloc_roundtrip(lua_State *L) {
 	void *ud = NULL;
 	lua_Alloc alloc = lua_getallocf(L, &ud);
@@ -215,6 +223,7 @@ static const luaL_Reg glua_native_smoke_funcs[] = {
 	{"new_counter", glua_native_new_counter},
 	{"fail", glua_native_fail},
 	{"raise", glua_native_raise},
+	{"call_error_no_resume", glua_native_call_error_no_resume},
 	{"alloc_roundtrip", glua_native_alloc_roundtrip},
 	{"runtimecap_cleanup_probe", glua_native_runtimecap_cleanup_probe},
 	{"runtimecap_sequence_probe", glua_native_runtimecap_sequence_probe},

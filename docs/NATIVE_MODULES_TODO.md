@@ -193,11 +193,11 @@
   - [x] 固定 `lpeg` 或等价纯 C 模块源码到仓库或 `third_party/`，记录来源、版本和许可证。
     - [x] 新增 `scripts/build-native-lpeg.sh`，使用仓库内 Lua 5.3 public headers 和固定源码编译当前平台 `lpeg` 动态模块。
     - [x] 新增 `scripts/test-native-lpeg.sh`，覆盖 `require("lpeg")` 和基础 pattern/match runtime smoke。
-  - [ ] `lpeg` 或等价纯 C 模块验收：覆盖 userdata、metatable、registry 和复杂 C function 行为。
+  - [x] `lpeg` 或等价纯 C 模块验收：覆盖 userdata、metatable、registry 和复杂 C function 行为。
     - [x] macOS arm64 `.so` 与 `.dylib` 两种后缀已通过基础 LPeg runtime smoke。
-    - [ ] 完整 `third_party/lpeg/test.lua`、复杂 capture、grammar 和错误边界仍待后续验收。
+    - [x] 完整 `third_party/lpeg/test.lua`、复杂 capture、grammar 和错误边界已通过 macOS arm64 native 验收。
       - [x] 已修复完整测试在 1084 行触发的 `string.char("98")` Lua 5.3 numeric string 转 integer 兼容断点。
-      - [ ] 当前完整测试推进到 1159 行；同一 pattern 独立运行返回 18，但完整前序状态后返回 12，疑似 LPeg match-time capture / named capture 前序状态污染，需继续缩小最小复现。
+      - [x] 当前完整测试推进到 1159 行；同一 pattern 独立运行返回 18，但完整前序状态后返回 12，疑似 LPeg match-time capture / named capture 前序状态污染，需继续缩小最小复现。
         - [x] 2026-07-06 复核：替换 1159 行断言为打印后，官方测试同路径下 `c:match('[==[]]====]]]]==]===[]')` 实际返回 `12`。
         - [x] 2026-07-06 复核：前缀执行到 656 行后，若沿用官方脚本的外层 `c = ...` 赋值形态，match-time callback 只在 position 12 触发并返回 `12`；独立脚本会尝试 position 7、12、13、14、15、18 并最终返回 `18`。
         - [x] 2026-07-06 复核：`local c = ...` shadow 形态与官方外层 `c = ...` 形态表现不同，说明问题不在动态库解析，而更可能在 native C frame 与 Go VM 嵌套执行 Lua callback 时的栈/寄存器隔离、`lua_call`、`lua_remove`/`lua_rotate` 或借用 VM 清理边界。
@@ -526,3 +526,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-07：复跑 LPeg 官方完整测试后，阻塞点从 `[C]: in function 'match'` 的 “attempt to call a non-function value” 前移为 `third_party/lpeg/test.lua:1439` 的 `bad argument #1 to 'sin' (number expected, got string)`；最小复现为 `lpeg.C(lpeg.R"09"^1) / math.sin` 和 `re.compile([[{[0-9]+'.'?[0-9]*} -> sin]], math)`，说明 native 调用桥已能调用 `math.sin`，下一轮应独立修复 Lua 5.3 标准库 `math.*` 对 numeric string 的通用兼容性，不应写 LPeg 专用分支。
 - 2026-07-07：修复 Lua 5.3 标准库 `math.*` 数值参数接受 numeric string 的通用兼容性；`numberValueArgument`、一元 `GoFastUnaryFunction` 入口和 `integerArgument` 现在统一复用字符串到 number 的转换语义，`math.type` 仍只识别真实 integer/float，不隐式转换 string。新增 `TestMathNumberArgumentsAcceptNumericStrings`，覆盖 `math.sin("2.34")`、`SinUnaryValue("2.34")`、`floor("9.75")`、`ult("1","2")`、非法字符串和 `math.type` 边界。
 - 2026-07-07：重建 native `glua` 后，LPeg `.so` 与 `.dylib` 最小复现 `lpeg.C(lpeg.R"09"^1) / math.sin` 和 `re.compile([[{[0-9]+'.'?[0-9]*} -> sin]], math)` 均已通过；完整 `third_party/lpeg/test.lua` 继续推进到 `test.lua:1658` 的 `errmsg('aaaa', "rule 'aaaa'")`，当前最小 `pcall(re.compile, "aaaa")` 返回 `attempt to call a non-function value`，下一轮应定位 `re` 错误路径为何未返回包含 `rule 'aaaa'` 的诊断，不应回退到 LPeg 特例。
+- 2026-07-07：集中排查 LPeg `re.compile("aaaa")` 错误路径；Delve 断点和临时调试版 LPeg 日志确认坏帧来自 `functioncap -> pushcapture -> getcaptures -> lp_match`，内层 `NT("aaaa", false)` 已通过 Lua `error` 产生正确错误对象，但 native `lua_callk` 只记录 pending error 并返回 C 调用点，导致 LPeg 继续执行后续 capture，最终外层 `functioncap` 把 stackbase lightuserdata 当作函数调用并报 `attempt to call a non-function value`。本轮修复通用 Lua C API 语义：非 protected `lua_callk/lua_call` 失败时由 C wrapper 立即 longjmp 到当前 C function 边界，`lua_pcallk` protected 路径保持返回错误码；新增 smoke fixture `call_error_no_resume` 锁定 C 模块在 `lua_call` 出错后不会继续执行。复跑 `re.compile("aaaa")` 返回 `rule 'aaaa' used outside a grammar`，重复规则路径返回 `already defined as a rule`，完整 `third_party/lpeg/test.lua` 在 macOS arm64 native LPeg `.so` 与 `.dylib` 路径下均输出 `OK`。

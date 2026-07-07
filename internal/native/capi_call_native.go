@@ -150,18 +150,18 @@ func nativeLuaPushCallResults(luaState unsafe.Pointer, results []runtime.Value, 
 	}
 }
 
-// nativeLuaCallK 实现不支持 yield continuation 的非 protected call。
-func nativeLuaCallK(luaState unsafe.Pointer, argumentCount int, resultCount int) {
+// nativeLuaCallK 实现不支持 yield continuation 的非 protected call，并返回是否需要 C 入口抛错。
+func nativeLuaCallK(luaState unsafe.Pointer, argumentCount int, resultCount int) bool {
 	// 当前 native shim 不支持 C continuation/yield；无 yield 时 lua_callk 等价于非 protected lua_call。
 	state, ok := lookupNativeStateHandle(luaState)
 	if !ok {
 		// 无效 State 没有可回填的错误栈，保持 no-op 让外层边界暴露 State 生命周期问题。
-		return
+		return false
 	}
 	if argumentCount < 0 {
-		// 非 protected 调用没有错误码返回；记录 pending error 等待当前 C function 返回边界传播。
+		// 非 protected 调用没有错误码返回；记录 pending error 后由 C 入口按 lua_call 语义立即跳出。
 		_ = setNativeStatePendingError(luaState, runtime.StringValue("bad argument count to lua_callk"))
-		return
+		return true
 	}
 	baseTop := 0
 	if currentBaseTop, ok := currentNativeStateCallBase(luaState); ok {
@@ -171,13 +171,13 @@ func nativeLuaCallK(luaState unsafe.Pointer, argumentCount int, resultCount int)
 	if state.StackTop()-baseTop < argumentCount+1 {
 		// 当前 C 帧可见槽不足时记录错误，但不弹栈，避免误删外层调用帧值。
 		_ = setNativeStatePendingError(luaState, runtime.StringValue("attempt to call a missing native value"))
-		return
+		return true
 	}
 	functionIndex := state.StackTop() - argumentCount
 	if functionIndex <= baseTop {
 		// 栈上没有被调函数时记录运行期错误，避免 C 模块继续读取伪造结果。
 		_ = setNativeStatePendingError(luaState, runtime.StringValue("attempt to call a missing native value"))
-		return
+		return true
 	}
 	function := state.ValueAt(functionIndex)
 	args := make([]runtime.Value, argumentCount)
@@ -200,11 +200,12 @@ func nativeLuaCallK(luaState unsafe.Pointer, argumentCount int, resultCount int)
 		results, callErr = nativeLuaCallValue(state, function, args)
 	}()
 	if callErr != nil {
-		// 非 protected 调用失败时不压栈返回错误对象，而是让当前 C function 调用边界抛出该错误。
+		// 非 protected 调用失败时不压栈返回错误对象，而是让 C 入口立刻跳出当前 C 调用链。
 		_ = setNativeStatePendingError(luaState, runtime.ErrorObject(callErr))
-		return
+		return true
 	}
 	nativeLuaPushCallResults(luaState, results, resultCount)
+	return false
 }
 
 // nativeLuaPCallK 实现不支持 yield continuation 的 protected call。
@@ -274,11 +275,13 @@ func lua_pcallk(luaState *C.lua_State, argumentCount C.int, resultCount C.int, e
 	return C.int(nativeLuaPCallK(unsafe.Pointer(luaState), int(argumentCount), int(resultCount), int(errorFunction)))
 }
 
-// lua_callk 导出 Lua 5.3 C API 非 protected call 入口。
+// glua_lua_callk_record 执行 Lua 5.3 C API 非 protected call，并把错误交给 C wrapper longjmp。
 //
-//export lua_callk
-func lua_callk(luaState *C.lua_State, argumentCount C.int, resultCount C.int, context C.lua_KContext, continuation C.lua_KFunction) {
-	// 当前 VM 不支持从 C API yield；非 yield 场景忽略 continuation/context，按 lua_call 语义执行。
-	_, _ = context, continuation
-	nativeLuaCallK(unsafe.Pointer(luaState), int(argumentCount), int(resultCount))
+//export glua_lua_callk_record
+func glua_lua_callk_record(luaState *C.lua_State, argumentCount C.int, resultCount C.int) C.int {
+	// C wrapper 已忽略 continuation/context；本 helper 只负责执行调用并报告是否需要非 protected 抛错。
+	if nativeLuaCallK(unsafe.Pointer(luaState), int(argumentCount), int(resultCount)) {
+		return 1
+	}
+	return 0
 }
