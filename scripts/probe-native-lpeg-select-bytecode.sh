@@ -87,6 +87,46 @@ print("PROBE", c:match'[==[]]====]]]]==]===[]', table.concat(attempts, ","))
 LUA
 }
 
+emit_lpeg_split_head_tail() {
+  cat <<'LUA'
+attempts = {}
+if probe_open == nil then
+  probe_open = '[' * m.Cg(m.P'='^0, "init") * '['
+end
+if probe_close == nil then
+  if probe_close_head == nil then
+    if probe_head_left == nil then
+      probe_head_left = ']'
+    end
+    if probe_head_unit == nil then
+      probe_head_unit = m.P'='^0
+    end
+    if probe_head_capture == nil then
+      probe_head_capture = m.C(probe_head_unit)
+    end
+    if probe_head_right == nil then
+      probe_head_right = ']'
+    end
+    probe_close_head = probe_head_left * probe_head_capture * probe_head_right
+  end
+  if probe_close_back == nil then
+    probe_close_back = m.Cb("init")
+  end
+  if probe_close_func == nil then
+    probe_close_func = function (_, pos, s1, s2)
+                                               attempts[#attempts + 1] = pos .. ':' .. s1 .. ':' .. s2
+                                               return s1 == s2 end
+  end
+  probe_close = m.Cmt(probe_close_head * probe_close_back, probe_close_func)
+end
+if probe_any == nil then
+  probe_any = m.P(1)
+end
+c = probe_open * { probe_close + probe_any * m.V(1) } / 0
+print("PROBE", c:match'[==[]]====]]]]==]===[]', table.concat(attempts, ","))
+LUA
+}
+
 emit_mode_body() {
   local mode="$1"
 
@@ -411,6 +451,10 @@ LUA
       emit_lpeg_error_number_perturbation
       emit_lpeg_selected_tail
       ;;
+    lpeg-split-head-tail-only-error-number)
+      emit_lpeg_error_number_perturbation
+      emit_lpeg_split_head_tail
+      ;;
     *)
       echo "unknown select bytecode probe mode: ${mode}" >&2
       return 1
@@ -461,6 +505,7 @@ modes=(
   lpeg-selected-decls-default-tail-error-number
   lpeg-selected-tail-only-error-number
   lpeg-decls-only-selected-tail-error-number
+  lpeg-split-head-tail-only-error-number
 )
 
 if (($# > 0)); then
