@@ -19,14 +19,15 @@
 | lua-cjson | `scripts/test-native-cjson.sh` | `.so`、`.dylib` | ABI 符号由 native `glua` shim 覆盖、`require("cjson")`、`encode/decode`、错误输入 `pcall` |
 | LPeg | `scripts/test-native-lpeg.sh` | `.so`、`.dylib` | `require("lpeg")`、基础 pattern/match；完整 `third_party/lpeg/test.lua` 已在排查闭环中通过 |
 | LuaSocket | `scripts/test-native-luasocket.sh` | `.so`、`.dylib` | `require("mime")`、MIME 编解码、`require("socket")`、TCP echo loopback、UDP sendto/receivefrom loopback |
+| 当前平台总验收 | `scripts/test-native-real-modules.sh` | `.so`、`.dylib` | 串联 fixture、lua-cjson、LPeg 和 LuaSocket 运行期验收，用于本机或 CI 一次性回归 |
 
-最近一次本机运行期验收：
+最近一次本机真实模块总验收：
 
 ```bash
-./scripts/test-native-luasocket.sh
+./scripts/test-native-real-modules.sh
 ```
 
-结果：macOS arm64 `.so` 与 `.dylib` 均通过 LuaSocket runtime acceptance。
+结果：macOS arm64 `.so` 与 `.dylib` 均通过 fixture、lua-cjson、LPeg 和 LuaSocket runtime acceptance。
 
 最近一次 native Go 门禁：
 

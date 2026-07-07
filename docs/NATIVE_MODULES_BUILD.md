@@ -98,6 +98,14 @@ fixture loader smoke：
 ./scripts/test-native-luasocket.sh
 ```
 
+当前平台真实模块总验收入口：
+
+```bash
+./scripts/test-native-real-modules.sh
+```
+
+该入口串联 fixture、lua-cjson、LPeg 和 LuaSocket 当前平台运行期验收，便于本机或 CI 做一次性回归；它不替代 Linux/Windows 目标平台的独立运行期闭环。
+
 交叉编译验证入口：
 
 ```bash

@@ -384,6 +384,7 @@
   - [x] `scripts/test-native-lpeg.sh`
   - [x] `scripts/build-native-luasocket.sh`
   - [x] `scripts/test-native-luasocket.sh`
+  - [x] `scripts/test-native-real-modules.sh`
   - [x] `scripts/check-native-skip-reasons.sh`
   - [x] `scripts/probe-native-lpeg-1159.sh`
   - [x] `scripts/bisect-native-lpeg-1159-prefix.sh`
@@ -549,3 +550,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-07：补齐 native `lua_rawget`，按 Lua 5.3 raw table 读取语义弹出栈顶 key、压入原始值并返回类型码，不触发 `__index` 元方法，且遵守当前 C frame 可见栈边界。重建 native `glua` 后，macOS arm64 `socket/core.so` 直接 `package.loadlib(..., "luaopen_socket_core")` 已成功返回模块 table，`require("socket")` / `require("mime")` 均通过；短 smoke 已验证 `socket.tcp()`、`socket.udp()` 创建 userdata 并可 `close()`。后续应把这些探针升级为可复跑脚本，并继续补齐可控 loopback TCP/UDP 行为验收。
 - 2026-07-07：新增 `scripts/test-native-luasocket.sh`，把 LuaSocket 运行期验收固化为脚本：脚本构建 native `glua` 与仓库内固定 LuaSocket 动态模块，按平台后缀执行 `require("mime")`、`mime.b64/unb64`、`require("socket")`、`socket.tcp()` / `socket.udp()` 基础创建关闭，以及带 2 秒超时的本机 TCP echo loopback 与 UDP sendto/receivefrom loopback。Windows 在 `lua53.dll` shim/import library 落地前继续明确 skip；Linux 仍需在对应平台实际运行闭环。
 - 2026-07-07：新增 `docs/NATIVE_MODULES_ACCEPTANCE.md` 作为当前验收台账，记录 macOS arm64 fixture、lua-cjson、LPeg、LuaSocket 已验证范围，明确 Linux/Windows 仍未声明运行期通过，并列出 native_modules 不可夸大的兼容边界。该记录不是全平台最终完成声明；Linux/Windows 闭环后需继续更新。
+- 2026-07-07：新增 `scripts/test-native-real-modules.sh` 作为当前平台真实模块总验收入口，串联 fixture、lua-cjson、LPeg 和 LuaSocket 运行期脚本，并统一输出目标平台与 CGO 状态。该入口只聚合当前平台验收结果，不把 Linux/Windows 缺失环境或 skip 视为全平台闭环；Linux/Windows 运行期仍需按目标平台独立执行并更新验收记录。
