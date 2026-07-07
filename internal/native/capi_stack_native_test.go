@@ -33,15 +33,27 @@ func TestNativeCAPIStackPrimitives(t *testing.T) {
 	nativeLuaPushNumber(luaState, 2.5)
 	cString := []byte{'l', 'u', 'a', 0}
 	cStringPointer := unsafe.Pointer(&cString[0])
-	if returned := nativeLuaPushString(luaState, cStringPointer); returned != cStringPointer {
-		// lua_pushstring 至少应返回传入的 C 字符串指针，后续会替换成稳定内部字符串指针策略。
-		t.Fatalf("lua_pushstring returned %p, want %p", returned, cStringPointer)
+	if returned := nativeLuaPushString(luaState, cStringPointer); returned == nil || returned == cStringPointer {
+		// lua_pushstring 必须返回 State 生命周期内稳定的内部副本指针，而不是借用调用方指针。
+		t.Fatalf("lua_pushstring returned %p, want stable copy not %p", returned, cStringPointer)
+	} else if got := unsafe.String((*byte)(returned), len("lua")); got != "lua" {
+		// 返回指针内容必须对应刚压入的 Lua string。
+		t.Fatalf("lua_pushstring returned buffer = %q, want lua", got)
+	} else if terminator := *(*byte)(unsafe.Add(returned, len("lua"))); terminator != 0 {
+		// C API 返回的字符串指针需要 NUL 结尾，兼容直接 C 字符串读取。
+		t.Fatalf("lua_pushstring returned buffer terminator = %d, want 0", terminator)
 	}
 	binary := []byte{'a', 0, 'b'}
 	cBinary := unsafe.Pointer(&binary[0])
-	if returned := nativeLuaPushLString(luaState, cBinary, uintptr(len(binary))); returned != cBinary {
-		// lua_pushlstring 当前返回传入指针，证明 C ABI 返回路径贯通。
-		t.Fatalf("lua_pushlstring returned %p, want %p", returned, cBinary)
+	if returned := nativeLuaPushLString(luaState, cBinary, uintptr(len(binary))); returned == nil || returned == cBinary {
+		// lua_pushlstring 同样必须返回内部副本指针，避免 C 模块保留临时入参地址。
+		t.Fatalf("lua_pushlstring returned %p, want stable copy not %p", returned, cBinary)
+	} else if got := unsafe.String((*byte)(returned), len(binary)); got != string(binary) {
+		// 指定长度字符串的返回 buffer 必须保留内嵌 NUL 字节。
+		t.Fatalf("lua_pushlstring returned buffer = %q, want binary string", got)
+	} else if terminator := *(*byte)(unsafe.Add(returned, len(binary))); terminator != 0 {
+		// 即使 Lua string 内部包含 NUL，C 返回 buffer 末尾仍应补一个终止符。
+		t.Fatalf("lua_pushlstring returned buffer terminator = %d, want 0", terminator)
 	}
 
 	if got := nativeLuaStackTop(luaState); got != 7 {

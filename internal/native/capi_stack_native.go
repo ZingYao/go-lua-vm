@@ -297,8 +297,13 @@ func nativeLuaPushLString(luaState unsafe.Pointer, text unsafe.Pointer, length u
 		// 无效指针或长度暂不抛出 longjmp，保持 no-op 并返回 nil。
 		return nil
 	}
+	buffer, _, ok := nativeLuaAllocCString(luaState, value)
+	if !ok {
+		// 无效 State 或分配失败时不能向 C 模块返回可用内部字符串指针。
+		return nil
+	}
 	nativeLuaPushValue(luaState, runtime.StringValue(value))
-	return text
+	return buffer
 }
 
 // nativeLuaPushString 把 NUL 结尾 C 字符串压入 native C API 对应的 Go State 栈。
@@ -310,8 +315,13 @@ func nativeLuaPushString(luaState unsafe.Pointer, text unsafe.Pointer) unsafe.Po
 		return nil
 	}
 	value := nativeLuaCString(text)
+	buffer, _, ok := nativeLuaAllocCString(luaState, value)
+	if !ok {
+		// 无效 State 或分配失败时不能向 C 模块返回可用内部字符串指针。
+		return nil
+	}
 	nativeLuaPushValue(luaState, runtime.StringValue(value))
-	return text
+	return buffer
 }
 
 // nativeLuaPushFormattedString 压入 C 层已经格式化完成的 Lua string。
