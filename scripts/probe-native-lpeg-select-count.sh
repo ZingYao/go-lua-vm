@@ -38,6 +38,7 @@ echo "PROBE_PREBUILD_DUMMY_CAPTURE=${PROBE_PREBUILD_DUMMY_CAPTURE:-0}"
 echo "PROBE_PREBUILD_DUMMY_BACK=${PROBE_PREBUILD_DUMMY_BACK:-0}"
 echo "PROBE_PREBUILD_DUMMY_VALUE=${PROBE_PREBUILD_DUMMY_VALUE:-}"
 echo "PROBE_PREBUILD_DECLS_ONLY=${PROBE_PREBUILD_DECLS_ONLY:-0}"
+echo "PROBE_PREBUILD_PADDING_LOCALS=${PROBE_PREBUILD_PADDING_LOCALS:-0}"
 echo "PROBE_CONTINUE_ON_CRASH=${PROBE_CONTINUE_ON_CRASH:-0}"
 
 expected_go_version="go1.26.4"
@@ -255,6 +256,19 @@ end
 c = probe_open * { probe_close + probe_any * m.V(1) } / 0
 print("PROBE", c:match'[==[]]====]]]]==]===[]', table.concat(attempts, ","))
 LUA
+}
+
+emit_probe_prebuild_padding_locals() {
+  local count="${PROBE_PREBUILD_PADDING_LOCALS:-0}"
+  local index
+
+  if ! [[ "${count}" =~ ^[0-9]+$ ]]; then
+    echo "PROBE_PREBUILD_PADDING_LOCALS must be a non-negative integer: ${count}" >&2
+    return 1
+  fi
+  for ((index = 1; index <= count; index++)); do
+    printf 'local __glua_prebuild_padding_%d = nil\n' "${index}"
+  done
 }
 
 lua_value_expr_for_kind() {
@@ -1338,6 +1352,7 @@ probe_mode() {
     elif [[ "${PROBE_PREBUILD_OPEN:-0}" == "1" || "${PROBE_PREBUILD_CLOSE:-0}" == "1" || "${PROBE_PREBUILD_ANY:-0}" == "1" || "${PROBE_PREBUILD_CLOSE_HEAD:-0}" == "1" || "${PROBE_PREBUILD_CLOSE_BACK:-0}" == "1" || "${PROBE_PREBUILD_CLOSE_FUNC:-0}" == "1" || "${PROBE_PREBUILD_DUMMY_FUNC:-0}" == "1" || "${PROBE_PREBUILD_DUMMY_CAPTURE:-0}" == "1" || "${PROBE_PREBUILD_DUMMY_BACK:-0}" == "1" || -n "${PROBE_PREBUILD_DUMMY_VALUE:-}" || "${PROBE_PREBUILD_DECLS_ONLY:-0}" == "1" ]]; then
       emit_probe_prebuild_selected_parts
     fi
+    emit_probe_prebuild_padding_locals
     emit_mode_body "${mode}"
     if [[ "${PROBE_PREBUILD_PATTERN:-0}" == "1" ]]; then
       emit_probe_prebuilt_match_tail
