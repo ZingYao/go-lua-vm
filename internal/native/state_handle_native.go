@@ -100,14 +100,23 @@ func (handle *nativeStateHandle) close() {
 	handle.token = nil
 
 	nativeStateHandlesMu.Lock()
-	delete(nativeStateHandles, uintptr(token))
-	buffers := nativeStateBuffers[uintptr(token)]
-	delete(nativeStateBuffers, uintptr(token))
-	delete(nativeStateCallBases, uintptr(token))
-	delete(nativeStateCallUpvalues, uintptr(token))
-	delete(nativeStatePendingErrors, uintptr(token))
-	delete(nativeStateLightUserdatas, uintptr(token))
+	key := uintptr(token)
+	state := nativeStateHandles[key]
+	callFrameCount := len(nativeStateCallBases[key])
+	delete(nativeStateHandles, key)
+	buffers := nativeStateBuffers[key]
+	delete(nativeStateBuffers, key)
+	delete(nativeStateCallBases, key)
+	delete(nativeStateCallUpvalues, key)
+	delete(nativeStatePendingErrors, key)
+	delete(nativeStateLightUserdatas, key)
 	nativeStateHandlesMu.Unlock()
+	for index := 0; index < callFrameCount; index++ {
+		// handle 关闭时若仍有未弹出的 C frame，同步回收对应 external root 帧。
+		if state != nil {
+			state.PopExternalGCRootFrame()
+		}
+	}
 	for _, buffer := range buffers {
 		// buffer 都由 C malloc 分配，可安全在 handle 生命周期结束时统一释放。
 		C.glua_free_native_buffer(buffer)
@@ -160,16 +169,23 @@ func pushNativeStateCallFrame(token unsafe.Pointer, baseTop int, upvalues []runt
 		// nil token 无法记录调用帧。
 		return false
 	}
+	upvalueSnapshot := append([]runtime.Value(nil), upvalues...)
 	nativeStateHandlesMu.Lock()
-	defer nativeStateHandlesMu.Unlock()
 	key := uintptr(token)
 	state := nativeStateHandles[key]
 	if state == nil || state.IsClosed() {
 		// State 已失效时不能建立 C 调用帧。
+		nativeStateHandlesMu.Unlock()
 		return false
 	}
 	nativeStateCallBases[key] = append(nativeStateCallBases[key], baseTop)
-	nativeStateCallUpvalues[key] = append(nativeStateCallUpvalues[key], append([]runtime.Value(nil), upvalues...))
+	nativeStateCallUpvalues[key] = append(nativeStateCallUpvalues[key], upvalueSnapshot)
+	nativeStateHandlesMu.Unlock()
+	if !state.PushExternalGCRootFrame(upvalueSnapshot) {
+		// external root 登记失败时回滚刚建立的 C frame，避免 upvalue 栈与 GC 根栈错位。
+		popNativeStateCallFrame(token)
+		return false
+	}
 	return true
 }
 
@@ -181,17 +197,23 @@ func popNativeStateCallFrame(token unsafe.Pointer) {
 		return
 	}
 	nativeStateHandlesMu.Lock()
-	defer nativeStateHandlesMu.Unlock()
 	key := uintptr(token)
+	state := nativeStateHandles[key]
 	bases := nativeStateCallBases[key]
 	if len(bases) == 0 {
 		// 没有活动调用帧时保持 no-op。
+		nativeStateHandlesMu.Unlock()
 		return
 	}
 	if len(bases) == 1 {
 		// 最后一层退出后删除 map 项，避免长期保留空切片。
 		delete(nativeStateCallBases, key)
 		delete(nativeStateCallUpvalues, key)
+		nativeStateHandlesMu.Unlock()
+		if state != nil {
+			// 同步弹出当前 C frame 的 external root 帧。
+			state.PopExternalGCRootFrame()
+		}
 		return
 	}
 	nativeStateCallBases[key] = bases[:len(bases)-1]
@@ -199,9 +221,19 @@ func popNativeStateCallFrame(token unsafe.Pointer) {
 	if len(upvalueFrames) <= 1 {
 		// upvalue 栈与基址栈理论上同步；异常时清空，避免后续读到错配闭包。
 		delete(nativeStateCallUpvalues, key)
+		nativeStateHandlesMu.Unlock()
+		if state != nil {
+			// 即便 upvalue 栈异常，也要弹出与基址帧对应的 external root。
+			state.PopExternalGCRootFrame()
+		}
 		return
 	}
 	nativeStateCallUpvalues[key] = upvalueFrames[:len(upvalueFrames)-1]
+	nativeStateHandlesMu.Unlock()
+	if state != nil {
+		// 同步弹出当前 C frame 的 external root 帧。
+		state.PopExternalGCRootFrame()
+	}
 }
 
 // currentNativeStateCallBase 返回当前 C function 调用的 Go State 栈基址。

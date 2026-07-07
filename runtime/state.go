@@ -276,6 +276,8 @@ type State struct {
 	threads []*Thread
 	// activeVMs 保存当前正在执行的 Lua VM 寄存器窗口，用于 GC 扫描活动 local。
 	activeVMs []*VM
+	// externalGCRootFrames 保存宿主桥接层显式压入的临时 GC 根帧。
+	externalGCRootFrames [][]Value
 	// pooledLuaVMCached 按寄存器窗口大小缓存可复用的 Lua VM。
 	pooledLuaVMCached map[int][]*VM
 	// pooledLuaVMFast 保存最近归还的 VM，命中同窗口热调用时绕过 map 池。
@@ -487,6 +489,7 @@ func (state *State) Close() {
 	state.globals = nil
 	state.stack = nil
 	state.callFrames = nil
+	state.externalGCRootFrames = nil
 	state.pooledLuaVMCached = nil
 	state.callArgumentScratch = nil
 	state.mainThread = nil

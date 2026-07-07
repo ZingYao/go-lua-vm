@@ -23,6 +23,8 @@ const (
 	GCRootTypeCoroutineStack GCRootType = "coroutine-stack-root"
 	// GCRootTypeUserdataAssociation 表示 userdata 关联的 user value 与 raw metatable 根样本。
 	GCRootTypeUserdataAssociation GCRootType = "userdata-association-root"
+	// GCRootTypeExternal 表示宿主桥接层显式压入的临时 root。
+	GCRootTypeExternal GCRootType = "external-root"
 	// autoGCSweepInterval 表示自动 GC 在分配压力下每多少次可收集对象分配推进一次 weak sweep。
 	// 弱表显式 collectgarbage 仍走完整扫描；自动路径使用独立低频节拍，既避免 finalizer-only
 	// 16 次周期误清普通弱表，也满足官方 closure.lua 等待弱引用在 100 次分配压力内消失的语义。
@@ -90,6 +92,65 @@ func (state *State) RestartGC() {
 
 	// 标记 Lua 自动 GC 已恢复，后续 isrunning 应返回 true。
 	state.gcRunning = true
+}
+
+// PushExternalGCRootFrame 压入一帧宿主桥接层临时 GC 根。
+//
+// values 会被复制保存；调用方后续修改原切片不会影响本帧。返回 false 表示 State 无效或已关闭。
+// 该入口服务 native C API shim 这类 runtime 外部桥接层，使 C frame upvalue、临时 handle 等
+// Lua 值在调用期间参与 root/weak sweep，而不要求 runtime 反向依赖具体 native 包。
+func (state *State) PushExternalGCRootFrame(values []Value) bool {
+	// nil 或关闭 State 不能再登记新根帧。
+	if state == nil || state.closed {
+		// 生命周期无效时返回 false，让调用方回滚对应桥接帧。
+		return false
+	}
+
+	// 始终复制一帧，包括空帧；这样 push/pop 与外层桥接调用帧保持严格 LIFO 对齐。
+	frame := append([]Value(nil), values...)
+	state.externalGCRootFrames = append(state.externalGCRootFrames, frame)
+	return true
+}
+
+// PopExternalGCRootFrame 弹出最近一帧宿主桥接层临时 GC 根。
+//
+// 返回 false 表示 State 无效、已关闭或没有可弹出的外部根帧；正常弹出时会先清空切片槽，
+// 避免已退出 native/C frame 的对象被 Go 切片底层数组继续持有。
+func (state *State) PopExternalGCRootFrame() bool {
+	// nil、关闭或空栈都没有可弹出的外部根帧。
+	if state == nil || state.closed || len(state.externalGCRootFrames) == 0 {
+		// 调用方可能在错误恢复或重复清理路径触发，返回 false 保持幂等。
+		return false
+	}
+
+	topIndex := len(state.externalGCRootFrames) - 1
+	frame := state.externalGCRootFrames[topIndex]
+	for index := range frame {
+		// 清空每个值槽，释放该外部根帧对 Lua 对象的强引用。
+		frame[index] = NilValue()
+	}
+	state.externalGCRootFrames[topIndex] = nil
+	state.externalGCRootFrames = state.externalGCRootFrames[:topIndex]
+	return true
+}
+
+// forEachExternalGCRoot 逐个访问宿主桥接层显式压入的临时 GC 根。
+//
+// visit 必须非 nil；该方法只读取当前 State 的外部根帧，不复制值。调用方不得在 visit 中修改
+// externalGCRootFrames，以免破坏正在进行的 root/weak sweep 遍历。
+func (state *State) forEachExternalGCRoot(visit func(Value)) {
+	// nil State 或 nil 回调没有可遍历目标。
+	if state == nil || visit == nil {
+		// 保持内部扫描 helper 防御性，避免 GC 路径 panic。
+		return
+	}
+	for frameIndex := range state.externalGCRootFrames {
+		frame := state.externalGCRootFrames[frameIndex]
+		for valueIndex := range frame {
+			// 外部根按压入顺序访问；NilValue 也允许被 visit 自行忽略。
+			visit(frame[valueIndex])
+		}
+	}
 }
 
 // SetGCPause 设置 Lua 视角的 GC pause 参数并返回旧值。
@@ -376,6 +437,7 @@ func joinCommaSpace(values []string) string {
 // - closure/upvalue root：所有线程函数入口、call frame 函数和闭包 upvalues。
 // - table key/value root：所有可见 table 的 key 与 value。
 // - userdata association root：userdata 的 user value 与 raw metatable。
+// - external root：native/C shim 等宿主桥接层显式压入的临时根。
 func (state *State) SnapshotGCRoots() GCRootSnapshot {
 	if state == nil {
 		// nil State 无法构建根快照。
@@ -395,6 +457,7 @@ func (state *State) SnapshotGCRoots() GCRootSnapshot {
 			GCRootTypeTableKeyValue:       {},
 			GCRootTypeCoroutineStack:      {},
 			GCRootTypeUserdataAssociation: {},
+			GCRootTypeExternal:            {},
 		},
 	}
 
@@ -469,6 +532,12 @@ func (state *State) SnapshotGCRoots() GCRootSnapshot {
 		state.appendAssociatedRoots(frame.Function, &snapshot)
 		snapshot.Batches[GCRootTypeClosureUpvalue] = state.appendClosureUpvalueRoots(frame.Function, snapshot.Batches[GCRootTypeClosureUpvalue])
 	}
+	state.forEachExternalGCRoot(func(value Value) {
+		// 外部根帧是宿主桥接层显式声明的强根，需要同时展开关联边与 closure upvalue。
+		snapshot.Batches[GCRootTypeExternal] = append(snapshot.Batches[GCRootTypeExternal], value)
+		state.appendAssociatedRoots(value, &snapshot)
+		snapshot.Batches[GCRootTypeClosureUpvalue] = state.appendClosureUpvalueRoots(value, snapshot.Batches[GCRootTypeClosureUpvalue])
+	})
 	return snapshot
 }
 
@@ -599,6 +668,10 @@ func (state *State) SweepWeakTables() int {
 		// 活动调用帧函数可能持有 upvalue table。
 		removed += state.sweepWeakTablesFromValue(frame.Function, visited, strongRefs)
 	}
+	state.forEachExternalGCRoot(func(value Value) {
+		// native/C shim 显式根也可能直接或间接持有弱表。
+		removed += state.sweepWeakTablesFromValue(value, visited, strongRefs)
+	})
 
 	// 返回发生删除的弱表数量近似值。
 	return removed
@@ -655,6 +728,10 @@ func (state *State) SweepWeakValuesBeforeFinalizers() int {
 		// 活动调用帧函数可能持有 upvalue table。
 		removed += state.sweepWeakValuesFromValue(frame.Function, visited, strongRefs, false)
 	}
+	state.forEachExternalGCRoot(func(value Value) {
+		// native/C shim 显式根也要参与 finalizer 前的 weak value 清理顺序。
+		removed += state.sweepWeakValuesFromValue(value, visited, strongRefs, false)
+	})
 	for _, table := range state.finalizableTables {
 		// 待终结 table 可能已经不在普通根图中，但其元表弱 value 必须在 finalizer 前清理。
 		removed += state.sweepWeakValueTableGraph(table, visited, strongRefs, true)
@@ -704,6 +781,10 @@ func (state *State) strongReferenceKeys() map[tableKey]bool {
 		// 当前调用帧函数也可能通过显式 upvalue 持有弱表 value。
 		state.collectStrongReferencesFromValue(frame.Function, strongRefs, visited)
 	}
+	state.forEachExternalGCRoot(func(value Value) {
+		// 外部根是 weak sweep 的强根入口，参与 key/value 强引用集合构建。
+		state.collectStrongReferencesFromValue(value, strongRefs, visited)
+	})
 	state.expandEphemeronReferences(strongRefs)
 	return strongRefs
 }
@@ -925,6 +1006,21 @@ func (state *State) hasReachableWeakTables() bool {
 			// 活动调用帧函数也可能通过 upvalue 持有弱表。
 			return true
 		}
+	}
+	externalHasWeakTable := false
+	state.forEachExternalGCRoot(func(value Value) {
+		if externalHasWeakTable {
+			// 已经命中弱表时保留标记，剩余外部根无需改变结果。
+			return
+		}
+		if state.valueGraphHasWeakTable(value, visitedTables, visitedClosures) {
+			// native/C shim 外部根也可能通过 upvalue 或临时对象持有弱表。
+			externalHasWeakTable = true
+		}
+	})
+	if externalHasWeakTable {
+		// 外部根可达弱表时保持自动 weak sweep 开关。
+		return true
 	}
 	return false
 }
@@ -1220,6 +1316,21 @@ func (state *State) tableReachableFromAutoRoots(table *Table) bool {
 			// 当前调用帧函数仍可达时不能自动终结。
 			return true
 		}
+	}
+	externalReachable := false
+	state.forEachExternalGCRoot(func(value Value) {
+		if externalReachable {
+			// 已经确认外部根可达目标时不再改变结果。
+			return
+		}
+		if state.valueStronglyReferencesTable(value, target, visitedTables, visitedClosures) {
+			// native/C shim 外部根可达目标时不能自动终结。
+			externalReachable = true
+		}
+	})
+	if externalReachable {
+		// 外部根仍持有目标 table，自动 GC 必须保留。
+		return true
 	}
 	return false
 }
@@ -1667,6 +1778,12 @@ func (state *State) expandEphemeronReferences(strongRefs map[tableKey]bool) {
 				changed = true
 			}
 		}
+		state.forEachExternalGCRoot(func(value Value) {
+			// 外部根也可能持有 weak-key table 或强 key，需要进入 ephemeron 固定点传播。
+			if state.expandEphemeronFromValue(value, strongRefs, visited) {
+				changed = true
+			}
+		})
 		if !changed {
 			// 没有新增强引用时固定点完成。
 			return

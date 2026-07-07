@@ -381,6 +381,61 @@ func TestSweepWeakTablesKeepsGoClosureUpvalueValues(t *testing.T) {
 	}
 }
 
+// TestSweepWeakTablesKeepsExternalGCRootValues 验证宿主桥接层 external root 保活 weak value。
+//
+// native C closure 调用期间的 upvalue 不一定作为普通 Lua 栈值存在；runtime 需要提供模块无关的
+// 外部根帧机制，让这类 bridge 临时根参与 root 快照、weak sweep 和后续 GC 可达性判断。
+func TestSweepWeakTablesKeepsExternalGCRootValues(t *testing.T) {
+	state := NewState()
+	weakValueTable := NewTable()
+	weakMetatable := NewTable()
+	weakMetatable.RawSetString("__mode", StringValue("v"))
+	weakValueTable.SetMetatable(weakMetatable)
+	state.SetGlobal("weak", ReferenceValue(KindTable, weakValueTable))
+
+	upvalueTarget := NewTable()
+	weakValueTable.RawSetString("from-external-root", ReferenceValue(KindTable, upvalueTarget))
+
+	upvalueRoot := NewTable()
+	upvalueRoot.RawSetString("target", ReferenceValue(KindTable, upvalueTarget))
+	externalRoot := ReferenceValue(KindTable, upvalueRoot)
+	if !state.PushExternalGCRootFrame([]Value{externalRoot}) {
+		// 打开的 State 必须允许宿主桥接层登记临时 GC 根。
+		t.Fatalf("push external GC root frame failed")
+	}
+
+	snapshot := state.SnapshotGCRoots()
+	externalRoots := snapshot.Batches[GCRootTypeExternal]
+	if !containsValue(externalRoots, externalRoot) {
+		// external root 分类必须能被 root snapshot 观测，便于后续 GC 门禁复核。
+		t.Fatalf("external roots should include pushed root: %#v", externalRoots)
+	}
+
+	removed := state.SweepWeakTables()
+	if removed != 0 {
+		// external root 间接引用目标时，weak value 不能被清理。
+		t.Fatalf("weak sweep removed %d entries while external root is active", removed)
+	}
+	if got := weakValueTable.RawGetString("from-external-root"); got.IsNil() {
+		// external root 间接引用的对象必须保活 weak value 项。
+		t.Fatalf("weak value reachable through external root was removed")
+	}
+
+	if !state.PopExternalGCRootFrame() {
+		// 正常 push 后必须能对应 pop，保持 native frame 生命周期配对。
+		t.Fatalf("pop external GC root frame failed")
+	}
+	removed = state.SweepWeakTables()
+	if removed == 0 {
+		// 弹出 external root 后，该 weak value 已无强根，应被下一轮 sweep 清理。
+		t.Fatalf("weak sweep should remove entry after external root pop")
+	}
+	if got := weakValueTable.RawGetString("from-external-root"); !got.IsNil() {
+		// external root 生命周期结束后不能继续保活目标。
+		t.Fatalf("weak value should be removed after external root pop, got %s", got.DebugString())
+	}
+}
+
 // TestSweepWeakTablesKeepsLuaClosureUpvalueCellValues 验证 Lua closure upvalue cell 保活 weak value。
 //
 // 内层 Lua closure 捕获外层局部后，外层局部可能在闭包创建后改写；weak sweep 必须跟随共享

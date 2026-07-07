@@ -255,3 +255,45 @@ func TestNativeCFrameVisibleStackRootsWeakSweep(t *testing.T) {
 		t.Fatalf("stack top after weak sweep = %d, want %d", got, baseTop+1)
 	}
 }
+
+// TestNativeCFrameUpvaluesRootWeakSweep 验证 C closure 调用期 upvalue 参与弱表强根扫描。
+func TestNativeCFrameUpvaluesRootWeakSweep(t *testing.T) {
+	// C 模块可在回调内触发 GC；当前 C closure 的 upvalue 必须像 Lua 调用帧函数一样保活。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 C closure 调用期根。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	weakValueTable := runtime.NewTable()
+	weakMetatable := runtime.NewTable()
+	weakMetatable.RawSetString("__mode", runtime.StringValue("v"))
+	weakValueTable.SetMetatable(weakMetatable)
+	state.SetGlobal("weak", runtime.ReferenceValue(runtime.KindTable, weakValueTable))
+
+	upvalueRoot := runtime.NewTable()
+	onlyThroughUpvalue := runtime.NewTable()
+	onlyThroughUpvalue.RawSetString("marker", runtime.StringValue("native-c-upvalue"))
+	upvalueRoot.RawSetString("child", runtime.ReferenceValue(runtime.KindTable, onlyThroughUpvalue))
+	weakValueTable.RawSetString("from-c-upvalue", runtime.ReferenceValue(runtime.KindTable, onlyThroughUpvalue))
+
+	baseTop := state.StackTop()
+	if !pushNativeStateCallFrame(luaState, baseTop, []runtime.Value{runtime.ReferenceValue(runtime.KindTable, upvalueRoot)}) {
+		// C frame 基址记录失败时无法验证调用期 upvalue root。
+		t.Fatalf("pushNativeStateCallFrame failed")
+	}
+	defer popNativeStateCallFrame(luaState)
+
+	if removed := state.SweepWeakTables(); removed != 0 {
+		// 当前 C closure upvalue 是唯一强根，weak value 不应被本轮 sweep 清掉。
+		t.Fatalf("weak sweep removed %d entries while C closure upvalue root is active", removed)
+	}
+	if got := weakValueTable.RawGetString("from-c-upvalue"); got.IsNil() {
+		// C closure upvalue 间接保活的 weak value 必须仍可见。
+		t.Fatalf("weak value reachable through native C closure upvalue was removed")
+	}
+}
