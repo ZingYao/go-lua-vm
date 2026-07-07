@@ -46,6 +46,8 @@ echo "PROBE_SELECTED_CORE_DECLS_ONLY=${PROBE_SELECTED_CORE_DECLS_ONLY:-0}"
 echo "PROBE_SELECTED_PROBE_LOCALS=${PROBE_SELECTED_PROBE_LOCALS:-}"
 echo "PROBE_SELECTED_HEAD_LOCALS=${PROBE_SELECTED_HEAD_LOCALS:-}"
 echo "PROBE_SELECTED_HEAD_SPLIT_TAIL_ONLY=${PROBE_SELECTED_HEAD_SPLIT_TAIL_ONLY:-0}"
+echo "PROBE_SELECTED_CLEAR_BEFORE_MATCH=${PROBE_SELECTED_CLEAR_BEFORE_MATCH:-0}"
+echo "PROBE_SELECTED_GC_BEFORE_MATCH=${PROBE_SELECTED_GC_BEFORE_MATCH:-0}"
 echo "PROBE_PREBUILD_PADDING_LOCALS=${PROBE_PREBUILD_PADDING_LOCALS:-0}"
 echo "PROBE_CONTINUE_ON_CRASH=${PROBE_CONTINUE_ON_CRASH:-0}"
 
@@ -365,6 +367,32 @@ uses_selected_tail() {
      "${PROBE_SELECTED_HEAD_SPLIT_TAIL_ONLY:-0}" == "1" ]]
 }
 
+emit_probe_selected_before_match_cleanup() {
+  if [[ "${PROBE_SELECTED_CLEAR_BEFORE_MATCH:-0}" == "1" ]]; then
+    cat <<'LUA'
+probe_open = nil
+probe_close = nil
+probe_any = nil
+probe_close_head = nil
+probe_close_back = nil
+probe_close_func = nil
+probe_head_left = nil
+probe_head_unit = nil
+probe_head_capture = nil
+probe_head_right = nil
+dummy_func = nil
+dummy_capture = nil
+dummy_back = nil
+dummy_value = nil
+LUA
+  fi
+  if [[ "${PROBE_SELECTED_GC_BEFORE_MATCH:-0}" == "1" ]]; then
+    cat <<'LUA'
+collectgarbage()
+LUA
+  fi
+}
+
 emit_probe_selected_parts_tail() {
   if [[ -n "${PROBE_SELECTED_HEAD_LOCALS:-}" || "${PROBE_SELECTED_HEAD_SPLIT_TAIL_ONLY:-0}" == "1" ]]; then
     cat <<'LUA'
@@ -402,6 +430,9 @@ if probe_any == nil then
   probe_any = m.P(1)
 end
 c = probe_open * { probe_close + probe_any * m.V(1) } / 0
+LUA
+    emit_probe_selected_before_match_cleanup
+    cat <<'LUA'
 print("PROBE", c:match'[==[]]====]]]]==]===[]', table.concat(attempts, ","))
 LUA
   else
@@ -428,6 +459,9 @@ if probe_any == nil then
   probe_any = m.P(1)
 end
 c = probe_open * { probe_close + probe_any * m.V(1) } / 0
+LUA
+    emit_probe_selected_before_match_cleanup
+    cat <<'LUA'
 print("PROBE", c:match'[==[]]====]]]]==]===[]', table.concat(attempts, ","))
 LUA
   fi
