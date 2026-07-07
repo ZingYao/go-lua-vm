@@ -116,6 +116,57 @@ func TestNativeCAPIOptInteger(t *testing.T) {
 	}
 }
 
+// TestNativeCAPICheckNumberAndOptNumber 验证 luaL_checknumber 与 luaL_optnumber 的通用转换边界。
+func TestNativeCAPICheckNumberAndOptNumber(t *testing.T) {
+	// 使用真实 State 和 opaque handle 验证 number、numeric string、none/nil 默认值和错误记录。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 number 参数检查。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	numericText := []byte{' ', '0', 'x', '1', '.', '8', 'p', '1', ' ', 0}
+	badText := []byte{'n', 'a', 'n', '?', 0}
+	nativeLuaPushNil(luaState)
+	nativeLuaPushNumber(luaState, 12.5)
+	nativeLuaPushString(luaState, unsafe.Pointer(&numericText[0]))
+	nativeLuaPushString(luaState, unsafe.Pointer(&badText[0]))
+
+	if numberValue := nativeLuaCheckNumber(luaState, 2); numberValue != 12.5 {
+		// 真实 number 参数必须原样返回。
+		t.Fatalf("nativeLuaCheckNumber number = %v, want 12.5", numberValue)
+	}
+	if numberValue := nativeLuaCheckNumber(luaState, 3); numberValue != 3 {
+		// Lua 5.3 lauxlib number 参数接受十六进制浮点 numeric string。
+		t.Fatalf("nativeLuaCheckNumber numeric string = %v, want 3", numberValue)
+	}
+	if value := state.ValueAt(3); value.Kind != runtime.KindString || value.String != " 0x1.8p1 " {
+		// luaL_checknumber 不应像 lua_tolstring 一样回写参数槽。
+		t.Fatalf("nativeLuaCheckNumber numeric string stack slot = %#v, want original string", value)
+	}
+	if numberValue := nativeLuaOptNumber(luaState, 1, 9.25); numberValue != 9.25 {
+		// nil 参数必须按可选参数语义返回默认值。
+		t.Fatalf("nativeLuaOptNumber nil = %v, want 9.25", numberValue)
+	}
+	if numberValue := nativeLuaOptNumber(luaState, 5, 8.5); numberValue != 8.5 {
+		// 缺失参数必须按 none 语义返回默认值。
+		t.Fatalf("nativeLuaOptNumber missing = %v, want 8.5", numberValue)
+	}
+	if numberValue := nativeLuaOptNumber(luaState, 4, 7.5); numberValue != 0 {
+		// 不可转换字符串错误路径返回 0，真正错误对象通过 pending error 暂存。
+		t.Fatalf("nativeLuaOptNumber bad string = %v, want 0", numberValue)
+	}
+	errorObject, ok := takeNativeStatePendingError(luaState)
+	if !ok || errorObject.Kind != runtime.KindString || errorObject.String != "bad argument #4 (number expected)" {
+		// 非数字参数必须记录 lauxlib 兼容的 number expected 错误。
+		t.Fatalf("nativeLuaOptNumber pending error = %#v ok=%v, want number expected", errorObject, ok)
+	}
+}
+
 // TestNativeCAPICheckLString 验证字符串参数检查返回 C 分配 buffer。
 func TestNativeCAPICheckLString(t *testing.T) {
 	// 使用真实 State 和 opaque handle 验证 luaL_checklstring 的 C buffer 生命周期。
@@ -178,6 +229,66 @@ func TestNativeCAPICheckLString(t *testing.T) {
 	if stillTracked {
 		// handle 关闭后必须解除 buffer 追踪并释放 C 内存。
 		t.Fatalf("nativeStateBuffers still tracks closed token")
+	}
+}
+
+// TestNativeCAPIOptLString 验证 luaL_optlstring 的默认值和存在参数转换语义。
+func TestNativeCAPIOptLString(t *testing.T) {
+	// 使用真实 State 和 opaque handle 验证 nil/none 默认字符串，以及 number 参数转换并回写。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 optlstring。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	defaultText := []byte{'f', 'a', 'l', 'l', 'b', 'a', 'c', 'k', 0}
+	binary := []byte{'x', 0, 'y'}
+	nativeLuaPushNil(luaState)
+	nativeLuaPushLString(luaState, unsafe.Pointer(&binary[0]), uintptr(len(binary)))
+	nativeLuaPushInteger(luaState, 81)
+
+	buffer, length, ok := nativeLuaOptLString(luaState, 1, unsafe.Pointer(&defaultText[0]))
+	if !ok || length != 8 {
+		// nil 参数必须返回调用方默认 C 字符串和 strlen 长度。
+		t.Fatalf("nativeLuaOptLString nil default = len=%d ok=%v, want 8 true", length, ok)
+	}
+	if got := unsafe.String((*byte)(buffer), int(length)); got != "fallback" {
+		// 默认字符串应直接来自调用方提供的 C 字符串。
+		t.Fatalf("nativeLuaOptLString nil default = %q, want fallback", got)
+	}
+
+	buffer, length, ok = nativeLuaOptLString(luaState, 2, unsafe.Pointer(&defaultText[0]))
+	if !ok || length != uintptr(len(binary)) {
+		// 存在的字符串参数必须优先返回参数自身，而不是默认值。
+		t.Fatalf("nativeLuaOptLString binary = len=%d ok=%v, want %d true", length, ok, len(binary))
+	}
+	if got := unsafe.String((*byte)(buffer), int(length)); got != string(binary) {
+		// 参数字符串必须保留内嵌 NUL 字节。
+		t.Fatalf("nativeLuaOptLString binary = %q, want %q", got, string(binary))
+	}
+
+	buffer, length, ok = nativeLuaOptLString(luaState, 3, nil)
+	if !ok || length != 2 {
+		// number 参数存在时按 luaL_checklstring 路径转换为 Lua string。
+		t.Fatalf("nativeLuaOptLString number = len=%d ok=%v, want 2 true", length, ok)
+	}
+	if got := unsafe.String((*byte)(buffer), int(length)); got != "81" {
+		// number-to-string 的返回 buffer 必须包含转换后的文本。
+		t.Fatalf("nativeLuaOptLString number = %q, want 81", got)
+	}
+	if value := state.ValueAt(3); value.Kind != runtime.KindString || value.String != "81" {
+		// optlstring 对存在 number 参数复用 lua_tolstring 语义，应回写真实栈槽。
+		t.Fatalf("nativeLuaOptLString number stack slot = %#v, want string 81", value)
+	}
+
+	buffer, length, ok = nativeLuaOptLString(luaState, 4, nil)
+	if !ok || buffer != nil || length != 0 {
+		// none 且默认值为 NULL 时返回 NULL、长度 0，但仍属于成功的默认路径。
+		t.Fatalf("nativeLuaOptLString missing nil default = buffer=%p len=%d ok=%v, want nil 0 true", buffer, length, ok)
 	}
 }
 

@@ -183,7 +183,10 @@ state := lua.NewStateWithOptions(options)
 - `luaL_newlib`
 - `luaL_checkinteger`
 - `luaL_optinteger`
+- `luaL_checknumber`
+- `luaL_optnumber`
 - `luaL_checklstring`
+- `luaL_optlstring`
 - `luaL_checkany`
 - `luaL_checktype`
 - `luaL_error`

@@ -9,6 +9,7 @@ package native
 
 typedef struct lua_State lua_State;
 typedef long long lua_Integer;
+typedef double lua_Number;
 
 static char* glua_alloc_native_lstring(const void* data, size_t length) {
 	if (length > 0 && data == NULL) {
@@ -82,6 +83,30 @@ func nativeLuaOptInteger(luaState unsafe.Pointer, index int, defaultValue int64)
 		return 0
 	}
 	return integerValue
+}
+
+// nativeLuaCheckNumber 实现 luaL_checknumber 的数字参数检查语义。
+func nativeLuaCheckNumber(luaState unsafe.Pointer, index int) float64 {
+	// 复用 lua_tonumberx 的 Lua 5.3 转换语义，允许真实 number 和 numeric string。
+	numberValue, ok := nativeLuaToNumber(luaState, index)
+	if !ok {
+		// 失败时记录 lauxlib 风格错误，等待当前 C function 边界传播。
+		message := fmt.Sprintf("bad argument #%d (number expected)", index)
+		_ = setNativeStatePendingError(luaState, runtime.StringValue(message))
+		return 0
+	}
+	return numberValue
+}
+
+// nativeLuaOptNumber 实现 luaL_optnumber 的可选数字参数读取语义。
+func nativeLuaOptNumber(luaState unsafe.Pointer, index int, defaultValue float64) float64 {
+	// 可选参数在 none 或 nil 时返回调用方默认值，否则等价于 checknumber。
+	value, ok := nativeLuaValueAt(luaState, index)
+	if !ok || value.IsNil() {
+		// none 与 nil 均按 Lua 5.3 lauxlib 可选参数语义返回默认值。
+		return defaultValue
+	}
+	return nativeLuaCheckNumber(luaState, index)
 }
 
 // nativeLuaArgError 记录 lauxlib 参数错误，并返回 Lua 5.3 API 约定的不可达返回值。
@@ -203,6 +228,21 @@ func nativeLuaCheckLString(luaState unsafe.Pointer, index int) (unsafe.Pointer, 
 	return nativeLuaToLString(luaState, index)
 }
 
+// nativeLuaOptLString 实现 luaL_optlstring 的可选字符串参数读取语义。
+func nativeLuaOptLString(luaState unsafe.Pointer, index int, defaultValue unsafe.Pointer) (unsafe.Pointer, uintptr, bool) {
+	// 可选字符串在 none 或 nil 时返回调用方提供的默认 C 字符串指针。
+	value, ok := nativeLuaValueAt(luaState, index)
+	if !ok || value.IsNil() {
+		// defaultValue 可以为 NULL；此时按 lauxlib 语义返回 NULL 和长度 0。
+		if defaultValue == nil {
+			return nil, 0, true
+		}
+		return defaultValue, uintptr(C.strlen((*C.char)(defaultValue))), true
+	}
+	// 参数存在时等价于 luaL_checklstring，并允许 number-to-string 回写。
+	return nativeLuaCheckLString(luaState, index)
+}
+
 // nativeLuaCheckAny 实现 luaL_checkany 的参数存在性检查；nil 是存在值，只有 none 会触发参数错误。
 func nativeLuaCheckAny(luaState unsafe.Pointer, index int) bool {
 	// luaL_checkany 只检查参数槽是否存在，不要求非 nil。
@@ -301,6 +341,22 @@ func luaL_optinteger(luaState *C.lua_State, index C.int, defaultValue C.lua_Inte
 	return C.lua_Integer(nativeLuaOptInteger(unsafe.Pointer(luaState), int(index), int64(defaultValue)))
 }
 
+// luaL_checknumber 导出 Lua 5.3 lauxlib number 参数检查入口。
+//
+//export luaL_checknumber
+func luaL_checknumber(luaState *C.lua_State, index C.int) C.lua_Number {
+	// 数字参数读取由 Go helper 统一处理 number 和 numeric string 转换。
+	return C.lua_Number(nativeLuaCheckNumber(unsafe.Pointer(luaState), int(index)))
+}
+
+// luaL_optnumber 导出 Lua 5.3 lauxlib optional number 参数读取入口。
+//
+//export luaL_optnumber
+func luaL_optnumber(luaState *C.lua_State, index C.int, defaultValue C.lua_Number) C.lua_Number {
+	// 可选数字参数由 Go helper 统一处理 none/nil 默认值与参数错误记录。
+	return C.lua_Number(nativeLuaOptNumber(unsafe.Pointer(luaState), int(index), float64(defaultValue)))
+}
+
 // glua_luaL_argerror_record 记录 Lua 5.3 lauxlib 参数错误。
 //
 //export glua_luaL_argerror_record
@@ -367,6 +423,29 @@ func luaL_checklstring(luaState *C.lua_State, index C.int, length *C.size_t) *C.
 		// length 非空时必须写入返回字符串长度或失败长度 0。
 		if ok {
 			// 成功时返回字节长度，允许内嵌 NUL。
+			*length = C.size_t(bufferLength)
+		} else {
+			// 失败时长度为 0。
+			*length = 0
+		}
+	}
+	if !ok {
+		// 当前阶段检查失败返回 NULL；错误 longjmp 后续由 luaL_error 补齐。
+		return nil
+	}
+	return (*C.char)(buffer)
+}
+
+// luaL_optlstring 导出 Lua 5.3 lauxlib optional string 参数读取入口。
+//
+//export luaL_optlstring
+func luaL_optlstring(luaState *C.lua_State, index C.int, defaultValue *C.char, length *C.size_t) *C.char {
+	// 可选字符串参数由 Go helper 统一处理 none/nil 默认值和存在参数的转换。
+	buffer, bufferLength, ok := nativeLuaOptLString(unsafe.Pointer(luaState), int(index), unsafe.Pointer(defaultValue))
+	if length != nil {
+		// length 非空时必须写入返回字符串长度或失败长度 0。
+		if ok {
+			// 成功时返回字节长度；默认 C 字符串按 strlen 计算。
 			*length = C.size_t(bufferLength)
 		} else {
 			// 失败时长度为 0。
