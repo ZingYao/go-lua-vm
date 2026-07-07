@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zing/go-lua-vm/runtime"
-	packagelib "github.com/zing/go-lua-vm/stdlib/package"
+	"github.com/ZingYao/go-lua-vm/runtime"
+	packagelib "github.com/ZingYao/go-lua-vm/stdlib/package"
 )
 
 // TestNativeLoaderRejectsEmptyArguments 验证 native_modules 构建下 loader 入口存在且校验参数。

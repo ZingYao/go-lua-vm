@@ -24,7 +24,7 @@ import (
 	"sync"
 	"unsafe"
 
-	"github.com/zing/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
 // nativeStateHandle 保存 Lua C API shim 使用的 opaque lua_State* 身份。

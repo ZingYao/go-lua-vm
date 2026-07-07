@@ -3,7 +3,7 @@ package formatter
 import (
 	"testing"
 
-	"github.com/zing/go-lua-vm/extensions"
+	"github.com/ZingYao/go-lua-vm/extensions"
 )
 
 // TestFormatSwitchContinueExtensions 验证 formatter 支持项目扩展语法。

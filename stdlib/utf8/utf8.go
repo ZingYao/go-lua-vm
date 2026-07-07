@@ -9,7 +9,7 @@ import (
 	"strings"
 	goutf8 "unicode/utf8"
 
-	"github.com/zing/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
 const (

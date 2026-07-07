@@ -5,7 +5,7 @@ package native
 import (
 	"testing"
 
-	"github.com/zing/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
 // TestNativeLuaCallKCallsGoClosure 验证 lua_callk 能执行非 protected 调用并压回返回值。

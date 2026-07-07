@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/zing/go-lua-vm/lua"
+	"github.com/ZingYao/go-lua-vm/lua"
 )
 
 // main 创建 Lua State、注册 Go 函数并通过 lua.Call 调用。

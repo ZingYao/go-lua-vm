@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zing/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
 // countingFlushCloser 记录测试 file 的 flush 与 close 调用次数。

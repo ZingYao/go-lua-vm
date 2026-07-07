@@ -6,7 +6,7 @@ package main
 import (
 	"os"
 
-	"github.com/zing/go-lua-vm/internal/luac"
+	"github.com/ZingYao/go-lua-vm/internal/luac"
 )
 
 // main 启动 gluac 命令行程序。

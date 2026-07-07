@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zing/go-lua-vm/bytecode"
+	"github.com/ZingYao/go-lua-vm/bytecode"
 )
 
 // TestVMOpcodeUnitCoverageMatrix 验证每条 Lua 5.3 opcode 都有对应单元测试覆盖说明。

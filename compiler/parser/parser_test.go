@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zing/go-lua-vm/compiler/lexer"
-	"github.com/zing/go-lua-vm/extensions"
+	"github.com/ZingYao/go-lua-vm/compiler/lexer"
+	"github.com/ZingYao/go-lua-vm/extensions"
 )
 
 // TestParserMarkResetRestoresTokenStream 验证 parser 局部试探可恢复前瞻 token 和后续 token 流。

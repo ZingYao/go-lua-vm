@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	packagelib "github.com/zing/go-lua-vm/stdlib/package"
+	packagelib "github.com/ZingYao/go-lua-vm/stdlib/package"
 )
 
 // TestUnixDynamicLibraryLookupSymbol 验证 Linux/macOS native loader 能打开系统库并解析公开符号。

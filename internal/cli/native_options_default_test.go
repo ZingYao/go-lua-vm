@@ -5,7 +5,7 @@ package cli
 import (
 	"testing"
 
-	"github.com/zing/go-lua-vm/lua"
+	"github.com/ZingYao/go-lua-vm/lua"
 )
 
 // TestApplyNativeModuleOptionsDefaultNoop 验证默认构建不启用 native loader。

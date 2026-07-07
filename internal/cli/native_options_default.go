@@ -2,7 +2,7 @@
 
 package cli
 
-import "github.com/zing/go-lua-vm/lua"
+import "github.com/ZingYao/go-lua-vm/lua"
 
 // applyNativeModuleOptions 在默认构建下保持 CLI 选项不变。
 func applyNativeModuleOptions(options lua.Options) lua.Options {

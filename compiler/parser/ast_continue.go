@@ -2,7 +2,7 @@
 
 package parser
 
-import "github.com/zing/go-lua-vm/compiler/lexer"
+import "github.com/ZingYao/go-lua-vm/compiler/lexer"
 
 // ContinueStatement 表示扩展语法 continue 语句。
 //

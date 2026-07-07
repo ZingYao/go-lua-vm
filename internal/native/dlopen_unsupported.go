@@ -2,7 +2,7 @@
 
 package native
 
-import packagelib "github.com/zing/go-lua-vm/stdlib/package"
+import packagelib "github.com/ZingYao/go-lua-vm/stdlib/package"
 import "unsafe"
 
 // resolveDynamicSymbol 在非目标平台动态加载器尚未实现时返回明确失败分类。

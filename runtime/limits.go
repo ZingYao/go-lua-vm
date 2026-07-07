@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"io/fs"
 
-	"github.com/zing/go-lua-vm/extensions"
+	"github.com/ZingYao/go-lua-vm/extensions"
 )
 
 const (

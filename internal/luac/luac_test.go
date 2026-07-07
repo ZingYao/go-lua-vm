@@ -10,11 +10,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zing/go-lua-vm/bytecode"
-	"github.com/zing/go-lua-vm/compiler/parser"
-	"github.com/zing/go-lua-vm/extensions"
-	"github.com/zing/go-lua-vm/lua"
-	"github.com/zing/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/bytecode"
+	"github.com/ZingYao/go-lua-vm/compiler/parser"
+	"github.com/ZingYao/go-lua-vm/extensions"
+	"github.com/ZingYao/go-lua-vm/lua"
+	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
 // TestParseArgs 验证 gluac 参数解析覆盖 luac 兼容选项和开发 trace 选项。

@@ -7,10 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zing/go-lua-vm/bytecode"
-	"github.com/zing/go-lua-vm/compiler/codegen"
-	"github.com/zing/go-lua-vm/compiler/parser"
-	"github.com/zing/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/bytecode"
+	"github.com/ZingYao/go-lua-vm/compiler/codegen"
+	"github.com/ZingYao/go-lua-vm/compiler/parser"
+	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
 // TestBaseLuaCallTraceFixedResultPairs 输出固定单返回 CALL 的运行期寄存器窗口。

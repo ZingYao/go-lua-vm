@@ -10,7 +10,7 @@ import "C"
 import (
 	"unsafe"
 
-	"github.com/zing/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
 // nativeLuaError 实现 Lua C API 的 lua_error 错误对象记录。

@@ -11,7 +11,7 @@ import "C"
 import (
 	"unsafe"
 
-	"github.com/zing/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
 // nativeLuaPushCClosure 把 Lua C 函数指针包装为当前 Go VM 可调用 closure。

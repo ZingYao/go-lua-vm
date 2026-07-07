@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/zing/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
 // TestOpenRegistersUTF8Library 验证 Open 会注册 utf8 库和本阶段支持的函数。

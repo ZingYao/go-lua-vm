@@ -3,8 +3,8 @@
 package cli
 
 import (
-	"github.com/zing/go-lua-vm/internal/native"
-	"github.com/zing/go-lua-vm/lua"
+	"github.com/ZingYao/go-lua-vm/internal/native"
+	"github.com/ZingYao/go-lua-vm/lua"
 )
 
 // applyNativeModuleOptions 在 native_modules 构建下为 CLI 注入 Lua C 模块 loader。

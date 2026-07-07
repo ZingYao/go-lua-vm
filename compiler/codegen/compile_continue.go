@@ -5,7 +5,7 @@ package codegen
 import (
 	"fmt"
 
-	"github.com/zing/go-lua-vm/compiler/parser"
+	"github.com/ZingYao/go-lua-vm/compiler/parser"
 )
 
 func init() {

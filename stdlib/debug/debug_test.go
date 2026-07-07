@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zing/go-lua-vm/bytecode"
-	"github.com/zing/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/bytecode"
+	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
 // TestOpenRegistersDebugLibrary 验证 Open 注册 debug 标准库表。

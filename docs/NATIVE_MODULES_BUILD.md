@@ -120,7 +120,7 @@ fixture loader smoke：
 ./scripts/check-native-skip-reasons.sh
 ```
 
-该脚本不替代 Linux/Windows 真实运行期验收，只验证 Windows shim 未落地、缺失 cross C compiler、当前平台总验收被误用于异平台等不可用场景会输出明确 `skip:` 原因。
+该脚本不替代 Linux/Windows 真实运行期验收，只验证 Windows shim 未落地、缺失 cross C compiler、当前平台总验收被误用于 Windows 或非 Windows 异平台等不可用场景会输出明确 `skip:` 原因。
 
 fixture 只验证 loader smoke，不作为最终兼容结论。真实兼容验收必须包含：
 

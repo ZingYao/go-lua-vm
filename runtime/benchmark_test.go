@@ -3,7 +3,7 @@ package runtime
 import (
 	"testing"
 
-	"github.com/zing/go-lua-vm/bytecode"
+	"github.com/ZingYao/go-lua-vm/bytecode"
 )
 
 // benchmarkValueSink 保存基准测试读取到的值，避免编译器完全消除循环体。

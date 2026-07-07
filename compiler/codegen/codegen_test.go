@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zing/go-lua-vm/bytecode"
-	"github.com/zing/go-lua-vm/compiler/parser"
-	"github.com/zing/go-lua-vm/extensions"
+	"github.com/ZingYao/go-lua-vm/bytecode"
+	"github.com/ZingYao/go-lua-vm/compiler/parser"
+	"github.com/ZingYao/go-lua-vm/extensions"
 )
 
 // TestCompileChunkDeduplicatesConstantsAndRegisters 验证常量去重、寄存器分配和临时寄存器释放。

@@ -14,8 +14,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/zing/go-lua-vm/runtime"
-	"github.com/zing/go-lua-vm/stdlib/internal/procstatus"
+	"github.com/ZingYao/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/stdlib/internal/procstatus"
 )
 
 // Flusher 表示 file userdata 可选的刷新能力。

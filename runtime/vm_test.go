@@ -6,7 +6,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/zing/go-lua-vm/bytecode"
+	"github.com/ZingYao/go-lua-vm/bytecode"
 )
 
 // TestVMMoveCopiesRegister 验证 MOVE 会复制源寄存器到目标寄存器。

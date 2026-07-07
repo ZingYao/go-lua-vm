@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zing/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
 // TestOpenRegistersOSLibrary 验证 Open 注册 os 库基础字段。

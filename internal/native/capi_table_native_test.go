@@ -6,7 +6,7 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/zing/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
 // TestNativeCAPITableFieldPrimitives 验证最小 table 字段 C API shim 能操作 Go table。

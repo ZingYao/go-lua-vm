@@ -2,7 +2,7 @@
 
 package parser
 
-import "github.com/zing/go-lua-vm/extensions"
+import "github.com/ZingYao/go-lua-vm/extensions"
 
 func init() {
 	// 注册 continue 扩展语句解析与语义检查入口。

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/zing/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
 // TestNativeCAPIStackPrimitives 验证 Lua C API 最小栈 shim 可操作 Go State 栈。

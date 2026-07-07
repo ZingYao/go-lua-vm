@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zing/go-lua-vm/bytecode"
+	"github.com/ZingYao/go-lua-vm/bytecode"
 )
 
 // TestVMCallMetamethod 验证 CALL 会把带 `__call` 的 table 转换为元方法调用请求。

@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zing/go-lua-vm/extensions"
-	"github.com/zing/go-lua-vm/lua"
-	"github.com/zing/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/extensions"
+	"github.com/ZingYao/go-lua-vm/lua"
+	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
 // TestParseArgs 验证 glua 第一阶段参数解析。

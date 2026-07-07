@@ -4,7 +4,7 @@
 // 后续会逐步扩展控制流、函数、表达式优先级和作用域检查。
 package parser
 
-import "github.com/zing/go-lua-vm/compiler/lexer"
+import "github.com/ZingYao/go-lua-vm/compiler/lexer"
 
 // Node 表示所有 AST 节点的公共接口。
 //

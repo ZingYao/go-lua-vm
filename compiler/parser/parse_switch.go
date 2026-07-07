@@ -3,8 +3,8 @@
 package parser
 
 import (
-	"github.com/zing/go-lua-vm/compiler/lexer"
-	"github.com/zing/go-lua-vm/extensions"
+	"github.com/ZingYao/go-lua-vm/compiler/lexer"
+	"github.com/ZingYao/go-lua-vm/extensions"
 )
 
 func init() {

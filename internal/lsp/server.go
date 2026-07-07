@@ -15,10 +15,10 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/zing/go-lua-vm/compiler/formatter"
-	"github.com/zing/go-lua-vm/compiler/lexer"
-	"github.com/zing/go-lua-vm/compiler/parser"
-	"github.com/zing/go-lua-vm/extensions"
+	"github.com/ZingYao/go-lua-vm/compiler/formatter"
+	"github.com/ZingYao/go-lua-vm/compiler/lexer"
+	"github.com/ZingYao/go-lua-vm/compiler/parser"
+	"github.com/ZingYao/go-lua-vm/extensions"
 )
 
 const (

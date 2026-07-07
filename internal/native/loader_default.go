@@ -2,7 +2,7 @@
 
 package native
 
-import "github.com/zing/go-lua-vm/runtime"
+import "github.com/ZingYao/go-lua-vm/runtime"
 
 // Loader 返回默认构建下的原生动态库 loader。
 //

@@ -7,7 +7,7 @@ import (
 	"context"
 	"os"
 
-	"github.com/zing/go-lua-vm/internal/cli"
+	"github.com/ZingYao/go-lua-vm/internal/cli"
 )
 
 // main 启动 glua 命令行程序。

@@ -70,7 +70,7 @@ import (
 	"math"
 	"unsafe"
 
-	"github.com/zing/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
 // nativeLuaBufferEnsure 保证 luaL_Buffer 至少能追加 extra 字节，返回当前写入起点；extra 为追加字节数，返回 nil 表示容量溢出或分配失败。

@@ -13,8 +13,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/zing/go-lua-vm/bytecode"
-	"github.com/zing/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/bytecode"
+	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
 const (

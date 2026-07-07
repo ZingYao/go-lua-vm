@@ -1,4 +1,4 @@
-module github.com/zing/go-lua-vm
+module github.com/ZingYao/go-lua-vm
 
 go 1.26
 

@@ -44,7 +44,7 @@ import "C"
 import (
 	"unsafe"
 
-	"github.com/zing/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
 // nativeLuaVersion 返回 Lua 5.3 C API 可见的版本号静态地址。

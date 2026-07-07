@@ -17,15 +17,15 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/zing/go-lua-vm/bytecode"
-	"github.com/zing/go-lua-vm/compiler/codegen"
-	"github.com/zing/go-lua-vm/compiler/formatter"
-	"github.com/zing/go-lua-vm/compiler/lexer"
-	"github.com/zing/go-lua-vm/compiler/parser"
-	"github.com/zing/go-lua-vm/extensions"
-	"github.com/zing/go-lua-vm/lua"
-	"github.com/zing/go-lua-vm/runtime"
-	oslib "github.com/zing/go-lua-vm/stdlib/os"
+	"github.com/ZingYao/go-lua-vm/bytecode"
+	"github.com/ZingYao/go-lua-vm/compiler/codegen"
+	"github.com/ZingYao/go-lua-vm/compiler/formatter"
+	"github.com/ZingYao/go-lua-vm/compiler/lexer"
+	"github.com/ZingYao/go-lua-vm/compiler/parser"
+	"github.com/ZingYao/go-lua-vm/extensions"
+	"github.com/ZingYao/go-lua-vm/lua"
+	"github.com/ZingYao/go-lua-vm/runtime"
+	oslib "github.com/ZingYao/go-lua-vm/stdlib/os"
 )
 
 const (

@@ -2,7 +2,7 @@
 
 package parser
 
-import "github.com/zing/go-lua-vm/compiler/lexer"
+import "github.com/ZingYao/go-lua-vm/compiler/lexer"
 
 // SwitchCase 表示扩展 switch 语法中的一个 case 分支。
 //

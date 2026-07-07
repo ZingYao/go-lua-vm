@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zing/go-lua-vm/bytecode"
-	"github.com/zing/go-lua-vm/runtime"
-	stringlib "github.com/zing/go-lua-vm/stdlib/string"
+	"github.com/ZingYao/go-lua-vm/bytecode"
+	"github.com/ZingYao/go-lua-vm/runtime"
+	stringlib "github.com/ZingYao/go-lua-vm/stdlib/string"
 )
 
 // TestOpenRegistersGlobalsAndVersion 验证 base.Open 注册 `_G` 与 `_VERSION`。

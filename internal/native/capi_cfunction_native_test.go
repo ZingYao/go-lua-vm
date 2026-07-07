@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/zing/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
 // TestNativeLuaCallCFunctionRejectsInvalidHandle 验证失效 State 不会进入本机函数。

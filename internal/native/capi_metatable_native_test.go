@@ -6,7 +6,7 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/zing/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
 // TestNativeLuaUserdataMetatable 验证 native userdata 可通过 C API 设置和读取 raw 元表。

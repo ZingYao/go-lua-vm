@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/zing/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
 // TestNativeStateHandleLifecycle 验证 opaque lua_State* handle 能绑定并释放当前 State。

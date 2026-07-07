@@ -11,9 +11,9 @@ import (
 	"strings"
 	"testing"
 
-	glualua "github.com/zing/go-lua-vm/lua"
-	luaruntime "github.com/zing/go-lua-vm/runtime"
-	packagelib "github.com/zing/go-lua-vm/stdlib/package"
+	glualua "github.com/ZingYao/go-lua-vm/lua"
+	luaruntime "github.com/ZingYao/go-lua-vm/runtime"
+	packagelib "github.com/ZingYao/go-lua-vm/stdlib/package"
 )
 
 // TestUnixPackageLoadLibResolvesNativeFixture 验证 package.loadlib 可解析真实 Lua C 模块入口。

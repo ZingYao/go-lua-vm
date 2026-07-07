@@ -387,6 +387,7 @@
   - [x] `scripts/test-native-real-modules.sh`
   - [x] `scripts/check-native-skip-reasons.sh`
     - [x] 覆盖 `scripts/test-native-real-modules.sh` 被误用于 Windows 目标时必须明确 skip，不能在子脚本全部 skip 后输出总验收 passed。
+    - [x] 覆盖 `scripts/test-native-real-modules.sh` 被误用于非 Windows 异平台目标时必须明确 skip，不能把宿主平台验收当成目标平台验收。
   - [x] `scripts/probe-native-lpeg-1159.sh`
   - [x] `scripts/bisect-native-lpeg-1159-prefix.sh`
   - [x] `scripts/probe-native-lpeg-1159-call-kinds.sh`
@@ -554,3 +555,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-07：新增 `scripts/test-native-real-modules.sh` 作为当前平台真实模块总验收入口，串联 fixture、lua-cjson、LPeg 和 LuaSocket 运行期脚本，并统一输出目标平台与 CGO 状态。该入口只聚合当前平台验收结果，不把 Linux/Windows 缺失环境或 skip 视为全平台闭环；Linux/Windows 运行期仍需按目标平台独立执行并更新验收记录。
 - 2026-07-07：修正 `scripts/test-native-real-modules.sh` 的异平台边界；总验收入口现在只允许宿主同平台执行，`TARGET_GOOS=windows` 等异平台目标会在子脚本前明确 `skip:`，避免多个子验收各自 skip 后仍输出 `native real module acceptance suite passed`。同步扩展 `scripts/check-native-skip-reasons.sh` 覆盖该 Windows 总验收 skip 文本。
 - 2026-07-07：收紧 `scripts/test-native-real-modules.sh` 的 Windows 目标判定；Windows 目标现在无论宿主平台是否 Windows 都会在子验收前明确 skip，直到 `lua53.dll` shim 或 import library 落地，避免未来 Windows host 上把子脚本 skip 汇总成总验收 passed。
+- 2026-07-07：扩展 `scripts/check-native-skip-reasons.sh`，新增非 Windows 异平台总验收误用门禁；脚本会根据宿主平台选择 `linux` 或 `darwin` 作为不同目标，并断言 `scripts/test-native-real-modules.sh` 输出目标/宿主不一致的明确 `skip:`，防止把 macOS/Linux 宿主验收误当成另一平台运行期闭环。

@@ -5,8 +5,8 @@ package cli
 import (
 	"testing"
 
-	"github.com/zing/go-lua-vm/lua"
-	"github.com/zing/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/lua"
+	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
 // TestApplyNativeModuleOptionsInjectsLoaders 验证 native_modules 构建会启用 CLI native loader。

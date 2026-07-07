@@ -1,6 +1,6 @@
 package codegen
 
-import "github.com/zing/go-lua-vm/compiler/parser"
+import "github.com/ZingYao/go-lua-vm/compiler/parser"
 
 // extensionStatementCompiler 表示一个可选语法扩展的语句编译入口。
 type extensionStatementCompiler func(*generator, parser.Statement) (bool, error)

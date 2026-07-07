@@ -7,7 +7,7 @@ import (
 	"syscall"
 	"unsafe"
 
-	packagelib "github.com/zing/go-lua-vm/stdlib/package"
+	packagelib "github.com/ZingYao/go-lua-vm/stdlib/package"
 )
 
 // dynamicLibrary 保存 Windows 平台 LoadLibraryW 返回的动态库句柄。

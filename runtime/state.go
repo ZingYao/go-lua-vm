@@ -5,7 +5,7 @@ import (
 	"errors"
 	"sync/atomic"
 
-	"github.com/zing/go-lua-vm/bytecode"
+	"github.com/ZingYao/go-lua-vm/bytecode"
 )
 
 const (

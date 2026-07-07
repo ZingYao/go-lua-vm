@@ -27,7 +27,7 @@ import "C"
 import (
 	"unsafe"
 
-	"github.com/zing/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
 // nativeLuaLibraryFunction 保存 luaL_Reg 的 Go 侧只读快照。

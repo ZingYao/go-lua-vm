@@ -5,7 +5,7 @@ package native
 import (
 	"testing"
 
-	"github.com/zing/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
 // TestNativeLuaLSetFuncsRegistersGoCallableFields 验证无 upvalue 函数列表可注册到 table。

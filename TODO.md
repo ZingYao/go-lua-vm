@@ -4,7 +4,7 @@
 
 ## 0. 项目初始化与工程基线
 
-- [x] 确认 Go module 路径，当前使用 `github.com/zing/go-lua-vm`，如需发布到其他仓库后续再调整。
+- [x] 确认 Go module 路径，当前使用 `github.com/ZingYao/go-lua-vm`，如需发布到其他仓库后续再调整。
 - [x] 确认最终 CLI 二进制名称为 `glua`，字节码工具名称为 `gluac`。
 - [x] 确认 Lua 5.3 迁移基线版本为 `lua-5.3.6`。
 - [x] 确认 “Cpp 源码” 当前按 Lua 官方 C 源码理解；如后续提供 C++ 仓库，另建映射文档。

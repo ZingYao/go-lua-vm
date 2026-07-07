@@ -9,7 +9,7 @@ import (
 	mrand "math/rand"
 	"sync"
 
-	"github.com/zing/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
 // randomMutex 保护 math.random 使用的包级随机源，避免并发嵌入调用产生数据竞争。

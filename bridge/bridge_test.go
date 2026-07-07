@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zing/go-lua-vm/lua"
-	"github.com/zing/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/lua"
+	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
 // reflectEmbeddedSample 用于验证 reflection 绑定会提升嵌入字段。

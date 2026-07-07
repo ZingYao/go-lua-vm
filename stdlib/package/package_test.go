@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zing/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
 // TestOpenRegistersPackageAndRequire 验证 Open 注册 package 表和 require 全局函数。

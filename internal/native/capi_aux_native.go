@@ -32,7 +32,7 @@ import (
 	"fmt"
 	"unsafe"
 
-	"github.com/zing/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
 // nativeLuaToInteger 按当前最小 Lua C API shim 读取 integer。

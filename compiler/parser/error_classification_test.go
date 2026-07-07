@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/zing/go-lua-vm/compiler/lexer"
+	"github.com/ZingYao/go-lua-vm/compiler/lexer"
 )
 
 // TestIsSyntaxError 验证 parser 包能识别单个和聚合解析错误。

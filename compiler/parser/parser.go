@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/zing/go-lua-vm/compiler/lexer"
-	"github.com/zing/go-lua-vm/extensions"
+	"github.com/ZingYao/go-lua-vm/compiler/lexer"
+	"github.com/ZingYao/go-lua-vm/extensions"
 )
 
 const (

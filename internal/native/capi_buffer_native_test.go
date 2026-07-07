@@ -5,7 +5,7 @@ package native
 import (
 	"testing"
 
-	"github.com/zing/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
 // TestNativeLuaBufferAddVisibleValueConsumesVisibleTop 验证 luaL_addvalue 核心逻辑追加并弹出当前可见栈顶。

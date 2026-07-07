@@ -3,8 +3,8 @@
 package codegen
 
 import (
-	"github.com/zing/go-lua-vm/bytecode"
-	"github.com/zing/go-lua-vm/compiler/parser"
+	"github.com/ZingYao/go-lua-vm/bytecode"
+	"github.com/ZingYao/go-lua-vm/compiler/parser"
 )
 
 func init() {

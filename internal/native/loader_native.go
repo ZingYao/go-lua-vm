@@ -7,8 +7,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/zing/go-lua-vm/runtime"
-	packagelib "github.com/zing/go-lua-vm/stdlib/package"
+	"github.com/ZingYao/go-lua-vm/runtime"
+	packagelib "github.com/ZingYao/go-lua-vm/stdlib/package"
 )
 
 // Loader 返回 native_modules 构建下的无状态原生动态库 loader。

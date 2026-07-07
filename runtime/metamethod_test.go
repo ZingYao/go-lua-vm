@@ -3,7 +3,7 @@ package runtime
 import (
 	"testing"
 
-	"github.com/zing/go-lua-vm/bytecode"
+	"github.com/ZingYao/go-lua-vm/bytecode"
 )
 
 // TestVMArithmeticMetamethod 验证算术指令在基础数字路径失败后会调用算术元方法。

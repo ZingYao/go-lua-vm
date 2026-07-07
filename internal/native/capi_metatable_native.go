@@ -10,7 +10,7 @@ import "C"
 import (
 	"unsafe"
 
-	"github.com/zing/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
 // nativeLuaMetatableFromTop 从栈顶读取 lua_setmetatable 使用的新元表。

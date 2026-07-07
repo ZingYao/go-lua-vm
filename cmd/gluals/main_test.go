@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/zing/go-lua-vm/extensions"
+	"github.com/ZingYao/go-lua-vm/extensions"
 )
 
 // TestParseArgsGlualsSyntax 验证 gluals 使用独立项目命名空间参数控制语法扩展。

@@ -8,8 +8,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/zing/go-lua-vm/lua"
-	"github.com/zing/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/lua"
+	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
 // Function 表示桥接层推荐的 Go 回调签名。

@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/zing/go-lua-vm/extensions"
-	"github.com/zing/go-lua-vm/internal/lsp"
+	"github.com/ZingYao/go-lua-vm/extensions"
+	"github.com/ZingYao/go-lua-vm/internal/lsp"
 )
 
 // main 启动 glua language server。

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zing/go-lua-vm/bytecode"
-	"github.com/zing/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/bytecode"
+	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
 // TestOpenRegistersStringLibrary 验证 Open 会注册 string 库和本阶段支持的函数。

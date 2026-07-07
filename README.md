@@ -72,7 +72,7 @@ package main
 import (
 	"log"
 
-	"github.com/zing/go-lua-vm/lua"
+	"github.com/ZingYao/go-lua-vm/lua"
 )
 
 func main() {

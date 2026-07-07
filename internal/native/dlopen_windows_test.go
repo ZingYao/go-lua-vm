@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	packagelib "github.com/zing/go-lua-vm/stdlib/package"
+	packagelib "github.com/ZingYao/go-lua-vm/stdlib/package"
 )
 
 // TestWindowsDynamicLibraryLookupSymbol 验证 Windows native loader 能打开系统 DLL 并解析公开符号。

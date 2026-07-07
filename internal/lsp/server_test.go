@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zing/go-lua-vm/extensions"
+	"github.com/ZingYao/go-lua-vm/extensions"
 )
 
 // TestAnalyzeDiagnosticsAcceptsExtensions 验证默认扩展语法不会产生标准 Lua 误报。

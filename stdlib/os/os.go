@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zing/go-lua-vm/runtime"
-	"github.com/zing/go-lua-vm/stdlib/internal/procstatus"
+	"github.com/ZingYao/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/stdlib/internal/procstatus"
 )
 
 // processStart 保存本 Go 进程启动后首次加载 oslib 的基准时间。

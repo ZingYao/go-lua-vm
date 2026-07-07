@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+host_goos="$(go env GOOS)"
 host_goarch="$(go env GOARCH)"
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/go-lua-vm-native-skips.XXXXXX")"
 
@@ -12,6 +13,7 @@ trap cleanup EXIT
 
 echo "native skip reason check"
 echo "repo_root=${repo_root}"
+echo "host_GOOS=${host_goos}"
 echo "host_GOARCH=${host_goarch}"
 
 run_and_require_skip() {
@@ -39,6 +41,10 @@ run_and_require_skip() {
 }
 
 cross_cc_var="NATIVE_CC_LINUX_$(printf '%s' "${host_goarch}" | tr '[:lower:]-' '[:upper:]_')"
+mismatch_goos="linux"
+if [[ "${host_goos}" == "linux" ]]; then
+  mismatch_goos="darwin"
+fi
 
 run_and_require_skip \
   "windows fixture build" \
@@ -69,6 +75,11 @@ run_and_require_skip \
   "windows real module aggregate acceptance" \
   "skip: native real module acceptance requires target platform runtime; Windows requires lua53.dll shim or import library, not implemented yet" \
   env TARGET_GOOS=windows "${repo_root}/scripts/test-native-real-modules.sh"
+
+run_and_require_skip \
+  "non windows real module aggregate target mismatch" \
+  "skip: native real module acceptance requires running on target platform ${mismatch_goos}/${host_goarch}; host is ${host_goos}/${host_goarch}" \
+  env TARGET_GOOS="${mismatch_goos}" "${repo_root}/scripts/test-native-real-modules.sh"
 
 run_and_require_skip \
   "linux missing cross compiler" \

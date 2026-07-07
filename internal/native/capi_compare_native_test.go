@@ -5,7 +5,7 @@ package native
 import (
 	"testing"
 
-	"github.com/zing/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
 // TestNativeLuaCompareBasicValues 验证 lua_compare 的基础 EQ/LT/LE 语义。
