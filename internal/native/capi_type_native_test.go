@@ -106,6 +106,39 @@ func TestNativeCAPITypeAndNumberPrimitives(t *testing.T) {
 		t.Fatalf("nativeLuaIsString nil state = %v, want false", got)
 	}
 
+	numberCases := []struct {
+		name    string
+		index   int
+		wantNum bool
+		wantInt bool
+	}{
+		{name: "nil", index: 1, wantNum: false, wantInt: false},
+		{name: "boolean", index: 2, wantNum: false, wantInt: false},
+		{name: "integer", index: 4, wantNum: true, wantInt: true},
+		{name: "float number", index: 5, wantNum: true, wantInt: false},
+		{name: "table", index: 7, wantNum: false, wantInt: false},
+		{name: "plain string", index: 8, wantNum: false, wantInt: false},
+		{name: "numeric string", index: 9, wantNum: true, wantInt: false},
+		{name: "missing", index: 10, wantNum: false, wantInt: false},
+	}
+	for _, tc := range numberCases {
+		// lua_isnumber 使用 number 可转换性；lua_isinteger 只接受真实 integer 表示。
+		if got := nativeLuaIsNumber(luaState, tc.index); got != tc.wantNum {
+			t.Fatalf("nativeLuaIsNumber %s = %v, want %v", tc.name, got, tc.wantNum)
+		}
+		if got := nativeLuaIsInteger(luaState, tc.index); got != tc.wantInt {
+			t.Fatalf("nativeLuaIsInteger %s = %v, want %v", tc.name, got, tc.wantInt)
+		}
+	}
+	if got := nativeLuaIsNumber(nil, 1); got {
+		// nil State 不能读取任何 number。
+		t.Fatalf("nativeLuaIsNumber nil state = %v, want false", got)
+	}
+	if got := nativeLuaIsInteger(nil, 1); got {
+		// nil State 不能读取任何 integer。
+		t.Fatalf("nativeLuaIsInteger nil state = %v, want false", got)
+	}
+
 	numberValue, ok := nativeLuaToNumber(luaState, 4)
 	if !ok || numberValue != 7 {
 		// integer 必须可按 number 读取。

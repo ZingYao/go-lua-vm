@@ -122,6 +122,24 @@ func nativeLuaIsString(luaState unsafe.Pointer, index int) bool {
 	return false
 }
 
+// nativeLuaIsNumber 按 Lua 5.3 C API 判断值是否可作为 number 读取。
+func nativeLuaIsNumber(luaState unsafe.Pointer, index int) bool {
+	// lua_isnumber 与 lua_tonumberx 的可转换性一致，numeric string 也应返回 true。
+	_, ok := nativeLuaToNumber(luaState, index)
+	return ok
+}
+
+// nativeLuaIsInteger 按 Lua 5.3 C API 判断值是否为真实 integer。
+func nativeLuaIsInteger(luaState unsafe.Pointer, index int) bool {
+	// lua_isinteger 只判断值本身是否为 integer，不执行 string/float 到 integer 的转换。
+	value, ok := nativeLuaValueAt(luaState, index)
+	if !ok {
+		// 无效索引属于 none，不能视为 integer。
+		return false
+	}
+	return value.Kind == runtime.KindInteger
+}
+
 // nativeLuaToNumber 按当前最小 Lua C API shim 读取 number。
 func nativeLuaToNumber(luaState unsafe.Pointer, index int) (float64, bool) {
 	// 入口通过统一 helper 区分 none 与 nil；两者都不能转换为 number。
@@ -172,6 +190,18 @@ func lua_toboolean(luaState *C.lua_State, index C.int) C.int {
 	return 0
 }
 
+// lua_isnumber 导出 Lua 5.3 C API number 可转换性判断入口。
+//
+//export lua_isnumber
+func lua_isnumber(luaState *C.lua_State, index C.int) C.int {
+	// C API 使用 int 表示 boolean，number 与 numeric string 都按 true 返回。
+	if nativeLuaIsNumber(unsafe.Pointer(luaState), int(index)) {
+		// 非 0 表示可按 number 读取。
+		return 1
+	}
+	return 0
+}
+
 // lua_isstring 导出 Lua 5.3 C API 字符串可转换性判断入口。
 //
 //export lua_isstring
@@ -179,6 +209,18 @@ func lua_isstring(luaState *C.lua_State, index C.int) C.int {
 	// C API 使用 int 表示 boolean，string 与 number 都按 true 返回。
 	if nativeLuaIsString(unsafe.Pointer(luaState), int(index)) {
 		// 非 0 表示可按字符串读取。
+		return 1
+	}
+	return 0
+}
+
+// lua_isinteger 导出 Lua 5.3 C API integer 类型判断入口。
+//
+//export lua_isinteger
+func lua_isinteger(luaState *C.lua_State, index C.int) C.int {
+	// C API 使用 int 表示 boolean，只有真实 integer 值按 true 返回。
+	if nativeLuaIsInteger(unsafe.Pointer(luaState), int(index)) {
+		// 非 0 表示当前值以 integer 表示。
 		return 1
 	}
 	return 0

@@ -128,8 +128,12 @@
   - [x] `lua_getallocf`
     - [x] 当前返回 native shim 的 C heap `realloc/free` 分配器，`ud` 固定为 `NULL`；fixture 覆盖 allocate/reallocate/free roundtrip。
   - [ ] `lua_is*` 系列常用入口：
+    - [x] `lua_isnumber`
+      - [x] 当前按 Lua 5.3 语义对 number 和 numeric string 返回 true，对 nil、boolean、table、none 和普通 string 返回 false。
     - [x] `lua_isstring`
       - [x] 当前按 Lua 5.3 语义对 string 和 number 返回 true，对 nil、boolean、table、none 返回 false。
+    - [x] `lua_isinteger`
+      - [x] 当前只对真实 integer 返回 true；numeric string 和 float number 即使可转换也不误判为 integer。
 - [x] 支持 C function 读取 Lua 参数并返回多值。
 - [x] fixture：C 模块函数 `add(a, b)`、`echo(s)`、`multi()`。
 
@@ -328,8 +332,9 @@
         - [x] 2026-07-07 修复：使用 `gopls check internal/native/capi_stack_native.go internal/native/capi_stack_native_test.go internal/native/capi_aux_native.go internal/native/state_handle_native.go` 复核后，修正 `lua_pushstring` / `lua_pushlstring` 的返回指针生命周期：压栈仍复制为 Go string，但返回给 C 模块的指针改为绑定到当前 `lua_State` handle 生命周期的 C buffer，而不是借用调用方传入的临时指针。`TestNativeCAPIStackPrimitives` 已覆盖返回指针非借用、内容保留内嵌 NUL 与 NUL 终止符。短 probe 仍为 `error-number result=12 class=bad`、`type-number result=18 class=good`，因此该 public C API 字符串返回指针缺口需要修复，但不是当前 select-count 退化的充分根因。
         - [x] 2026-07-07 修复：使用 `gopls check internal/native/capi_stack_native.go internal/native/capi_aux_native.go internal/native/capi_aux_native_test.go internal/native/capi_type_native.go internal/native/state_handle_native.go` 复核后，补齐 `lua_tolstring` 对 number 的 Lua 5.3 回写语义：数字转换成功时返回 State 生命周期内 C buffer，并把真实栈槽替换成 Lua string；pseudo-index 不作为普通栈槽写回。新增 `TestNativeLuaToLStringNumberConversionWritesCurrentCFrame`，覆盖当前 C frame 正索引只回写 frame 可见槽、不穿透外层 Go VM 栈。短 probe 仍为 `error-number result=12 class=bad`、`type-number result=18 class=good`，因此该 public C API 数字转字符串回写缺口需要修复，但不是当前 select-count 退化的充分根因。
         - [x] 2026-07-07 修复：使用 `gopls check internal/native/capi_aux_native.go internal/native/capi_type_native.go internal/native/capi_aux_native_test.go internal/native/capi_type_native_test.go` 复核后，补齐 `lua_tonumberx` / `lua_tointegerx` 对 numeric string 的 Lua 5.3 转换语义：复用 runtime 字符串数字解析，支持空白包裹、十六进制整数和十六进制浮点；转换不会像 `lua_tolstring` 一样回写栈槽。`TestNativeCAPICheckInteger`、`TestNativeCAPIOptInteger` 和 `TestNativeCAPITypeAndNumberPrimitives` 已覆盖成功、失败和 no-writeback。短 probe 仍为 `error-number result=12 class=bad`、`type-number result=18 class=good`，因此该 public C API numeric string 转换缺口需要修复，但不是当前 select-count 退化的充分根因。
+        - [x] 2026-07-07 修复：使用 `gopls check internal/native/capi_type_native.go internal/native/capi_type_native_test.go` 复核后，补齐 `lua_isnumber` 与 `lua_isinteger` 导出入口；`lua_isnumber` 复用 `lua_tonumberx` 可转换性，numeric string 返回 true，`lua_isinteger` 只接受真实 integer 表示，不把 numeric string 或 float number 误判为 integer。`TestNativeCAPITypeAndNumberPrimitives` 已覆盖 number/string/table/none/nil State 边界。短 probe 仍为 `error-number result=12 class=bad`、`type-number result=18 class=good`，因此该 public C API 判断入口缺口需要修复，但不是当前 select-count 退化的充分根因。
         - [ ] 修复门禁：LPeg 只作为真实第三方 C 模块集成验收和问题暴露样本，禁止通过模块名、测试行号、特定 pattern、特定返回值或 LPeg 私有行为做特向性修复；任何生产代码修复都必须能解释为通用 Lua 5.3 C API、VM 调用帧、vararg、返回值写回、栈隔离、registry/metatable/userdata 或错误恢复语义，并补充模块无关的定向测试或 probe。
-        - [ ] 下一步继续定位构造期生命周期缺口：已证伪基本 userdata uservalue table 合并、负索引 rawseti 路径、非 native 固定返回 CALL 临时实参槽清理、native C frame 可见临时栈 weak sweep 强根、C closure 多 upvalue 后缀消费/前缀保留边界、栈上 Go/C closure upvalue 根快照缺失、userdata 关联弱表可达性缺失、C closure 调用期 native external root 缺失、registry/metatable 关联边漏扫、fixed-result CALL 后构造期 userdata/user value 可见根组合、`lua_pushstring` / `lua_pushlstring` 返回指针借用、`lua_tolstring` number 回写缺失，以及 `lua_tonumberx` / `lua_tointegerx` numeric string 转换缺失是充分根因；后续继续比较 vararg/fixed CALL 与 native 构造期对象挂接、closure/root 形态和 Proto 常量布局的组合。任何生产修复仍必须落到通用 Lua 5.3 C API 或 VM/GC 生命周期语义，不能按 LPeg pattern 特例处理。
+        - [ ] 下一步继续定位构造期生命周期缺口：已证伪基本 userdata uservalue table 合并、负索引 rawseti 路径、非 native 固定返回 CALL 临时实参槽清理、native C frame 可见临时栈 weak sweep 强根、C closure 多 upvalue 后缀消费/前缀保留边界、栈上 Go/C closure upvalue 根快照缺失、userdata 关联弱表可达性缺失、C closure 调用期 native external root 缺失、registry/metatable 关联边漏扫、fixed-result CALL 后构造期 userdata/user value 可见根组合、`lua_pushstring` / `lua_pushlstring` 返回指针借用、`lua_tolstring` number 回写缺失、`lua_tonumberx` / `lua_tointegerx` numeric string 转换缺失，以及 `lua_isnumber` / `lua_isinteger` 导出缺失是充分根因；后续继续比较 vararg/fixed CALL 与 native 构造期对象挂接、closure/root 形态和 Proto 常量布局的组合。任何生产修复仍必须落到通用 Lua 5.3 C API 或 VM/GC 生命周期语义，不能按 LPeg pattern 特例处理。
   - [ ] LuaSocket 或等价网络库验收：仅在 userdata/metatable/registry/错误边界稳定后进入平台闭环。
 - [ ] 增加交叉编译验证脚本：
   - [x] `scripts/check-native-cross-compile.sh`：显式输出 `GOOS`、`GOARCH`、`CC`、产物路径和缺失 toolchain 时的 skip 原因。
@@ -495,3 +500,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-07：修正 `lua_pushstring` / `lua_pushlstring` 返回指针语义：返回当前 `lua_State` handle 生命周期内的 C buffer 副本，而不是调用方传入指针；测试覆盖稳定副本、内嵌 NUL 和 NUL 终止符。该修复提升通用 Lua 5.3 public C API 兼容性；短 probe 仍为 `error-number=12 bad` / `type-number=18 good`，因此不是当前 LPeg select-count 退化的充分根因。
 - 2026-07-07：补齐 `lua_tolstring` number 转字符串回写语义：返回给 C 模块的 buffer 仍绑定到 `lua_State` 生命周期，同时把真实栈槽从 number 替换为 Lua string；C frame 正索引只回写当前 frame 可见槽。该修复提升通用 Lua 5.3 public C API 兼容性；短 probe 仍为 `error-number=12 bad` / `type-number=18 good`，因此不是当前 LPeg select-count 退化的充分根因。
 - 2026-07-07：补齐 `lua_tonumberx` / `lua_tointegerx` numeric string 转换语义：复用 runtime 字符串数字解析，支持空白、十六进制整数和十六进制浮点，且转换不回写栈槽。该修复提升通用 Lua 5.3 public C API 兼容性；短 probe 仍为 `error-number=12 bad` / `type-number=18 good`，因此不是当前 LPeg select-count 退化的充分根因。
+- 2026-07-07：补齐 `lua_isnumber` / `lua_isinteger` 导出入口：`lua_isnumber` 与 `lua_tonumberx` 的 number 可转换性一致，numeric string 返回 true；`lua_isinteger` 只接受真实 integer，不把 numeric string 或 float number 误判为 integer。该修复提升通用 Lua 5.3 public C API 兼容性；短 probe 仍为 `error-number=12 bad` / `type-number=18 good`，因此不是当前 LPeg select-count 退化的充分根因。
