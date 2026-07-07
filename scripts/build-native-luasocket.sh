@@ -2,9 +2,10 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+host_goos="$(go env GOOS)"
+host_goarch="$(go env GOARCH)"
 target_goos="${TARGET_GOOS:-$(go env GOOS)}"
 target_goarch="${TARGET_GOARCH:-$(go env GOARCH)}"
-cc="${CC:-cc}"
 build_dir="${BUILD_DIR:-${repo_root}/build/native-luasocket/${target_goos}-${target_goarch}}"
 include_dir="${repo_root}/native/lua53/include"
 source_dir="${repo_root}/third_party/luasocket"
@@ -26,17 +27,72 @@ socket_sources=(
   "${source_src_dir}/udp.c"
 )
 
+socket_windows_sources=(
+  "${source_src_dir}/luasocket.c"
+  "${source_src_dir}/timeout.c"
+  "${source_src_dir}/buffer.c"
+  "${source_src_dir}/io.c"
+  "${source_src_dir}/auxiliar.c"
+  "${source_src_dir}/compat.c"
+  "${source_src_dir}/options.c"
+  "${source_src_dir}/inet.c"
+  "${source_src_dir}/wsocket.c"
+  "${source_src_dir}/except.c"
+  "${source_src_dir}/select.c"
+  "${source_src_dir}/tcp.c"
+  "${source_src_dir}/udp.c"
+)
+
 mime_sources=(
   "${source_src_dir}/mime.c"
   "${source_src_dir}/compat.c"
 )
 
+normalize_env_name() {
+  echo "$1" | tr '[:lower:]/-' '[:upper:]__'
+}
+
+cc_variable_for_target() {
+  echo "NATIVE_CC_$(normalize_env_name "${target_goos}_${target_goarch}")"
+}
+
+target_cc_for() {
+  local cc_var="$1"
+  local cc_value="${!cc_var:-}"
+
+  if [[ -n "${cc_value}" ]]; then
+    echo "${cc_value}"
+    return 0
+  fi
+
+  if [[ -n "${CC+x}" ]]; then
+    echo "${CC}"
+    return 0
+  fi
+
+  if [[ "${target_goos}" == "${host_goos}" && "${target_goarch}" == "${host_goarch}" ]]; then
+    echo "cc"
+    return 0
+  fi
+
+  return 1
+}
+
+cc_var="$(cc_variable_for_target)"
+cc=""
+if cc="$(target_cc_for "${cc_var}")"; then
+  :
+fi
+
 echo "native LuaSocket source build"
 echo "repo_root=${repo_root}"
+echo "host_GOOS=${host_goos}"
+echo "host_GOARCH=${host_goarch}"
 echo "GOOS=${target_goos}"
 echo "GOARCH=${target_goarch}"
 echo "CGO_ENABLED=${CGO_ENABLED:-unset}"
-echo "CC=${cc}"
+echo "CC=${cc:-unset}"
+echo "CC variable=${cc_var}"
 echo "include_dir=${include_dir}"
 echo "source_dir=${source_dir}"
 echo "build_dir=${build_dir}"
@@ -51,33 +107,76 @@ if [[ ! -d "${source_src_dir}" ]]; then
   exit 1
 fi
 
-for source_file in "${socket_sources[@]}" "${mime_sources[@]}"; do
+for source_file in "${socket_sources[@]}" "${socket_windows_sources[@]}" "${mime_sources[@]}"; do
   if [[ ! -f "${source_file}" ]]; then
     echo "LuaSocket source file not found: ${source_file}" >&2
     exit 1
   fi
 done
 
-read -r -a cc_parts <<<"${cc}"
-if [[ "${#cc_parts[@]}" -eq 0 ]] || ! command -v "${cc_parts[0]}" >/dev/null 2>&1; then
-  echo "skip: C compiler not found: ${cc}" >&2
+if [[ -z "${cc}" ]]; then
+  echo "skip: no C compiler configured for ${target_goos}/${target_goarch}; set ${cc_var} or CC" >&2
   exit 0
 fi
 
+read -r -a cc_parts <<<"${cc}"
+if [[ "${#cc_parts[@]}" -eq 0 ]] || ! command -v "${cc_parts[0]}" >/dev/null 2>&1; then
+  echo "skip: C compiler not found for ${target_goos}/${target_goarch}: ${cc}" >&2
+  exit 0
+fi
+
+selected_socket_sources=()
+lua53_import_lib=""
+output_extensions=()
+link_args=()
+link_inputs=()
+platform_cflags=()
 case "${target_goos}" in
   darwin)
+    selected_socket_sources=("${socket_sources[@]}")
     output_extensions=(".so" ".dylib")
     link_args=("-bundle" "-undefined" "dynamic_lookup")
     platform_cflags=("-DUNIX_HAS_SUN_LEN")
     ;;
   linux)
+    selected_socket_sources=("${socket_sources[@]}")
     output_extensions=(".so")
     link_args=("-shared" "-fPIC")
     platform_cflags=()
     ;;
   windows)
-    echo "skip: Windows LuaSocket build requires lua53.dll shim or import library, not implemented yet" >&2
-    exit 0
+    selected_socket_sources=("${socket_windows_sources[@]}")
+    output_extensions=(".dll")
+    link_args=("-shared" "-DLUA_BUILD_AS_DLL")
+    link_inputs=("-lws2_32")
+    platform_cflags=("-DWINVER=0x0501")
+    import_build_dir="${LUA53_IMPORT_BUILD_DIR:-${build_dir}/lua53}"
+
+    if [[ -n "${LUA53_IMPORT_LIB:-}" ]]; then
+      if [[ ! -f "${LUA53_IMPORT_LIB}" ]]; then
+        echo "Windows lua53 import library not found: ${LUA53_IMPORT_LIB}" >&2
+        exit 1
+      fi
+      lua53_import_lib="${LUA53_IMPORT_LIB}"
+    else
+      TARGET_GOOS=windows TARGET_GOARCH="${target_goarch}" BUILD_DIR="${import_build_dir}" \
+        "${repo_root}/scripts/build-native-windows-lua53-importlib.sh"
+
+      for candidate in "${import_build_dir}/liblua53.dll.a" "${import_build_dir}/lua53.lib"; do
+        if [[ -f "${candidate}" ]]; then
+          lua53_import_lib="${candidate}"
+          break
+        fi
+      done
+
+      if [[ -z "${lua53_import_lib}" ]]; then
+        echo "skip: Windows LuaSocket build requires lua53 import library; set LUA53_IMPORT_LIB or install llvm-dlltool, dlltool, lib.exe, or llvm-lib" >&2
+        exit 0
+      fi
+    fi
+
+    echo "lua53_import_lib=${lua53_import_lib}"
+    link_inputs=("${lua53_import_lib}" "${link_inputs[@]}")
     ;;
   *)
     echo "skip: unsupported native LuaSocket target GOOS=${target_goos}" >&2
@@ -109,6 +208,9 @@ build_luasocket_module() {
   args+=("-o" "${output_path}")
   args+=("${link_args[@]}")
   args+=("$@")
+  if [[ "${#link_inputs[@]}" -gt 0 ]]; then
+    args+=("${link_inputs[@]}")
+  fi
 
   printf 'compile LuaSocket %s%s:' "${label}" "${extension}"
   printf ' %q' "${cc_parts[@]}" "${args[@]}"
@@ -119,7 +221,7 @@ build_luasocket_module() {
 }
 
 for extension in "${output_extensions[@]}"; do
-  build_luasocket_module "socket.core" "${build_dir}/socket" "${extension}" "${socket_sources[@]}"
+  build_luasocket_module "socket.core" "${build_dir}/socket" "${extension}" "${selected_socket_sources[@]}"
   build_luasocket_module "mime.core" "${build_dir}/mime" "${extension}" "${mime_sources[@]}"
 done
 

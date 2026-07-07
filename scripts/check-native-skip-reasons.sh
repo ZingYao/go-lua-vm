@@ -102,9 +102,14 @@ run_and_require_skip \
   env TARGET_GOOS=windows CC=cc NATIVE_WINDOWS_IMPORT_TOOL=__glua_missing_import_tool__ "${repo_root}/scripts/build-native-lpeg.sh"
 
 run_and_require_skip \
-  "windows luasocket build" \
-  "skip: Windows LuaSocket build requires lua53.dll shim or import library, not implemented yet" \
+  "windows luasocket build missing compiler" \
+  "skip: no C compiler configured for windows/${host_goarch}; set ${windows_cc_var} or CC" \
   env TARGET_GOOS=windows "${repo_root}/scripts/build-native-luasocket.sh"
+
+run_and_require_skip \
+  "windows luasocket build missing import library" \
+  "skip: Windows LuaSocket build requires lua53 import library; set LUA53_IMPORT_LIB or install llvm-dlltool, dlltool, lib.exe, or llvm-lib" \
+  env TARGET_GOOS=windows CC=cc NATIVE_WINDOWS_IMPORT_TOOL=__glua_missing_import_tool__ "${repo_root}/scripts/build-native-luasocket.sh"
 
 run_and_require_skip \
   "windows luasocket runtime acceptance" \

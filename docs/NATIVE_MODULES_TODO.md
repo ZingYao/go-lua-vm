@@ -357,8 +357,10 @@
     - [x] 固定 LuaSocket 源码到 `third_party/luasocket/`，来源为 `lunarmodules/luasocket` tag `v3.1.0` / commit `95b7efa9da506ef968c1347edf3fc56370f0deed`，保留 MIT-style `LICENSE` 并新增 `GLUA_VENDOR.md` 记录本项目未做源码修改。
     - [x] 新增 LuaSocket 源码编译脚本，使用仓库内 Lua 5.3 public headers 编译 `socket.core` 和 `mime.core`，禁止读取系统 Lua 开发包。
       - [x] macOS arm64 `.so` 与 `.dylib` 两种后缀已通过源码编译级验收。
+      - [x] `scripts/build-native-luasocket.sh` 支持 Windows `socket/core.dll` 与 `mime/core.dll` 源码构建入口：显式配置 `NATIVE_CC_WINDOWS_<ARCH>` / `CC` 且 `LUA53_IMPORT_LIB` 或 import library 生成工具可用时构建；缺少 Windows C compiler 或 import library 时必须明确 `skip:`。
     - [x] 新增 LuaSocket 运行期验收脚本，覆盖 `require("socket")`、`require("mime")`、基础 MIME 编解码和本机 loopback TCP/UDP 边界；网络用例必须可控、可超时、失败原因明确。
       - [x] `scripts/test-native-luasocket.sh` 会构建 native `glua` 和 LuaSocket 模块，macOS 分别覆盖 `.so` 与 `.dylib`，Linux 覆盖 `.so`，Windows 在 `lua53.dll` shim/import library 落地前明确 skip。
+      - [ ] Windows 目标平台执行 `require("socket")`、`require("mime")`、基础 MIME 编解码和 TCP/UDP loopback 验收。
 - [ ] 增加交叉编译验证脚本：
   - [x] `scripts/check-native-cross-compile.sh`：显式输出 `GOOS`、`GOARCH`、`CC`、产物路径和缺失 toolchain 时的 skip 原因。
     - [x] 支持 `NATIVE_CC_*` / `CC` 使用带参数的编译器命令，便于 CI 传入 `zig cc -target ...` 或等价 cross toolchain。
@@ -588,3 +590,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-07：扩展 `scripts/build-native-fixtures.sh` 的 Windows 分支；脚本现在支持通过显式 `NATIVE_CC_WINDOWS_<ARCH>` / `CC` 和 `LUA53_IMPORT_LIB` 或 `scripts/build-native-windows-lua53-importlib.sh` 产物构建 `glua_native_smoke.dll` / `glua_native_failopen.dll`，并在缺 Windows C compiler 或 import library 时输出可门禁的 `skip:`。当前 macOS arm64 本机缺少 Windows C toolchain 和 import library 工具，因此只验证 skip 路径和当前平台 macOS fixture/真实模块验收；本轮不声明 Windows 目标平台 `require` 或真实模块运行期闭环完成。
 - 2026-07-07：扩展 `scripts/build-native-cjson.sh` 的 Windows 分支；脚本现在支持通过显式 `NATIVE_CC_WINDOWS_<ARCH>` / `CC` 和 `LUA53_IMPORT_LIB` 或 `scripts/build-native-windows-lua53-importlib.sh` 产物构建 `cjson.dll`，并在缺 Windows C compiler 或 import library 时输出可门禁的 `skip:`。当前 macOS arm64 本机缺少 Windows C toolchain 和 import library 工具，因此只验证 skip 路径和当前平台 macOS `lua-cjson` 源码/运行期验收；本轮不声明 Windows `require("cjson")` 或真实模块运行期闭环完成。
 - 2026-07-07：扩展 `scripts/build-native-lpeg.sh` 的 Windows 分支；脚本现在支持通过显式 `NATIVE_CC_WINDOWS_<ARCH>` / `CC` 和 `LUA53_IMPORT_LIB` 或 `scripts/build-native-windows-lua53-importlib.sh` 产物构建 `lpeg.dll`，并在缺 Windows C compiler 或 import library 时输出可门禁的 `skip:`。当前 macOS arm64 本机缺少 Windows C toolchain 和 import library 工具，因此只验证 skip 路径和当前平台 macOS LPeg 源码/运行期验收；本轮不声明 Windows `require("lpeg")` 或完整 LPeg 运行期闭环完成。
+- 2026-07-07：扩展 `scripts/build-native-luasocket.sh` 的 Windows 分支；脚本现在支持通过显式 `NATIVE_CC_WINDOWS_<ARCH>` / `CC` 和 `LUA53_IMPORT_LIB` 或 `scripts/build-native-windows-lua53-importlib.sh` 产物，使用 LuaSocket 的 `wsocket.c` backend 与 `ws2_32` 构建 `socket/core.dll` 和 `mime/core.dll`，并在缺 Windows C compiler 或 import library 时输出可门禁的 `skip:`。当前 macOS arm64 本机缺少 Windows C toolchain 和 import library 工具，因此只验证 skip 路径和当前平台 macOS LuaSocket 源码/运行期验收；本轮不声明 Windows `require("socket")`、`require("mime")` 或 TCP/UDP loopback 运行期闭环完成。
