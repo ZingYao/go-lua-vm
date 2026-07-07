@@ -393,6 +393,78 @@ func TestNativeCAPIFrameNegativeIndexesDoNotCrossBase(t *testing.T) {
 	}
 }
 
+// TestNativeCAPIUpvaluePseudoIndexesUseCurrentCFrame 验证 lua_upvalueindex 只读取当前 C closure 调用帧。
+func TestNativeCAPIUpvaluePseudoIndexesUseCurrentCFrame(t *testing.T) {
+	// C closure upvalue 不是普通 Lua 栈槽，读取时必须从当前 C frame 的 upvalue 快照解析。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 upvalue pseudo-index。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+	upvalueIndex := func(index int) int {
+		// Lua 5.3 头文件把 lua_upvalueindex(i) 定义为 LUA_REGISTRYINDEX - i。
+		return runtime.RegistryPseudoIndex - index
+	}
+
+	if err := state.Push(runtime.StringValue("outer")); err != nil {
+		// 外层栈值用于证明 upvalue 读取不会穿透或改写调用者栈。
+		t.Fatalf("push outer stack value failed: %v", err)
+	}
+	outerBaseTop := state.StackTop()
+	outerUpvalues := []runtime.Value{runtime.StringValue("outer-up"), runtime.IntegerValue(11)}
+	if !pushNativeStateCallFrame(luaState, outerBaseTop, outerUpvalues) {
+		// 无法建立 C 调用帧时，本测试不能继续验证 upvalue pseudo-index。
+		t.Fatalf("pushNativeStateCallFrame outer failed")
+	}
+	defer popNativeStateCallFrame(luaState)
+
+	value, ok := nativeLuaValueAt(luaState, upvalueIndex(1))
+	if !ok || value.Kind != runtime.KindString || value.String != "outer-up" {
+		// lua_upvalueindex(1) 必须读取当前 C closure 的第一个 upvalue。
+		t.Fatalf("outer upvalue[1] = %#v ok=%v, want outer-up", value, ok)
+	}
+	nativeLuaPushValueAt(luaState, upvalueIndex(2))
+	if got := nativeLuaStackTop(luaState); got != 1 {
+		// pushvalue 读取 upvalue 时只能在当前 C frame 可见栈压入一个副本。
+		t.Fatalf("lua_pushvalue(upvalue[2]) visible top = %d, want 1", got)
+	}
+	if copied := state.ValueAt(-1); copied.Kind != runtime.KindInteger || copied.Integer != 11 {
+		// 第二个 upvalue 被复制到全局栈顶，但不改变原 upvalue 快照。
+		t.Fatalf("copied upvalue[2] = %#v, want integer 11", copied)
+	}
+	if missing, ok := nativeLuaValueAt(luaState, upvalueIndex(3)); ok || !missing.IsNil() {
+		// 超出当前 closure 捕获数量的 upvalue 必须表现为 none，不能误读普通栈槽。
+		t.Fatalf("missing outer upvalue[3] = %#v ok=%v, want none", missing, ok)
+	}
+
+	innerBaseTop := state.StackTop()
+	innerUpvalues := []runtime.Value{runtime.StringValue("inner-up")}
+	if !pushNativeStateCallFrame(luaState, innerBaseTop, innerUpvalues) {
+		// 无法建立嵌套 C 调用帧时，本测试不能继续验证 frame 隔离。
+		t.Fatalf("pushNativeStateCallFrame inner failed")
+	}
+	innerValue, ok := nativeLuaValueAt(luaState, upvalueIndex(1))
+	if !ok || innerValue.Kind != runtime.KindString || innerValue.String != "inner-up" {
+		// 嵌套 C frame 内的 lua_upvalueindex(1) 必须读取内层 closure 的 upvalue。
+		t.Fatalf("inner upvalue[1] = %#v ok=%v, want inner-up", innerValue, ok)
+	}
+	popNativeStateCallFrame(luaState)
+
+	restoredValue, ok := nativeLuaValueAt(luaState, upvalueIndex(1))
+	if !ok || restoredValue.Kind != runtime.KindString || restoredValue.String != "outer-up" {
+		// 内层 frame 退出后，外层 C closure upvalue 快照必须恢复可见。
+		t.Fatalf("restored outer upvalue[1] = %#v ok=%v, want outer-up", restoredValue, ok)
+	}
+	if value := state.ValueAt(1); value.Kind != runtime.KindString || value.String != "outer" {
+		// upvalue pseudo-index 读取和复制不能覆盖当前 C frame 之前的外层栈槽。
+		t.Fatalf("outer stack slot = %#v, want outer", value)
+	}
+}
+
 // TestNativeCAPIStackPrimitivesRejectInvalidState 验证失效 State handle 的最小安全边界。
 func TestNativeCAPIStackPrimitivesRejectInvalidState(t *testing.T) {
 	// nil lua_State* 没有可映射 State，所有操作必须保持失败安全。
