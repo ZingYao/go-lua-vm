@@ -386,6 +386,7 @@
   - [x] `scripts/test-native-luasocket.sh`
   - [x] `scripts/test-native-real-modules.sh`
   - [x] `scripts/check-native-skip-reasons.sh`
+    - [x] 覆盖 `scripts/test-native-real-modules.sh` 被误用于 Windows 目标时必须明确 skip，不能在子脚本全部 skip 后输出总验收 passed。
   - [x] `scripts/probe-native-lpeg-1159.sh`
   - [x] `scripts/bisect-native-lpeg-1159-prefix.sh`
   - [x] `scripts/probe-native-lpeg-1159-call-kinds.sh`
@@ -551,3 +552,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-07：新增 `scripts/test-native-luasocket.sh`，把 LuaSocket 运行期验收固化为脚本：脚本构建 native `glua` 与仓库内固定 LuaSocket 动态模块，按平台后缀执行 `require("mime")`、`mime.b64/unb64`、`require("socket")`、`socket.tcp()` / `socket.udp()` 基础创建关闭，以及带 2 秒超时的本机 TCP echo loopback 与 UDP sendto/receivefrom loopback。Windows 在 `lua53.dll` shim/import library 落地前继续明确 skip；Linux 仍需在对应平台实际运行闭环。
 - 2026-07-07：新增 `docs/NATIVE_MODULES_ACCEPTANCE.md` 作为当前验收台账，记录 macOS arm64 fixture、lua-cjson、LPeg、LuaSocket 已验证范围，明确 Linux/Windows 仍未声明运行期通过，并列出 native_modules 不可夸大的兼容边界。该记录不是全平台最终完成声明；Linux/Windows 闭环后需继续更新。
 - 2026-07-07：新增 `scripts/test-native-real-modules.sh` 作为当前平台真实模块总验收入口，串联 fixture、lua-cjson、LPeg 和 LuaSocket 运行期脚本，并统一输出目标平台与 CGO 状态。该入口只聚合当前平台验收结果，不把 Linux/Windows 缺失环境或 skip 视为全平台闭环；Linux/Windows 运行期仍需按目标平台独立执行并更新验收记录。
+- 2026-07-07：修正 `scripts/test-native-real-modules.sh` 的异平台边界；总验收入口现在只允许宿主同平台执行，`TARGET_GOOS=windows` 等异平台目标会在子脚本前明确 `skip:`，避免多个子验收各自 skip 后仍输出 `native real module acceptance suite passed`。同步扩展 `scripts/check-native-skip-reasons.sh` 覆盖该 Windows 总验收 skip 文本。

@@ -66,6 +66,11 @@ run_and_require_skip \
   env TARGET_GOOS=windows "${repo_root}/scripts/test-native-luasocket.sh"
 
 run_and_require_skip \
+  "windows real module aggregate acceptance" \
+  "skip: native real module acceptance requires target platform runtime; Windows requires lua53.dll shim or import library, not implemented yet" \
+  env TARGET_GOOS=windows "${repo_root}/scripts/test-native-real-modules.sh"
+
+run_and_require_skip \
   "linux missing cross compiler" \
   "skip: C compiler not found for linux/${host_goarch}: __glua_missing_native_cc__" \
   env NATIVE_CROSS_TARGETS="linux/${host_goarch}" "${cross_cc_var}=__glua_missing_native_cc__" "${repo_root}/scripts/check-native-cross-compile.sh"

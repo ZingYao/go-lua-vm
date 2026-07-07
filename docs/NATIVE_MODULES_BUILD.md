@@ -104,7 +104,7 @@ fixture loader smoke：
 ./scripts/test-native-real-modules.sh
 ```
 
-该入口串联 fixture、lua-cjson、LPeg 和 LuaSocket 当前平台运行期验收，便于本机或 CI 做一次性回归；它不替代 Linux/Windows 目标平台的独立运行期闭环。
+该入口串联 fixture、lua-cjson、LPeg 和 LuaSocket 当前平台运行期验收，便于本机或 CI 做一次性回归；它只允许在宿主同平台运行，异平台目标会明确 `skip:`，不替代 Linux/Windows 目标平台的独立运行期闭环。
 
 交叉编译验证入口：
 
@@ -120,7 +120,7 @@ fixture loader smoke：
 ./scripts/check-native-skip-reasons.sh
 ```
 
-该脚本不替代 Linux/Windows 真实运行期验收，只验证 Windows shim 未落地、缺失 cross C compiler 等不可用场景会输出明确 `skip:` 原因。
+该脚本不替代 Linux/Windows 真实运行期验收，只验证 Windows shim 未落地、缺失 cross C compiler、当前平台总验收被误用于异平台等不可用场景会输出明确 `skip:` 原因。
 
 fixture 只验证 loader smoke，不作为最终兼容结论。真实兼容验收必须包含：
 
