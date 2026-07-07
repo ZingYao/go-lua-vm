@@ -570,6 +570,30 @@ LUA
 local probe_warmup = ']' .. ''
 LUA
       ;;
+    string-close-dead-branch)
+      cat <<'LUA'
+local probe_warmup
+if false then
+  probe_warmup = ']'
+end
+LUA
+      ;;
+    string-close-dead-function)
+      cat <<'LUA'
+local function probe_warmup_const()
+  return ']'
+end
+local probe_warmup = nil
+LUA
+      ;;
+    string-close-called-function)
+      cat <<'LUA'
+local function probe_warmup_const()
+  return ']'
+end
+local probe_warmup = probe_warmup_const()
+LUA
+      ;;
     table-key-close)
       cat <<'LUA'
 local probe_warmup = { [']'] = true }
