@@ -169,6 +169,47 @@ func TestNativeCAPITypeAndNumberPrimitives(t *testing.T) {
 		t.Fatalf("nativeLuaIsUserdata nil state = %v, want false", got)
 	}
 
+	nativeLuaPushCClosure(luaState, luaState, 0)
+	nativeLuaPushValue(luaState, runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(func(args ...runtime.Value) ([]runtime.Value, error) {
+		// 测试只关心值类型；该函数不会被实际调用。
+		return args, nil
+	})))
+	nativeLuaPushValue(luaState, runtime.ReferenceValue(runtime.KindLuaClosure, &runtime.LuaClosure{}))
+	callableTable := runtime.NewTable()
+	callMetatable := runtime.NewTable()
+	callMetatable.RawSetString("__call", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(func(args ...runtime.Value) ([]runtime.Value, error) {
+		// 测试只关心带 __call 的 table 不应被误判为 C function。
+		return args, nil
+	})))
+	callableTable.SetMetatable(callMetatable)
+	nativeLuaPushValue(luaState, runtime.ReferenceValue(runtime.KindTable, callableTable))
+	cFunctionCases := []struct {
+		name  string
+		index int
+		want  bool
+	}{
+		{name: "nil", index: 1, want: false},
+		{name: "integer", index: 4, want: false},
+		{name: "table", index: 7, want: false},
+		{name: "full userdata", index: 10, want: false},
+		{name: "light userdata", index: 11, want: false},
+		{name: "native C closure", index: 12, want: true},
+		{name: "host Go closure", index: 13, want: true},
+		{name: "Lua closure", index: 14, want: false},
+		{name: "callable table", index: 15, want: false},
+		{name: "missing", index: 16, want: false},
+	}
+	for _, tc := range cFunctionCases {
+		// lua_iscfunction 只接受宿主侧 C/Go closure，不触发 __call，也不把 Lua closure 误判为 C function。
+		if got := nativeLuaIsCFunction(luaState, tc.index); got != tc.want {
+			t.Fatalf("nativeLuaIsCFunction %s = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	if got := nativeLuaIsCFunction(nil, 1); got {
+		// nil State 不能读取任何 C function。
+		t.Fatalf("nativeLuaIsCFunction nil state = %v, want false", got)
+	}
+
 	numberValue, ok := nativeLuaToNumber(luaState, 4)
 	if !ok || numberValue != 7 {
 		// integer 必须可按 number 读取。

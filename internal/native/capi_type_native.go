@@ -140,6 +140,17 @@ func nativeLuaIsInteger(luaState unsafe.Pointer, index int) bool {
 	return value.Kind == runtime.KindInteger
 }
 
+// nativeLuaIsCFunction 按 Lua 5.3 C API 判断值是否为宿主侧 C/Go 函数。
+func nativeLuaIsCFunction(luaState unsafe.Pointer, index int) bool {
+	// 本 VM 中 KindGoClosure 承载标准库 Go 函数和 native C function wrapper，对 C API 都表现为 C function。
+	value, ok := nativeLuaValueAt(luaState, index)
+	if !ok {
+		// 无效索引属于 none，不能视为 C function。
+		return false
+	}
+	return value.Kind == runtime.KindGoClosure
+}
+
 // nativeLuaIsUserdata 按 Lua 5.3 C API 判断值是否为 full userdata 或 lightuserdata。
 func nativeLuaIsUserdata(luaState unsafe.Pointer, index int) bool {
 	// lua_isuserdata 对 full userdata 和 lightuserdata 都返回 true。
@@ -232,6 +243,18 @@ func lua_isinteger(luaState *C.lua_State, index C.int) C.int {
 	// C API 使用 int 表示 boolean，只有真实 integer 值按 true 返回。
 	if nativeLuaIsInteger(unsafe.Pointer(luaState), int(index)) {
 		// 非 0 表示当前值以 integer 表示。
+		return 1
+	}
+	return 0
+}
+
+// lua_iscfunction 导出 Lua 5.3 C API C function 类型判断入口。
+//
+//export lua_iscfunction
+func lua_iscfunction(luaState *C.lua_State, index C.int) C.int {
+	// C API 使用 int 表示 boolean，宿主 Go closure 和 native C closure wrapper 都按 true 返回。
+	if nativeLuaIsCFunction(unsafe.Pointer(luaState), int(index)) {
+		// 非 0 表示当前值是 C API 视角下的 C function。
 		return 1
 	}
 	return 0
