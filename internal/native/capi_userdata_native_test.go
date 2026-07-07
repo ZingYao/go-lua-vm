@@ -446,6 +446,136 @@ func TestNativeLuaUserValueCopyBetweenVisibleUserdata(t *testing.T) {
 	}
 }
 
+// TestNativeLuaUserValueJoinTablesWithShiftedRawSetI 验证构造期 user value table 合并的负索引语义。
+func TestNativeLuaUserValueJoinTablesWithShiftedRawSetI(t *testing.T) {
+	// LPeg 的 joinktables/concattable 路径会在 lua_rawgeti 压栈后用 idx2-1 修正目标 table，这里用通用 C API 组合锁定该栈语义。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 native State 映射不可用，无法验证 table 合并路径。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'o', 'u', 't', 'e', 'r', 0}[0]))
+	if pointer := nativeLuaNewUserdata(luaState, 4); pointer == nil {
+		// 测试需要一个 left native full userdata。
+		t.Fatalf("left lua_newuserdata returned nil")
+	}
+	leftValue := state.ValueAt(2)
+	leftUserdata, ok := leftValue.Ref.(*runtime.Userdata)
+	if !ok || leftUserdata == nil {
+		// left userdata 必须能解析为 runtime.Userdata。
+		t.Fatalf("left userdata ref = %#v, want *runtime.Userdata", leftValue.Ref)
+	}
+	leftTable := runtime.NewTable()
+	leftTable.RawSetInteger(1, runtime.StringValue("left-a"))
+	leftTable.RawSetInteger(2, runtime.StringValue("left-b"))
+	leftUserdata.UserValue = runtime.ReferenceValue(runtime.KindTable, leftTable)
+	if pointer := nativeLuaNewUserdata(luaState, 4); pointer == nil {
+		// 测试需要一个 right native full userdata。
+		t.Fatalf("right lua_newuserdata returned nil")
+	}
+	rightValue := state.ValueAt(3)
+	rightUserdata, ok := rightValue.Ref.(*runtime.Userdata)
+	if !ok || rightUserdata == nil {
+		// right userdata 必须能解析为 runtime.Userdata。
+		t.Fatalf("right userdata ref = %#v, want *runtime.Userdata", rightValue.Ref)
+	}
+	rightTable := runtime.NewTable()
+	rightTable.RawSetInteger(1, runtime.StringValue("right-a"))
+	rightUserdata.UserValue = runtime.ReferenceValue(runtime.KindTable, rightTable)
+	if pointer := nativeLuaNewUserdata(luaState, 4); pointer == nil {
+		// 测试需要一个 joined native full userdata。
+		t.Fatalf("joined lua_newuserdata returned nil")
+	}
+	joinedValue := state.ValueAt(4)
+	joinedUserdata, ok := joinedValue.Ref.(*runtime.Userdata)
+	if !ok || joinedUserdata == nil {
+		// joined userdata 必须能解析为 runtime.Userdata。
+		t.Fatalf("joined userdata ref = %#v, want *runtime.Userdata", joinedValue.Ref)
+	}
+	if !pushNativeStateCallFrame(luaState, 1, nil) {
+		// 无法建立调用帧时，本测试不能验证 C frame 内 table 合并语义。
+		t.Fatalf("pushNativeStateCallFrame failed")
+	}
+	defer popNativeStateCallFrame(luaState)
+
+	if gotType := nativeLuaGetUserValue(luaState, 1); gotType != nativeLuaTypeTable {
+		// left 的 user value 是 table，读取后必须压入当前 C frame。
+		t.Fatalf("lua_getuservalue(left) = %d, want table", gotType)
+	}
+	if gotType := nativeLuaGetUserValue(luaState, 2); gotType != nativeLuaTypeTable {
+		// right 的 user value 是 table，读取后必须压入当前 C frame。
+		t.Fatalf("lua_getuservalue(right) = %d, want table", gotType)
+	}
+	nativeLuaCreateTable(luaState, 3, 0)
+	if got := nativeLuaStackTop(luaState); got != 6 {
+		// 当前 C frame 应可见 left、right、joined、left ktable、right ktable、新 ktable。
+		t.Fatalf("visible top after create joined ktable = %d, want 6", got)
+	}
+
+	if gotType := nativeLuaRawGetI(luaState, -3, 1); gotType != nativeLuaTypeString {
+		// -3 当前指向 left ktable，slot 1 应读取 left-a 并压栈。
+		t.Fatalf("lua_rawgeti(left ktable, 1) = %d, want string", gotType)
+	}
+	nativeLuaRawSetI(luaState, -2, 1)
+	if gotType := nativeLuaRawGetI(luaState, -3, 2); gotType != nativeLuaTypeString {
+		// 上一次 rawset 弹栈后 -3 仍指向 left ktable，slot 2 应读取 left-b。
+		t.Fatalf("lua_rawgeti(left ktable, 2) = %d, want string", gotType)
+	}
+	nativeLuaRawSetI(luaState, -2, 2)
+	if gotType := nativeLuaRawGetI(luaState, -2, 1); gotType != nativeLuaTypeString {
+		// -2 当前指向 right ktable，slot 1 应读取 right-a 并压栈。
+		t.Fatalf("lua_rawgeti(right ktable, 1) = %d, want string", gotType)
+	}
+	nativeLuaRawSetI(luaState, -2, 3)
+	if got := nativeLuaStackTop(luaState); got != 6 {
+		// 三次 rawseti 必须各自消费临时 value，不能在 C frame 栈顶残留拷贝值。
+		t.Fatalf("visible top after concatenating ktables = %d, want 6", got)
+	}
+	if got := nativeLuaSetUserValue(luaState, -4); got != 1 {
+		// -4 当前指向 joined userdata，栈顶新 ktable 必须能挂入其 user value。
+		t.Fatalf("lua_setuservalue(joined) = %d, want 1", got)
+	}
+	if got := nativeLuaStackTop(luaState); got != 5 {
+		// setuservalue 只应弹出新 ktable，保留两个源 ktable 等待调用方清理。
+		t.Fatalf("visible top after lua_setuservalue(joined) = %d, want 5", got)
+	}
+	nativeLuaSetTop(luaState, 3)
+	if got := nativeLuaStackTop(luaState); got != 3 {
+		// 调用方清理后当前 C frame 只保留三个 userdata 参数槽。
+		t.Fatalf("visible top after ktable cleanup = %d, want 3", got)
+	}
+	if got := state.StackTop(); got != 4 {
+		// 全局栈仍应是 outer、left、right、joined，不能泄漏临时 ktable。
+		t.Fatalf("global top after ktable join = %d, want 4", got)
+	}
+	if value := state.ValueAt(1); value.Kind != runtime.KindString || value.String != "outer" {
+		// C frame 内 table 合并不能覆盖外层调用者栈。
+		t.Fatalf("outer stack value = %#v, want outer", value)
+	}
+	joinedTable, ok := joinedUserdata.UserValue.Ref.(*runtime.Table)
+	if joinedUserdata.UserValue.Kind != runtime.KindTable || !ok || joinedTable == nil {
+		// joined userdata 必须持有新合并出的 user value table。
+		t.Fatalf("joined user value = %#v, want table", joinedUserdata.UserValue)
+	}
+	if value := joinedTable.RawGetInteger(1); !value.RawEqual(runtime.StringValue("left-a")) {
+		// 合并 table 的第一个槽位必须来自 left ktable。
+		t.Fatalf("joined ktable[1] = %#v, want left-a", value)
+	}
+	if value := joinedTable.RawGetInteger(2); !value.RawEqual(runtime.StringValue("left-b")) {
+		// 合并 table 的第二个槽位必须来自 left ktable。
+		t.Fatalf("joined ktable[2] = %#v, want left-b", value)
+	}
+	if value := joinedTable.RawGetInteger(3); !value.RawEqual(runtime.StringValue("right-a")) {
+		// 合并 table 的第三个槽位必须来自 right ktable。
+		t.Fatalf("joined ktable[3] = %#v, want right-a", value)
+	}
+}
+
 // TestNativeLuaToUserdataRejectsNonUserdata 验证非 native userdata 不会被误暴露为 C 指针。
 func TestNativeLuaToUserdataRejectsNonUserdata(t *testing.T) {
 	// 构造普通栈值和纯 Go userdata，覆盖转换失败边界。
