@@ -69,6 +69,36 @@ func nativeLuaCallGoClosure(function runtime.Value, args []runtime.Value) ([]run
 			return nil, err
 		}
 		return []runtime.Value{result}, nil
+	case runtime.GoUnaryFunction:
+		// 单参数 Go 回调是 GoFunction 的热路径形态；C API 调用仍按普通 Lua 调用只读取首个实参。
+		argument := runtime.NilValue()
+		if len(args) > 0 {
+			// Lua 调用允许多余实参，一元标准库函数只消费第一个实参。
+			argument = args[0]
+		}
+		result, err := callback(argument)
+		if err != nil {
+			// 回调错误原样传播，protected call 边界会转换为 Lua error object。
+			return nil, err
+		}
+		return []runtime.Value{result}, nil
+	case *runtime.GoFastUnaryFunction:
+		// fast unary 在 native C API 回调中不能跳过调用边界，按其普通一元函数入口执行。
+		if callback == nil || callback.Function == nil {
+			// 损坏 closure 按不可调用处理。
+			return nil, runtime.NewRuntimeError(runtime.StringValue(runtime.ErrExpectedCallable.Error()), runtime.ErrExpectedCallable)
+		}
+		argument := runtime.NilValue()
+		if len(args) > 0 {
+			// Lua 调用允许多余实参，一元标准库函数只消费第一个实参。
+			argument = args[0]
+		}
+		result, err := callback.Function(argument)
+		if err != nil {
+			// 回调错误原样传播，protected call 边界会转换为 Lua error object。
+			return nil, err
+		}
+		return []runtime.Value{result}, nil
 	case *runtime.GoFixedResultsFunction:
 		// 固定结果回调先尝试声明的通用入口，未命中再走 fallback。
 		if callback == nil || callback.Function == nil {

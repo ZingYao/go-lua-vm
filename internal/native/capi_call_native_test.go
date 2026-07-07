@@ -53,6 +53,93 @@ func TestNativeLuaCallKCallsGoClosure(t *testing.T) {
 	}
 }
 
+// TestNativeLuaCallKCallsUnaryGoClosureShapes 验证 lua_callk 覆盖一元 Go closure 负载。
+func TestNativeLuaCallKCallsUnaryGoClosureShapes(t *testing.T) {
+	// native C 模块通过 lua_callk 调 Lua/Go 函数时，必须支持标准库常用的一元热路径闭包形态；
+	// 该路径不能只识别 GoResultsFunction，否则 math.sin 这类函数会被误判为不可调用。
+	cases := []struct {
+		name     string
+		function runtime.Value
+	}{
+		{
+			name: "go-unary-function",
+			function: runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoUnaryFunction(func(argument runtime.Value) (runtime.Value, error) {
+				// 测试函数只消费首个实参，多余 Lua 实参必须被调用边界安全忽略。
+				value, ok := argument.ToInteger()
+				if !ok {
+					// 非整数实参说明 native 调用桥没有按顺序传入首个参数。
+					return runtime.NilValue(), runtime.RaiseError(runtime.StringValue("bad unary argument"))
+				}
+				return runtime.IntegerValue(value + 1), nil
+			})),
+		},
+		{
+			name: "go-fast-unary-function",
+			function: runtime.ReferenceValue(runtime.KindGoClosure, &runtime.GoFastUnaryFunction{
+				Function: func(argument runtime.Value) (runtime.Value, error) {
+					// fast unary 在 native C API 调用桥中仍要走真实函数入口，不能依赖 VM opcode 快路径。
+					value, ok := argument.ToInteger()
+					if !ok {
+						// 非整数实参说明 native 调用桥没有按顺序传入首个参数。
+						return runtime.NilValue(), runtime.RaiseError(runtime.StringValue("bad fast unary argument"))
+					}
+					return runtime.IntegerValue(value + 1), nil
+				},
+				AcceptedKinds: runtime.UnaryKindMask(runtime.KindInteger),
+			}),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// 每个子用例使用独立 State，避免 pending error 或栈状态跨用例污染。
+			state := runtime.NewState()
+			defer state.Close()
+			handle, err := newNativeStateHandle(state)
+			if err != nil {
+				// handle 创建失败说明 State 映射不可用，无法验证 unary callk。
+				t.Fatalf("newNativeStateHandle failed: %v", err)
+			}
+			defer handle.close()
+			luaState := handle.pointer()
+
+			nativeLuaPushValue(luaState, runtime.StringValue("outer-sentinel"))
+			baseTop := state.StackTop()
+			if !pushNativeStateCallFrame(luaState, baseTop, nil) {
+				// 建立 C frame 失败时无法验证 native C 模块中的 lua_callk 边界。
+				t.Fatalf("pushNativeStateCallFrame failed")
+			}
+			defer popNativeStateCallFrame(luaState)
+
+			nativeLuaPushValue(luaState, tc.function)
+			nativeLuaPushInteger(luaState, 41)
+			nativeLuaPushInteger(luaState, 99)
+			nativeLuaCallK(luaState, 2, 1)
+
+			if got := nativeLuaStackTop(luaState); got != 1 {
+				// 函数和两个参数应被消费，只留下一个一元函数返回值。
+				t.Fatalf("visible top after unary call = %d, want 1", got)
+			}
+			if got := state.StackTop(); got != baseTop+1 {
+				// 全局栈应保留外层 sentinel 加当前 C frame 的一个返回值。
+				t.Fatalf("global top after unary call = %d, want %d", got, baseTop+1)
+			}
+			if value := state.ValueAt(1); !value.RawEqual(runtime.StringValue("outer-sentinel")) {
+				// native C frame 内的调用不能覆盖外层 Go VM 栈值。
+				t.Fatalf("outer sentinel after unary call = %#v", value)
+			}
+			if value := state.ValueAt(-1); !value.RawEqual(runtime.IntegerValue(42)) {
+				// 一元闭包必须读取首个实参 41 并忽略第二个多余实参。
+				t.Fatalf("unary call result = %#v, want 42", value)
+			}
+			if errorObject, hasError := takeNativeStatePendingError(luaState); hasError {
+				// 成功路径不应留下 pending error。
+				t.Fatalf("unary call pending error = %#v", errorObject)
+			}
+		})
+	}
+}
+
 // TestNativeLuaCallKRecordsPendingError 验证 lua_callk 失败时记录非 protected pending error。
 func TestNativeLuaCallKRecordsPendingError(t *testing.T) {
 	// lua_callk 没有错误码返回，错误需要等待当前 C function 返回 Go 边界后传播。
