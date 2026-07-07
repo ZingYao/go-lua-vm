@@ -483,9 +483,39 @@ emit_probe_warmup_default_tail() {
 local probe_warmup = ']' * m.C(m.P'='^0) * ']'
 LUA
       ;;
+    pempty)
+      cat <<'LUA'
+local probe_warmup = m.P''
+LUA
+      ;;
+    ptrue)
+      cat <<'LUA'
+local probe_warmup = m.P(true)
+LUA
+      ;;
+    pfalse)
+      cat <<'LUA'
+local probe_warmup = m.P(false)
+LUA
+      ;;
+    pnum0)
+      cat <<'LUA'
+local probe_warmup = m.P(0)
+LUA
+      ;;
     pany)
       cat <<'LUA'
 local probe_warmup = m.P(1)
+LUA
+      ;;
+    pnum2)
+      cat <<'LUA'
+local probe_warmup = m.P(2)
+LUA
+      ;;
+    pnumneg1)
+      cat <<'LUA'
+local probe_warmup = m.P(-1)
 LUA
       ;;
     pchar)
@@ -493,9 +523,29 @@ LUA
 local probe_warmup = m.P']'
 LUA
       ;;
+    pstring2)
+      cat <<'LUA'
+local probe_warmup = m.P'ab'
+LUA
+      ;;
     seq)
       cat <<'LUA'
 local probe_warmup = m.P']' * (m.P'='^0) * m.P']'
+LUA
+      ;;
+    set-empty)
+      cat <<'LUA'
+local probe_warmup = m.S''
+LUA
+      ;;
+    set-single)
+      cat <<'LUA'
+local probe_warmup = m.S']'
+LUA
+      ;;
+    set-range)
+      cat <<'LUA'
+local probe_warmup = m.R'az'
 LUA
       ;;
     capture)
