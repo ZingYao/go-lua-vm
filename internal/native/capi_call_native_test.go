@@ -154,6 +154,119 @@ func TestNativeLuaCallKRespectsCurrentCFrameBase(t *testing.T) {
 	}
 }
 
+// TestNativeLuaCallKFixedResultKeepsConstructedUserdataRoots 验证固定返回调用后的构造期 native 根。
+func TestNativeLuaCallKFixedResultKeepsConstructedUserdataRoots(t *testing.T) {
+	// 固定返回 Go closure 经 lua_callk 写回后，当前 C frame 继续创建 userdata/user value table；
+	// 这些临时构造对象必须通过可见栈和 userdata 关联边参与 weak sweep 强根判断。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 fixed call 与构造期根组合。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	weakValueTable := runtime.NewTable()
+	weakMetatable := runtime.NewTable()
+	weakMetatable.RawSetString("__mode", runtime.StringValue("v"))
+	weakValueTable.SetMetatable(weakMetatable)
+	state.SetGlobal("weak", runtime.ReferenceValue(runtime.KindTable, weakValueTable))
+	target := runtime.NewTable()
+	weakValueTable.RawSetString("from-fixed-call-userdata", runtime.ReferenceValue(runtime.KindTable, target))
+
+	nativeLuaPushValue(luaState, runtime.StringValue("outer-sentinel"))
+	baseTop := state.StackTop()
+	if !pushNativeStateCallFrame(luaState, baseTop, nil) {
+		// 建立 C frame 失败时无法验证可见栈边界。
+		t.Fatalf("pushNativeStateCallFrame failed")
+	}
+	defer popNativeStateCallFrame(luaState)
+
+	fixedFunction := &runtime.GoFixedResultsFunction{
+		MaxResults: 1,
+		Function: func(results []runtime.Value, args ...runtime.Value) (int, bool, error) {
+			// 该回调模拟标准库 select/rawequal 这类固定返回 Go closure 的 C API 调用路径。
+			if len(args) != 2 {
+				// 参数数量不符合预期时返回 Lua error，避免测试静默通过。
+				return 0, false, runtime.RaiseError(runtime.StringValue("bad fixed arg count"))
+			}
+			if len(results) == 0 {
+				// 调用方声明的 MaxResults 不足时不能写入结果槽。
+				return 0, false, runtime.RaiseError(runtime.StringValue("missing result slot"))
+			}
+			results[0] = runtime.IntegerValue(int64(len(args)))
+			return 1, true, nil
+		},
+	}
+	nativeLuaPushValue(luaState, runtime.ReferenceValue(runtime.KindGoClosure, fixedFunction))
+	nativeLuaPushValue(luaState, runtime.StringValue("alpha"))
+	nativeLuaPushValue(luaState, runtime.StringValue("beta"))
+	nativeLuaCallK(luaState, 2, 1)
+
+	if got := nativeLuaStackTop(luaState); got != 1 {
+		// 固定返回调用应只在当前 C frame 留下一个结果。
+		t.Fatalf("visible top after fixed call = %d, want 1", got)
+	}
+	if value := state.ValueAt(-1); !value.RawEqual(runtime.IntegerValue(2)) {
+		// 固定返回值必须按实参数量写回，证明 lua_callk 消费了当前 C frame 内的函数和参数。
+		t.Fatalf("fixed call result = %#v, want 2", value)
+	}
+	if value := state.ValueAt(1); !value.RawEqual(runtime.StringValue("outer-sentinel")) {
+		// 外层 Go VM 栈值不能被 fixed call 或后续构造期操作覆盖。
+		t.Fatalf("outer sentinel after fixed call = %#v", value)
+	}
+	if errorObject, hasError := takeNativeStatePendingError(luaState); hasError {
+		// 成功 fixed call 不应留下 pending error。
+		t.Fatalf("fixed call pending error = %#v", errorObject)
+	}
+
+	if pointer := nativeLuaNewUserdata(luaState, 4); pointer == nil {
+		// 构造期需要一个 native full userdata 承载 user value table。
+		t.Fatalf("lua_newuserdata returned nil")
+	}
+	userdataValue := state.ValueAt(-1)
+	userdata, ok := userdataValue.Ref.(*runtime.Userdata)
+	if !ok || userdata == nil {
+		// native full userdata 必须能解析为 runtime.Userdata。
+		t.Fatalf("userdata ref = %#v, want *runtime.Userdata", userdataValue.Ref)
+	}
+	nativeLuaCreateTable(luaState, 0, 1)
+	userValueValue := state.ValueAt(-1)
+	userValueTable, ok := userValueValue.Ref.(*runtime.Table)
+	if !ok || userValueTable == nil {
+		// lua_createtable 必须压入可挂接到 userdata 的 table。
+		t.Fatalf("user value ref = %#v, want *runtime.Table", userValueValue.Ref)
+	}
+	userValueTable.RawSetString("target", runtime.ReferenceValue(runtime.KindTable, target))
+	if got := nativeLuaSetUserValue(luaState, -2); got != 1 {
+		// -2 当前指向刚创建的 userdata，栈顶 table 应挂为 user value。
+		t.Fatalf("lua_setuservalue(userdata) = %d, want 1", got)
+	}
+	if got := nativeLuaStackTop(luaState); got != 2 {
+		// 当前 C frame 应保留 fixed call 结果和 userdata，不应残留临时 user value table。
+		t.Fatalf("visible top after userdata construction = %d, want 2", got)
+	}
+	if got := state.StackTop(); got != baseTop+2 {
+		// 全局栈应保留外层 sentinel 加当前 C frame 两个可见值。
+		t.Fatalf("global top after userdata construction = %d, want %d", got, baseTop+2)
+	}
+	if userdata.UserValue.Kind != runtime.KindTable || userdata.UserValue.Ref != userValueTable {
+		// userdata 必须持有刚构造出的 user value table identity。
+		t.Fatalf("userdata user value = %#v, want %p", userdata.UserValue, userValueTable)
+	}
+
+	if removed := state.SweepWeakTables(); removed != 0 {
+		// userdata 仍在当前 C frame 可见栈时，其 user value 间接引用的 weak value 不能被清理。
+		t.Fatalf("weak sweep removed %d entries while constructed userdata is visible", removed)
+	}
+	if got := weakValueTable.RawGetString("from-fixed-call-userdata"); got.IsNil() {
+		// fixed call 后构造出的 userdata/user value 关联边必须保活 target。
+		t.Fatalf("weak value reachable through fixed-call userdata was removed")
+	}
+}
+
 // TestNativeLuaPCallKCallsGoClosure 验证 lua_pcallk 能调用 native shim 包装的 Go closure。
 func TestNativeLuaPCallKCallsGoClosure(t *testing.T) {
 	// pcall 成功时必须弹出函数和参数，并按 nresults 压回返回值。
