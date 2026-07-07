@@ -147,3 +147,48 @@ func TestNativeLuaPushCClosureRejectsUpvaluesOutsideCurrentCFrame(t *testing.T) 
 		t.Fatalf("outer sentinel after missing-upvalue C closure = %#v, want outer string", value)
 	}
 }
+
+// TestNativeCFrameVisibleStackRootsWeakSweep 验证 C frame 可见临时栈值参与弱表强根扫描。
+func TestNativeCFrameVisibleStackRootsWeakSweep(t *testing.T) {
+	// native C API 构造 userdata、ktable 或 capture 时会把临时对象压在当前 C frame 可见栈上。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 C frame 栈根。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	weakValueTable := runtime.NewTable()
+	weakMetatable := runtime.NewTable()
+	weakMetatable.RawSetString("__mode", runtime.StringValue("v"))
+	weakValueTable.SetMetatable(weakMetatable)
+	state.SetGlobal("weak", runtime.ReferenceValue(runtime.KindTable, weakValueTable))
+
+	temporaryRoot := runtime.NewTable()
+	temporaryRoot.RawSetString("marker", runtime.StringValue("native-c-frame"))
+	weakValueTable.RawSetString("from-c-frame", runtime.ReferenceValue(runtime.KindTable, temporaryRoot))
+
+	baseTop := state.StackTop()
+	if !pushNativeStateCallFrame(luaState, baseTop, nil) {
+		// C frame 基址记录失败时无法验证临时栈 root。
+		t.Fatalf("pushNativeStateCallFrame failed")
+	}
+	defer popNativeStateCallFrame(luaState)
+	nativeLuaPushValue(luaState, runtime.ReferenceValue(runtime.KindTable, temporaryRoot))
+
+	if removed := state.SweepWeakTables(); removed != 0 {
+		// 当前 C frame 栈上的 table 是唯一强根，weak value 不应被本轮 sweep 清掉。
+		t.Fatalf("weak sweep removed %d entries while C frame root is visible", removed)
+	}
+	if got := weakValueTable.RawGetString("from-c-frame"); got.IsNil() {
+		// 临时 C frame 栈值间接保活的 weak value 必须仍可见。
+		t.Fatalf("weak value reachable through native C frame stack was removed")
+	}
+	if got := state.StackTop(); got != baseTop+1 {
+		// sweep 不应修改 C frame 可见栈。
+		t.Fatalf("stack top after weak sweep = %d, want %d", got, baseTop+1)
+	}
+}
