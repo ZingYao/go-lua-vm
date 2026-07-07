@@ -33,7 +33,7 @@
 | Windows import library 构建入口 | `scripts/build-native-windows-lua53-importlib.sh` | 根据 `native/lua53/windows/lua53.def` 生成 `llvm-dlltool` / `dlltool` 可用的 `liblua53.dll.a` 或 MSVC/LLVM `lua53.lib`，并在缺失工具时输出明确 `skip:`；该入口只证明链接期 import library 可生成，不替代 Windows `.dll` require 运行期验收 | 已固定 |
 | Fixture Go harness | `internal/native/loadlib_fixture_unix_test.go` | 编译仓库内 fixture C 文件，并验证 `package.loadlib`、`require`、错误传播和 userdata 状态 | 已固定 |
 | 真实模块源码 | `third_party/lua-cjson/` | 第一真实模块验收源码，固定 upstream `mpx/lua-cjson` tag `2.1.0` / commit `4bc5e917c8cd5fc2f6b217512ef530007529322f`，许可证见目录内 `LICENSE` | 已固定 |
-| 真实模块构建脚本 | `scripts/build-native-cjson.sh` | 使用仓库内 Lua 5.3 public headers 和固定 `third_party/lua-cjson/` 源码编译当前平台 `cjson` 动态模块，显式输出目标平台、`CC`、源码路径和产物路径 | 已固定 |
+| 真实模块构建脚本 | `scripts/build-native-cjson.sh` | 使用仓库内 Lua 5.3 public headers 和固定 `third_party/lua-cjson/` 源码编译 `cjson` 动态模块；Linux 产出 `.so`，macOS 产出 `.so` / `.dylib`，Windows 在显式 C compiler 和 Lua import library 齐备时产出 `.dll`；脚本显式输出宿主/目标平台、`CC`、源码路径和产物路径，缺少 Windows 输入时明确 skip | 已固定 |
 | 真实模块运行期脚本 | `scripts/test-native-cjson.sh` | 构建 native tag `glua` 与 `cjson` 动态模块，验证 `lua_*` / `luaL_*` 未解析 ABI 符号由 native `glua` shim 覆盖，并执行 `require("cjson")`、`encode/decode`、`cjson.null`、非法 JSON `pcall` 和不可序列化 function `pcall` 验收；macOS 分别覆盖 `.so` 与 `.dylib` 后缀 | 已固定 |
 | 真实模块源码 | `third_party/lpeg/` | 第二真实模块验收源码，固定 LPeg 1.1.0 官方源码包，用于后续覆盖复杂 userdata、metatable、registry 和 C function 行为；许可证和来源见目录内 `GLUA_VENDOR.md` 与 `lpeg.html` | 已固定 |
 | 真实模块构建脚本 | `scripts/build-native-lpeg.sh` | 使用仓库内 Lua 5.3 public headers 和固定 `third_party/lpeg/` 源码编译当前平台 `lpeg` 动态模块，显式输出目标平台、`CC`、源码路径和产物路径；Windows 在 `lua53.dll` shim/import library 落地前明确 skip | 已固定 |
@@ -54,7 +54,7 @@
 
 - 默认构建仍以 `CGO_ENABLED=0 go test ./...` 和 `./scripts/check-go-gates.sh` 作为必过门禁。
 - `native_modules` 构建当前可通过 `CGO_ENABLED=1 go test -tags native_modules ./...` 验证仓库内 Go/CGO shim、平台 loader 和 Unix 内嵌 fixture。
-- `lua-cjson` 真实模块源码可通过 `CGO_ENABLED=1 scripts/build-native-cjson.sh` 做源码编译级验收，也可通过 `scripts/test-native-cjson.sh` 做 ABI 符号和运行期验收；运行期脚本覆盖 `require("cjson")`、`encode/decode`、`cjson.null` identity、非法 JSON `pcall` 和不可序列化 function `pcall`，并在 macOS 上分别验证 `.so` 与 `.dylib` 两类候选。
+- `lua-cjson` 真实模块源码可通过 `CGO_ENABLED=1 scripts/build-native-cjson.sh` 做源码编译级验收，也可通过 `scripts/test-native-cjson.sh` 做 ABI 符号和运行期验收；运行期脚本覆盖 `require("cjson")`、`encode/decode`、`cjson.null` identity、非法 JSON `pcall` 和不可序列化 function `pcall`，并在 macOS 上分别验证 `.so` 与 `.dylib` 两类候选。Windows 分支当前只提供 `cjson.dll` 源码构建入口，不替代 Windows `require("cjson")` 运行期验收。
 - `third_party/lpeg/` 当前可通过 `CGO_ENABLED=1 scripts/build-native-lpeg.sh` 做源码编译级验收，也可通过 `scripts/test-native-lpeg.sh` 做运行期验收；macOS arm64 `.so` 与 `.dylib` 后缀已通过基础 smoke 和完整官方 `test.lua`。
 - `third_party/luasocket/` 当前可通过 `CGO_ENABLED=1 scripts/build-native-luasocket.sh` 做 `socket.core` / `mime.core` 源码编译级验收，也可通过 `scripts/test-native-luasocket.sh` 做当前平台运行期验收；脚本覆盖 `require("socket")`、`require("mime")`、MIME 编解码和可控本机 TCP/UDP loopback。
 - `scripts/test-native-real-modules.sh` 可作为当前平台真实模块总验收入口，串联 fixture、lua-cjson、LPeg 和 LuaSocket 运行期脚本；该入口只聚合宿主同平台结果，Windows 目标和其他异平台目标会在执行子验收前明确 skip，不把缺失目标平台的 skip 解释为 Linux/Windows 已闭环。

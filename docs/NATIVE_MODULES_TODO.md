@@ -186,8 +186,10 @@
   - [x] 固定 `lua-cjson` 源码到仓库或 `third_party/`，记录来源、版本和许可证，构建不得联网下载。
   - [x] `lua-cjson` 源码编译验收：`require("cjson")`、`encode/decode`、错误输入 `pcall`。
     - [x] 新增 `scripts/build-native-cjson.sh`，使用仓库内 Lua 5.3 public headers 和固定源码编译当前平台 `cjson` 动态模块。
+    - [x] `scripts/build-native-cjson.sh` 支持 Windows `cjson.dll` 源码构建入口：显式配置 `NATIVE_CC_WINDOWS_<ARCH>` / `CC` 且 `LUA53_IMPORT_LIB` 或 import library 生成工具可用时构建；缺少 Windows C compiler 或 import library 时必须明确 `skip:`。
     - [x] 运行期 `require("cjson")`、`encode/decode` 和错误输入 `pcall` 验收。
       - [x] macOS `.so` 与 `.dylib` 两种后缀分别独立验收。
+      - [ ] Windows 目标平台执行 `require("cjson")`、`encode/decode` 和错误输入 `pcall` 验收。
     - [x] 新增 `scripts/test-native-cjson.sh`，把真实模块运行期验收固化为可重复 CLI 脚本。
   - [x] `lua-cjson` 官方 Lua 5.3 ABI 二进制模块验收：验证 `lua_*` / `luaL_*` 符号由本项目 shim 满足。
     - [x] macOS arm64 已在 `scripts/test-native-cjson.sh` 中固化：`cjson.so` / `cjson.dylib` 必须保留未解析 `lua_*` / `luaL_*` ABI 符号、不得链接外部 Lua runtime，且这些符号必须由 native `glua` 导出的 shim 覆盖后再执行运行期验收。
@@ -582,3 +584,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-07：按用户纠正的“LPeg 日志相关模块”方向，临时克隆并运行 `mozilla-services/lua_sandbox_extensions` 的 `lpeg/tests/test.lua`。第一层证伪为外部套件自身 Lua 5.1/旧 LPeg 假设：模块使用 `setfenv`、测试假设 `_G.lpeg`、本地时区需固定为 `TZ=UTC`，且纳秒断言混用 Lua 5.1 double 期望与 Lua 5.3 integer。排除这些外部噪音后，确认项目侧真实缺口为三类通用语义：`os.time` date table 字段未接受 numeric string、`os.date` 常见 POSIX strftime 指令覆盖不足、native `lua_callk` 从 C 模块调用 Lua callback 时缺少可见 C frame，导致 `error(msg, 2)` 越过 C 边界给 `re.lua` 错误对象误加源码前缀。已修复上述通用语义并补充模块无关测试；`pcall(re.compile, "@{:foo")` 现返回裸 `pattern error near '@{:foo'`，临时 LPeg 日志 suite 已在 macOS arm64 native LPeg 下通过。该外部 suite 未入仓库，当前仅作为诊断压力样本，不替代正式真实模块门禁。
 - 2026-07-07：新增 `scripts/build-native-windows-lua53-importlib.sh`，在 `lua53.def` 未漂移的前提下生成 Windows Lua 5.3 ABI import library：MinGW/LLVM dlltool 路径产出 `liblua53.dll.a`，MSVC/LLVM lib 路径产出 `lua53.lib`，并支持 `NATIVE_WINDOWS_IMPORT_TOOL` / `NATIVE_WINDOWS_IMPORT_TOOL_KIND` 指定工具。当前 macOS arm64 本机缺少 `llvm-dlltool`、`dlltool`、`lib.exe` 和 `llvm-lib`，脚本输出明确 `skip:`，并已纳入 `scripts/check-native-skip-reasons.sh`；本轮只完成 Windows 链接期构建入口，不声明 Windows `.dll` fixture 构建、`require` 或真实模块运行期闭环完成。
 - 2026-07-07：扩展 `scripts/build-native-fixtures.sh` 的 Windows 分支；脚本现在支持通过显式 `NATIVE_CC_WINDOWS_<ARCH>` / `CC` 和 `LUA53_IMPORT_LIB` 或 `scripts/build-native-windows-lua53-importlib.sh` 产物构建 `glua_native_smoke.dll` / `glua_native_failopen.dll`，并在缺 Windows C compiler 或 import library 时输出可门禁的 `skip:`。当前 macOS arm64 本机缺少 Windows C toolchain 和 import library 工具，因此只验证 skip 路径和当前平台 macOS fixture/真实模块验收；本轮不声明 Windows 目标平台 `require` 或真实模块运行期闭环完成。
+- 2026-07-07：扩展 `scripts/build-native-cjson.sh` 的 Windows 分支；脚本现在支持通过显式 `NATIVE_CC_WINDOWS_<ARCH>` / `CC` 和 `LUA53_IMPORT_LIB` 或 `scripts/build-native-windows-lua53-importlib.sh` 产物构建 `cjson.dll`，并在缺 Windows C compiler 或 import library 时输出可门禁的 `skip:`。当前 macOS arm64 本机缺少 Windows C toolchain 和 import library 工具，因此只验证 skip 路径和当前平台 macOS `lua-cjson` 源码/运行期验收；本轮不声明 Windows `require("cjson")` 或真实模块运行期闭环完成。

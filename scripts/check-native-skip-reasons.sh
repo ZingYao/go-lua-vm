@@ -82,9 +82,14 @@ run_and_require_skip \
   env TARGET_GOOS=windows CC=cc NATIVE_WINDOWS_IMPORT_TOOL=__glua_missing_import_tool__ "${repo_root}/scripts/build-native-fixtures.sh"
 
 run_and_require_skip \
-  "windows cjson build" \
-  "skip: Windows lua-cjson build requires lua53.dll shim or import library, not implemented yet" \
+  "windows cjson build missing compiler" \
+  "skip: no C compiler configured for windows/${host_goarch}; set ${windows_cc_var} or CC" \
   env TARGET_GOOS=windows "${repo_root}/scripts/build-native-cjson.sh"
+
+run_and_require_skip \
+  "windows cjson build missing import library" \
+  "skip: Windows lua-cjson build requires lua53 import library; set LUA53_IMPORT_LIB or install llvm-dlltool, dlltool, lib.exe, or llvm-lib" \
+  env TARGET_GOOS=windows CC=cc NATIVE_WINDOWS_IMPORT_TOOL=__glua_missing_import_tool__ "${repo_root}/scripts/build-native-cjson.sh"
 
 run_and_require_skip \
   "windows lpeg build" \
