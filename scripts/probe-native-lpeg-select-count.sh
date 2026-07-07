@@ -826,6 +826,23 @@ if count ~= 2 then
 end
 LUA
       ;;
+    select-count-local-callee)
+      cat <<'LUA'
+local select_fn = select
+local count = select_fn("#", "alpha", "beta")
+if count ~= 2 then
+  error("unexpected local-callee select-count fixed result")
+end
+LUA
+      ;;
+    select-count-gtable-callee)
+      cat <<'LUA'
+local count = _G["select"]("#", "alpha", "beta")
+if count ~= 2 then
+  error("unexpected _G select-count fixed result")
+end
+LUA
+      ;;
     select-count-one-string)
       cat <<'LUA'
 local count = select("#", "alpha")
