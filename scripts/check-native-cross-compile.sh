@@ -93,6 +93,8 @@ cc_executable_for() {
 }
 
 status=0
+compiled_count=0
+skipped_count=0
 for target in "${targets[@]}"; do
   target_goos="${target%%/*}"
   target_goarch="${target##*/}"
@@ -114,6 +116,7 @@ for target in "${targets[@]}"; do
 
   if ! cc="$(target_cc_for "${target_goos}" "${target_goarch}")"; then
     echo "skip: no C compiler configured for ${target_goos}/${target_goarch}; set ${cc_var} or CC" >&2
+    skipped_count=$((skipped_count + 1))
     if [[ "${require_all}" == "1" ]]; then
       echo "required target unavailable: ${target_goos}/${target_goarch}" >&2
       status=1
@@ -125,6 +128,7 @@ for target in "${targets[@]}"; do
   cc_executable="$(cc_executable_for "${cc}")"
   if ! command -v "${cc_executable}" >/dev/null 2>&1; then
     echo "skip: C compiler not found for ${target_goos}/${target_goarch}: ${cc}" >&2
+    skipped_count=$((skipped_count + 1))
     if [[ "${require_all}" == "1" ]]; then
       echo "required target unavailable: ${target_goos}/${target_goarch}" >&2
       status=1
@@ -150,6 +154,10 @@ for target in "${targets[@]}"; do
 
   echo "compiled ${test_output}"
   echo "compiled ${glua_output}"
+  compiled_count=$((compiled_count + 1))
 done
+
+echo
+echo "native cross compile summary: compiled=${compiled_count} skipped=${skipped_count} targets=${#targets[@]}"
 
 exit "${status}"
