@@ -124,6 +124,78 @@ func TestNativeCAPIStackPrimitives(t *testing.T) {
 	}
 }
 
+// TestNativeLuaAbsIndexUsesCurrentCFrame 验证 lua_absindex 按当前 C frame 可见栈规范化索引。
+func TestNativeLuaAbsIndexUsesCurrentCFrame(t *testing.T) {
+	// C 模块常把负索引转成稳定正索引后继续传给 lua_pushvalue/lua_setfield 等 API。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 absindex。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+	pushText := func(text string) {
+		// 测试字符串只在本次调用内使用；native helper 会立即复制为 Go VM string。
+		buffer := append([]byte(text), 0)
+		nativeLuaPushString(luaState, unsafe.Pointer(&buffer[0]))
+	}
+	upvalueIndex := func(index int) int {
+		// Lua 5.3 头文件把 lua_upvalueindex(i) 定义为 LUA_REGISTRYINDEX - i。
+		return runtime.RegistryPseudoIndex - index
+	}
+
+	pushText("outer")
+	pushText("first")
+	pushText("second")
+	if got := nativeLuaAbsIndex(luaState, -1); got != 3 {
+		// 普通栈上 -1 应规范化为当前栈顶正索引。
+		t.Fatalf("lua_absindex global -1 = %d, want 3", got)
+	}
+	if got := nativeLuaAbsIndex(luaState, runtime.RegistryPseudoIndex); got != runtime.RegistryPseudoIndex {
+		// registry pseudo-index 必须原样返回。
+		t.Fatalf("lua_absindex registry = %d, want %d", got, runtime.RegistryPseudoIndex)
+	}
+	if got := nativeLuaAbsIndex(luaState, upvalueIndex(2)); got != upvalueIndex(2) {
+		// upvalue pseudo-index 也不能被当作负栈索引转换。
+		t.Fatalf("lua_absindex upvalue = %d, want %d", got, upvalueIndex(2))
+	}
+
+	if !pushNativeStateCallFrame(luaState, 1, nil) {
+		// 无法建立调用帧时，本测试不能继续验证 C frame 视角。
+		t.Fatalf("pushNativeStateCallFrame failed")
+	}
+	defer popNativeStateCallFrame(luaState)
+
+	absTop := nativeLuaAbsIndex(luaState, -1)
+	if absTop != 2 {
+		// C frame 内 -1 只能转换为当前帧可见栈顶，即第二个参数槽。
+		t.Fatalf("lua_absindex frame -1 = %d, want 2", absTop)
+	}
+	if got := nativeLuaAbsIndex(luaState, -2); got != 1 {
+		// C frame 内 -2 指向当前帧第一个可见槽位，而不是外层栈。
+		t.Fatalf("lua_absindex frame -2 = %d, want 1", got)
+	}
+	if got := nativeLuaAbsIndex(luaState, -3); got != 0 {
+		// 越过当前 frame base 的负索引按公式得到 0，后续 API 会按无效索引处理。
+		t.Fatalf("lua_absindex frame -3 = %d, want 0", got)
+	}
+	nativeLuaPushValueAt(luaState, absTop)
+	if value := state.ValueAt(-1); value.Kind != runtime.KindString || value.String != "second" {
+		// absindex 返回的正索引必须能继续按当前 C frame 正索引语义读取到原栈顶。
+		t.Fatalf("lua_pushvalue(abs(-1)) = %#v, want second", value)
+	}
+	if value := state.ValueAt(1); value.Kind != runtime.KindString || value.String != "outer" {
+		// absindex 不能把当前 C frame 正索引转换成会覆盖或读取外层栈的全局槽位。
+		t.Fatalf("outer stack slot after absindex = %#v, want outer", value)
+	}
+	if got := nativeLuaAbsIndex(nil, -1); got != 0 {
+		// nil State 没有可规范化的索引。
+		t.Fatalf("lua_absindex nil state = %d, want 0", got)
+	}
+}
+
 // TestNativeLuaPushFormattedString 验证 lua_pushfstring C wrapper 使用的 Go 压栈 helper。
 func TestNativeLuaPushFormattedString(t *testing.T) {
 	// C wrapper 负责 varargs 格式化；Go helper 负责压栈和返回 C 可见稳定字符串。

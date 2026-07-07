@@ -39,6 +39,38 @@ func nativeLuaStackTop(luaState unsafe.Pointer) int {
 	return state.StackTop()
 }
 
+// nativeLuaAbsIndex 把 Lua C API 索引规范化为当前调用帧可见的稳定正索引。
+func nativeLuaAbsIndex(luaState unsafe.Pointer, index int) int {
+	// 入口先校验 State 生命周期；无效 State 不返回可继续使用的栈索引。
+	state, ok := lookupNativeStateHandle(luaState)
+	if !ok {
+		// 无效或已关闭 State 没有可规范化的栈索引。
+		return 0
+	}
+	if index <= runtime.RegistryPseudoIndex {
+		// registry 和 upvalue pseudo-index 不是普通栈槽，Lua 5.3 规定 absindex 保持原值。
+		return index
+	}
+	if index > 0 {
+		// 正索引已经是当前 C API 视角的稳定索引，不能转换成 Go State 全局槽位。
+		return index
+	}
+	if index == 0 {
+		// Lua 栈索引 0 无效，返回 0 供调用方识别。
+		return 0
+	}
+	visibleTop := state.StackTop()
+	if baseTop, ok := currentNativeStateCallBase(luaState); ok {
+		// C function 内负索引必须按当前调用帧可见栈顶计算，不能穿透到外层 Go VM 栈。
+		visibleTop -= baseTop
+	}
+	if visibleTop < 0 {
+		// 调用帧基址损坏时不返回可用索引。
+		return 0
+	}
+	return visibleTop + index + 1
+}
+
 // nativeLuaPopVisible 从当前 C API 可见栈顶弹出一个值。
 func nativeLuaPopVisible(luaState unsafe.Pointer, state *runtime.State) (runtime.Value, bool) {
 	// 弹栈前先确认当前调用帧基址，防止 C API 在参数不足时穿透外层 Go VM 栈。
@@ -399,6 +431,14 @@ func nativeLuaCString(text unsafe.Pointer) string {
 func lua_gettop(luaState *C.lua_State) C.int {
 	// C API 入口只做 token 转发，实际生命周期校验集中在 Go helper。
 	return C.int(nativeLuaStackTop(unsafe.Pointer(luaState)))
+}
+
+// lua_absindex 导出 Lua 5.3 C API 绝对索引规范化入口。
+//
+//export lua_absindex
+func lua_absindex(luaState *C.lua_State, index C.int) C.int {
+	// C API 入口只做类型转换，具体 C frame 可见栈语义由 Go helper 维护。
+	return C.int(nativeLuaAbsIndex(unsafe.Pointer(luaState), int(index)))
 }
 
 // lua_settop 导出 Lua 5.3 C API 栈顶调整入口。
