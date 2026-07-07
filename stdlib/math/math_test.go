@@ -513,6 +513,68 @@ func TestSinSqrtAndTan(t *testing.T) {
 	}
 }
 
+// TestMathNumberArgumentsAcceptNumericStrings 验证 math 数值参数接受 numeric string。
+//
+// Lua 5.3 的 luaL_checknumber/luaL_checkinteger 会接受可转换的字符串；LPeg 等 C 模块
+// 通过 capture 把文本传给 math.sin 时依赖该通用标准库语义。
+func TestMathNumberArgumentsAcceptNumericStrings(t *testing.T) {
+	// 普通多返回入口应把 numeric string 转为 number 后计算。
+	sinResults, err := Sin(runtime.StringValue("2.34"))
+	if err != nil {
+		// numeric string 是合法 number 参数，不应返回参数错误。
+		t.Fatalf("Sin numeric string failed: %v", err)
+	}
+	if len(sinResults) != 1 || sinResults[0].Kind != runtime.KindNumber || math.Abs(sinResults[0].Number-math.Sin(2.34)) > 1e-12 {
+		// math.sin("2.34") 应等价于 math.sin(2.34)。
+		t.Fatalf("Sin numeric string result mismatch: %#v", sinResults)
+	}
+
+	sinUnaryResult, err := SinUnaryValue(runtime.StringValue("2.34"))
+	if err != nil {
+		// native C callback 直接调用 fast unary 负载时也必须接受 numeric string。
+		t.Fatalf("SinUnaryValue numeric string failed: %v", err)
+	}
+	if sinUnaryResult.Kind != runtime.KindNumber || math.Abs(sinUnaryResult.Number-math.Sin(2.34)) > 1e-12 {
+		// 一元入口结果必须与普通入口一致。
+		t.Fatalf("SinUnaryValue numeric string result mismatch: %#v", sinUnaryResult)
+	}
+
+	floorUnaryResult, err := FloorUnaryValue(runtime.StringValue("9.75"))
+	if err != nil {
+		// floor 的一元入口同样复用 number 参数转换规则。
+		t.Fatalf("FloorUnaryValue numeric string failed: %v", err)
+	}
+	if floorUnaryResult.Kind != runtime.KindInteger || floorUnaryResult.Integer != 9 {
+		// 可表达的 floor 结果应返回 Lua integer。
+		t.Fatalf("FloorUnaryValue numeric string result mismatch: %#v", floorUnaryResult)
+	}
+
+	ultResults, err := ULT(runtime.StringValue("1"), runtime.StringValue("2"))
+	if err != nil {
+		// integer 参数也应接受可无损转换的 numeric string。
+		t.Fatalf("ULT numeric string failed: %v", err)
+	}
+	if len(ultResults) != 1 || ultResults[0].Kind != runtime.KindBoolean || !ultResults[0].Bool {
+		// 无符号比较 1 < 2 应返回 true。
+		t.Fatalf("ULT numeric string result mismatch: %#v", ultResults)
+	}
+
+	if _, err := Sin(runtime.StringValue("not-a-number")); err == nil {
+		// 不可转换字符串仍必须保持 number expected 参数错误。
+		t.Fatalf("Sin invalid numeric string succeeded")
+	}
+
+	typeResults, err := Type(runtime.StringValue("2.34"))
+	if err != nil {
+		// math.type 不属于 number 参数检查，不应因为字符串可转换而报错。
+		t.Fatalf("Type numeric string failed: %v", err)
+	}
+	if len(typeResults) != 1 || !typeResults[0].IsNil() {
+		// math.type 按 Lua 5.3 只识别真实 integer/float，不隐式转换 string。
+		t.Fatalf("Type numeric string result mismatch: %#v", typeResults)
+	}
+}
+
 // TestToIntegerReturnsIntegerOrNil 验证 math.tointeger 的转换语义。
 //
 // 可无损转换的 number 返回 integer；不可转换值返回 nil；缺失参数属于参数错误。
@@ -633,10 +695,10 @@ func TestULTUsesUnsignedIntegerOrdering(t *testing.T) {
 
 // TestMathArgumentErrors 验证 math 标准库参数错误以 Lua error 传播。
 //
-// 非 number 参数不能隐式转换，错误链必须包含 runtime.ErrLuaError。
+// 不可转换为 number 的参数必须返回错误，错误链必须包含 runtime.ErrLuaError。
 func TestMathArgumentErrors(t *testing.T) {
-	// 字符串不是 number，Abs 应返回 Lua 参数错误。
-	_, err := Abs(runtime.StringValue("1"))
+	// 非 numeric string 不能作为 number，Abs 应返回 Lua 参数错误。
+	_, err := Abs(runtime.StringValue("not-a-number"))
 	if !errors.Is(err, runtime.ErrLuaError) {
 		// 参数错误必须以 Lua error 形式传播。
 		t.Fatalf("Abs argument error mismatch: %v", err)

@@ -127,13 +127,14 @@ func Abs(args ...runtime.Value) ([]runtime.Value, error) {
 
 // AbsUnaryValue 实现 Lua 5.3 `math.abs` 的单参数单返回热路径。
 //
-// value 必须是 number 或 integer；integer 入参返回 integer，float number 入参返回 number。
+// value 必须可转换为 number；integer 入参返回 integer，float number 入参返回 number。
 // 该入口服务 VM CALL fast path，避免标准库热点调用构造临时参数和结果切片。
 func AbsUnaryValue(value runtime.Value) (runtime.Value, error) {
 	// abs 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
-	if value.Kind != runtime.KindInteger && value.Kind != runtime.KindNumber {
-		// 非 number 入参按 Lua 标准库参数错误返回。
-		return runtime.NilValue(), badArgument("abs", 1, fmt.Sprintf("number expected, got %s", runtime.LuaErrorTypeName(value)))
+	value, err := numberValueUnaryArgument(value, "abs")
+	if err != nil {
+		// 第一个参数不可转换为 number 时直接返回 Lua 参数错误。
+		return runtime.NilValue(), err
 	}
 	if value.Kind == runtime.KindInteger {
 		// integer 快路径保留整数类型。
@@ -167,21 +168,18 @@ func ACos(args ...runtime.Value) ([]runtime.Value, error) {
 
 // ACosUnaryValue 实现 Lua 5.3 `math.acos` 的单参数单返回热路径。
 //
-// value 必须是 number 或 integer；返回值始终是 Lua float number。该入口服务 VM CALL
+// value 必须可转换为 number；返回值始终是 Lua float number。该入口服务 VM CALL
 // fast path，避免标准库热点调用构造临时参数和结果切片。
 func ACosUnaryValue(value runtime.Value) (runtime.Value, error) {
 	// acos 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
-	if value.Kind != runtime.KindInteger && value.Kind != runtime.KindNumber {
-		// 非 number 入参按 Lua 标准库参数错误返回。
-		return runtime.NilValue(), badArgument("acos", 1, fmt.Sprintf("number expected, got %s", runtime.LuaErrorTypeName(value)))
-	}
-	if value.Kind == runtime.KindInteger {
-		// integer 入参转换为 float64 后计算反余弦。
-		return runtime.NumberValue(math.Acos(float64(value.Integer))), nil
+	numberValue, err := numberUnaryArgument(value, "acos")
+	if err != nil {
+		// 第一个参数不可转换为 number 时直接返回 Lua 参数错误。
+		return runtime.NilValue(), err
 	}
 
 	// number 入参直接计算反余弦。
-	return runtime.NumberValue(math.Acos(value.Number)), nil
+	return runtime.NumberValue(math.Acos(numberValue)), nil
 }
 
 // ASin 实现 Lua 5.3 `math.asin`。
@@ -202,21 +200,18 @@ func ASin(args ...runtime.Value) ([]runtime.Value, error) {
 
 // ASinUnaryValue 实现 Lua 5.3 `math.asin` 的单参数单返回热路径。
 //
-// value 必须是 number 或 integer；返回值始终是 Lua float number。该入口服务 VM CALL
+// value 必须可转换为 number；返回值始终是 Lua float number。该入口服务 VM CALL
 // fast path，避免标准库热点调用构造临时参数和结果切片。
 func ASinUnaryValue(value runtime.Value) (runtime.Value, error) {
 	// asin 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
-	if value.Kind != runtime.KindInteger && value.Kind != runtime.KindNumber {
-		// 非 number 入参按 Lua 标准库参数错误返回。
-		return runtime.NilValue(), badArgument("asin", 1, fmt.Sprintf("number expected, got %s", runtime.LuaErrorTypeName(value)))
-	}
-	if value.Kind == runtime.KindInteger {
-		// integer 入参转换为 float64 后计算反正弦。
-		return runtime.NumberValue(math.Asin(float64(value.Integer))), nil
+	numberValue, err := numberUnaryArgument(value, "asin")
+	if err != nil {
+		// 第一个参数不可转换为 number 时直接返回 Lua 参数错误。
+		return runtime.NilValue(), err
 	}
 
 	// number 入参直接计算反正弦。
-	return runtime.NumberValue(math.Asin(value.Number)), nil
+	return runtime.NumberValue(math.Asin(numberValue)), nil
 }
 
 // ATan 实现 Lua 5.3 `math.atan`。
@@ -247,21 +242,18 @@ func ATan(args ...runtime.Value) ([]runtime.Value, error) {
 
 // ATanUnaryValue 实现 Lua 5.3 `math.atan(y)` 的单参数单返回热路径。
 //
-// value 必须是 number 或 integer；返回值始终是 Lua float number。该入口只覆盖默认
+// value 必须可转换为 number；返回值始终是 Lua float number。该入口只覆盖默认
 // x=1 的单参数调用，多参数 `math.atan(y, x)` 仍由通用 Go closure 路径处理。
 func ATanUnaryValue(value runtime.Value) (runtime.Value, error) {
 	// atan 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
-	if value.Kind != runtime.KindInteger && value.Kind != runtime.KindNumber {
-		// 非 number 入参按 Lua 标准库参数错误返回。
-		return runtime.NilValue(), badArgument("atan", 1, fmt.Sprintf("number expected, got %s", runtime.LuaErrorTypeName(value)))
-	}
-	if value.Kind == runtime.KindInteger {
-		// integer 入参转换为 float64，并按 Lua 5.3 默认 x=1 计算 atan2。
-		return runtime.NumberValue(math.Atan2(float64(value.Integer), 1)), nil
+	numberValue, err := numberUnaryArgument(value, "atan")
+	if err != nil {
+		// 第一个参数不可转换为 number 时直接返回 Lua 参数错误。
+		return runtime.NilValue(), err
 	}
 
 	// number 入参直接按默认 x=1 计算 atan2。
-	return runtime.NumberValue(math.Atan2(value.Number, 1)), nil
+	return runtime.NumberValue(math.Atan2(numberValue, 1)), nil
 }
 
 // Ceil 实现 Lua 5.3 `math.ceil`。
@@ -292,13 +284,14 @@ func Ceil(args ...runtime.Value) ([]runtime.Value, error) {
 
 // CeilUnaryValue 实现 Lua 5.3 `math.ceil` 的单参数单返回热路径。
 //
-// value 必须是 number 或 integer；integer 入参原样返回，float number 入参按 Lua 5.3
+// value 必须可转换为 number；integer 入参原样返回，float number 入参按 Lua 5.3
 // 语义向上取整。该入口服务 VM CALL fast path，避免构造临时参数和结果切片。
 func CeilUnaryValue(value runtime.Value) (runtime.Value, error) {
 	// ceil 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
-	if !value.IsNumber() {
-		// 非 number 类型不做字符串转数值隐式转换。
-		return runtime.NilValue(), badArgument("ceil", 1, fmt.Sprintf("number expected, got %s", runtime.LuaErrorTypeName(value)))
+	value, err := numberValueUnaryArgument(value, "ceil")
+	if err != nil {
+		// 第一个参数不可转换为 number 时直接返回 Lua 参数错误。
+		return runtime.NilValue(), err
 	}
 	if value.Kind == runtime.KindInteger {
 		// integer 已经是整数，直接返回。
@@ -333,21 +326,18 @@ func Cos(args ...runtime.Value) ([]runtime.Value, error) {
 
 // CosUnaryValue 实现 Lua 5.3 `math.cos` 的单参数单返回热路径。
 //
-// value 必须是 number 或 integer；返回值始终是 Lua float number。该入口服务 VM CALL
+// value 必须可转换为 number；返回值始终是 Lua float number。该入口服务 VM CALL
 // fast path，避免标准库热点调用构造临时参数和结果切片。
 func CosUnaryValue(value runtime.Value) (runtime.Value, error) {
 	// cos 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
-	if value.Kind != runtime.KindInteger && value.Kind != runtime.KindNumber {
-		// 非 number 入参按 Lua 标准库参数错误返回。
-		return runtime.NilValue(), badArgument("cos", 1, fmt.Sprintf("number expected, got %s", runtime.LuaErrorTypeName(value)))
-	}
-	if value.Kind == runtime.KindInteger {
-		// integer 入参转换为 float64 后计算三角函数。
-		return runtime.NumberValue(math.Cos(float64(value.Integer))), nil
+	numberValue, err := numberUnaryArgument(value, "cos")
+	if err != nil {
+		// 第一个参数不可转换为 number 时直接返回 Lua 参数错误。
+		return runtime.NilValue(), err
 	}
 
 	// number 入参直接计算三角函数。
-	return runtime.NumberValue(math.Cos(value.Number)), nil
+	return runtime.NumberValue(math.Cos(numberValue)), nil
 }
 
 // Deg 实现 Lua 5.3 `math.deg`。
@@ -368,21 +358,18 @@ func Deg(args ...runtime.Value) ([]runtime.Value, error) {
 
 // DegUnaryValue 实现 Lua 5.3 `math.deg` 的单参数单返回热路径。
 //
-// value 必须是 number 或 integer；返回值始终是 Lua float number。该入口服务 VM CALL
+// value 必须可转换为 number；返回值始终是 Lua float number。该入口服务 VM CALL
 // fast path，避免标准库热点调用构造临时参数和结果切片。
 func DegUnaryValue(value runtime.Value) (runtime.Value, error) {
 	// deg 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
-	if value.Kind != runtime.KindInteger && value.Kind != runtime.KindNumber {
-		// 非 number 入参按 Lua 标准库参数错误返回。
-		return runtime.NilValue(), badArgument("deg", 1, fmt.Sprintf("number expected, got %s", runtime.LuaErrorTypeName(value)))
-	}
-	if value.Kind == runtime.KindInteger {
-		// integer 入参转换为 float64 后执行弧度到角度转换。
-		return runtime.NumberValue(float64(value.Integer) * 180 / math.Pi), nil
+	numberValue, err := numberUnaryArgument(value, "deg")
+	if err != nil {
+		// 第一个参数不可转换为 number 时直接返回 Lua 参数错误。
+		return runtime.NilValue(), err
 	}
 
 	// number 入参直接执行弧度到角度转换。
-	return runtime.NumberValue(value.Number * 180 / math.Pi), nil
+	return runtime.NumberValue(numberValue * 180 / math.Pi), nil
 }
 
 // Exp 实现 Lua 5.3 `math.exp`。
@@ -403,21 +390,18 @@ func Exp(args ...runtime.Value) ([]runtime.Value, error) {
 
 // ExpUnaryValue 实现 Lua 5.3 `math.exp` 的单参数单返回热路径。
 //
-// value 必须是 number 或 integer；返回值始终是 Lua float number。该入口服务 VM CALL
+// value 必须可转换为 number；返回值始终是 Lua float number。该入口服务 VM CALL
 // fast path，避免标准库热点调用构造临时参数和结果切片。
 func ExpUnaryValue(value runtime.Value) (runtime.Value, error) {
 	// exp 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
-	if value.Kind != runtime.KindInteger && value.Kind != runtime.KindNumber {
-		// 非 number 入参按 Lua 标准库参数错误返回。
-		return runtime.NilValue(), badArgument("exp", 1, fmt.Sprintf("number expected, got %s", runtime.LuaErrorTypeName(value)))
-	}
-	if value.Kind == runtime.KindInteger {
-		// integer 入参转换为 float64 后计算指数。
-		return runtime.NumberValue(math.Exp(float64(value.Integer))), nil
+	numberValue, err := numberUnaryArgument(value, "exp")
+	if err != nil {
+		// 第一个参数不可转换为 number 时直接返回 Lua 参数错误。
+		return runtime.NilValue(), err
 	}
 
 	// number 入参直接计算指数。
-	return runtime.NumberValue(math.Exp(value.Number)), nil
+	return runtime.NumberValue(math.Exp(numberValue)), nil
 }
 
 // Floor 实现 Lua 5.3 `math.floor`。
@@ -467,6 +451,11 @@ func FloorValue(args ...runtime.Value) (runtime.Value, error) {
 // value 是调用方已经从 Lua 寄存器读取出的第一个参数；返回语义和错误语义与 FloorValue 保持一致。
 func FloorUnaryValue(value runtime.Value) (runtime.Value, error) {
 	// floor 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
+	value, err := numberValueUnaryArgument(value, "floor")
+	if err != nil {
+		// 第一个参数不可转换为 number 时直接返回 Lua 参数错误。
+		return runtime.NilValue(), err
+	}
 	switch value.Kind {
 	case runtime.KindInteger:
 		// integer 已经是整数，直接返回。
@@ -482,7 +471,7 @@ func FloorUnaryValue(value runtime.Value) (runtime.Value, error) {
 		// 有限且可表达时返回 Lua integer。
 		return runtime.IntegerValue(int64(floored)), nil
 	default:
-		// 非 number 类型不做字符串转数值隐式转换。
+		// 转换 helper 已保证该分支不可达，保留防御式错误避免未来新增类型误用。
 		return runtime.NilValue(), badArgument("floor", 1, fmt.Sprintf("number expected, got %s", runtime.LuaErrorTypeName(value)))
 	}
 }
@@ -557,21 +546,18 @@ func Log(args ...runtime.Value) ([]runtime.Value, error) {
 
 // LogUnaryValue 实现 Lua 5.3 `math.log(x)` 的单参数单返回热路径。
 //
-// value 必须是 number 或 integer；返回值始终是 Lua float number。该入口只覆盖默认
+// value 必须可转换为 number；返回值始终是 Lua float number。该入口只覆盖默认
 // 自然对数调用，带 base 的 `math.log(x, base)` 仍由通用 Go closure 路径处理。
 func LogUnaryValue(value runtime.Value) (runtime.Value, error) {
 	// log 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
-	if value.Kind != runtime.KindInteger && value.Kind != runtime.KindNumber {
-		// 非 number 入参按 Lua 标准库参数错误返回。
-		return runtime.NilValue(), badArgument("log", 1, fmt.Sprintf("number expected, got %s", runtime.LuaErrorTypeName(value)))
-	}
-	if value.Kind == runtime.KindInteger {
-		// integer 入参转换为 float64 后计算自然对数。
-		return runtime.NumberValue(math.Log(float64(value.Integer))), nil
+	numberValue, err := numberUnaryArgument(value, "log")
+	if err != nil {
+		// 第一个参数不可转换为 number 时直接返回 Lua 参数错误。
+		return runtime.NilValue(), err
 	}
 
 	// number 入参直接计算自然对数。
-	return runtime.NumberValue(math.Log(value.Number)), nil
+	return runtime.NumberValue(math.Log(numberValue)), nil
 }
 
 // Max 实现 Lua 5.3 `math.max`。
@@ -688,21 +674,18 @@ func Rad(args ...runtime.Value) ([]runtime.Value, error) {
 
 // RadUnaryValue 实现 Lua 5.3 `math.rad` 的单参数单返回热路径。
 //
-// value 必须是 number 或 integer；返回值始终是 Lua float number。该入口服务 VM CALL
+// value 必须可转换为 number；返回值始终是 Lua float number。该入口服务 VM CALL
 // fast path，避免标准库热点调用构造临时参数和结果切片。
 func RadUnaryValue(value runtime.Value) (runtime.Value, error) {
 	// rad 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
-	if value.Kind != runtime.KindInteger && value.Kind != runtime.KindNumber {
-		// 非 number 入参按 Lua 标准库参数错误返回。
-		return runtime.NilValue(), badArgument("rad", 1, fmt.Sprintf("number expected, got %s", runtime.LuaErrorTypeName(value)))
-	}
-	if value.Kind == runtime.KindInteger {
-		// integer 入参转换为 float64 后执行角度到弧度转换。
-		return runtime.NumberValue(float64(value.Integer) * math.Pi / 180), nil
+	numberValue, err := numberUnaryArgument(value, "rad")
+	if err != nil {
+		// 第一个参数不可转换为 number 时直接返回 Lua 参数错误。
+		return runtime.NilValue(), err
 	}
 
 	// number 入参直接执行角度到弧度转换。
-	return runtime.NumberValue(value.Number * math.Pi / 180), nil
+	return runtime.NumberValue(numberValue * math.Pi / 180), nil
 }
 
 // Random 实现 Lua 5.3 `math.random` 的基础区间语义。
@@ -811,21 +794,18 @@ func SinValue(args ...runtime.Value) (runtime.Value, error) {
 
 // SinUnaryValue 实现 Lua 5.3 `math.sin` 的单参数单返回热路径。
 //
-// value 必须是 number 或 integer；返回值始终是 Lua float number。该入口服务 VM CALL
+// value 必须可转换为 number；返回值始终是 Lua float number。该入口服务 VM CALL
 // fast path，避免标准库热点调用构造临时参数切片。
 func SinUnaryValue(value runtime.Value) (runtime.Value, error) {
 	// sin 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
-	if value.Kind != runtime.KindInteger && value.Kind != runtime.KindNumber {
-		// 非 number 入参按 Lua 标准库参数错误返回。
-		return runtime.NilValue(), badArgument("sin", 1, fmt.Sprintf("number expected, got %s", runtime.LuaErrorTypeName(value)))
-	}
-	if value.Kind == runtime.KindInteger {
-		// integer 入参转换为 float64 后计算三角函数。
-		return runtime.NumberValue(math.Sin(float64(value.Integer))), nil
+	numberValue, err := numberUnaryArgument(value, "sin")
+	if err != nil {
+		// 第一个参数不可转换为 number 时直接返回 Lua 参数错误。
+		return runtime.NilValue(), err
 	}
 
 	// number 入参直接计算三角函数。
-	return runtime.NumberValue(math.Sin(value.Number)), nil
+	return runtime.NumberValue(math.Sin(numberValue)), nil
 }
 
 // Sqrt 实现 Lua 5.3 `math.sqrt`。
@@ -865,6 +845,11 @@ func SqrtValue(args ...runtime.Value) (runtime.Value, error) {
 // value 是调用方已经从 Lua 寄存器读取出的第一个参数；返回语义和错误语义与 SqrtValue 保持一致。
 func SqrtUnaryValue(value runtime.Value) (runtime.Value, error) {
 	// sqrt 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
+	value, err := numberValueUnaryArgument(value, "sqrt")
+	if err != nil {
+		// 第一个参数不可转换为 number 时直接返回 Lua 参数错误。
+		return runtime.NilValue(), err
+	}
 	switch value.Kind {
 	case runtime.KindInteger:
 		// integer 入参转换为 float64 后计算平方根。
@@ -873,7 +858,7 @@ func SqrtUnaryValue(value runtime.Value) (runtime.Value, error) {
 		// number 入参直接计算平方根。
 		return runtime.NumberValue(math.Sqrt(value.Number)), nil
 	default:
-		// 非 number 类型不做字符串转数值隐式转换。
+		// 转换 helper 已保证该分支不可达，保留防御式错误避免未来新增类型误用。
 		return runtime.NilValue(), badArgument("sqrt", 1, fmt.Sprintf("number expected, got %s", runtime.LuaErrorTypeName(value)))
 	}
 }
@@ -896,21 +881,18 @@ func Tan(args ...runtime.Value) ([]runtime.Value, error) {
 
 // TanUnaryValue 实现 Lua 5.3 `math.tan` 的单参数单返回热路径。
 //
-// value 必须是 number 或 integer；返回值始终是 Lua float number。该入口服务 VM CALL
+// value 必须可转换为 number；返回值始终是 Lua float number。该入口服务 VM CALL
 // fast path，避免标准库热点调用构造临时参数和结果切片。
 func TanUnaryValue(value runtime.Value) (runtime.Value, error) {
 	// tan 一元入口直接校验首参数，避免为单参数 CALL 构造临时切片。
-	if value.Kind != runtime.KindInteger && value.Kind != runtime.KindNumber {
-		// 非 number 入参按 Lua 标准库参数错误返回。
-		return runtime.NilValue(), badArgument("tan", 1, fmt.Sprintf("number expected, got %s", runtime.LuaErrorTypeName(value)))
-	}
-	if value.Kind == runtime.KindInteger {
-		// integer 入参转换为 float64 后计算三角函数。
-		return runtime.NumberValue(math.Tan(float64(value.Integer))), nil
+	numberValue, err := numberUnaryArgument(value, "tan")
+	if err != nil {
+		// 第一个参数不可转换为 number 时直接返回 Lua 参数错误。
+		return runtime.NilValue(), err
 	}
 
 	// number 入参直接计算三角函数。
-	return runtime.NumberValue(math.Tan(value.Number)), nil
+	return runtime.NumberValue(math.Tan(numberValue)), nil
 }
 
 // ToInteger 实现 Lua 5.3 `math.tointeger`。
@@ -993,7 +975,7 @@ func ULT(args ...runtime.Value) ([]runtime.Value, error) {
 // numberValueArgument 按 Lua 标准库参数规则提取 number 值。
 //
 // args 使用 0-based Go 切片；position 使用 Lua 1-based 参数序号。返回原始 Lua number
-// 值，便于调用方决定是否保留 integer 类型。
+// 或字符串转换后的 Lua number 值，便于调用方决定是否保留 integer 类型。
 func numberValueArgument(args []runtime.Value, position int, functionName string) (runtime.Value, error) {
 	// 先检查参数是否存在。
 	if len(args) < position {
@@ -1001,18 +983,19 @@ func numberValueArgument(args []runtime.Value, position int, functionName string
 		return runtime.NilValue(), badArgument(functionName, position, "number expected")
 	}
 	value := args[position-1]
-	if !value.IsNumber() {
-		// 非 number 类型不做字符串转数值隐式转换。
+	converted, ok := numberValueFromArgument(value)
+	if !ok {
+		// 不可转换为 number 的值按 Lua 标准库参数错误返回。
 		return runtime.NilValue(), badArgument(functionName, position, fmt.Sprintf("number expected, got %s", runtime.LuaErrorTypeName(value)))
 	}
 
-	// 返回原始 number 值，保留 integer/float 区分。
-	return value, nil
+	// 返回原始或转换后的 number 值，保留 integer/float 区分。
+	return converted, nil
 }
 
 // numberArgument 按 Lua 标准库参数规则提取 float64 number。
 //
-// integer 会转换为 float64；float number 原样返回。非 number 返回 Lua 参数错误。
+// integer 和 numeric string 会转换为 float64；float number 原样返回。非 number 返回 Lua 参数错误。
 func numberArgument(args []runtime.Value, position int, functionName string) (float64, error) {
 	// 先提取原始 number 值。
 	value, err := numberValueArgument(args, position, functionName)
@@ -1025,10 +1008,59 @@ func numberArgument(args []runtime.Value, position int, functionName string) (fl
 	return numberValue, nil
 }
 
+// numberValueUnaryArgument 按 Lua 标准库一元参数规则提取 number 值。
+//
+// value 是已经从 Lua 寄存器或 native C frame 读取出的首个实参；返回原始 number 或
+// numeric string 转换后的 number。错误语义与 numberValueArgument 的第一个参数一致。
+func numberValueUnaryArgument(value runtime.Value, functionName string) (runtime.Value, error) {
+	// 一元 fast path 没有参数切片，直接复用相同的可转换性语义。
+	converted, ok := numberValueFromArgument(value)
+	if !ok {
+		// 不可转换为 number 的值按 Lua 标准库参数错误返回。
+		return runtime.NilValue(), badArgument(functionName, 1, fmt.Sprintf("number expected, got %s", runtime.LuaErrorTypeName(value)))
+	}
+
+	// 返回原始或转换后的 number 值，保留 integer/float 区分。
+	return converted, nil
+}
+
+// numberUnaryArgument 按 Lua 标准库一元参数规则提取 float64 number。
+//
+// value 可以是 number 或 numeric string；返回值统一转换为 float64。
+func numberUnaryArgument(value runtime.Value, functionName string) (float64, error) {
+	// 先取得保留 integer/float 区分的 Lua number 值。
+	converted, err := numberValueUnaryArgument(value, functionName)
+	if err != nil {
+		// 参数错误直接返回。
+		return 0, err
+	}
+
+	numberValue, _ := converted.ToNumber()
+	return numberValue, nil
+}
+
+// numberValueFromArgument 执行 Lua 5.3 number 参数可转换性判断。
+//
+// Lua 标准库的 `luaL_checknumber` / `luaL_checkinteger` 会接受 numeric string；本 helper
+// 只负责 value 到 Lua number 的转换，不负责构造带函数名和参数序号的错误。
+func numberValueFromArgument(value runtime.Value) (runtime.Value, bool) {
+	// 真实 Lua number 直接返回，保留 integer/float 原始类型。
+	if value.IsNumber() {
+		return value, true
+	}
+	if value.Kind == runtime.KindString {
+		// numeric string 按 Lua 5.3 字符串到 number 规则转换。
+		return value.StringToNumber()
+	}
+
+	// 其他类型不能作为 number 参数。
+	return runtime.NilValue(), false
+}
+
 // integerArgument 按 Lua 标准库参数规则提取 integer。
 //
-// args 使用 0-based Go 切片；position 使用 Lua 1-based 参数序号。integer 与可无损转换的
-// float number 都会被接受，其他类型返回 Lua 参数错误。
+// args 使用 0-based Go 切片；position 使用 Lua 1-based 参数序号。integer、numeric string
+// 与可无损转换的 float number 都会被接受，其他类型返回 Lua 参数错误。
 func integerArgument(args []runtime.Value, position int, functionName string) (int64, error) {
 	// 先检查参数是否存在。
 	if len(args) < position {
@@ -1036,7 +1068,13 @@ func integerArgument(args []runtime.Value, position int, functionName string) (i
 		return 0, badArgument(functionName, position, "integer expected")
 	}
 
-	integerValue, ok := args[position-1].ToInteger()
+	value, ok := numberValueFromArgument(args[position-1])
+	if !ok {
+		// 非 number 值不能作为 math 标准库整数参数。
+		return 0, badArgument(functionName, position, "integer expected")
+	}
+
+	integerValue, ok := value.ToInteger()
 	if !ok {
 		// 非整数值不能作为 math 标准库整数参数。
 		return 0, badArgument(functionName, position, "integer expected")
