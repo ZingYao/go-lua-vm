@@ -40,6 +40,30 @@ run_and_require_skip() {
   grep -F "skip:" "${output_file}" | sed 's/^/  /'
 }
 
+run_and_require_failure_skip() {
+  local label="$1"
+  local expected="$2"
+  shift 2
+
+  local output_file="${work_dir}/${label//[^A-Za-z0-9_]/_}.log"
+
+  echo
+  echo "check ${label}: $*"
+  if "$@" >"${output_file}" 2>&1; then
+    echo "skip check command unexpectedly succeeded for ${label}" >&2
+    cat "${output_file}" >&2
+    exit 1
+  fi
+
+  if ! grep -F "${expected}" "${output_file}" >/dev/null; then
+    echo "skip check missing expected reason for ${label}: ${expected}" >&2
+    cat "${output_file}" >&2
+    exit 1
+  fi
+
+  grep -F "skip:" "${output_file}" | sed 's/^/  /'
+}
+
 cross_cc_var="NATIVE_CC_LINUX_$(printf '%s' "${host_goarch}" | tr '[:lower:]-' '[:upper:]_')"
 mismatch_goos="linux"
 if [[ "${host_goos}" == "linux" ]]; then
@@ -85,6 +109,11 @@ run_and_require_skip \
   "linux missing cross compiler" \
   "skip: C compiler not found for linux/${host_goarch}: __glua_missing_native_cc__" \
   env NATIVE_CROSS_TARGETS="linux/${host_goarch}" "${cross_cc_var}=__glua_missing_native_cc__" "${repo_root}/scripts/check-native-cross-compile.sh"
+
+run_and_require_failure_skip \
+  "linux required missing cross compiler" \
+  "skip: C compiler not found for linux/${host_goarch}: __glua_missing_native_cc__" \
+  env NATIVE_CROSS_REQUIRE_ALL=1 NATIVE_CROSS_TARGETS="linux/${host_goarch}" "${cross_cc_var}=__glua_missing_native_cc__" "${repo_root}/scripts/check-native-cross-compile.sh"
 
 echo
 echo "native skip reason check passed"

@@ -6,6 +6,7 @@ host_goos="$(go env GOOS)"
 host_goarch="$(go env GOARCH)"
 target_list="${NATIVE_CROSS_TARGETS:-}"
 build_root="${BUILD_ROOT:-${repo_root}/build/native-cross}"
+require_all="${NATIVE_CROSS_REQUIRE_ALL:-0}"
 
 echo "native cross compile check"
 echo "repo_root=${repo_root}"
@@ -13,6 +14,7 @@ echo "host_GOOS=${host_goos}"
 echo "host_GOARCH=${host_goarch}"
 echo "CGO_ENABLED=1"
 echo "build_root=${build_root}"
+echo "NATIVE_CROSS_REQUIRE_ALL=${require_all}"
 
 expected_go_version="go1.26.4"
 actual_go_version="$(go version | awk '{print $3}')"
@@ -112,6 +114,10 @@ for target in "${targets[@]}"; do
 
   if ! cc="$(target_cc_for "${target_goos}" "${target_goarch}")"; then
     echo "skip: no C compiler configured for ${target_goos}/${target_goarch}; set ${cc_var} or CC" >&2
+    if [[ "${require_all}" == "1" ]]; then
+      echo "required target unavailable: ${target_goos}/${target_goarch}" >&2
+      status=1
+    fi
     continue
   fi
 
@@ -119,6 +125,10 @@ for target in "${targets[@]}"; do
   cc_executable="$(cc_executable_for "${cc}")"
   if ! command -v "${cc_executable}" >/dev/null 2>&1; then
     echo "skip: C compiler not found for ${target_goos}/${target_goarch}: ${cc}" >&2
+    if [[ "${require_all}" == "1" ]]; then
+      echo "required target unavailable: ${target_goos}/${target_goarch}" >&2
+      status=1
+    fi
     continue
   fi
 

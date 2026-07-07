@@ -358,6 +358,7 @@
 - [ ] 增加交叉编译验证脚本：
   - [x] `scripts/check-native-cross-compile.sh`：显式输出 `GOOS`、`GOARCH`、`CC`、产物路径和缺失 toolchain 时的 skip 原因。
     - [x] 支持 `NATIVE_CC_*` / `CC` 使用带参数的编译器命令，便于 CI 传入 `zig cc -target ...` 或等价 cross toolchain。
+    - [x] 支持 `NATIVE_CROSS_REQUIRE_ALL=1` 严格模式；缺失目标 C toolchain 时仍输出明确 `skip:`，但脚本返回失败，避免把 Linux/Windows 未配置工具链误记为编译验证完成。
   - [ ] Linux native build/test 编译验证。
   - [x] macOS native build/test 编译验证。
   - [ ] Windows native build/test 编译验证。
@@ -388,6 +389,7 @@
   - [x] `scripts/check-native-skip-reasons.sh`
     - [x] 覆盖 `scripts/test-native-real-modules.sh` 被误用于 Windows 目标时必须明确 skip，不能在子脚本全部 skip 后输出总验收 passed。
     - [x] 覆盖 `scripts/test-native-real-modules.sh` 被误用于非 Windows 异平台目标时必须明确 skip，不能把宿主平台验收当成目标平台验收。
+    - [x] 覆盖 `scripts/check-native-cross-compile.sh` 启用严格模式但缺失目标 C toolchain 时必须失败并输出明确 skip。
   - [x] `scripts/probe-native-lpeg-1159.sh`
   - [x] `scripts/bisect-native-lpeg-1159-prefix.sh`
   - [x] `scripts/probe-native-lpeg-1159-call-kinds.sh`
@@ -505,6 +507,7 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：更新 `README.md`；将动态库与 `require` 边界改为默认 no-CGO 与显式 `native_modules` 可选构建并列口径，并在对外文档列表中加入 `NATIVE_MODULES_PLAN.md`、`NATIVE_MODULES_BUILD.md` 和 `NATIVE_MODULES_SOURCE_INVENTORY.md`。
 - 2026-07-06：收敛 fixture 兼容边界 TODO；`docs/NATIVE_MODULES_BUILD.md` 已说明 fixture 只验证 loader smoke、不作为最终兼容结论，`docs/NATIVE_MODULES_SOURCE_INVENTORY.md` 已说明自编 fixture 只证明 loader、opaque `lua_State*`、基础 C API shim 和 require 链路贯通，不能解释为任意第三方 Lua C 模块兼容。
 - 2026-07-06：增强 `scripts/check-native-cross-compile.sh`；`NATIVE_CC_*` / `CC` 现在可传入带参数的编译器命令，脚本只校验第一个命令词是否存在，完整命令仍原样传给 Go/cgo，方便后续 Linux/Windows CI 使用 `zig cc -target ...` 或等价 cross toolchain。
+- 2026-07-07：增强 `scripts/check-native-cross-compile.sh`，新增 `NATIVE_CROSS_REQUIRE_ALL=1` 严格模式；本地开发仍可对缺失 C toolchain 的目标明确 skip，CI 或人工平台闭环验收可要求目标全部真实编译，否则返回失败。同步扩展 `scripts/check-native-skip-reasons.sh`，验证严格模式缺失 Linux cross compiler 时不会静默成功。
 - 2026-07-06：固定第二真实模块 LPeg 1.1.0 到 `third_party/lpeg/`，新增 `GLUA_VENDOR.md` 记录官方源码包 URL、版本、许可位置和本项目未改源码；该切口只完成源码自包含门禁，尚未声明 `require("lpeg")` 运行期验收通过。
 - 2026-07-06：新增 `scripts/build-native-lpeg.sh`，直接使用仓库内 `native/lua53/include/` 与 `third_party/lpeg/` 固定源码编译当前平台 `lpeg` 动态模块；macOS 同时产出 `.so` 与 `.dylib`，Linux 产出 `.so`，Windows 在 `lua53.dll` shim/import library 落地前明确 skip。该切口只证明 LPeg 源码可自包含编译，`require("lpeg")` 运行期验收仍等待独立脚本闭环。
 - 2026-07-06：复核 `package.loadlib` 门禁并同步 TODO；`go test ./stdlib/package -run 'TestLoadLibDisabled|TestCLoadingPolicyDocumentsUnsupportedDynamicLibraries|TestLoadLibUsesDynamicLibraryLoader'` 确认默认 no-CGO 禁用说明和宿主 loader 覆盖稳定，`CGO_ENABLED=1 go test -tags native_modules ./internal/native -run 'TestUnixPackageLoadLibResolvesNativeFixture|TestUnixPackageLoadLibReturnsCallableNativeFixture'` 确认 native fixture 可通过 `package.loadlib` 解析并在 state-aware loader 下调用。LPeg 运行期探测已进入动态库打开阶段，但当前被 `_luaL_addlstring` 等尚未导出的 public C API 阻塞，后续需按 `luaL_Buffer`、table/user value、raw length/equality/call 等 API 组分批补齐。
