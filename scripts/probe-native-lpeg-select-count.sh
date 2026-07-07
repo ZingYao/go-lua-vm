@@ -48,6 +48,7 @@ echo "PROBE_SELECTED_HEAD_LOCALS=${PROBE_SELECTED_HEAD_LOCALS:-}"
 echo "PROBE_SELECTED_HEAD_SPLIT_TAIL_ONLY=${PROBE_SELECTED_HEAD_SPLIT_TAIL_ONLY:-0}"
 echo "PROBE_SELECTED_HEAD_WARMUP_DEFAULT_TAIL=${PROBE_SELECTED_HEAD_WARMUP_DEFAULT_TAIL:-0}"
 echo "PROBE_SELECTED_HEAD_WARMUP_GC_BEFORE_TAIL=${PROBE_SELECTED_HEAD_WARMUP_GC_BEFORE_TAIL:-0}"
+echo "PROBE_SELECTED_WARMUP_KIND=${PROBE_SELECTED_WARMUP_KIND:-}"
 echo "PROBE_SELECTED_CLEAR_BEFORE_MATCH=${PROBE_SELECTED_CLEAR_BEFORE_MATCH:-0}"
 echo "PROBE_SELECTED_GC_BEFORE_MATCH=${PROBE_SELECTED_GC_BEFORE_MATCH:-0}"
 echo "PROBE_GC_BEFORE_TAIL=${PROBE_GC_BEFORE_TAIL:-0}"
@@ -470,10 +471,55 @@ LUA
   fi
 }
 
-emit_probe_head_warmup_default_tail() {
+emit_probe_warmup_default_tail() {
+  local warmup_kind="${PROBE_SELECTED_WARMUP_KIND:-}"
+  if [[ -z "${warmup_kind}" && "${PROBE_SELECTED_HEAD_WARMUP_DEFAULT_TAIL:-0}" == "1" ]]; then
+    warmup_kind="head"
+  fi
+
+  case "${warmup_kind}" in
+    head)
+      cat <<'LUA'
+local probe_warmup = ']' * m.C(m.P'='^0) * ']'
+LUA
+      ;;
+    pany)
+      cat <<'LUA'
+local probe_warmup = m.P(1)
+LUA
+      ;;
+    pchar)
+      cat <<'LUA'
+local probe_warmup = m.P']'
+LUA
+      ;;
+    seq)
+      cat <<'LUA'
+local probe_warmup = m.P']' * (m.P'='^0) * m.P']'
+LUA
+      ;;
+    capture)
+      cat <<'LUA'
+local probe_warmup = m.C(m.P'='^0)
+LUA
+      ;;
+    back)
+      cat <<'LUA'
+local probe_warmup = m.Cb("init")
+LUA
+      ;;
+    runtime)
+      cat <<'LUA'
+local probe_warmup = m.Cmt(m.P(1), function () return true end)
+LUA
+      ;;
+    *)
+      echo "unknown PROBE_SELECTED_WARMUP_KIND=${warmup_kind}" >&2
+      return 1
+      ;;
+  esac
   cat <<'LUA'
-local probe_close_head_warmup = ']' * m.C(m.P'='^0) * ']'
-probe_close_head_warmup = nil
+probe_warmup = nil
 LUA
   if [[ "${PROBE_SELECTED_HEAD_WARMUP_GC_BEFORE_TAIL:-0}" == "1" ]]; then
     cat <<'LUA'
@@ -1601,8 +1647,8 @@ probe_mode() {
       emit_probe_prebuilt_match_tail
     elif [[ "${PROBE_PREBUILD_PARTS:-0}" == "1" ]]; then
       emit_probe_prebuilt_parts_tail
-    elif [[ "${PROBE_SELECTED_HEAD_WARMUP_DEFAULT_TAIL:-0}" == "1" ]]; then
-      emit_probe_head_warmup_default_tail
+    elif [[ -n "${PROBE_SELECTED_WARMUP_KIND:-}" || "${PROBE_SELECTED_HEAD_WARMUP_DEFAULT_TAIL:-0}" == "1" ]]; then
+      emit_probe_warmup_default_tail
     elif uses_selected_tail; then
       emit_probe_selected_parts_tail
     else
