@@ -170,13 +170,22 @@ func nativeLuaToLString(luaState unsafe.Pointer, index int) (unsafe.Pointer, uin
 		// Lua string 可直接复制到 C buffer。
 		return nativeLuaAllocCString(luaState, value.String)
 	case runtime.KindInteger, runtime.KindNumber:
-		// number-to-string 使用 runtime 已有 Lua 5.3 基础格式；当前不回写栈槽，后续完整 lua_tolstring 语义补齐。
+		// number-to-string 使用 runtime 已有 Lua 5.3 基础格式，并按 lua_tolstring 语义回写真实栈槽。
 		text, ok := value.NumberToString()
 		if !ok {
 			// 理论上 number 类型均可格式化；失败时按转换失败处理。
 			return nil, 0, false
 		}
-		return nativeLuaAllocCString(luaState, text)
+		buffer, length, ok := nativeLuaAllocCString(luaState, text)
+		if !ok {
+			// C buffer 分配失败时不能向调用方暴露可用字符串，也不提前改变栈槽。
+			return nil, 0, false
+		}
+		if state, stateOK := lookupNativeStateHandle(luaState); stateOK {
+			// 只有普通栈槽会被写回；registry/upvalue 等 pseudo-index 没有“栈内实际值”可替换。
+			_ = nativeLuaWriteStackValue(luaState, state, index, runtime.StringValue(text))
+		}
+		return buffer, length, true
 	default:
 		// 其他类型不能按最小字符串 API 转换。
 		return nil, 0, false

@@ -131,6 +131,10 @@ func TestNativeCAPICheckLString(t *testing.T) {
 		// number-to-string 结果必须来自 runtime 的 Lua 5.3 基础格式。
 		t.Fatalf("nativeLuaToLString integer = %q, want 42", got)
 	}
+	if value := state.ValueAt(2); value.Kind != runtime.KindString || value.String != "42" {
+		// lua_tolstring 对 number 的转换必须把真实栈槽回写为 Lua string。
+		t.Fatalf("nativeLuaToLString integer stack slot = %#v, want string 42", value)
+	}
 
 	buffer, length, ok = nativeLuaCheckLString(luaState, 3)
 	if ok || buffer != nil || length != 0 {
@@ -152,6 +156,51 @@ func TestNativeCAPICheckLString(t *testing.T) {
 	if stillTracked {
 		// handle 关闭后必须解除 buffer 追踪并释放 C 内存。
 		t.Fatalf("nativeStateBuffers still tracks closed token")
+	}
+}
+
+// TestNativeLuaToLStringNumberConversionWritesCurrentCFrame 验证 lua_tolstring 数字转换只回写当前 C frame 可见槽。
+func TestNativeLuaToLStringNumberConversionWritesCurrentCFrame(t *testing.T) {
+	// 构造外层栈槽和 C frame 参数槽，确认正索引映射不会穿透到外层调用者。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 C frame 写回。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	outer := []byte{'o', 'u', 't', 'e', 'r', 0}
+	nativeLuaPushString(luaState, unsafe.Pointer(&outer[0]))
+	nativeLuaPushInteger(luaState, 7)
+	if !pushNativeStateCallFrame(luaState, 1, nil) {
+		// 无法建立调用帧时，本测试不能继续验证正索引回写边界。
+		t.Fatalf("pushNativeStateCallFrame failed")
+	}
+	defer popNativeStateCallFrame(luaState)
+
+	buffer, length, ok := nativeLuaToLString(luaState, 1)
+	if !ok || length != 1 {
+		// C frame 正索引 1 应命中 integer 参数并转换成单字节字符串。
+		t.Fatalf("nativeLuaToLString frame integer = len=%d ok=%v, want 1 true", length, ok)
+	}
+	if got := unsafe.String((*byte)(buffer), int(length)); got != "7" {
+		// 返回给 C 模块的 buffer 必须包含转换后的数字文本。
+		t.Fatalf("nativeLuaToLString frame integer = %q, want 7", got)
+	}
+	if value := state.ValueAt(1); value.Kind != runtime.KindString || value.String != "outer" {
+		// 外层栈槽不属于当前 C frame，正索引回写不能覆盖它。
+		t.Fatalf("outer stack slot = %#v, want outer", value)
+	}
+	if value := state.ValueAt(2); value.Kind != runtime.KindString || value.String != "7" {
+		// 当前 C frame 第一个可见槽位必须从 integer 回写为 string。
+		t.Fatalf("call frame stack slot = %#v, want string 7", value)
+	}
+	if got := nativeLuaStackTop(luaState); got != 1 {
+		// 回写不能改变当前 C frame 的可见栈顶。
+		t.Fatalf("nativeLuaToLString frame visible top = %d, want 1", got)
 	}
 }
 

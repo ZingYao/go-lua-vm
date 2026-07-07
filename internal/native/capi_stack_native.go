@@ -205,6 +205,39 @@ func nativeLuaAbsoluteStackIndex(luaState unsafe.Pointer, state *runtime.State, 
 	return absoluteIndex, true
 }
 
+// nativeLuaWriteStackValue 把值写回指定 C API 栈槽，并保持原栈顶不变。
+func nativeLuaWriteStackValue(luaState unsafe.Pointer, state *runtime.State, index int, value runtime.Value) bool {
+	// 写回前先校验 State 生命周期，避免在已关闭 VM 上重建栈段。
+	if state == nil || state.IsClosed() {
+		// 无效或已关闭 State 不能安全写回任何栈槽。
+		return false
+	}
+	absoluteTarget, ok := nativeLuaAbsoluteStackIndex(luaState, state, index)
+	if !ok {
+		// 目标必须是当前 C API 可见的真实栈槽；pseudo-index 和越界索引保持 no-op。
+		return false
+	}
+	top := state.StackTop()
+	suffix := make([]runtime.Value, top-absoluteTarget)
+	for valueIndex := range suffix {
+		// 保存目标槽之后的后缀，避免重建栈段时改变后续值顺序。
+		suffix[valueIndex] = state.ValueAt(absoluteTarget + 1 + valueIndex)
+	}
+	nativeLuaRestoreStackTop(state, absoluteTarget-1)
+	if err := state.Push(value); err != nil {
+		// 写回原有槽位理论上不会扩栈失败；失败时停止，调用方可按 no-op 处理。
+		return false
+	}
+	for valueIndex := range suffix {
+		// 重新压回后缀，保证该 helper 不改变栈顶和目标槽之外的内容。
+		if err := state.Push(suffix[valueIndex]); err != nil {
+			// 后缀恢复失败时停止，避免继续扩大状态损坏。
+			return false
+		}
+	}
+	return true
+}
+
 // nativeLuaCopy 按 Lua 5.3 C API 的 lua_copy 语义复制 fromidx 到 toidx。
 func nativeLuaCopy(luaState unsafe.Pointer, fromIndex int, toIndex int) {
 	// 入口先解析 State；失效 handle 不能修改任何 Go VM 状态。
@@ -218,28 +251,9 @@ func nativeLuaCopy(luaState unsafe.Pointer, fromIndex int, toIndex int) {
 		// fromidx 必须是可读索引；当前最小 shim 对无效索引保持 no-op。
 		return
 	}
-	absoluteTarget, ok := nativeLuaAbsoluteStackIndex(luaState, state, toIndex)
-	if !ok {
+	if !nativeLuaWriteStackValue(luaState, state, toIndex, value) {
 		// toidx 必须是当前栈上的有效槽位；pseudo-index 写入留到后续完整 API 阶段。
 		return
-	}
-	top := state.StackTop()
-	suffix := make([]runtime.Value, top-absoluteTarget)
-	for valueIndex := range suffix {
-		// 先保存目标槽之后的后缀，避免重建栈段时丢失原顺序。
-		suffix[valueIndex] = state.ValueAt(absoluteTarget + 1 + valueIndex)
-	}
-	nativeLuaRestoreStackTop(state, absoluteTarget-1)
-	if err := state.Push(value); err != nil {
-		// 理论上不会超过原栈深；失败时停止写回，交给后续 State 错误边界暴露。
-		return
-	}
-	for valueIndex := range suffix {
-		// 重新压回后缀，保持 lua_copy 不改变栈顶和其他槽位的语义。
-		if err := state.Push(suffix[valueIndex]); err != nil {
-			// 写回失败时停止，避免继续扩大副作用。
-			return
-		}
 	}
 }
 
