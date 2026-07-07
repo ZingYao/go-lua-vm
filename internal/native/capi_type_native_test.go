@@ -99,6 +99,8 @@ func TestNativeCAPITypeAndNumberPrimitives(t *testing.T) {
 		// 普通 string 必须可作为字符串读取。
 		t.Fatalf("nativeLuaIsString string = %v, want true", got)
 	}
+	numericText := []byte{' ', '0', 'x', '1', 'p', '+', '2', ' ', 0}
+	nativeLuaPushString(luaState, unsafe.Pointer(&numericText[0]))
 	if got := nativeLuaIsString(nil, 1); got {
 		// nil State 不能读取任何 string。
 		t.Fatalf("nativeLuaIsString nil state = %v, want false", got)
@@ -113,6 +115,15 @@ func TestNativeCAPITypeAndNumberPrimitives(t *testing.T) {
 	if !ok || numberValue != 2.5 {
 		// float number 必须原样返回。
 		t.Fatalf("nativeLuaToNumber number = value=%v ok=%v, want 2.5 true", numberValue, ok)
+	}
+	numberValue, ok = nativeLuaToNumber(luaState, 9)
+	if !ok || numberValue != 4 {
+		// Lua 5.3 C API 要求 numeric string 可按 number 读取，十六进制浮点也应复用 runtime 解析。
+		t.Fatalf("nativeLuaToNumber numeric string = value=%v ok=%v, want 4 true", numberValue, ok)
+	}
+	if value := state.ValueAt(9); value.Kind != runtime.KindString || value.String != " 0x1p+2 " {
+		// lua_tonumberx 不应改变栈中原始字符串值。
+		t.Fatalf("nativeLuaToNumber numeric string stack slot = %#v, want original string", value)
 	}
 	numberValue, ok = nativeLuaToNumber(luaState, 7)
 	if ok || numberValue != 0 {

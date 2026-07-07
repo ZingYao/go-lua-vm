@@ -44,8 +44,13 @@ func nativeLuaToInteger(luaState unsafe.Pointer, index int) (int64, bool) {
 	}
 	integerValue, ok := value.ToInteger()
 	if !ok {
-		// 当前阶段只覆盖 runtime.Value 的 number/integer 转换；字符串转数字留到完整 C API 兼容阶段。
-		return 0, false
+		// Lua 5.3 C API 允许 numeric string 先按 number 解析，再尝试无损转 integer。
+		numberValue, converted := value.StringToNumber()
+		if !converted {
+			// 非 number 且非 numeric string 不能转换为 integer。
+			return 0, false
+		}
+		return numberValue.ToInteger()
 	}
 	return integerValue, true
 }

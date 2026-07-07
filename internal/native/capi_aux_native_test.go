@@ -25,6 +25,10 @@ func TestNativeCAPICheckInteger(t *testing.T) {
 	nativeLuaPushInteger(luaState, 53)
 	nativeLuaPushNumber(luaState, 42)
 	nativeLuaPushNumber(luaState, 2.5)
+	hexInteger := []byte{' ', '0', 'x', '2', 'a', ' ', 0}
+	fractionalText := []byte{'3', '4', '.', '3', 0}
+	nativeLuaPushString(luaState, unsafe.Pointer(&hexInteger[0]))
+	nativeLuaPushString(luaState, unsafe.Pointer(&fractionalText[0]))
 	nativeLuaPushString(luaState, nil)
 
 	if integerValue, ok := nativeLuaToInteger(luaState, 1); !ok || integerValue != 53 {
@@ -38,6 +42,18 @@ func TestNativeCAPICheckInteger(t *testing.T) {
 	if integerValue, ok := nativeLuaToInteger(luaState, 3); ok || integerValue != 0 {
 		// 有小数部分的 float number 不能转换为 integer。
 		t.Fatalf("nativeLuaToInteger fractional = value=%d ok=%v, want 0 false", integerValue, ok)
+	}
+	if integerValue, ok := nativeLuaToInteger(luaState, 4); !ok || integerValue != 42 {
+		// Lua 5.3 C API 要求 numeric string 可按整数读取。
+		t.Fatalf("nativeLuaToInteger string = value=%d ok=%v, want 42 true", integerValue, ok)
+	}
+	if value := state.ValueAt(4); value.Kind != runtime.KindString || value.String != " 0x2a " {
+		// lua_tointegerx 不像 lua_tolstring，不应把 numeric string 回写成 number。
+		t.Fatalf("nativeLuaToInteger string stack slot = %#v, want original string", value)
+	}
+	if integerValue, ok := nativeLuaToInteger(luaState, 5); ok || integerValue != 0 {
+		// 小数字符串可转 number，但不能无损转 Lua integer。
+		t.Fatalf("nativeLuaToInteger fractional string = value=%d ok=%v, want 0 false", integerValue, ok)
 	}
 	if integerValue := nativeLuaCheckInteger(luaState, 3); integerValue != 0 {
 		// luaL_error 尚未实现前，checkinteger 失败暂时返回 0。
@@ -66,9 +82,11 @@ func TestNativeCAPIOptInteger(t *testing.T) {
 	defer handle.close()
 	luaState := handle.pointer()
 
+	numericText := []byte{'3', '4', '.', '0', 0}
 	text := []byte{'x', 0}
 	nativeLuaPushNil(luaState)
 	nativeLuaPushInteger(luaState, 7)
+	nativeLuaPushString(luaState, unsafe.Pointer(&numericText[0]))
 	nativeLuaPushString(luaState, unsafe.Pointer(&text[0]))
 
 	if integerValue := nativeLuaOptInteger(luaState, 1, 99); integerValue != 99 {
@@ -79,16 +97,20 @@ func TestNativeCAPIOptInteger(t *testing.T) {
 		// 存在的整数参数必须返回实际值。
 		t.Fatalf("nativeLuaOptInteger integer = %d, want 7", integerValue)
 	}
-	if integerValue := nativeLuaOptInteger(luaState, 4, 88); integerValue != 88 {
+	if integerValue := nativeLuaOptInteger(luaState, 3, 99); integerValue != 34 {
+		// 可选整数参数存在且是 numeric string 时必须按实际值返回。
+		t.Fatalf("nativeLuaOptInteger numeric string = %d, want 34", integerValue)
+	}
+	if integerValue := nativeLuaOptInteger(luaState, 5, 88); integerValue != 88 {
 		// 缺失参数必须按 none 语义返回默认值。
 		t.Fatalf("nativeLuaOptInteger missing = %d, want 88", integerValue)
 	}
-	if integerValue := nativeLuaOptInteger(luaState, 3, 99); integerValue != 0 {
+	if integerValue := nativeLuaOptInteger(luaState, 4, 99); integerValue != 0 {
 		// 非整数参数错误路径返回 0，真正错误对象通过 pending error 暂存。
 		t.Fatalf("nativeLuaOptInteger string = %d, want 0", integerValue)
 	}
 	errorObject, ok := takeNativeStatePendingError(luaState)
-	if !ok || errorObject.Kind != runtime.KindString || errorObject.String != "bad argument #3 (integer expected)" {
+	if !ok || errorObject.Kind != runtime.KindString || errorObject.String != "bad argument #4 (integer expected)" {
 		// 非整数参数必须记录 lauxlib 兼容的 integer expected 错误。
 		t.Fatalf("nativeLuaOptInteger pending error = %#v ok=%v, want integer expected", errorObject, ok)
 	}

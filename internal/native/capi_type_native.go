@@ -132,8 +132,13 @@ func nativeLuaToNumber(luaState unsafe.Pointer, index int) (float64, bool) {
 	}
 	numberValue, ok := value.ToNumber()
 	if !ok {
-		// 当前阶段只覆盖 runtime.Value 的 number/integer 转换；字符串转数字留到完整 C API 阶段。
-		return 0, false
+		// Lua 5.3 C API 允许 numeric string 按完整字符串转 number 规则读取。
+		convertedValue, converted := value.StringToNumber()
+		if !converted {
+			// 非 number 且非 numeric string 不能转换为 number。
+			return 0, false
+		}
+		return convertedValue.ToNumber()
 	}
 	return numberValue, true
 }
