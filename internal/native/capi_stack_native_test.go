@@ -262,6 +262,63 @@ func TestNativeLuaCopyUsesCallFramePositiveIndexes(t *testing.T) {
 	}
 }
 
+// TestNativeLuaReplaceMacroRespectsCurrentCFrame 验证 lua_replace 宏展开不会穿透当前 C 调用帧。
+func TestNativeLuaReplaceMacroRespectsCurrentCFrame(t *testing.T) {
+	// Lua 5.3 头文件将 lua_replace 展开为 lua_copy(L, -1, idx) 与 lua_pop(L, 1)，LPeg 的 getpatt 路径依赖该组合语义。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 lua_replace 宏语义。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+	pushText := func(text string) {
+		// 测试字符串只在本次调用内使用；native helper 会立即复制为 Go VM string。
+		buffer := append([]byte(text), 0)
+		nativeLuaPushString(luaState, unsafe.Pointer(&buffer[0]))
+	}
+
+	pushText("outer")
+	pushText("first")
+	pushText("second")
+	if !pushNativeStateCallFrame(luaState, 1, nil) {
+		// 无法建立调用帧时，本测试不能继续验证 C frame 内 lua_replace 宏展开。
+		t.Fatalf("pushNativeStateCallFrame failed")
+	}
+	defer popNativeStateCallFrame(luaState)
+
+	pushText("replacement")
+	if got := nativeLuaStackTop(luaState); got != 3 {
+		// C function 内两个入参加一个临时 replacement，宏展开前可见栈顶应为 3。
+		t.Fatalf("before lua_replace macro visible top = %d, want 3", got)
+	}
+	nativeLuaCopy(luaState, -1, 1)
+	nativeLuaSetTop(luaState, -2)
+
+	if got := nativeLuaStackTop(luaState); got != 2 {
+		// lua_pop(L, 1) 必须只弹出当前 C frame 内的临时栈顶。
+		t.Fatalf("after lua_replace macro visible top = %d, want 2", got)
+	}
+	if got := state.StackTop(); got != 3 {
+		// 全局栈仍保留 outer 加两个 C frame 可见槽，不能留下 replacement 临时值。
+		t.Fatalf("after lua_replace macro global top = %d, want 3", got)
+	}
+	if value := state.ValueAt(1); value.Kind != runtime.KindString || value.String != "outer" {
+		// 外层调用者栈不属于当前 C frame，lua_replace(L, 1) 不能覆盖它。
+		t.Fatalf("outer stack slot = %#v, want outer", value)
+	}
+	if value := state.ValueAt(2); value.Kind != runtime.KindString || value.String != "replacement" {
+		// 当前 C frame 第一个参数应被原栈顶临时值替换。
+		t.Fatalf("call frame target = %#v, want replacement", value)
+	}
+	if value := state.ValueAt(3); value.Kind != runtime.KindString || value.String != "second" {
+		// 当前 C frame 第二个参数不是目标槽，必须保持原值。
+		t.Fatalf("call frame untouched slot = %#v, want second", value)
+	}
+}
+
 // TestNativeCAPIFrameNegativeIndexesDoNotCrossBase 验证 C frame 内过深负索引不能穿透外层栈。
 func TestNativeCAPIFrameNegativeIndexesDoNotCrossBase(t *testing.T) {
 	// 外层栈槽不属于当前 C function 可见栈，负索引越过 frame base 时必须按 none/no-op 处理。
