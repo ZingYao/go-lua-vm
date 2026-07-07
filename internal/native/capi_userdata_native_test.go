@@ -182,6 +182,57 @@ func TestNativeLuaGetUserValueRejectsNonFullUserdata(t *testing.T) {
 	}
 }
 
+// TestNativeLuaGetUserValueRespectsCurrentCFrameBase 验证 lua_getuservalue 不会读取当前 C 帧之前的外层 userdata。
+func TestNativeLuaGetUserValueRespectsCurrentCFrameBase(t *testing.T) {
+	// 外层 userdata 持有非 nil user value；当前 C 帧为空时，正索引 1 不能穿透读取它。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 native State 映射不可用，无法验证 C frame 边界。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	if pointer := nativeLuaNewUserdata(luaState, 8); pointer == nil {
+		// 测试需要一个 native full userdata 作为外层 sentinel。
+		t.Fatalf("lua_newuserdata returned nil")
+	}
+	userdataValue := state.ValueAt(1)
+	userdata, ok := userdataValue.Ref.(*runtime.Userdata)
+	if !ok || userdata == nil {
+		// native full userdata 必须能解析为 runtime.Userdata。
+		t.Fatalf("userdata ref = %#v, want *runtime.Userdata", userdataValue.Ref)
+	}
+	userValueTable := runtime.NewTable()
+	userdata.UserValue = runtime.ReferenceValue(runtime.KindTable, userValueTable)
+
+	baseTop := state.StackTop()
+	if !pushNativeStateCallFrame(luaState, baseTop, nil) {
+		// 无法建立 C 调用帧时，正索引可见性不可验证。
+		t.Fatal("pushNativeStateCallFrame failed")
+	}
+	defer popNativeStateCallFrame(luaState)
+
+	if gotType := nativeLuaGetUserValue(luaState, 1); gotType != nativeLuaTypeNil {
+		// 当前 C 帧没有第 1 个可见参数时，应按 nil 回退，不能读取外层 userdata 的 user value。
+		t.Fatalf("lua_getuservalue(frame index 1) = %d, want nil", gotType)
+	}
+	if got := state.StackTop(); got != baseTop+1 {
+		// 失败安全路径只应在当前 C 帧压入一个 nil，不得改写外层栈。
+		t.Fatalf("lua_getuservalue global top = %d, want %d", got, baseTop+1)
+	}
+	if value := state.ValueAt(1); value.Ref != userdata {
+		// 外层 userdata sentinel 必须原样保留给调用者。
+		t.Fatalf("outer userdata value = %#v, want %p", value, userdata)
+	}
+	if value := state.ValueAt(-1); !value.IsNil() {
+		// 栈顶必须是失败安全 nil，而不是外层 userdata 的 user value table。
+		t.Fatalf("visible user value = %#v, want nil", value)
+	}
+}
+
 // TestNativeLuaSetUserValue 验证 lua_setuservalue 写入 full userdata 关联值。
 func TestNativeLuaSetUserValue(t *testing.T) {
 	// LPeg 使用 user value 保存 pattern 的 ktable，必须保持 table identity。
