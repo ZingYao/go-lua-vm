@@ -545,6 +545,14 @@ LUA
 local probe_warmup = ']'
 LUA
       ;;
+    string-close-after-dead-pad)
+      cat <<'LUA'
+if false then
+  local probe_pad = 'pad-before-close'
+end
+local probe_warmup = ']'
+LUA
+      ;;
     string-open)
       cat <<'LUA'
 local probe_warmup = '['
@@ -572,6 +580,35 @@ LUA
       ;;
     string-close-dead-branch)
       cat <<'LUA'
+local probe_warmup
+if false then
+  probe_warmup = ']'
+end
+LUA
+      ;;
+    string-close-dead-branch-after-dead-pad)
+      cat <<'LUA'
+if false then
+  local probe_pad = 'pad-before-close'
+end
+local probe_warmup
+if false then
+  probe_warmup = ']'
+end
+LUA
+      ;;
+    string-close-dead-branch-after-dead-pads8)
+      cat <<'LUA'
+if false then
+  local probe_pad1 = 'pad-before-close-1'
+  local probe_pad2 = 'pad-before-close-2'
+  local probe_pad3 = 'pad-before-close-3'
+  local probe_pad4 = 'pad-before-close-4'
+  local probe_pad5 = 'pad-before-close-5'
+  local probe_pad6 = 'pad-before-close-6'
+  local probe_pad7 = 'pad-before-close-7'
+  local probe_pad8 = 'pad-before-close-8'
+end
 local probe_warmup
 if false then
   probe_warmup = ']'

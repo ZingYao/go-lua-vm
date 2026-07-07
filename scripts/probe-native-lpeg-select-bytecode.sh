@@ -54,8 +54,51 @@ probe_warmup = nil
 LUA
 }
 
+emit_lpeg_warmup_string_close_after_dead_pad() {
+  cat <<'LUA'
+if false then
+  local probe_pad = 'pad-before-close'
+end
+local probe_warmup = ']'
+probe_warmup = nil
+LUA
+}
+
 emit_lpeg_warmup_string_close_dead_branch() {
   cat <<'LUA'
+local probe_warmup
+if false then
+  probe_warmup = ']'
+end
+probe_warmup = nil
+LUA
+}
+
+emit_lpeg_warmup_string_close_dead_branch_after_dead_pad() {
+  cat <<'LUA'
+if false then
+  local probe_pad = 'pad-before-close'
+end
+local probe_warmup
+if false then
+  probe_warmup = ']'
+end
+probe_warmup = nil
+LUA
+}
+
+emit_lpeg_warmup_string_close_dead_branch_after_dead_pads8() {
+  cat <<'LUA'
+if false then
+  local probe_pad1 = 'pad-before-close-1'
+  local probe_pad2 = 'pad-before-close-2'
+  local probe_pad3 = 'pad-before-close-3'
+  local probe_pad4 = 'pad-before-close-4'
+  local probe_pad5 = 'pad-before-close-5'
+  local probe_pad6 = 'pad-before-close-6'
+  local probe_pad7 = 'pad-before-close-7'
+  local probe_pad8 = 'pad-before-close-8'
+end
 local probe_warmup
 if false then
   probe_warmup = ']'
@@ -496,8 +539,23 @@ LUA
       emit_lpeg_error_number_perturbation
       emit_lpeg_default_tail
       ;;
+    lpeg-warmup-string-close-after-dead-pad-default-tail-error-number)
+      emit_lpeg_warmup_string_close_after_dead_pad
+      emit_lpeg_error_number_perturbation
+      emit_lpeg_default_tail
+      ;;
     lpeg-warmup-string-close-dead-branch-default-tail-error-number)
       emit_lpeg_warmup_string_close_dead_branch
+      emit_lpeg_error_number_perturbation
+      emit_lpeg_default_tail
+      ;;
+    lpeg-warmup-string-close-dead-branch-after-dead-pad-default-tail-error-number)
+      emit_lpeg_warmup_string_close_dead_branch_after_dead_pad
+      emit_lpeg_error_number_perturbation
+      emit_lpeg_default_tail
+      ;;
+    lpeg-warmup-string-close-dead-branch-after-dead-pads8-default-tail-error-number)
+      emit_lpeg_warmup_string_close_dead_branch_after_dead_pads8
       emit_lpeg_error_number_perturbation
       emit_lpeg_default_tail
       ;;
@@ -563,7 +621,10 @@ modes=(
   lpeg-decls-only-selected-tail-error-number
   lpeg-split-head-tail-only-error-number
   lpeg-warmup-string-close-default-tail-error-number
+  lpeg-warmup-string-close-after-dead-pad-default-tail-error-number
   lpeg-warmup-string-close-dead-branch-default-tail-error-number
+  lpeg-warmup-string-close-dead-branch-after-dead-pad-default-tail-error-number
+  lpeg-warmup-string-close-dead-branch-after-dead-pads8-default-tail-error-number
   lpeg-warmup-string-close-dead-function-default-tail-error-number
   lpeg-warmup-string-close-called-function-default-tail-error-number
 )
