@@ -46,8 +46,11 @@ echo "PROBE_SELECTED_CORE_DECLS_ONLY=${PROBE_SELECTED_CORE_DECLS_ONLY:-0}"
 echo "PROBE_SELECTED_PROBE_LOCALS=${PROBE_SELECTED_PROBE_LOCALS:-}"
 echo "PROBE_SELECTED_HEAD_LOCALS=${PROBE_SELECTED_HEAD_LOCALS:-}"
 echo "PROBE_SELECTED_HEAD_SPLIT_TAIL_ONLY=${PROBE_SELECTED_HEAD_SPLIT_TAIL_ONLY:-0}"
+echo "PROBE_SELECTED_HEAD_WARMUP_DEFAULT_TAIL=${PROBE_SELECTED_HEAD_WARMUP_DEFAULT_TAIL:-0}"
+echo "PROBE_SELECTED_HEAD_WARMUP_GC_BEFORE_TAIL=${PROBE_SELECTED_HEAD_WARMUP_GC_BEFORE_TAIL:-0}"
 echo "PROBE_SELECTED_CLEAR_BEFORE_MATCH=${PROBE_SELECTED_CLEAR_BEFORE_MATCH:-0}"
 echo "PROBE_SELECTED_GC_BEFORE_MATCH=${PROBE_SELECTED_GC_BEFORE_MATCH:-0}"
+echo "PROBE_GC_BEFORE_TAIL=${PROBE_GC_BEFORE_TAIL:-0}"
 echo "PROBE_PREBUILD_PADDING_LOCALS=${PROBE_PREBUILD_PADDING_LOCALS:-0}"
 echo "PROBE_CONTINUE_ON_CRASH=${PROBE_CONTINUE_ON_CRASH:-0}"
 
@@ -465,6 +468,34 @@ LUA
 print("PROBE", c:match'[==[]]====]]]]==]===[]', table.concat(attempts, ","))
 LUA
   fi
+}
+
+emit_probe_head_warmup_default_tail() {
+  cat <<'LUA'
+local probe_close_head_warmup = ']' * m.C(m.P'='^0) * ']'
+probe_close_head_warmup = nil
+LUA
+  if [[ "${PROBE_SELECTED_HEAD_WARMUP_GC_BEFORE_TAIL:-0}" == "1" ]]; then
+    cat <<'LUA'
+collectgarbage()
+LUA
+  fi
+  cat <<'LUA'
+local attempts = {}
+c = '[' * m.Cg(m.P'='^0, "init") * '[' *
+    { m.Cmt(']' * m.C(m.P'='^0) * ']' * m.Cb("init"), function (_, pos, s1, s2)
+                                               attempts[#attempts + 1] = pos .. ':' .. s1 .. ':' .. s2
+                                               return s1 == s2 end)
+       + 1 * m.V(1) } / 0
+LUA
+  if [[ "${PROBE_SELECTED_GC_BEFORE_MATCH:-0}" == "1" ]]; then
+    cat <<'LUA'
+collectgarbage()
+LUA
+  fi
+  cat <<'LUA'
+print("PROBE", c:match'[==[]]====]]]]==]===[]', table.concat(attempts, ","))
+LUA
 }
 
 emit_probe_prebuild_padding_locals() {
@@ -1563,10 +1594,15 @@ probe_mode() {
     fi
     emit_probe_prebuild_padding_locals
     emit_mode_body "${mode}"
+    if [[ "${PROBE_GC_BEFORE_TAIL:-0}" == "1" ]]; then
+      printf '%s\n' 'collectgarbage()'
+    fi
     if [[ "${PROBE_PREBUILD_PATTERN:-0}" == "1" ]]; then
       emit_probe_prebuilt_match_tail
     elif [[ "${PROBE_PREBUILD_PARTS:-0}" == "1" ]]; then
       emit_probe_prebuilt_parts_tail
+    elif [[ "${PROBE_SELECTED_HEAD_WARMUP_DEFAULT_TAIL:-0}" == "1" ]]; then
+      emit_probe_head_warmup_default_tail
     elif uses_selected_tail; then
       emit_probe_selected_parts_tail
     else
