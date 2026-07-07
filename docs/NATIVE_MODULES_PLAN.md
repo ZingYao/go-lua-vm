@@ -234,6 +234,7 @@ state := lua.NewStateWithOptions(options)
 - `luaL_testudata`
 - `luaL_ref`
 - `luaL_unref`
+- `lua_rawget`
 - `lua_rawgeti`
 - `lua_rawseti`
 - `luaL_buffinit`

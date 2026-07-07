@@ -221,6 +221,35 @@ func nativeLuaRawGetI(luaState unsafe.Pointer, index int, key int64) int {
 	return nativeLuaTypeCode(value, false)
 }
 
+// nativeLuaRawGet 按栈顶 key raw 读取 table 字段，弹出 key 后压入读取结果。
+func nativeLuaRawGet(luaState unsafe.Pointer, index int) int {
+	// rawget 不触发 __index 元方法；目标必须是 table 或 registry pseudo-index。
+	state, ok := lookupNativeStateHandle(luaState)
+	if !ok {
+		// 无效 State 或关闭 State 下不能弹栈或压栈。
+		return nativeLuaTypeNone
+	}
+	table, ok := nativeLuaTableAt(luaState, index)
+	if !ok {
+		// 非 table 目标保持 key 不被吞掉，后续 api_check 阶段再补齐错误语义。
+		return nativeLuaTypeNone
+	}
+	key, ok := nativeLuaPopVisible(luaState, state)
+	if !ok {
+		// 当前 C 帧没有可见 key 时保持栈不变，避免穿透外层 VM 栈。
+		return nativeLuaTypeNone
+	}
+	value, err := table.RawGet(key)
+	if err != nil {
+		// 不支持的 key 类型通过 pending error 传回 C function 调用边界。
+		setNativeStatePendingError(luaState, runtime.StringValue(err.Error()))
+		nativeLuaPushNil(luaState)
+		return nativeLuaTypeNil
+	}
+	nativeLuaPushValue(luaState, value)
+	return nativeLuaTypeCode(value, false)
+}
+
 // nativeLuaRawSetI 按 integer key raw 写入 table 字段并弹出栈顶值。
 func nativeLuaRawSetI(luaState unsafe.Pointer, index int, key int64) {
 	// 入口先解析 State；失效 handle 不能弹栈或写表。
@@ -456,6 +485,14 @@ func lua_settable(luaState *C.lua_State, index C.int) {
 func lua_rawgeti(luaState *C.lua_State, index C.int, key C.lua_Integer) C.int {
 	// C API 入口只做类型转换，返回值是 Lua 5.3 C API 类型编号。
 	return C.int(nativeLuaRawGetI(unsafe.Pointer(luaState), int(index), int64(key)))
+}
+
+// lua_rawget 导出 Lua 5.3 C API raw key 字段读取入口。
+//
+//export lua_rawget
+func lua_rawget(luaState *C.lua_State, index C.int) C.int {
+	// C API 入口只做类型转换，返回值是 Lua 5.3 C API 类型编号。
+	return C.int(nativeLuaRawGet(unsafe.Pointer(luaState), int(index)))
 }
 
 // lua_rawseti 导出 Lua 5.3 C API integer key raw 写入入口。

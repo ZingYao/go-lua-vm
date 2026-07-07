@@ -472,6 +472,167 @@ func TestNativeCAPIRawIntegerPrimitives(t *testing.T) {
 	}
 }
 
+// TestNativeCAPIRawGetUsesStackKey 验证 lua_rawget 使用栈顶 key 做原始读取。
+func TestNativeCAPIRawGetUsesStackKey(t *testing.T) {
+	// LuaSocket 会通过 lua_rawget 读取模块表和 registry，本测试锁定不触发元方法的 raw 查询语义。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	nativeLuaCreateTable(luaState, 0, 2)
+	tableValue := state.ValueAt(1)
+	tableRef, ok := tableValue.Ref.(*runtime.Table)
+	if tableValue.Kind != runtime.KindTable || !ok || tableRef == nil {
+		// 栈底必须是 rawget 操作的 table。
+		t.Fatalf("table value = %#v, want table", tableValue)
+	}
+	tableRef.RawSetString("name", runtime.StringValue("glua"))
+	tableRef.RawSetInteger(2, runtime.IntegerValue(200))
+	indexTable := runtime.NewTable()
+	indexTable.RawSetString("meta", runtime.StringValue("hidden"))
+	metatable := runtime.NewTable()
+	metatable.RawSetString("__index", runtime.ReferenceValue(runtime.KindTable, indexTable))
+	tableRef.SetMetatable(metatable)
+
+	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'n', 'a', 'm', 'e', 0}[0]))
+	typeCode := nativeLuaRawGet(luaState, 1)
+	if typeCode != nativeLuaTypeString {
+		// string key 命中时返回 string 类型编号。
+		t.Fatalf("lua_rawget string type = %d, want %d", typeCode, nativeLuaTypeString)
+	}
+	if got := nativeLuaStackTop(luaState); got != 2 {
+		// rawget 必须弹出 key 并压入 value，因此总栈高保持 table,value。
+		t.Fatalf("lua_rawget string top = %d, want 2", got)
+	}
+	if value := state.ValueAt(-1); value.Kind != runtime.KindString || value.String != "glua" {
+		// 栈顶必须是 table["name"] 的原始值。
+		t.Fatalf("lua_rawget string value = %#v, want glua", value)
+	}
+
+	nativeLuaSetTop(luaState, 1)
+	nativeLuaPushInteger(luaState, 2)
+	typeCode = nativeLuaRawGet(luaState, 1)
+	if typeCode != nativeLuaTypeNumber {
+		// integer key 命中 integer 值时返回 number 类型编号。
+		t.Fatalf("lua_rawget integer type = %d, want %d", typeCode, nativeLuaTypeNumber)
+	}
+	if value := state.ValueAt(-1); value.Kind != runtime.KindInteger || value.Integer != 200 {
+		// 栈顶必须是 table[2] 的原始值。
+		t.Fatalf("lua_rawget integer value = %#v, want 200", value)
+	}
+
+	nativeLuaSetTop(luaState, 1)
+	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'m', 'e', 't', 'a', 0}[0]))
+	typeCode = nativeLuaRawGet(luaState, 1)
+	if typeCode != nativeLuaTypeNil {
+		// rawget 不触发 __index，metatable 中可见的字段也必须返回 nil。
+		t.Fatalf("lua_rawget metatable key type = %d, want %d", typeCode, nativeLuaTypeNil)
+	}
+	if value := state.ValueAt(-1); !value.IsNil() {
+		// rawget 未命中时必须压入 nil。
+		t.Fatalf("lua_rawget metatable key value = %#v, want nil", value)
+	}
+}
+
+// TestNativeCAPIRawGetRegistry 验证 lua_rawget 可读取 registry pseudo-index。
+func TestNativeCAPIRawGetRegistry(t *testing.T) {
+	// registry pseudo-index 是 Lua C 模块保存类型表、方法表和引用数据的公共入口。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+	state.Registry().RawSetString("raw-key", runtime.IntegerValue(44))
+
+	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'r', 'a', 'w', '-', 'k', 'e', 'y', 0}[0]))
+	if typeCode := nativeLuaRawGet(luaState, runtime.RegistryPseudoIndex); typeCode != nativeLuaTypeNumber {
+		// registry 命中 integer 值时按 Lua C API 返回 number 类型编号。
+		t.Fatalf("registry lua_rawget type = %d, want %d", typeCode, nativeLuaTypeNumber)
+	}
+	if value := state.ValueAt(-1); value.Kind != runtime.KindInteger || value.Integer != 44 {
+		// registry["raw-key"] 必须保存并读取 integer 44。
+		t.Fatalf("registry raw-key = %#v, want 44", value)
+	}
+}
+
+// TestNativeLuaRawGetRespectsCurrentCFrameBase 验证 lua_rawget 不会弹出当前 C 帧之前的外层 key。
+func TestNativeLuaRawGetRespectsCurrentCFrameBase(t *testing.T) {
+	// registry 目标在当前 C 帧无可见 key 时，最容易暴露 rawget 是否误弹调用者栈。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 C frame 边界。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	keyBytes := []byte{'o', 'u', 't', 'e', 'r', '_', 'k', 'e', 'y', 0}
+	nativeLuaPushString(luaState, unsafe.Pointer(&keyBytes[0]))
+	if !pushNativeStateCallFrame(luaState, state.StackTop(), nil) {
+		// 无法建立 C 调用帧时，后续索引语义不可验证。
+		t.Fatal("pushNativeStateCallFrame failed")
+	}
+	defer popNativeStateCallFrame(luaState)
+
+	if typeCode := nativeLuaRawGet(luaState, runtime.RegistryPseudoIndex); typeCode != nativeLuaTypeNone {
+		// 当前 C 帧没有可见 key 时返回 none，不压入 nil 伪造查询结果。
+		t.Fatalf("lua_rawget type = %d, want %d", typeCode, nativeLuaTypeNone)
+	}
+	if got := state.StackTop(); got != 1 {
+		// 当前 C 帧没有可见 key 时，rawget 不得弹掉外层 sentinel。
+		t.Fatalf("lua_rawget global top = %d, want 1", got)
+	}
+	if value := state.ValueAt(1); value.Kind != runtime.KindString || value.String != "outer_key" {
+		// 外层 key sentinel 必须原样保留给调用者。
+		t.Fatalf("outer key stack value = %#v, want outer_key", value)
+	}
+	if errorObject, hasError := takeNativeStatePendingError(luaState); hasError {
+		// 缺少当前 C 帧可见 key 不应产生额外 pending error。
+		t.Fatalf("lua_rawget pending error = %#v", errorObject)
+	}
+}
+
+// TestNativeCAPIRawGetRejectsInvalidTarget 验证 lua_rawget 对无效目标保持失败安全。
+func TestNativeCAPIRawGetRejectsInvalidTarget(t *testing.T) {
+	// 当前最小 shim 不做 api_check；非 table 目标保持 key 不被吞掉。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	nativeLuaPushInteger(luaState, 1)
+	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'x', 0}[0]))
+	if typeCode := nativeLuaRawGet(luaState, 1); typeCode != nativeLuaTypeNone {
+		// 非 table 目标在当前阶段返回 none。
+		t.Fatalf("invalid lua_rawget type = %d, want %d", typeCode, nativeLuaTypeNone)
+	}
+	if got := nativeLuaStackTop(luaState); got != 2 {
+		// 无效目标不能弹出 key，避免掩盖后续错误边界。
+		t.Fatalf("invalid lua_rawget top = %d, want 2", got)
+	}
+	if errorObject, hasError := takeNativeStatePendingError(luaState); hasError {
+		// 无效目标 no-op 不应留下 pending error。
+		t.Fatalf("invalid lua_rawget pending error = %#v", errorObject)
+	}
+}
+
 // TestNativeCAPIRawSetAndNext 验证 lua_rawset 与 lua_next 的基础 table 语义。
 func TestNativeCAPIRawSetAndNext(t *testing.T) {
 	// cjson 编码 table 时依赖 rawset/next 这类不触发元方法的 public C API。
