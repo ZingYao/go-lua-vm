@@ -628,19 +628,20 @@ func (state *State) SweepWeakTables() int {
 	}
 
 	visited := make(map[*Table]bool)
+	visitedClosures := make(map[any]bool)
 	strongRefs := state.strongReferenceKeys()
 	removed := 0
 	if state.registry != nil {
 		// registry 是全局可达入口之一，需要从中查找弱表。
-		removed += state.sweepWeakTablesFromValue(ReferenceValue(KindTable, state.registry), visited, strongRefs)
+		removed += state.sweepWeakTablesFromValue(ReferenceValue(KindTable, state.registry), visited, visitedClosures, strongRefs)
 	}
 	if state.globals != nil {
 		// globals 保存脚本全局变量，是官方测试中弱表 a 的主要入口。
-		removed += state.sweepWeakTablesFromValue(ReferenceValue(KindTable, state.globals), visited, strongRefs)
+		removed += state.sweepWeakTablesFromValue(ReferenceValue(KindTable, state.globals), visited, visitedClosures, strongRefs)
 	}
 	for index := range state.stack {
 		// 主栈上的 table 也可能是待清理弱表或包含弱表。
-		removed += state.sweepWeakTablesFromValue(state.stack[index], visited, strongRefs)
+		removed += state.sweepWeakTablesFromValue(state.stack[index], visited, visitedClosures, strongRefs)
 	}
 	for _, vm := range state.activeVMs {
 		if vm == nil {
@@ -650,7 +651,7 @@ func (state *State) SweepWeakTables() int {
 		registers := vm.ActiveRegistersSnapshot()
 		for index := range registers {
 			// 当前 PC 下仍存活的活动寄存器本身也可能保存局部弱表，需要作为扫描入口。
-			removed += state.sweepWeakTablesFromValue(registers[index], visited, strongRefs)
+			removed += state.sweepWeakTablesFromValue(registers[index], visited, visitedClosures, strongRefs)
 		}
 	}
 	for _, thread := range state.threads {
@@ -660,17 +661,17 @@ func (state *State) SweepWeakTables() int {
 		}
 		for index := range thread.stack {
 			// 协程栈中的 table 同样纳入基础扫描。
-			removed += state.sweepWeakTablesFromValue(thread.stack[index], visited, strongRefs)
+			removed += state.sweepWeakTablesFromValue(thread.stack[index], visited, visitedClosures, strongRefs)
 		}
-		removed += state.sweepWeakTablesFromValue(thread.function, visited, strongRefs)
+		removed += state.sweepWeakTablesFromValue(thread.function, visited, visitedClosures, strongRefs)
 	}
 	for _, frame := range state.callFrames {
 		// 活动调用帧函数可能持有 upvalue table。
-		removed += state.sweepWeakTablesFromValue(frame.Function, visited, strongRefs)
+		removed += state.sweepWeakTablesFromValue(frame.Function, visited, visitedClosures, strongRefs)
 	}
 	state.forEachExternalGCRoot(func(value Value) {
 		// native/C shim 显式根也可能直接或间接持有弱表。
-		removed += state.sweepWeakTablesFromValue(value, visited, strongRefs)
+		removed += state.sweepWeakTablesFromValue(value, visited, visitedClosures, strongRefs)
 	})
 
 	// 返回发生删除的弱表数量近似值。
@@ -688,19 +689,20 @@ func (state *State) SweepWeakValuesBeforeFinalizers() int {
 	}
 
 	visited := make(map[*Table]bool)
+	visitedClosures := make(map[any]bool)
 	strongRefs := state.strongReferenceKeys()
 	removed := 0
 	if state.registry != nil {
 		// registry 是全局可达入口之一，需要从中查找弱 value 表。
-		removed += state.sweepWeakValuesFromValue(ReferenceValue(KindTable, state.registry), visited, strongRefs, false)
+		removed += state.sweepWeakValuesFromValue(ReferenceValue(KindTable, state.registry), visited, visitedClosures, strongRefs, false)
 	}
 	if state.globals != nil {
 		// globals 保存脚本全局变量，是官方测试中弱表 C 的主要入口。
-		removed += state.sweepWeakValuesFromValue(ReferenceValue(KindTable, state.globals), visited, strongRefs, false)
+		removed += state.sweepWeakValuesFromValue(ReferenceValue(KindTable, state.globals), visited, visitedClosures, strongRefs, false)
 	}
 	for index := range state.stack {
 		// 主栈上的 table 也可能包含弱 value 表。
-		removed += state.sweepWeakValuesFromValue(state.stack[index], visited, strongRefs, false)
+		removed += state.sweepWeakValuesFromValue(state.stack[index], visited, visitedClosures, strongRefs, false)
 	}
 	for _, vm := range state.activeVMs {
 		if vm == nil {
@@ -710,7 +712,7 @@ func (state *State) SweepWeakValuesBeforeFinalizers() int {
 		registers := vm.ActiveRegistersSnapshot()
 		for index := range registers {
 			// 活动寄存器中的局部 table 也需要参与弱 value 预清理。
-			removed += state.sweepWeakValuesFromValue(registers[index], visited, strongRefs, false)
+			removed += state.sweepWeakValuesFromValue(registers[index], visited, visitedClosures, strongRefs, false)
 		}
 	}
 	for _, thread := range state.threads {
@@ -720,21 +722,21 @@ func (state *State) SweepWeakValuesBeforeFinalizers() int {
 		}
 		for index := range thread.stack {
 			// 协程栈中的 table 同样纳入预清理扫描。
-			removed += state.sweepWeakValuesFromValue(thread.stack[index], visited, strongRefs, false)
+			removed += state.sweepWeakValuesFromValue(thread.stack[index], visited, visitedClosures, strongRefs, false)
 		}
-		removed += state.sweepWeakValuesFromValue(thread.function, visited, strongRefs, false)
+		removed += state.sweepWeakValuesFromValue(thread.function, visited, visitedClosures, strongRefs, false)
 	}
 	for _, frame := range state.callFrames {
 		// 活动调用帧函数可能持有 upvalue table。
-		removed += state.sweepWeakValuesFromValue(frame.Function, visited, strongRefs, false)
+		removed += state.sweepWeakValuesFromValue(frame.Function, visited, visitedClosures, strongRefs, false)
 	}
 	state.forEachExternalGCRoot(func(value Value) {
 		// native/C shim 显式根也要参与 finalizer 前的 weak value 清理顺序。
-		removed += state.sweepWeakValuesFromValue(value, visited, strongRefs, false)
+		removed += state.sweepWeakValuesFromValue(value, visited, visitedClosures, strongRefs, false)
 	})
 	for _, table := range state.finalizableTables {
 		// 待终结 table 可能已经不在普通根图中，但其元表弱 value 必须在 finalizer 前清理。
-		removed += state.sweepWeakValueTableGraph(table, visited, strongRefs, true)
+		removed += state.sweepWeakValueTableGraph(table, visited, visitedClosures, strongRefs, true)
 	}
 	return removed
 }
@@ -750,17 +752,18 @@ func (state *State) strongReferenceKeys() map[tableKey]bool {
 		return strongRefs
 	}
 	visited := make(map[*Table]bool)
+	visitedClosures := make(map[any]bool)
 	if state.registry != nil {
 		// registry 是强根入口，但 table 内部的弱边需要按元表模式过滤。
-		state.collectStrongReferencesFromValue(ReferenceValue(KindTable, state.registry), strongRefs, visited)
+		state.collectStrongReferencesFromValue(ReferenceValue(KindTable, state.registry), strongRefs, visited, visitedClosures)
 	}
 	if state.globals != nil {
 		// globals 是脚本全局变量入口，官方 gc.lua 的全局 a/x 都从这里进入。
-		state.collectStrongReferencesFromValue(ReferenceValue(KindTable, state.globals), strongRefs, visited)
+		state.collectStrongReferencesFromValue(ReferenceValue(KindTable, state.globals), strongRefs, visited, visitedClosures)
 	}
 	for index := range state.stack {
 		// 主栈上的值按强根入口处理。
-		state.collectStrongReferencesFromValue(state.stack[index], strongRefs, visited)
+		state.collectStrongReferencesFromValue(state.stack[index], strongRefs, visited, visitedClosures)
 	}
 	for _, vm := range state.activeVMs {
 		if vm == nil {
@@ -770,7 +773,7 @@ func (state *State) strongReferenceKeys() map[tableKey]bool {
 		registers := vm.ActiveRegistersSnapshot()
 		for index := range registers {
 			// 当前 PC 下仍存活的活动寄存器中的引用值视为强根。
-			state.collectStrongReferencesFromValue(registers[index], strongRefs, visited)
+			state.collectStrongReferencesFromValue(registers[index], strongRefs, visited, visitedClosures)
 		}
 	}
 	for _, frame := range state.callFrames {
@@ -779,11 +782,11 @@ func (state *State) strongReferenceKeys() map[tableKey]bool {
 			continue
 		}
 		// 当前调用帧函数也可能通过显式 upvalue 持有弱表 value。
-		state.collectStrongReferencesFromValue(frame.Function, strongRefs, visited)
+		state.collectStrongReferencesFromValue(frame.Function, strongRefs, visited, visitedClosures)
 	}
 	state.forEachExternalGCRoot(func(value Value) {
 		// 外部根是 weak sweep 的强根入口，参与 key/value 强引用集合构建。
-		state.collectStrongReferencesFromValue(value, strongRefs, visited)
+		state.collectStrongReferencesFromValue(value, strongRefs, visited, visitedClosures)
 	})
 	state.expandEphemeronReferences(strongRefs)
 	return strongRefs
@@ -1649,7 +1652,7 @@ func tableFinalizerValue(table *Table) Value {
 // collectStrongReferencesFromValue 从强根值出发，按强边递归收集引用。
 //
 // 普通 table 的 key/value 都是强边；弱表会按 `__mode` 跳过弱 key 或弱 value，避免弱边提前保活。
-func (state *State) collectStrongReferencesFromValue(value Value, strongRefs map[tableKey]bool, visited map[*Table]bool) {
+func (state *State) collectStrongReferencesFromValue(value Value, strongRefs map[tableKey]bool, visited map[*Table]bool, visitedClosures map[any]bool) {
 	addStrongReferenceKey(strongRefs, value)
 	switch value.Kind {
 	case KindTable:
@@ -1669,44 +1672,54 @@ func (state *State) collectStrongReferencesFromValue(value Value, strongRefs map
 		for index := range entries {
 			if !weakKeys {
 				// 非弱 key 是强边。
-				state.collectStrongReferencesFromValue(entries[index].key, strongRefs, visited)
+				state.collectStrongReferencesFromValue(entries[index].key, strongRefs, visited, visitedClosures)
 			}
 			if !weakKeys && !weakValues {
 				// 普通 table 或仅弱 value 表中的非弱 value 是强边；weak-key 表的 value 需由 ephemeron 固定点传播。
-				state.collectStrongReferencesFromValue(entries[index].value, strongRefs, visited)
+				state.collectStrongReferencesFromValue(entries[index].value, strongRefs, visited, visitedClosures)
 			}
 		}
 		if table.metatable != nil {
 			// 元表是 table 自身结构的一部分，按强边扫描。
-			state.collectStrongReferencesFromValue(ReferenceValue(KindTable, table.metatable), strongRefs, visited)
+			state.collectStrongReferencesFromValue(ReferenceValue(KindTable, table.metatable), strongRefs, visited, visitedClosures)
 		}
 	case KindLuaClosure:
 		// Lua closure 的 upvalue 是强边。
-		upvalues, _, ok := closureUpvalueValues(value)
+		upvalues, visitKey, ok := closureUpvalueValues(value)
 		if !ok {
 			// 损坏闭包引用无法继续扫描。
 			return
 		}
+		if visitedClosures[visitKey] {
+			// 闭包/upvalue 图可能自引用，已访问闭包不能继续递归。
+			return
+		}
+		visitedClosures[visitKey] = true
 		for index := range upvalues {
 			// upvalue 继续按强根递归。
-			state.collectStrongReferencesFromValue(upvalues[index], strongRefs, visited)
+			state.collectStrongReferencesFromValue(upvalues[index], strongRefs, visited, visitedClosures)
 		}
 	case KindGoClosure:
 		// Go closure with explicit upvalues 的 upvalue 是强边。
-		upvalues, _, ok := closureUpvalueValues(value)
+		upvalues, visitKey, ok := closureUpvalueValues(value)
 		if !ok {
 			// 普通 Go closure 没有可枚举 upvalue。
 			return
 		}
+		if visitedClosures[visitKey] {
+			// 闭包/upvalue 图可能自引用，已访问闭包不能继续递归。
+			return
+		}
+		visitedClosures[visitKey] = true
 		for index := range upvalues {
 			// 显式 upvalue 继续按强根递归。
-			state.collectStrongReferencesFromValue(upvalues[index], strongRefs, visited)
+			state.collectStrongReferencesFromValue(upvalues[index], strongRefs, visited, visitedClosures)
 		}
 	case KindUserdata:
 		// userdata 的 user value 与 raw metatable 是 full userdata 关联强边。
 		for _, associatedValue := range state.userdataAssociationRoots(value) {
 			// 关联值继续递归，覆盖 user value table 中保存的 ktable/capture 根。
-			state.collectStrongReferencesFromValue(associatedValue, strongRefs, visited)
+			state.collectStrongReferencesFromValue(associatedValue, strongRefs, visited, visitedClosures)
 		}
 	default:
 		// 其他引用类型当前没有可扫描内部边。
@@ -1726,21 +1739,22 @@ func (state *State) expandEphemeronReferences(strongRefs map[tableKey]bool) {
 	for {
 		changed := false
 		visited := make(map[*Table]bool)
+		visitedClosures := make(map[any]bool)
 		if state.registry != nil {
 			// registry 入口可能间接包含 weak-key table。
-			if state.expandEphemeronFromValue(ReferenceValue(KindTable, state.registry), strongRefs, visited) {
+			if state.expandEphemeronFromValue(ReferenceValue(KindTable, state.registry), strongRefs, visited, visitedClosures) {
 				changed = true
 			}
 		}
 		if state.globals != nil {
 			// globals 入口覆盖官方 ephemeron 测试中的 table a。
-			if state.expandEphemeronFromValue(ReferenceValue(KindTable, state.globals), strongRefs, visited) {
+			if state.expandEphemeronFromValue(ReferenceValue(KindTable, state.globals), strongRefs, visited, visitedClosures) {
 				changed = true
 			}
 		}
 		for index := range state.stack {
 			// 主栈上的弱表也需要参与 ephemeron 固定点传播。
-			if state.expandEphemeronFromValue(state.stack[index], strongRefs, visited) {
+			if state.expandEphemeronFromValue(state.stack[index], strongRefs, visited, visitedClosures) {
 				changed = true
 			}
 		}
@@ -1752,7 +1766,7 @@ func (state *State) expandEphemeronReferences(strongRefs map[tableKey]bool) {
 			registers := vm.ActiveRegistersSnapshot()
 			for index := range registers {
 				// 当前 PC 下仍存活的活动寄存器中可能保存局部 weak-key table。
-				if state.expandEphemeronFromValue(registers[index], strongRefs, visited) {
+				if state.expandEphemeronFromValue(registers[index], strongRefs, visited, visitedClosures) {
 					changed = true
 				}
 			}
@@ -1764,23 +1778,23 @@ func (state *State) expandEphemeronReferences(strongRefs map[tableKey]bool) {
 			}
 			for index := range thread.stack {
 				// 协程栈可能在 yield 边界持有 weak-key table 或强 key。
-				if state.expandEphemeronFromValue(thread.stack[index], strongRefs, visited) {
+				if state.expandEphemeronFromValue(thread.stack[index], strongRefs, visited, visitedClosures) {
 					changed = true
 				}
 			}
-			if state.expandEphemeronFromValue(thread.function, strongRefs, visited) {
+			if state.expandEphemeronFromValue(thread.function, strongRefs, visited, visitedClosures) {
 				changed = true
 			}
 		}
 		for _, frame := range state.callFrames {
 			// 调用帧函数 upvalue 可能间接持有 weak-key table。
-			if state.expandEphemeronFromValue(frame.Function, strongRefs, visited) {
+			if state.expandEphemeronFromValue(frame.Function, strongRefs, visited, visitedClosures) {
 				changed = true
 			}
 		}
 		state.forEachExternalGCRoot(func(value Value) {
 			// 外部根也可能持有 weak-key table 或强 key，需要进入 ephemeron 固定点传播。
-			if state.expandEphemeronFromValue(value, strongRefs, visited) {
+			if state.expandEphemeronFromValue(value, strongRefs, visited, visitedClosures) {
 				changed = true
 			}
 		})
@@ -1794,7 +1808,7 @@ func (state *State) expandEphemeronReferences(strongRefs map[tableKey]bool) {
 // expandEphemeronFromValue 从一个值出发执行一轮 ephemeron 传播。
 //
 // 返回 true 表示本轮新增了强引用。
-func (state *State) expandEphemeronFromValue(value Value, strongRefs map[tableKey]bool, visited map[*Table]bool) bool {
+func (state *State) expandEphemeronFromValue(value Value, strongRefs map[tableKey]bool, visited map[*Table]bool, visitedClosures map[any]bool) bool {
 	switch value.Kind {
 	case KindTable:
 		// table 可能是 weak-key table 或包含 weak-key table。
@@ -1821,48 +1835,58 @@ func (state *State) expandEphemeronFromValue(value Value, strongRefs map[tableKe
 			}
 			if !weakKeys {
 				// 非弱 key 继续查找内部 weak-key table。
-				if state.expandEphemeronFromValue(entry.key, strongRefs, visited) {
+				if state.expandEphemeronFromValue(entry.key, strongRefs, visited, visitedClosures) {
 					changed = true
 				}
 			}
 			if !weakValues {
 				// 非弱 value 继续查找内部 weak-key table。
-				if state.expandEphemeronFromValue(entry.value, strongRefs, visited) {
+				if state.expandEphemeronFromValue(entry.value, strongRefs, visited, visitedClosures) {
 					changed = true
 				}
 			}
 		}
 		if table.metatable != nil {
 			// 元表也可能包含弱表。
-			if state.expandEphemeronFromValue(ReferenceValue(KindTable, table.metatable), strongRefs, visited) {
+			if state.expandEphemeronFromValue(ReferenceValue(KindTable, table.metatable), strongRefs, visited, visitedClosures) {
 				changed = true
 			}
 		}
 		return changed
 	case KindLuaClosure:
 		// closure upvalue 可能包含 weak-key table。
-		upvalues, _, ok := closureUpvalueValues(value)
+		upvalues, visitKey, ok := closureUpvalueValues(value)
 		if !ok {
 			// 损坏闭包引用无法传播。
 			return false
 		}
+		if visitedClosures[visitKey] {
+			// 闭包/upvalue 图可能自引用，已访问闭包不能继续递归。
+			return false
+		}
+		visitedClosures[visitKey] = true
 		changed := false
 		for index := range upvalues {
-			if state.expandEphemeronFromValue(upvalues[index], strongRefs, visited) {
+			if state.expandEphemeronFromValue(upvalues[index], strongRefs, visited, visitedClosures) {
 				changed = true
 			}
 		}
 		return changed
 	case KindGoClosure:
 		// Go closure with explicit upvalues 的 upvalue 可能包含 weak-key table。
-		upvalues, _, ok := closureUpvalueValues(value)
+		upvalues, visitKey, ok := closureUpvalueValues(value)
 		if !ok {
 			// 普通 Go closure 没有可传播结构。
 			return false
 		}
+		if visitedClosures[visitKey] {
+			// 闭包/upvalue 图可能自引用，已访问闭包不能继续递归。
+			return false
+		}
+		visitedClosures[visitKey] = true
 		changed := false
 		for index := range upvalues {
-			if state.expandEphemeronFromValue(upvalues[index], strongRefs, visited) {
+			if state.expandEphemeronFromValue(upvalues[index], strongRefs, visited, visitedClosures) {
 				changed = true
 			}
 		}
@@ -1871,7 +1895,7 @@ func (state *State) expandEphemeronFromValue(value Value, strongRefs map[tableKe
 		// userdata 关联边也可能包含 weak-key table。
 		changed := false
 		for _, associatedValue := range state.userdataAssociationRoots(value) {
-			if state.expandEphemeronFromValue(associatedValue, strongRefs, visited) {
+			if state.expandEphemeronFromValue(associatedValue, strongRefs, visited, visitedClosures) {
 				changed = true
 			}
 		}
@@ -1885,7 +1909,7 @@ func (state *State) expandEphemeronFromValue(value Value, strongRefs map[tableKe
 // collectNewStrongReferencesFromValue 收集 value 可达的强引用并报告是否新增。
 func (state *State) collectNewStrongReferencesFromValue(value Value, strongRefs map[tableKey]bool) bool {
 	before := len(strongRefs)
-	state.collectStrongReferencesFromValue(value, strongRefs, make(map[*Table]bool))
+	state.collectStrongReferencesFromValue(value, strongRefs, make(map[*Table]bool), make(map[any]bool))
 	return len(strongRefs) > before
 }
 
@@ -1909,8 +1933,8 @@ func addStrongReferenceKey(strongRefs map[tableKey]bool, value Value) {
 
 // sweepWeakTablesFromValue 从一个值出发递归扫描 table/closure 中的弱表。
 //
-// visited 防止循环 table 图导致无限递归；返回值为发生清理的 table 数量。
-func (state *State) sweepWeakTablesFromValue(value Value, visited map[*Table]bool, strongRefs map[tableKey]bool) int {
+// visited 防止循环 table 图导致无限递归；visitedClosures 防止闭包 upvalue 自环；返回值为发生清理的 table 数量。
+func (state *State) sweepWeakTablesFromValue(value Value, visited map[*Table]bool, visitedClosures map[any]bool, strongRefs map[tableKey]bool) int {
 	switch value.Kind {
 	case KindTable:
 		// table 是弱表扫描的核心对象。
@@ -1919,31 +1943,41 @@ func (state *State) sweepWeakTablesFromValue(value Value, visited map[*Table]boo
 			// 损坏 table 引用无法扫描。
 			return 0
 		}
-		return state.sweepWeakTableGraph(table, visited, strongRefs)
+		return state.sweepWeakTableGraph(table, visited, visitedClosures, strongRefs)
 	case KindLuaClosure:
 		// Lua closure 的 upvalue 可能间接持有弱表。
-		upvalues, _, ok := closureUpvalueValues(value)
+		upvalues, visitKey, ok := closureUpvalueValues(value)
 		if !ok {
 			// 损坏闭包引用无法继续扫描。
 			return 0
 		}
+		if visitedClosures[visitKey] {
+			// 闭包/upvalue 图可能自引用，已访问闭包不能继续递归。
+			return 0
+		}
+		visitedClosures[visitKey] = true
 		removed := 0
 		for index := range upvalues {
 			// 逐个 upvalue 递归查找弱表。
-			removed += state.sweepWeakTablesFromValue(upvalues[index], visited, strongRefs)
+			removed += state.sweepWeakTablesFromValue(upvalues[index], visited, visitedClosures, strongRefs)
 		}
 		return removed
 	case KindGoClosure:
 		// Go closure with explicit upvalues 的 upvalue 可能间接持有弱表。
-		upvalues, _, ok := closureUpvalueValues(value)
+		upvalues, visitKey, ok := closureUpvalueValues(value)
 		if !ok {
 			// 普通 Go closure 没有可扫描结构。
 			return 0
 		}
+		if visitedClosures[visitKey] {
+			// 闭包/upvalue 图可能自引用，已访问闭包不能继续递归。
+			return 0
+		}
+		visitedClosures[visitKey] = true
 		removed := 0
 		for index := range upvalues {
 			// 逐个显式 upvalue 递归查找弱表。
-			removed += state.sweepWeakTablesFromValue(upvalues[index], visited, strongRefs)
+			removed += state.sweepWeakTablesFromValue(upvalues[index], visited, visitedClosures, strongRefs)
 		}
 		return removed
 	case KindUserdata:
@@ -1951,7 +1985,7 @@ func (state *State) sweepWeakTablesFromValue(value Value, visited map[*Table]boo
 		removed := 0
 		for _, associatedValue := range state.userdataAssociationRoots(value) {
 			// 逐个关联值递归扫描弱表。
-			removed += state.sweepWeakTablesFromValue(associatedValue, visited, strongRefs)
+			removed += state.sweepWeakTablesFromValue(associatedValue, visited, visitedClosures, strongRefs)
 		}
 		return removed
 	default:
@@ -1961,7 +1995,7 @@ func (state *State) sweepWeakTablesFromValue(value Value, visited map[*Table]boo
 }
 
 // sweepWeakValuesFromValue 从一个值出发递归扫描 finalizer 前弱 value 表。
-func (state *State) sweepWeakValuesFromValue(value Value, visited map[*Table]bool, strongRefs map[tableKey]bool, allowWeakKV bool) int {
+func (state *State) sweepWeakValuesFromValue(value Value, visited map[*Table]bool, visitedClosures map[any]bool, strongRefs map[tableKey]bool, allowWeakKV bool) int {
 	switch value.Kind {
 	case KindTable:
 		// table 是弱 value 预清理的核心对象。
@@ -1970,31 +2004,41 @@ func (state *State) sweepWeakValuesFromValue(value Value, visited map[*Table]boo
 			// 损坏 table 引用无法扫描。
 			return 0
 		}
-		return state.sweepWeakValueTableGraph(table, visited, strongRefs, allowWeakKV)
+		return state.sweepWeakValueTableGraph(table, visited, visitedClosures, strongRefs, allowWeakKV)
 	case KindLuaClosure:
 		// Lua closure 的 upvalue 可能间接持有 weak value 表。
-		upvalues, _, ok := closureUpvalueValues(value)
+		upvalues, visitKey, ok := closureUpvalueValues(value)
 		if !ok {
 			// 损坏闭包引用无法继续扫描。
 			return 0
 		}
+		if visitedClosures[visitKey] {
+			// 闭包/upvalue 图可能自引用，已访问闭包不能继续递归。
+			return 0
+		}
+		visitedClosures[visitKey] = true
 		removed := 0
 		for index := range upvalues {
 			// 逐个 upvalue 递归查找 weak value 表。
-			removed += state.sweepWeakValuesFromValue(upvalues[index], visited, strongRefs, allowWeakKV)
+			removed += state.sweepWeakValuesFromValue(upvalues[index], visited, visitedClosures, strongRefs, allowWeakKV)
 		}
 		return removed
 	case KindGoClosure:
 		// Go closure with explicit upvalues 的 upvalue 可能间接持有 weak value 表。
-		upvalues, _, ok := closureUpvalueValues(value)
+		upvalues, visitKey, ok := closureUpvalueValues(value)
 		if !ok {
 			// 普通 Go closure 没有可扫描结构。
 			return 0
 		}
+		if visitedClosures[visitKey] {
+			// 闭包/upvalue 图可能自引用，已访问闭包不能继续递归。
+			return 0
+		}
+		visitedClosures[visitKey] = true
 		removed := 0
 		for index := range upvalues {
 			// 逐个显式 upvalue 递归查找 weak value 表。
-			removed += state.sweepWeakValuesFromValue(upvalues[index], visited, strongRefs, allowWeakKV)
+			removed += state.sweepWeakValuesFromValue(upvalues[index], visited, visitedClosures, strongRefs, allowWeakKV)
 		}
 		return removed
 	case KindUserdata:
@@ -2002,7 +2046,7 @@ func (state *State) sweepWeakValuesFromValue(value Value, visited map[*Table]boo
 		removed := 0
 		for _, associatedValue := range state.userdataAssociationRoots(value) {
 			// 逐个关联值递归扫描 finalizer 前 weak value 表。
-			removed += state.sweepWeakValuesFromValue(associatedValue, visited, strongRefs, allowWeakKV)
+			removed += state.sweepWeakValuesFromValue(associatedValue, visited, visitedClosures, strongRefs, allowWeakKV)
 		}
 		return removed
 	default:
@@ -2012,7 +2056,7 @@ func (state *State) sweepWeakValuesFromValue(value Value, visited map[*Table]boo
 }
 
 // sweepWeakValueTableGraph 扫描 table 图并只清理 weak value-only 表。
-func (state *State) sweepWeakValueTableGraph(table *Table, visited map[*Table]bool, strongRefs map[tableKey]bool, allowWeakKV bool) int {
+func (state *State) sweepWeakValueTableGraph(table *Table, visited map[*Table]bool, visitedClosures map[any]bool, strongRefs map[tableKey]bool, allowWeakKV bool) int {
 	if table == nil {
 		// nil table 没有可扫描内容。
 		return 0
@@ -2040,16 +2084,16 @@ func (state *State) sweepWeakValueTableGraph(table *Table, visited map[*Table]bo
 	for index := range entries {
 		if !weakKeys {
 			// key 非弱时才作为强边递归扫描。
-			removed += state.sweepWeakValuesFromValue(entries[index].key, visited, strongRefs, allowWeakKV)
+			removed += state.sweepWeakValuesFromValue(entries[index].key, visited, visitedClosures, strongRefs, allowWeakKV)
 		}
 		if !weakValues {
 			// value 非弱时才作为强边递归扫描。
-			removed += state.sweepWeakValuesFromValue(entries[index].value, visited, strongRefs, allowWeakKV)
+			removed += state.sweepWeakValuesFromValue(entries[index].value, visited, visitedClosures, strongRefs, allowWeakKV)
 		}
 	}
 	if table.metatable != nil {
 		// 元表是 table 的强可达结构，仍需要继续扫描其中可能存在的 weak value 表。
-		removed += state.sweepWeakValueTableGraph(table.metatable, visited, strongRefs, allowWeakKV)
+		removed += state.sweepWeakValueTableGraph(table.metatable, visited, visitedClosures, strongRefs, allowWeakKV)
 	}
 	return removed
 }
@@ -2083,7 +2127,7 @@ func (state *State) finalizableWeakKeyPreserveSet() map[tableKey]bool {
 // sweepWeakTableGraph 扫描 table 及其强可达子 table。
 //
 // 弱侧边不作为继续递归的强引用；这能避免刚被清理的弱 key/value 反向保活自身。
-func (state *State) sweepWeakTableGraph(table *Table, visited map[*Table]bool, strongRefs map[tableKey]bool) int {
+func (state *State) sweepWeakTableGraph(table *Table, visited map[*Table]bool, visitedClosures map[any]bool, strongRefs map[tableKey]bool) int {
 	if table == nil {
 		// nil table 没有可扫描内容。
 		return 0
@@ -2104,16 +2148,16 @@ func (state *State) sweepWeakTableGraph(table *Table, visited map[*Table]bool, s
 	for index := range entries {
 		if !weakKeys {
 			// key 非弱时才作为强边递归扫描。
-			removed += state.sweepWeakTablesFromValue(entries[index].key, visited, strongRefs)
+			removed += state.sweepWeakTablesFromValue(entries[index].key, visited, visitedClosures, strongRefs)
 		}
 		if !weakValues {
 			// value 非弱时才作为强边递归扫描。
-			removed += state.sweepWeakTablesFromValue(entries[index].value, visited, strongRefs)
+			removed += state.sweepWeakTablesFromValue(entries[index].value, visited, visitedClosures, strongRefs)
 		}
 	}
 	if table.metatable != nil {
 		// 元表是 table 的强可达结构，仍需要继续扫描其中可能存在的弱表。
-		removed += state.sweepWeakTableGraph(table.metatable, visited, strongRefs)
+		removed += state.sweepWeakTableGraph(table.metatable, visited, visitedClosures, strongRefs)
 	}
 	return removed
 }

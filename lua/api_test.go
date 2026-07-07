@@ -4823,6 +4823,53 @@ checkmessage(s.."; local t = {}; t:bbb()", "method 'bbb'")
 	}
 }
 
+// TestDoStringRKOverflowBinaryLeftLiteralSurvivesRightCall 验证溢出 RK 范围的左字面量生命周期。
+//
+// 当常量索引超过 RK 可编码范围时，codegen 会把字面量先装入临时寄存器。左字面量参与二元运算、
+// 右侧又包含嵌套调用时，该临时寄存器必须在发射二元指令前保持有效，不能被右侧求值覆盖。
+func TestDoStringRKOverflowBinaryLeftLiteralSurvivesRightCall(t *testing.T) {
+	// 创建完整标准库 State，确保 setmetatable、assert 和 tostring 可用。
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库打开失败时无法执行元方法与断言脚本。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+
+	var source strings.Builder
+	source.WriteString("local sink = false\n")
+	for constantIndex := 0; constantIndex < 270; constantIndex++ {
+		// 生成不可达但会进入常量表的唯一字符串，把后续 `]` 推到 RK 常量范围之外。
+		fmt.Fprintf(&source, "if sink then local _ = %q end\n", fmt.Sprintf("pad-%03d", constantIndex))
+	}
+	source.WriteString(`
+local seen
+local mt = {}
+mt.__mul = function(a, b)
+  if seen == nil then
+    seen = a
+  end
+  return setmetatable({}, mt)
+end
+mt.__pow = function(a, b)
+  return setmetatable({}, mt)
+end
+local m = {}
+function m.P(x)
+  return setmetatable({}, mt)
+end
+function m.C(x)
+  return setmetatable({}, mt)
+end
+local _ = "]" * m.C(m.P("=") ^ 0)
+assert(seen == "]", tostring(seen))
+`)
+	if err := DoString(state, source.String()); err != nil {
+		// 首个 __mul 左操作数必须仍是溢出 RK 范围的 `]` 字面量。
+		t.Fatalf("DoString RK overflow binary literal failed: %v", err)
+	}
+}
+
 // TestDoStringOfficialShortCircuitIndexReceiverName 验证短路分支内索引接收者错误名称。
 //
 // 官方 errors.lua 会在 table constructor 内执行 `x and aaa[x or y]`；虽然 `aaa` 位于短路分支

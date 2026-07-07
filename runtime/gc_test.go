@@ -434,6 +434,101 @@ func TestSweepWeakTablesKeepsGoClosureUpvalueValues(t *testing.T) {
 	}
 }
 
+// TestSweepWeakTablesHandlesSelfReferentialLuaClosureUpvalues 验证 Lua closure 自引用 upvalue 不会让强引用遍历递归失控。
+//
+// Lua 闭包可能通过 upvalue cell 或闭包快照形成自环；weak sweep 需要识别已访问 closure，
+// 同时继续保留同一闭包上其他 upvalue 间接引用的 weak value。
+func TestSweepWeakTablesHandlesSelfReferentialLuaClosureUpvalues(t *testing.T) {
+	state := NewState()
+	weakValueTable := NewTable()
+	weakMetatable := NewTable()
+	weakMetatable.RawSetString("__mode", StringValue("v"))
+	weakValueTable.SetMetatable(weakMetatable)
+	state.SetGlobal("weak", ReferenceValue(KindTable, weakValueTable))
+
+	target := NewTable()
+	weakValueTable.RawSetString("from-lua-closure-cycle", ReferenceValue(KindTable, target))
+
+	closure := &LuaClosure{}
+	closureValue := ReferenceValue(KindLuaClosure, closure)
+	closure.Upvalues = []Value{
+		closureValue,
+		ReferenceValue(KindTable, target),
+	}
+	state.SetGlobal("root", closureValue)
+
+	state.SweepWeakTables()
+	if got := weakValueTable.RawGetString("from-lua-closure-cycle"); got.IsNil() {
+		// 自引用闭包上的其他 upvalue 仍是强边，weak value 不应被清理。
+		t.Fatalf("weak value reachable through self-referential Lua closure was removed")
+	}
+}
+
+// TestSweepWeakTablesHandlesSelfReferentialGoClosureUpvalues 验证显式 Go closure 自引用 upvalue 不会让强引用遍历递归失控。
+//
+// native C closure、标准库 trampoline 等 Go closure 可能把自身或相互引用的 closure 放进 upvalue；
+// weak sweep 应用相同的 closure 访问集阻断自环，并保留其他可达 upvalue。
+func TestSweepWeakTablesHandlesSelfReferentialGoClosureUpvalues(t *testing.T) {
+	state := NewState()
+	weakValueTable := NewTable()
+	weakMetatable := NewTable()
+	weakMetatable.RawSetString("__mode", StringValue("v"))
+	weakValueTable.SetMetatable(weakMetatable)
+	state.SetGlobal("weak", ReferenceValue(KindTable, weakValueTable))
+
+	target := NewTable()
+	weakValueTable.RawSetString("from-go-closure-cycle", ReferenceValue(KindTable, target))
+
+	closure := &GoClosureWithUpvalues{
+		Function: GoResultsFunction(func(values ...Value) ([]Value, error) {
+			// 测试只关注 weak sweep 可达图，不实际调用该 closure。
+			return values, nil
+		}),
+	}
+	closureValue := ReferenceValue(KindGoClosure, closure)
+	closure.Upvalues = []Value{
+		closureValue,
+		ReferenceValue(KindTable, target),
+	}
+	state.SetGlobal("root", closureValue)
+
+	state.SweepWeakTables()
+	if got := weakValueTable.RawGetString("from-go-closure-cycle"); got.IsNil() {
+		// 自引用 Go closure 上的其他 upvalue 仍是强边，weak value 不应被清理。
+		t.Fatalf("weak value reachable through self-referential Go closure was removed")
+	}
+}
+
+// TestSweepWeakValuesBeforeFinalizersHandlesSelfReferentialLuaClosureUpvalues 验证 finalizer 前弱值清理能处理闭包自环。
+//
+// finalizer 前清理 weak value-only 表使用独立扫描路径；该路径也必须阻断 Lua closure upvalue 自环，
+// 同时保留同一闭包其他 upvalue 间接引用的 weak value。
+func TestSweepWeakValuesBeforeFinalizersHandlesSelfReferentialLuaClosureUpvalues(t *testing.T) {
+	state := NewState()
+	weakValueTable := NewTable()
+	weakMetatable := NewTable()
+	weakMetatable.RawSetString("__mode", StringValue("v"))
+	weakValueTable.SetMetatable(weakMetatable)
+	state.SetGlobal("weak", ReferenceValue(KindTable, weakValueTable))
+
+	target := NewTable()
+	weakValueTable.RawSetString("from-lua-closure-cycle", ReferenceValue(KindTable, target))
+
+	closure := &LuaClosure{}
+	closureValue := ReferenceValue(KindLuaClosure, closure)
+	closure.Upvalues = []Value{
+		closureValue,
+		ReferenceValue(KindTable, target),
+	}
+	state.SetGlobal("root", closureValue)
+
+	state.SweepWeakValuesBeforeFinalizers()
+	if got := weakValueTable.RawGetString("from-lua-closure-cycle"); got.IsNil() {
+		// finalizer 前 weak value 清理也必须保留自引用闭包可达的目标。
+		t.Fatalf("weak value reachable through self-referential Lua closure was removed before finalizers")
+	}
+}
+
 // TestSweepWeakTablesKeepsExternalGCRootValues 验证宿主桥接层 external root 保活 weak value。
 //
 // native C closure 调用期间的 upvalue 不一定作为普通 Lua 栈值存在；runtime 需要提供模块无关的

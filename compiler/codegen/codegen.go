@@ -949,8 +949,13 @@ func (generator *generator) compileSingleSafeTableAssignment(statement *parser.A
 		return false, nil
 	}
 
+	if !generator.isSafeRKCandidate(indexExpression.Index) || !generator.isSafeRKCandidate(statement.Right[0]) {
+		// key 或 value 不是当前 local/字面量时，回退通用赋值路径以避免提前生成半截指令。
+		return false, nil
+	}
+
 	firstTempRegister := generator.nextRegister
-	keyOperand, keyOK, err := generator.safeRKOperand(indexExpression.Index)
+	keyOperand, _, keyOK, err := generator.safeRKOperand(indexExpression.Index)
 	if err != nil {
 		// 安全 key 编译失败时释放临时寄存器并返回。
 		generator.releaseRegistersFrom(firstTempRegister)
@@ -961,7 +966,7 @@ func (generator *generator) compileSingleSafeTableAssignment(statement *parser.A
 		generator.releaseRegistersFrom(firstTempRegister)
 		return false, nil
 	}
-	valueOperand, valueOK, err := generator.safeRKOperand(statement.Right[0])
+	valueOperand, _, valueOK, err := generator.safeRKOperand(statement.Right[0])
 	if err != nil {
 		// 安全 value 编译失败时释放临时寄存器并返回。
 		generator.releaseRegistersFrom(firstTempRegister)
@@ -1242,9 +1247,9 @@ func (generator *generator) compileSelfBinaryChainAccumulatorNode(targetName str
 // finalRegister，随后用 `final = left op final` 合成当前层结果，减少 `x = x + call()` 子链的
 // 额外调用寄存器。若两者相同则必须分配独立右操作数，避免覆盖左侧中间值。
 func (generator *generator) selfBinaryAccumulatorRightOperand(expression parser.Expression, leftOperand int, finalRegister int) (operand int, tempRegister int, err error) {
-	if operand, ok, err := generator.safeRKOperand(expression); err != nil || ok {
+	if operand, register, ok, err := generator.safeRKOperand(expression); err != nil || ok {
 		// 安全 RK 操作数不需要额外临时寄存器；错误保持原编译语义。
-		return operand, -1, err
+		return operand, register, err
 	}
 	if finalRegister >= 0 && finalRegister != leftOperand && !generator.registerHasActiveLocal(finalRegister) {
 		// finalRegister 是可覆盖临时槽时，右侧直接写入该槽，避免额外调用结果寄存器。
@@ -1396,9 +1401,9 @@ func (generator *generator) compileSelfBinaryChainToTarget(targetName string, bi
 //
 // 字面量和当前 local 直接作为 RK 操作数；更复杂但安全的普通二元树编译到临时寄存器。
 func (generator *generator) selfBinaryRightOperand(expression parser.Expression) (operand int, tempRegister int, err error) {
-	if operand, ok, err := generator.safeRKOperand(expression); err != nil || ok {
+	if operand, register, ok, err := generator.safeRKOperand(expression); err != nil || ok {
 		// 安全 RK 操作数不需要额外临时寄存器；错误保持原编译语义。
-		return operand, -1, err
+		return operand, register, err
 	}
 	rightRegister := generator.allocateRegister()
 	rightHandled, err := generator.compileSelfBinaryRightExpressionTo(expression, rightRegister)
@@ -1543,7 +1548,7 @@ func (generator *generator) compileSelfBinaryRightExpressionTo(expression parser
 		return false, nil
 	}
 	firstTempRegister := generator.nextRegister
-	keyOperand, keyOK, err := generator.safeRKOperand(indexExpression.Index)
+	keyOperand, keyRegister, keyOK, err := generator.safeRKOperand(indexExpression.Index)
 	if err != nil {
 		// key 编译失败时释放临时寄存器并返回。
 		generator.releaseRegistersFrom(firstTempRegister)
@@ -1562,6 +1567,7 @@ func (generator *generator) compileSelfBinaryRightExpressionTo(expression parser
 		generator.releaseRegistersFrom(firstTempRegister)
 		return true, err
 	}
+	generator.releaseOptionalRegister(keyRegister)
 	generator.releaseRegistersFrom(firstTempRegister)
 	return true, nil
 }
@@ -1777,11 +1783,11 @@ func (generator *generator) isSelfBinarySafeRightExpression(expression parser.Ex
 	return true
 }
 
-// safeRKOperand 将无副作用表达式转换为 RK 操作数。
+// safeInlineRKOperand 将无副作用表达式转换为不会分配临时寄存器的 RK 操作数。
 //
-// 当前只接受当前 local 名称和字面量；local 名称直接复用寄存器，字面量进入常量池并尽量使用
-// RK 常量编码。返回 ok=false 表示表达式不满足安全条件，调用方应回退通用路径。
-func (generator *generator) safeRKOperand(expression parser.Expression) (operand int, ok bool, err error) {
+// 当前只接受当前 local 名称，以及常量索引可直接放入 RK 字段的字面量；超过 RK 常量范围的字面量
+// 返回 ok=false，由调用方回退需要显式目标寄存器的通用路径。
+func (generator *generator) safeInlineRKOperand(expression parser.Expression) (operand int, ok bool, err error) {
 	switch typedExpression := expression.(type) {
 	case *parser.NameExpression:
 		binding, exists := generator.lookupLocal(typedExpression.Name)
@@ -1797,15 +1803,47 @@ func (generator *generator) safeRKOperand(expression parser.Expression) (operand
 			return 0, false, nil
 		}
 		constantIndex := generator.addConstant(constant)
-		rkOperand, _, rkErr := generator.rkOperandForConstantIndex(constantIndex)
-		if rkErr != nil {
-			// 常量载入失败时返回错误，保持原编译错误语义。
-			return 0, true, rkErr
+		if constantIndex > bytecode.MaxIndexRK {
+			// 溢出 RK 范围的常量需要 LOADK 临时寄存器，不能用于 inline RK 生命周期。
+			return 0, false, nil
 		}
-		return rkOperand, true, nil
+		return bytecode.RKAsK(constantIndex), true, nil
 	default:
 		// 其他表达式可能有副作用，不能作为安全 RK 操作数。
 		return 0, false, nil
+	}
+}
+
+// safeRKOperand 将无副作用表达式转换为 RK 操作数。
+//
+// 当前只接受当前 local 名称和字面量；local 名称直接复用寄存器，字面量进入常量池并尽量使用
+// RK 常量编码。若字面量超出 RK 常量范围，会额外生成 LOADK/LOADKX 临时寄存器并通过 register 返回；
+// 调用方必须在发射完使用该操作数的指令后释放 register。返回 ok=false 表示表达式不满足安全条件。
+func (generator *generator) safeRKOperand(expression parser.Expression) (operand int, register int, ok bool, err error) {
+	switch typedExpression := expression.(type) {
+	case *parser.NameExpression:
+		binding, exists := generator.lookupLocal(typedExpression.Name)
+		if !exists {
+			// 非当前 local 名称可能是 upvalue 或全局访问，不能直接作为 RK 寄存器。
+			return 0, -1, false, nil
+		}
+		return binding.register, -1, true, nil
+	case *parser.LiteralExpression:
+		constant, constantOK := literalConstant(typedExpression)
+		if !constantOK {
+			// 当前字面量类型无法放入常量表时回退通用路径。
+			return 0, -1, false, nil
+		}
+		constantIndex := generator.addConstant(constant)
+		rkOperand, register, rkErr := generator.rkOperandForConstantIndex(constantIndex)
+		if rkErr != nil {
+			// 常量载入失败时返回错误，保持原编译错误语义。
+			return 0, -1, true, rkErr
+		}
+		return rkOperand, register, true, nil
+	default:
+		// 其他表达式可能有副作用，不能作为安全 RK 操作数。
+		return 0, -1, false, nil
 	}
 }
 
@@ -1814,31 +1852,16 @@ func (generator *generator) safeRKOperand(expression parser.Expression) (operand
 // 当前只接受 active local 和字面量；字面量超过 RK 常量范围时会装载到临时寄存器，返回的
 // register 需要调用方用 releaseOptionalRegister 释放。
 func (generator *generator) safeRKOperandWithRegister(expression parser.Expression) (operand int, register int, err error) {
-	switch typedExpression := expression.(type) {
-	case *parser.NameExpression:
-		binding, exists := generator.lookupLocal(typedExpression.Name)
-		if !exists {
-			// 调用方已筛选 safe candidate；防御性返回编译错误便于定位损坏状态。
-			return 0, -1, fmt.Errorf("codegen missing local %s", typedExpression.Name)
-		}
-		return binding.register, -1, nil
-	case *parser.LiteralExpression:
-		constant, ok := literalConstant(typedExpression)
-		if !ok {
-			// 调用方已筛选 literal 常量；防御性返回编译错误便于定位损坏状态。
-			return 0, -1, fmt.Errorf("codegen unsupported comparison literal")
-		}
-		constantIndex := generator.addConstant(constant)
-		operand, register, err := generator.rkOperandForConstantIndex(constantIndex)
-		if err != nil {
-			// 常量装载失败时保持原始错误。
-			return 0, -1, err
-		}
-		return operand, register, nil
-	default:
+	operand, register, ok, err := generator.safeRKOperand(expression)
+	if err != nil {
+		// 常量装载失败时保持原始错误。
+		return 0, -1, err
+	}
+	if !ok {
 		// 调用方已筛选表达式形态；防御性返回编译错误便于定位损坏状态。
 		return 0, -1, fmt.Errorf("codegen unsupported comparison operand %T", expression)
 	}
+	return operand, register, nil
 }
 
 // literalConstant 将可直接放入常量表的字面量转为 bytecode.Constant。
@@ -3301,7 +3324,7 @@ func (generator *generator) hasLocalOrUpvalueName(name string) bool {
 
 // safeBinaryReturnOperand 编译 return 二元快路径的操作数并返回 RK/寄存器操作数。
 func (generator *generator) safeBinaryReturnOperand(expression parser.Expression, resultRegister int, resultRegisterInUse *bool) (int, error) {
-	if operand, ok, err := generator.safeRKOperand(expression); err != nil || ok {
+	if operand, _, ok, err := generator.safeRKOperand(expression); err != nil || ok {
 		// local/字面量可以直接作为 RK 操作数；错误保持原编译语义。
 		return operand, err
 	}
@@ -4078,14 +4101,19 @@ func (generator *generator) compileBinaryRKTo(expression *parser.BinaryExpressio
 		// 非普通二元 opcode 不属于该快路径。
 		return false, nil
 	}
-	leftOperand, leftOK, err := generator.safeRKOperand(expression.Left)
+	if !generator.isSafeRKCandidate(expression.Left) || !generator.isSafeRKCandidate(expression.Right) {
+		// 左右任一侧不是无副作用 RK 候选时，不能提前生成半截 LOADK 指令。
+		return false, nil
+	}
+	leftOperand, leftRegister, leftOK, err := generator.safeRKOperand(expression.Left)
 	if err != nil || !leftOK {
 		// 左侧无法安全转 RK 时交给通用路径。
 		return false, err
 	}
-	rightOperand, rightOK, err := generator.safeRKOperand(expression.Right)
+	rightOperand, rightRegister, rightOK, err := generator.safeRKOperand(expression.Right)
 	if err != nil || !rightOK {
 		// 右侧无法安全转 RK 时交给通用路径。
+		generator.releaseOptionalRegister(leftRegister)
 		return false, err
 	}
 	if err := generator.withSourceLine(expression.Position, func() error {
@@ -4093,8 +4121,12 @@ func (generator *generator) compileBinaryRKTo(expression *parser.BinaryExpressio
 		generator.emitABC(opCode, targetRegister, leftOperand, rightOperand)
 		return nil
 	}); err != nil {
+		generator.releaseOptionalRegister(rightRegister)
+		generator.releaseOptionalRegister(leftRegister)
 		return true, err
 	}
+	generator.releaseOptionalRegister(rightRegister)
+	generator.releaseOptionalRegister(leftRegister)
 	return true, nil
 }
 
@@ -4108,14 +4140,14 @@ func (generator *generator) compileBinaryLeftRKRightToTargetTo(expression *parse
 		// 非普通二元 opcode 不属于该快路径。
 		return false, nil
 	}
-	leftOperand, leftOK, err := generator.safeRKOperand(expression.Left)
+	leftOperand, leftOK, err := generator.safeInlineRKOperand(expression.Left)
 	if err != nil || !leftOK {
 		// 左侧无法安全转 RK 时交给通用可复用目标路径。
 		return false, err
 	}
-	if _, rightOK, err := generator.safeRKOperand(expression.Right); err != nil || rightOK {
+	if generator.isSafeRKCandidate(expression.Right) {
 		// 右侧也能转 RK 时已由 compileBinaryRKTo 处理；错误保持原始编译语义。
-		return false, err
+		return false, nil
 	}
 	generator.ensureRegister(targetRegister)
 	if err := generator.compileExpressionTo(expression.Right, targetRegister); err != nil {
@@ -4230,9 +4262,9 @@ func (generator *generator) compileBinaryWithReusableTargetTo(expression *parser
 // 字面量和当前 local 会直接作为 RK 操作数；其他表达式编译到临时寄存器，并返回该临时寄存器供
 // 调用方在发射 opcode 后释放。
 func (generator *generator) binaryRightOperand(expression parser.Expression) (operand int, tempRegister int, err error) {
-	if operand, ok, err := generator.safeRKOperand(expression); err != nil || ok {
+	if operand, register, ok, err := generator.safeRKOperand(expression); err != nil || ok {
 		// 安全 RK 操作数不需要额外临时寄存器；错误保持原编译语义。
-		return operand, -1, err
+		return operand, register, err
 	}
 	rightRegister := generator.allocateRegister()
 	if err := generator.compileExpressionTo(expression, rightRegister); err != nil {
