@@ -102,12 +102,25 @@ func TestNativeCAPITableFieldPrimitivesRejectInvalidTarget(t *testing.T) {
 	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'v', 0}[0]))
 	nativeLuaSetField(luaState, 1, keyPointer)
 	if got := nativeLuaStackTop(luaState); got != 2 {
-		// 非 table 目标保持栈不变，避免提前吞掉 C 模块传入的值。
+		// 非 table setfield 目标保持栈不变，避免提前吞掉 C 模块传入的值。
 		t.Fatalf("invalid lua_setfield top = %d, want 2", got)
 	}
-	if typeCode := nativeLuaGetField(luaState, 1, keyPointer); typeCode != nativeLuaTypeNone {
-		// 非 table 目标读取在当前阶段返回 none。
-		t.Fatalf("invalid lua_getfield type = %d, want %d", typeCode, nativeLuaTypeNone)
+	if typeCode := nativeLuaGetField(luaState, 1, keyPointer); typeCode != nativeLuaTypeNil {
+		// 非 table getfield 目标按普通索引错误路径压入 nil，并通过 pending error 暴露错误。
+		t.Fatalf("invalid lua_getfield type = %d, want %d", typeCode, nativeLuaTypeNil)
+	}
+	if got := nativeLuaStackTop(luaState); got != 3 {
+		// getfield 错误路径需要给 C 调用方留下一个 nil 结果槽。
+		t.Fatalf("invalid lua_getfield top = %d, want 3", got)
+	}
+	if value := state.ValueAt(-1); !value.IsNil() {
+		// 错误路径压入的占位结果必须是 nil。
+		t.Fatalf("invalid lua_getfield value = %#v, want nil", value)
+	}
+	pending, hasPending := takeNativeStatePendingError(luaState)
+	if !hasPending || !pending.RawEqual(runtime.StringValue(runtime.ErrExpectedTable.Error())) {
+		// 非 table 普通索引错误必须通过 pending error 传回 C function 边界。
+		t.Fatalf("invalid lua_getfield pending = %#v, want %q", pending, runtime.ErrExpectedTable.Error())
 	}
 }
 
@@ -210,6 +223,91 @@ func TestNativeCAPIGetTableUsesStackKey(t *testing.T) {
 	}
 }
 
+// TestNativeLuaGetTableUsesUserdataIndexMetatable 验证 lua_gettable 可通过 userdata __index 方法表读取字段。
+func TestNativeLuaGetTableUsesUserdataIndexMetatable(t *testing.T) {
+	// LuaSocket 的 socket.select 会对 socket userdata 执行 lua_gettable(L, -2) 读取 getfd/dirty 方法。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 userdata 索引。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	methods := runtime.NewTable()
+	methodValue := runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(func(args ...runtime.Value) ([]runtime.Value, error) {
+		// 测试方法只作为可调用 sentinel，不在本测试中执行。
+		return []runtime.Value{runtime.IntegerValue(42)}, nil
+	}))
+	methods.RawSetString("getfd", methodValue)
+	metatable := runtime.NewTable()
+	metatable.RawSetString("__index", runtime.ReferenceValue(runtime.KindTable, methods))
+	userdata := runtime.NewUserdata("socket-like")
+	if err := userdata.SetMetatable(metatable); err != nil {
+		// 测试准备阶段设置 userdata 元表必须成功。
+		t.Fatalf("set userdata metatable failed: %v", err)
+	}
+
+	nativeLuaPushValue(luaState, userdata.Value())
+	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'g', 'e', 't', 'f', 'd', 0}[0]))
+	typeCode := nativeLuaGetTable(luaState, 1)
+	if typeCode != nativeLuaTypeFunction {
+		// userdata __index table 中的 Go closure 必须按 Lua C API function 类型返回。
+		t.Fatalf("lua_gettable userdata type = %d, want %d", typeCode, nativeLuaTypeFunction)
+	}
+	if got := nativeLuaStackTop(luaState); got != 2 {
+		// lua_gettable 必须弹出 key 并压入方法，保留原 userdata。
+		t.Fatalf("lua_gettable userdata top = %d, want 2", got)
+	}
+	if value := state.ValueAt(-1); !value.RawEqual(methodValue) {
+		// 栈顶必须是 __index 方法表中的 getfd 函数。
+		t.Fatalf("lua_gettable userdata value = %#v, want method", value)
+	}
+}
+
+// TestNativeLuaGetFieldUsesUserdataIndexMetatable 验证 lua_getfield 可通过 userdata __index 方法表读取字段。
+func TestNativeLuaGetFieldUsesUserdataIndexMetatable(t *testing.T) {
+	// lua_getfield 是 lua_gettable 的 string key 便捷入口，应共享 userdata __index 语义。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 userdata 字段读取。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	methods := runtime.NewTable()
+	methodValue := runtime.StringValue("method")
+	methods.RawSetString("dirty", methodValue)
+	metatable := runtime.NewTable()
+	metatable.RawSetString("__index", runtime.ReferenceValue(runtime.KindTable, methods))
+	userdata := runtime.NewUserdata("socket-like")
+	if err := userdata.SetMetatable(metatable); err != nil {
+		// 测试准备阶段设置 userdata 元表必须成功。
+		t.Fatalf("set userdata metatable failed: %v", err)
+	}
+
+	nativeLuaPushValue(luaState, userdata.Value())
+	keyBytes := []byte{'d', 'i', 'r', 't', 'y', 0}
+	typeCode := nativeLuaGetField(luaState, 1, unsafe.Pointer(&keyBytes[0]))
+	if typeCode != nativeLuaTypeString {
+		// lua_getfield 应返回 __index 方法表中的字段类型。
+		t.Fatalf("lua_getfield userdata type = %d, want %d", typeCode, nativeLuaTypeString)
+	}
+	if got := nativeLuaStackTop(luaState); got != 2 {
+		// lua_getfield 不弹出 receiver，只压入读取结果。
+		t.Fatalf("lua_getfield userdata top = %d, want 2", got)
+	}
+	if value := state.ValueAt(-1); !value.RawEqual(methodValue) {
+		// 栈顶必须是 __index 方法表中的 dirty 字段。
+		t.Fatalf("lua_getfield userdata value = %#v, want method", value)
+	}
+}
+
 // TestNativeLuaGetTableRespectsCurrentCFrameBase 验证 lua_gettable 不会弹出当前 C 帧之前的外层栈值。
 func TestNativeLuaGetTableRespectsCurrentCFrameBase(t *testing.T) {
 	// registry 目标不需要当前 C 帧内 table 参数，可直接暴露“缺少 key 时是否穿透外层栈”的边界。
@@ -259,13 +357,22 @@ func TestNativeCAPIGetTableRejectsInvalidTarget(t *testing.T) {
 
 	nativeLuaPushInteger(luaState, 1)
 	nativeLuaPushString(luaState, unsafe.Pointer(&[]byte{'x', 0}[0]))
-	if typeCode := nativeLuaGetTable(luaState, 1); typeCode != nativeLuaTypeNone {
-		// 非 table 目标在当前阶段返回 none。
-		t.Fatalf("invalid lua_gettable type = %d, want %d", typeCode, nativeLuaTypeNone)
+	if typeCode := nativeLuaGetTable(luaState, 1); typeCode != nativeLuaTypeNil {
+		// 非 table 目标按普通索引错误路径压入 nil，并通过 pending error 暴露错误。
+		t.Fatalf("invalid lua_gettable type = %d, want %d", typeCode, nativeLuaTypeNil)
 	}
 	if got := nativeLuaStackTop(luaState); got != 2 {
-		// 无效目标不能弹出 key，避免掩盖后续错误边界。
+		// gettable 弹出 key 并压入 nil，占位后总栈高仍为 2。
 		t.Fatalf("invalid lua_gettable top = %d, want 2", got)
+	}
+	if value := state.ValueAt(-1); !value.IsNil() {
+		// 错误路径压入的占位结果必须是 nil。
+		t.Fatalf("invalid lua_gettable value = %#v, want nil", value)
+	}
+	pending, hasPending := takeNativeStatePendingError(luaState)
+	if !hasPending || !pending.RawEqual(runtime.StringValue(runtime.ErrExpectedTable.Error())) {
+		// 非 table 普通索引错误必须通过 pending error 传回 C function 边界。
+		t.Fatalf("invalid lua_gettable pending = %#v, want %q", pending, runtime.ErrExpectedTable.Error())
 	}
 }
 

@@ -100,6 +100,96 @@ func nativeLuaTableAt(luaState unsafe.Pointer, index int) (*runtime.Table, bool)
 	return table, true
 }
 
+// nativeLuaIndexValue 按 Lua 普通索引语义读取 receiver[key]。
+func nativeLuaIndexValue(state *runtime.State, receiver runtime.Value, key runtime.Value) (runtime.Value, error) {
+	// table 读取复用 runtime 的普通 table 语义，保留 table 型和 Go closure 型 __index。
+	switch receiver.Kind {
+	case runtime.KindTable:
+		// table 引用损坏时直接返回错误，避免误读为 nil。
+		table, ok := receiver.Ref.(*runtime.Table)
+		if !ok || table == nil {
+			// 损坏 table 负载是内部错误，按 expected table 报告。
+			return runtime.NilValue(), runtime.ErrExpectedTable
+		}
+		return table.Get(key)
+	case runtime.KindUserdata:
+		// userdata 通过 raw metatable 的 __index 暴露方法表，LuaSocket socket 对象依赖该路径。
+		userdata, ok := receiver.Ref.(*runtime.Userdata)
+		if !ok || userdata == nil {
+			// 损坏 userdata 负载不能安全索引。
+			return runtime.NilValue(), runtime.ErrExpectedTable
+		}
+		metatable := userdata.GetMetatable()
+		if metatable == nil {
+			// 当前项目 VM 对无 __index 的 userdata 读取保持 nil，后续 api_check 可再收紧错误边界。
+			return runtime.NilValue(), nil
+		}
+		indexValue := metatable.RawGetString("__index")
+		if indexValue.IsNil() {
+			// 元表没有 __index 时读取结果为 nil。
+			return runtime.NilValue(), nil
+		}
+		if indexValue.Kind == runtime.KindTable {
+			// __index table 继续使用普通 table 读取，以支持方法表自身的 __index 链。
+			indexTable, ok := indexValue.Ref.(*runtime.Table)
+			if !ok || indexTable == nil {
+				// 损坏 __index table 不能安全读取。
+				return runtime.NilValue(), runtime.ErrUnsupportedIndexMetamethod
+			}
+			return indexTable.Get(key)
+		}
+		if indexValue.Kind == runtime.KindGoClosure || indexValue.Kind == runtime.KindLuaClosure {
+			// 函数型 __index 按 Lua 规则接收原 receiver 和 key，并取第一返回值。
+			results, err := nativeLuaCallValue(state, indexValue, []runtime.Value{receiver, key})
+			if err != nil {
+				// 元方法执行失败必须上抛到 C API 调用边界。
+				return runtime.NilValue(), err
+			}
+			if len(results) == 0 {
+				// Lua 函数无返回值等价于 nil。
+				return runtime.NilValue(), nil
+			}
+			return results[0], nil
+		}
+		return runtime.NilValue(), runtime.ErrUnsupportedIndexMetamethod
+	default:
+		// 基础类型可通过 debug.setmetatable 或标准库设置类型级 __index。
+		metatable := runtime.BasicTypeMetatable(receiver)
+		if metatable == nil {
+			// 没有元表时保持当前 C API shim 的 none 边界。
+			return runtime.NilValue(), runtime.ErrExpectedTable
+		}
+		indexValue := metatable.RawGetString("__index")
+		if indexValue.IsNil() {
+			// 元表没有 __index 时读取结果为 nil。
+			return runtime.NilValue(), nil
+		}
+		if indexValue.Kind == runtime.KindTable {
+			// table 型 __index 复用普通 table 读取。
+			indexTable, ok := indexValue.Ref.(*runtime.Table)
+			if !ok || indexTable == nil {
+				// 损坏 __index table 不能安全读取。
+				return runtime.NilValue(), runtime.ErrUnsupportedIndexMetamethod
+			}
+			return indexTable.Get(key)
+		}
+		if indexValue.Kind == runtime.KindGoClosure || indexValue.Kind == runtime.KindLuaClosure {
+			// 函数型 __index 需要当前 State 调用 runner。
+			results, err := nativeLuaCallValue(state, indexValue, []runtime.Value{receiver, key})
+			if err != nil {
+				// 元方法错误必须原样传播。
+				return runtime.NilValue(), err
+			}
+			if len(results) == 0 {
+				// 无返回值按 nil 处理。
+				return runtime.NilValue(), nil
+			}
+			return results[0], nil
+		}
+		return runtime.NilValue(), runtime.ErrUnsupportedIndexMetamethod
+	}
+}
+
 // nativeLuaCreateTable 创建空 table 并压入当前 Go State 栈。
 func nativeLuaCreateTable(luaState unsafe.Pointer, arraySize int, recordSize int) {
 	// 当前 runtime 只公开普通 NewTable；array/hash 预留参数先保留接口语义，后续可优化容量。
@@ -131,17 +221,23 @@ func nativeLuaSetField(luaState unsafe.Pointer, index int, keyPointer unsafe.Poi
 // nativeLuaGetField 按 string key 读取 table 字段并压入栈顶。
 func nativeLuaGetField(luaState unsafe.Pointer, index int, keyPointer unsafe.Pointer) int {
 	// 入口先解析 State；失效 handle 无可读栈，返回 LUA_TNONE。
-	_, ok := lookupNativeStateHandle(luaState)
+	state, ok := lookupNativeStateHandle(luaState)
 	if !ok || keyPointer == nil {
 		// 无效 State 或 key 暂不产生 Lua 值。
 		return nativeLuaTypeNone
 	}
-	table, ok := nativeLuaTableAt(luaState, index)
+	receiver, ok := nativeLuaValueAt(luaState, index)
 	if !ok {
-		// 非 table 目标在当前最小 shim 中返回 none，后续元方法阶段会补完整错误语义。
+		// 无效索引不压入值，返回 none。
 		return nativeLuaTypeNone
 	}
-	value := table.RawGetString(nativeLuaCString(keyPointer))
+	value, err := nativeLuaIndexValue(state, receiver, runtime.StringValue(nativeLuaCString(keyPointer)))
+	if err != nil {
+		// 普通索引错误通过 pending error 交给 C function 调用边界处理。
+		setNativeStatePendingError(luaState, runtime.StringValue(err.Error()))
+		nativeLuaPushNil(luaState)
+		return nativeLuaTypeNil
+	}
 	nativeLuaPushValue(luaState, value)
 	return nativeLuaTypeCode(value, false)
 }
@@ -154,9 +250,9 @@ func nativeLuaGetTable(luaState unsafe.Pointer, index int) int {
 		// 无效 State 或关闭 State 下不能弹栈或压栈。
 		return nativeLuaTypeNone
 	}
-	table, ok := nativeLuaTableAt(luaState, index)
+	receiver, ok := nativeLuaValueAt(luaState, index)
 	if !ok {
-		// 非 table 目标在当前最小 shim 中保持 no-op，后续元方法和错误阶段再补齐完整语义。
+		// 无效目标保持 key 不被吞掉，避免掩盖调用方栈问题。
 		return nativeLuaTypeNone
 	}
 	key, ok := nativeLuaPopVisible(luaState, state)
@@ -164,9 +260,9 @@ func nativeLuaGetTable(luaState unsafe.Pointer, index int) int {
 		// 当前 C 帧没有可见 key 时保持栈不变，避免穿透外层 VM 栈。
 		return nativeLuaTypeNone
 	}
-	value, err := table.RawGet(key)
+	value, err := nativeLuaIndexValue(state, receiver, key)
 	if err != nil {
-		// 不支持的 key 类型通过 pending error 传回 C function 调用边界。
+		// 不支持的 key 或元方法错误通过 pending error 传回 C function 调用边界。
 		setNativeStatePendingError(luaState, runtime.StringValue(err.Error()))
 		nativeLuaPushNil(luaState)
 		return nativeLuaTypeNil

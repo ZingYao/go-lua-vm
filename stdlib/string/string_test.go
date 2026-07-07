@@ -1212,6 +1212,26 @@ func TestGSubStringReplacement(t *testing.T) {
 		t.Fatalf("GSub empty match result mismatch: %#v", emptyMatch)
 	}
 
+	anchoredTrim, err := GSub(runtime.StringValue(" a b"), runtime.StringValue("^%s*"), runtime.StringValue(""))
+	if err != nil {
+		// 锚定 nullable pattern 的 gsub 不应失败。
+		t.Fatalf("GSub anchored trim failed: %v", err)
+	}
+	if len(anchoredTrim) != 2 || anchoredTrim[0].String != "a b" || anchoredTrim[1].Integer != 1 {
+		// `^%s*` 只能替换开头一次，不能继续扫描并删除中间空格。
+		t.Fatalf("GSub anchored trim result mismatch: %#v", anchoredTrim)
+	}
+
+	anchoredEmpty, err := GSub(runtime.StringValue("a b"), runtime.StringValue("^%s*"), runtime.StringValue(""))
+	if err != nil {
+		// 开头零宽命中也应只算一次替换。
+		t.Fatalf("GSub anchored empty failed: %v", err)
+	}
+	if len(anchoredEmpty) != 2 || anchoredEmpty[0].String != "a b" || anchoredEmpty[1].Integer != 1 {
+		// 锚定空匹配后必须停止迭代，保留原始字符串内容。
+		t.Fatalf("GSub anchored empty result mismatch: %#v", anchoredEmpty)
+	}
+
 	balancedQuote, err := GSub(runtime.StringValue("alo 'oi' alo"), runtime.StringValue("%b''"), runtime.StringValue("\""))
 	if err != nil {
 		// balanced pattern 作为 gsub 查找模式不应失败。

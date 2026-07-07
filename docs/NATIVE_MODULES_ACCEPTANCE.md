@@ -17,8 +17,8 @@
 | --- | --- | --- | --- |
 | fixture | `scripts/test-native-modules.sh` | `.so`、`.dylib` | `require` 成功路径、`luaopen_*` 初始化失败、userdata/metatable/registry/error smoke |
 | lua-cjson | `scripts/test-native-cjson.sh` | `.so`、`.dylib` | ABI 符号由 native `glua` shim 覆盖、`require("cjson")`、`encode/decode`、错误输入 `pcall` |
-| LPeg | `scripts/test-native-lpeg.sh` | `.so`、`.dylib` | `require("lpeg")`、基础 pattern/match；完整 `third_party/lpeg/test.lua` 已在排查闭环中通过 |
-| LuaSocket | `scripts/test-native-luasocket.sh` | `.so`、`.dylib` | `require("mime")`、MIME 编解码、`require("socket")`、TCP echo loopback、UDP sendto/receivefrom loopback |
+| LPeg | `scripts/test-native-lpeg.sh` | `.so`、`.dylib` | `require("lpeg")`、基础 pattern/match、完整 `third_party/lpeg/test.lua` 和 `re` 模块官方测试 |
+| LuaSocket | `scripts/test-native-luasocket.sh` | `.so`、`.dylib` | `require("mime")`、MIME 编解码、`require("socket")`、TCP/UDP loopback、官方离线脚本和 `testsrvr.lua` + `testclnt.lua` client/server 主路径 |
 | 当前平台总验收 | `scripts/test-native-real-modules.sh` | `.so`、`.dylib` | 串联 fixture、lua-cjson、LPeg 和 LuaSocket 运行期验收，用于本机或 CI 一次性回归 |
 
 最近一次本机真实模块总验收：
@@ -27,7 +27,7 @@
 source ~/.zshrc && CGO_ENABLED=1 ./scripts/test-native-real-modules.sh
 ```
 
-结果：2026-07-07 自动轮次复跑通过；macOS arm64 `.so` 与 `.dylib` 均通过 fixture、lua-cjson、LPeg 和 LuaSocket runtime acceptance。
+结果：2026-07-07 本轮复跑通过；macOS arm64 `.so` 与 `.dylib` 均通过 fixture、lua-cjson、完整 LPeg 官方 `test.lua`、LuaSocket runtime acceptance、LuaSocket 官方离线脚本和 `testsrvr.lua` + `testclnt.lua` client/server 主路径。
 
 额外诊断样本：
 
@@ -41,6 +41,16 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 ```
 
 结果：通过。
+
+最近一次默认 no-CGO 门禁：
+
+```bash
+CGO_ENABLED=0 go test ./...
+./scripts/check-go-gates.sh
+git ls-files --others --exclude-standard | rg '\.go$|_test\.go$'
+```
+
+结果：通过；未发现未跟踪 Go 文件。
 
 ## Linux
 

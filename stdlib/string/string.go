@@ -2316,6 +2316,10 @@ type patternIterator struct {
 	pattern string
 	// offset 保存下一次查找起始偏移。
 	offset int
+	// anchored 表示 pattern 以 ^ 开头，gsub/gmatch 迭代时只能尝试一次。
+	anchored bool
+	// anchorAttempted 表示锚定 pattern 已经执行过唯一一次匹配尝试。
+	anchorAttempted bool
 	// finished 表示迭代已经结束。
 	finished bool
 	// skipEmptyAtOffset 表示上次是非空匹配，本次需要跳过同一 offset 的空匹配。
@@ -2327,7 +2331,7 @@ type patternIterator struct {
 // startOffset 是 Go 0-based 起始偏移。
 func newPatternIterator(source string, pattern string, startOffset int) *patternIterator {
 	// 初始化迭代器，offset 由调用方按 Lua init 语义换算。
-	return &patternIterator{source: source, pattern: pattern, offset: startOffset}
+	return &patternIterator{source: source, pattern: pattern, offset: startOffset, anchored: strings.HasPrefix(pattern, "^")}
 }
 
 // next 返回下一次 pattern 匹配。
@@ -2337,6 +2341,15 @@ func (iterator *patternIterator) next() (patternMatch, bool, error) {
 	if iterator.finished {
 		// 已结束迭代器不再继续查找。
 		return patternMatch{}, false, nil
+	}
+	if iterator.anchored && iterator.anchorAttempted {
+		// Lua 5.3 的锚定 pattern 在 gsub/gmatch 中只尝试起始位置一次。
+		iterator.finished = true
+		return patternMatch{}, false, nil
+	}
+	if iterator.anchored {
+		// 记录本次唯一尝试；即便匹配为空，也不能继续从后续 offset 重复匹配。
+		iterator.anchorAttempted = true
 	}
 	if iterator.offset > len(iterator.source) {
 		// 起点超过尾后时结束迭代。

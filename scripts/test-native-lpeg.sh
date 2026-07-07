@@ -6,6 +6,8 @@ target_goos="${TARGET_GOOS:-$(go env GOOS)}"
 target_goarch="${TARGET_GOARCH:-$(go env GOARCH)}"
 build_dir="${BUILD_DIR:-${repo_root}/build/native-lpeg/${target_goos}-${target_goarch}}"
 glua_bin="${GLUA_BIN:-${build_dir}/glua-native}"
+lpeg_source_dir="${repo_root}/third_party/lpeg"
+lpeg_test_file="${lpeg_source_dir}/test.lua"
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/go-lua-vm-native-lpeg.XXXXXX")"
 
 cleanup() {
@@ -59,6 +61,11 @@ fi
 
 BUILD_DIR="${build_dir}" CGO_ENABLED=1 "${repo_root}/scripts/build-native-lpeg.sh"
 
+if [[ ! -f "${lpeg_test_file}" ]]; then
+  echo "LPeg official test file missing: ${lpeg_test_file}" >&2
+  exit 1
+fi
+
 lua_string_literal() {
   local text="$1"
   text="${text//\\/\\\\}"
@@ -66,7 +73,8 @@ lua_string_literal() {
   printf '"%s"' "${text}"
 }
 
-package_path_literal="$(lua_string_literal "${work_dir}/missing/?.lua")"
+package_path_literal="$(lua_string_literal "${lpeg_source_dir}/?.lua;${work_dir}/missing/?.lua")"
+lpeg_test_literal="$(lua_string_literal "${lpeg_test_file}")"
 
 for extension in "${runtime_extensions[@]}"; do
   module_path="${build_dir}/lpeg${extension}"
@@ -98,7 +106,9 @@ assert(lpeg.match(S("ab")^1, "abba!") == 5)
 assert(lpeg.match(C(R("az")^1), "lua53") == "lua")
 assert(lpeg.match(P(false) + "a", "a") == 2)
 
-print("native LPeg runtime acceptance passed", "${extension}")
+dofile(${lpeg_test_literal})
+
+print("native LPeg full official test passed", "${extension}")
 EOF
 
   echo "run native LPeg acceptance (${extension}): ${acceptance_source}"

@@ -10,6 +10,7 @@ build_dir="${BUILD_DIR:-${repo_root}/build/native-luasocket/${target_goos}-${tar
 include_dir="${repo_root}/native/lua53/include"
 source_dir="${repo_root}/third_party/luasocket"
 source_src_dir="${source_dir}/src"
+debug_build="${NATIVE_LUASOCKET_DEBUG:-0}"
 
 socket_sources=(
   "${source_src_dir}/luasocket.c"
@@ -93,6 +94,7 @@ echo "GOARCH=${target_goarch}"
 echo "CGO_ENABLED=${CGO_ENABLED:-unset}"
 echo "CC=${cc:-unset}"
 echo "CC variable=${cc_var}"
+echo "NATIVE_LUASOCKET_DEBUG=${debug_build}"
 echo "include_dir=${include_dir}"
 echo "source_dir=${source_dir}"
 echo "build_dir=${build_dir}"
@@ -197,12 +199,16 @@ build_luasocket_module() {
     "-I" "${include_dir}"
     "-I" "${source_src_dir}"
     "-O2"
-    "-DNDEBUG"
-    "-DLUASOCKET_NODEBUG"
     "-std=c99"
     "-fPIC"
     "-Wall"
   )
+
+  if [[ "${debug_build}" == "1" ]]; then
+    args+=("-DLUASOCKET_DEBUG")
+  else
+    args+=("-DNDEBUG" "-DLUASOCKET_NODEBUG")
+  fi
 
   args+=("${platform_cflags[@]}")
   args+=("-o" "${output_path}")
