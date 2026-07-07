@@ -56,6 +56,11 @@ run_and_require_skip \
   env TARGET_GOOS=windows "${repo_root}/scripts/build-native-lpeg.sh"
 
 run_and_require_skip \
+  "windows luasocket build" \
+  "skip: Windows LuaSocket build requires lua53.dll shim or import library, not implemented yet" \
+  env TARGET_GOOS=windows "${repo_root}/scripts/build-native-luasocket.sh"
+
+run_and_require_skip \
   "linux missing cross compiler" \
   "skip: C compiler not found for linux/${host_goarch}: __glua_missing_native_cc__" \
   env NATIVE_CROSS_TARGETS="linux/${host_goarch}" "${cross_cc_var}=__glua_missing_native_cc__" "${repo_root}/scripts/check-native-cross-compile.sh"

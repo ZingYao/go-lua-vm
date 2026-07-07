@@ -351,7 +351,8 @@
         - [x] 2026-07-07 收敛：构造期生命周期与错误路径缺口已分别落到通用 codegen RK 临时寄存器生命周期、native Go closure 调用形态、math numeric string 兼容和非 protected `lua_callk` longjmp 语义；完整 LPeg `.so/.dylib` 官方测试均已通过，当前无继续围绕 LPeg select-count 的活动阻塞。
   - [ ] LuaSocket 或等价网络库验收：仅在 userdata/metatable/registry/错误边界稳定后进入平台闭环。
     - [x] 固定 LuaSocket 源码到 `third_party/luasocket/`，来源为 `lunarmodules/luasocket` tag `v3.1.0` / commit `95b7efa9da506ef968c1347edf3fc56370f0deed`，保留 MIT-style `LICENSE` 并新增 `GLUA_VENDOR.md` 记录本项目未做源码修改。
-    - [ ] 新增 LuaSocket 源码编译脚本，使用仓库内 Lua 5.3 public headers 编译 `socket.core` 和 `mime.core`，禁止读取系统 Lua 开发包。
+    - [x] 新增 LuaSocket 源码编译脚本，使用仓库内 Lua 5.3 public headers 编译 `socket.core` 和 `mime.core`，禁止读取系统 Lua 开发包。
+      - [x] macOS arm64 `.so` 与 `.dylib` 两种后缀已通过源码编译级验收。
     - [ ] 新增 LuaSocket 运行期验收脚本，覆盖 `require("socket")`、`require("mime")`、基础 MIME 编解码和本机 loopback TCP/UDP 边界；网络用例必须可控、可超时、失败原因明确。
 - [ ] 增加交叉编译验证脚本：
   - [x] `scripts/check-native-cross-compile.sh`：显式输出 `GOOS`、`GOARCH`、`CC`、产物路径和缺失 toolchain 时的 skip 原因。
@@ -380,6 +381,7 @@
   - [x] `scripts/test-native-cjson.sh`
   - [x] `scripts/build-native-lpeg.sh`
   - [x] `scripts/test-native-lpeg.sh`
+  - [x] `scripts/build-native-luasocket.sh`
   - [x] `scripts/check-native-skip-reasons.sh`
   - [x] `scripts/probe-native-lpeg-1159.sh`
   - [x] `scripts/bisect-native-lpeg-1159-prefix.sh`
@@ -536,3 +538,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-07：重建 native `glua` 后，LPeg `.so` 与 `.dylib` 最小复现 `lpeg.C(lpeg.R"09"^1) / math.sin` 和 `re.compile([[{[0-9]+'.'?[0-9]*} -> sin]], math)` 均已通过；完整 `third_party/lpeg/test.lua` 继续推进到 `test.lua:1658` 的 `errmsg('aaaa', "rule 'aaaa'")`，当前最小 `pcall(re.compile, "aaaa")` 返回 `attempt to call a non-function value`，下一轮应定位 `re` 错误路径为何未返回包含 `rule 'aaaa'` 的诊断，不应回退到 LPeg 特例。
 - 2026-07-07：集中排查 LPeg `re.compile("aaaa")` 错误路径；Delve 断点和临时调试版 LPeg 日志确认坏帧来自 `functioncap -> pushcapture -> getcaptures -> lp_match`，内层 `NT("aaaa", false)` 已通过 Lua `error` 产生正确错误对象，但 native `lua_callk` 只记录 pending error 并返回 C 调用点，导致 LPeg 继续执行后续 capture，最终外层 `functioncap` 把 stackbase lightuserdata 当作函数调用并报 `attempt to call a non-function value`。本轮修复通用 Lua C API 语义：非 protected `lua_callk/lua_call` 失败时由 C wrapper 立即 longjmp 到当前 C function 边界，`lua_pcallk` protected 路径保持返回错误码；新增 smoke fixture `call_error_no_resume` 锁定 C 模块在 `lua_call` 出错后不会继续执行。复跑 `re.compile("aaaa")` 返回 `rule 'aaaa' used outside a grammar`，重复规则路径返回 `already defined as a rule`，完整 `third_party/lpeg/test.lua` 在 macOS arm64 native LPeg `.so` 与 `.dylib` 路径下均输出 `OK`。
 - 2026-07-07：固定第三真实模块 LuaSocket 到 `third_party/luasocket/`，来源为 upstream `https://github.com/lunarmodules/luasocket` tag `v3.1.0`、commit `95b7efa9da506ef968c1347edf3fc56370f0deed`，保留 MIT-style `LICENSE` 并新增 `GLUA_VENDOR.md` 记录本项目未做源码修改。本轮只完成网络库验收前的源码自包含门禁，不声明 `socket.core` / `mime.core` 编译或运行期验收通过；后续需独立新增构建脚本和可控 loopback 运行期脚本。
+- 2026-07-07：新增 `scripts/build-native-luasocket.sh`，直接使用仓库内 `native/lua53/include/` 与固定 `third_party/luasocket/` 源码编译当前平台 `socket/core` 和 `mime/core` 动态模块；macOS 同时产出 `.so` 与 `.dylib`，Linux 产出 `.so`，Windows 在 `lua53.dll` shim/import library 落地前明确 skip。当前 macOS arm64 源码编译级验收通过；运行期 `require("socket")` / `require("mime")` 和可控 loopback 网络行为仍等待独立脚本闭环。
