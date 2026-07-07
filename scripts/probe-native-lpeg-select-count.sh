@@ -524,6 +524,21 @@ LUA
 local probe_warmup = m.P']'
 LUA
       ;;
+    pchar-open)
+      cat <<'LUA'
+local probe_warmup = m.P'['
+LUA
+      ;;
+    pchar-eq)
+      cat <<'LUA'
+local probe_warmup = m.P'='
+LUA
+      ;;
+    pchar-a)
+      cat <<'LUA'
+local probe_warmup = m.P'a'
+LUA
+      ;;
     pstring2)
       cat <<'LUA'
 local probe_warmup = m.P'ab'
@@ -542,6 +557,11 @@ LUA
     set-single)
       cat <<'LUA'
 local probe_warmup = m.S']'
+LUA
+      ;;
+    set-single-a)
+      cat <<'LUA'
+local probe_warmup = m.S'a'
 LUA
       ;;
     set-range)
