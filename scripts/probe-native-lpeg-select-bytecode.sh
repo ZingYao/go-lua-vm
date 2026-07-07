@@ -20,6 +20,73 @@ if [[ "${actual_go_version}" != "${expected_go_version}" ]]; then
   exit 1
 fi
 
+emit_lpeg_selected_decls() {
+  cat <<'LUA'
+local attempts = {}
+local probe_open
+local probe_close
+local probe_any
+local probe_close_head
+local probe_close_back
+local probe_close_func
+local dummy_func
+local dummy_capture
+local dummy_back
+local dummy_value
+LUA
+}
+
+emit_lpeg_error_number_perturbation() {
+  cat <<'LUA'
+local count = select("#", "alpha", "beta")
+if count ~= 2 then
+  error("unexpected select count")
+end
+local skipped = error
+local payload = 17
+LUA
+}
+
+emit_lpeg_default_tail() {
+  cat <<'LUA'
+local attempts = {}
+c = '[' * m.Cg(m.P'='^0, "init") * '[' *
+    { m.Cmt(']' * m.C(m.P'='^0) * ']' * m.Cb("init"), function (_, pos, s1, s2)
+                                               attempts[#attempts + 1] = pos .. ':' .. s1 .. ':' .. s2
+                                               return s1 == s2 end)
+       + 1 * m.V(1) } / 0
+print("PROBE", c:match'[==[]]====]]]]==]===[]', table.concat(attempts, ","))
+LUA
+}
+
+emit_lpeg_selected_tail() {
+  cat <<'LUA'
+attempts = {}
+if probe_open == nil then
+  probe_open = '[' * m.Cg(m.P'='^0, "init") * '['
+end
+if probe_close == nil then
+  if probe_close_head == nil then
+    probe_close_head = ']' * m.C(m.P'='^0) * ']'
+  end
+  if probe_close_back == nil then
+    probe_close_back = m.Cb("init")
+  end
+  if probe_close_func == nil then
+    probe_close_func = function (_, pos, s1, s2)
+                                               attempts[#attempts + 1] = pos .. ':' .. s1 .. ':' .. s2
+                                               return s1 == s2 end
+  end
+  probe_close = m.Cmt(probe_close_head * probe_close_back, probe_close_func)
+end
+if probe_any == nil then
+  probe_any = m.P(1)
+end
+c = probe_open * { probe_close + probe_any * m.V(1) } / 0
+print("PROBE", c:match'[==[]]====]]]]==]===[]', table.concat(attempts, ","))
+LUA
+}
+
 emit_mode_body() {
   local mode="$1"
 
@@ -326,6 +393,24 @@ if number ~= 17 then
 end
 LUA
       ;;
+    lpeg-default-tail-error-number)
+      emit_lpeg_error_number_perturbation
+      emit_lpeg_default_tail
+      ;;
+    lpeg-selected-decls-default-tail-error-number)
+      emit_lpeg_selected_decls
+      emit_lpeg_error_number_perturbation
+      emit_lpeg_default_tail
+      ;;
+    lpeg-selected-tail-only-error-number)
+      emit_lpeg_error_number_perturbation
+      emit_lpeg_selected_tail
+      ;;
+    lpeg-decls-only-selected-tail-error-number)
+      emit_lpeg_selected_decls
+      emit_lpeg_error_number_perturbation
+      emit_lpeg_selected_tail
+      ;;
     *)
       echo "unknown select bytecode probe mode: ${mode}" >&2
       return 1
@@ -372,6 +457,10 @@ modes=(
   fixed-result-rawequal-strings-true-error-number
   fixed-result-rawequal-numbers-false-error-number
   builtin-tonumber-string-base
+  lpeg-default-tail-error-number
+  lpeg-selected-decls-default-tail-error-number
+  lpeg-selected-tail-only-error-number
+  lpeg-decls-only-selected-tail-error-number
 )
 
 if (($# > 0)); then
