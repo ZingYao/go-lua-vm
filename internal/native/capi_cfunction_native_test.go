@@ -109,6 +109,69 @@ func TestNativeLuaPushCClosureCapturesVisibleFrameUpvalues(t *testing.T) {
 	}
 }
 
+// TestNativeLuaPushCClosureCapturesMultipleUpvaluesAndKeepsVisiblePrefix 验证 C closure 构造只消费栈顶 upvalue 后缀。
+func TestNativeLuaPushCClosureCapturesMultipleUpvaluesAndKeepsVisiblePrefix(t *testing.T) {
+	// 构造外层调用者栈和当前 C 帧，锁定 lua_pushcclosure 的通用 upvalue 弹栈边界。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 C closure 构造边界。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+
+	if err := state.Push(runtime.StringValue("outer")); err != nil {
+		// 外层 sentinel 压栈失败时无法验证当前 C 帧不会被弹栈穿透。
+		t.Fatalf("push outer sentinel failed: %v", err)
+	}
+	baseTop := state.StackTop()
+	if !pushNativeStateCallFrame(luaState, baseTop, nil) {
+		// C frame 基址记录失败时无法验证多 upvalue 捕获顺序。
+		t.Fatalf("pushNativeStateCallFrame failed")
+	}
+	defer popNativeStateCallFrame(luaState)
+
+	firstUpvalue := runtime.NewTable()
+	firstUpvalue.RawSetString("marker", runtime.StringValue("first-upvalue"))
+	nativeLuaPushValue(luaState, runtime.StringValue("visible-prefix"))
+	nativeLuaPushValue(luaState, runtime.ReferenceValue(runtime.KindTable, firstUpvalue))
+	nativeLuaPushInteger(luaState, 99)
+
+	nativeLuaPushCClosure(luaState, luaState, 2)
+	if got := state.StackTop(); got != baseTop+2 {
+		// nup=2 只能弹出两个 upvalue 并压入一个 closure，当前 C 帧前缀必须保留。
+		t.Fatalf("global top after multi-upvalue C closure = %d, want %d", got, baseTop+2)
+	}
+	if got := nativeLuaStackTop(luaState); got != 2 {
+		// 当前 C 帧应只看到保留下来的前缀值和新 closure。
+		t.Fatalf("visible top after multi-upvalue C closure = %d, want 2", got)
+	}
+	if value := state.ValueAt(baseTop + 1); value.Kind != runtime.KindString || value.String != "visible-prefix" {
+		// 非 upvalue 的当前 C 帧前缀不能被 lua_pushcclosure 的弹栈逻辑误消费。
+		t.Fatalf("visible prefix after multi-upvalue C closure = %#v, want visible-prefix", value)
+	}
+	closureValue := state.ValueAt(-1)
+	closure, ok := closureValue.Ref.(*runtime.GoClosureWithUpvalues)
+	if closureValue.Kind != runtime.KindGoClosure || !ok || closure == nil {
+		// 栈顶必须是携带 upvalue 快照的 Go closure。
+		t.Fatalf("multi-upvalue C closure value = %#v, want GoClosureWithUpvalues", closureValue)
+	}
+	if len(closure.Upvalues) != 2 {
+		// 捕获数量必须与 lua_pushcclosure 的 nup 完全一致。
+		t.Fatalf("multi-upvalue C closure upvalue count = %d, want 2", len(closure.Upvalues))
+	}
+	if closure.Upvalues[0].Kind != runtime.KindTable || closure.Upvalues[0].Ref != firstUpvalue {
+		// 第一个 upvalue 必须保持原始 table identity，供后续 C closure 调用通过 lua_upvalueindex 读取。
+		t.Fatalf("first multi-upvalue C closure upvalue = %#v, want table %p", closure.Upvalues[0], firstUpvalue)
+	}
+	if !closure.Upvalues[1].RawEqual(runtime.IntegerValue(99)) {
+		// 第二个 upvalue 必须按栈上原始顺序保存。
+		t.Fatalf("second multi-upvalue C closure upvalue = %#v, want 99", closure.Upvalues[1])
+	}
+}
+
 // TestNativeLuaPushCClosureRejectsUpvaluesOutsideCurrentCFrame 验证 C closure 不穿透外层栈捕获 upvalue。
 func TestNativeLuaPushCClosureRejectsUpvaluesOutsideCurrentCFrame(t *testing.T) {
 	// 当前 C 帧没有可见 upvalue 时，nup=1 必须 no-op，不能捕获并弹掉外层调用者栈。
