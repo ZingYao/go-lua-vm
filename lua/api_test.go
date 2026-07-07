@@ -5627,6 +5627,196 @@ __call_temp_tforcall_result_checks = checks
 	}
 }
 
+// TestDoStringCallTemporaryCleanupClosureRootShapeGuards 验证固定返回 CALL 后的闭包根形态。
+//
+// native LPeg 诊断已把差异收敛到 selected tail 是否复用前置 local root；该测试不依赖 LPeg
+// 或 native_modules，用纯 Lua closure 覆盖 long-lived local、_ENV/global 和 shadow local 三种形态。
+func TestDoStringCallTemporaryCleanupClosureRootShapeGuards(t *testing.T) {
+	// 创建完整标准库 State，确保 select、collectgarbage、tostring 和 table 操作可用。
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库打开不应失败，否则无法覆盖 GC 与 closure upvalue 语义。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+
+	source := `
+local checks = {}
+
+local function allocate_pressure()
+  for index = 1, 200 do
+    local holder = { index, tostring(index), { nested = index } }
+    assert(holder[1] == index)
+  end
+  collectgarbage()
+end
+
+local function make_local_root_probe()
+  local attempts = {}
+  local probe_open
+  local probe_close
+  local probe_any
+  local probe_close_head
+  local probe_close_back
+  local probe_close_func
+  local dummy_func
+  local dummy_capture
+  local dummy_back
+  local dummy_value
+
+  local count = select("#", "alpha", "beta")
+  if count ~= 2 then
+    error("unexpected select count")
+  end
+  local skipped = error
+  local payload = 17
+
+  attempts = {}
+  if probe_open == nil then
+    probe_open = function()
+      return "open", count
+    end
+  end
+  if probe_close_func == nil then
+    probe_close_func = function(_, pos, s1, s2)
+      attempts[#attempts + 1] = pos .. ":" .. s1 .. ":" .. s2
+      return s1 == s2
+    end
+  end
+  if probe_close == nil then
+    probe_close = function(_, pos, s1, s2)
+      return probe_close_func(_, pos, s1, s2)
+    end
+  end
+  if probe_any == nil then
+    probe_any = "any"
+  end
+
+  return function()
+    local ok = probe_close(nil, 18, "==", "==")
+    local open_marker, local_count = probe_open()
+    return ok, attempts[1], open_marker, local_count, payload, skipped == error, probe_any
+  end
+end
+
+local function make_global_root_probe()
+  __call_temp_global_attempts = {}
+  __call_temp_global_probe_open = nil
+  __call_temp_global_probe_close_func = nil
+
+  local count = select("#", "alpha", "beta")
+  if count ~= 2 then
+    error("unexpected global select count")
+  end
+  local skipped = error
+  local payload = 17
+
+  __call_temp_global_attempts = {}
+  if __call_temp_global_probe_open == nil then
+    __call_temp_global_probe_open = function()
+      return "global-open", count
+    end
+  end
+  if __call_temp_global_probe_close_func == nil then
+    __call_temp_global_probe_close_func = function(_, pos, s1, s2)
+      __call_temp_global_attempts[#__call_temp_global_attempts + 1] = pos .. ":" .. s1 .. ":" .. s2
+      return s1 == s2
+    end
+  end
+
+  return function()
+    local ok = __call_temp_global_probe_close_func(nil, 18, "==", "==")
+    local open_marker, local_count = __call_temp_global_probe_open()
+    return ok, __call_temp_global_attempts[1], open_marker, local_count, payload, skipped == error
+  end
+end
+
+local function make_shadow_root_probe()
+  local attempts = {}
+  local probe_marker = attempts
+
+  local count = select("#", "alpha", "beta")
+  if count ~= 2 then
+    error("unexpected shadow select count")
+  end
+  local skipped = error
+  local payload = 17
+
+  local attempts = {}
+  local callback = function(_, pos, s1, s2)
+    attempts[#attempts + 1] = pos .. ":" .. s1 .. ":" .. s2
+    return s1 == s2
+  end
+
+  return function()
+    local ok = callback(nil, 18, "==", "==")
+    return ok, attempts[1], probe_marker ~= attempts, payload, skipped == error
+  end
+end
+
+local local_probe = make_local_root_probe()
+allocate_pressure()
+local ok, attempt, open_marker, local_count, payload, skipped_ok, any_marker = local_probe()
+checks.local_upvalue =
+  ok and
+  attempt == "18:==:==" and
+  open_marker == "open" and
+  local_count == 2 and
+  payload == 17 and
+  skipped_ok and
+  any_marker == "any"
+
+local global_probe = make_global_root_probe()
+allocate_pressure()
+ok, attempt, open_marker, local_count, payload, skipped_ok = global_probe()
+checks.global_upvalue =
+  ok and
+  attempt == "18:==:==" and
+  open_marker == "global-open" and
+  local_count == 2 and
+  payload == 17 and
+  skipped_ok
+
+local shadow_probe = make_shadow_root_probe()
+allocate_pressure()
+local shadowed
+ok, attempt, shadowed, payload, skipped_ok = shadow_probe()
+checks.shadow_upvalue =
+  ok and
+  attempt == "18:==:==" and
+  shadowed and
+  payload == 17 and
+  skipped_ok
+
+__call_temp_closure_root_shape_checks = checks
+__call_temp_global_attempts = nil
+__call_temp_global_probe_open = nil
+__call_temp_global_probe_close_func = nil
+`
+	if err := DoString(state, source); err != nil {
+		// 任一断言或闭包调用失败都说明模块无关 closure root 形态门禁不成立。
+		t.Fatalf("DoString closure root shape guard failed: %v", err)
+	}
+	checksValue, err := GetGlobal(state, "__call_temp_closure_root_shape_checks")
+	if err != nil {
+		// 全局读取失败说明脚本未能暴露 closure root 检查结果。
+		t.Fatalf("read closure root shape checks failed: %v", err)
+	}
+	checksTable, ok := checksValue.Ref.(*runtime.Table)
+	if checksValue.Kind != runtime.KindTable || !ok || checksTable == nil {
+		// 检查结果必须是 Lua table，便于逐项报告失败门禁。
+		t.Fatalf("closure root shape checks kind = %v, want table", checksValue.Kind)
+	}
+	for _, checkName := range []string{"local_upvalue", "global_upvalue", "shadow_upvalue"} {
+		// 每个门禁项必须由对应 closure/root 形态实际确认。
+		checkValue := checksTable.RawGetString(checkName)
+		if checkValue.Kind != runtime.KindBoolean || !checkValue.Bool {
+			// 逐项报告失败名称，避免 Lua error 抹掉具体门禁。
+			t.Fatalf("closure root shape guard %s = %#v, want true", checkName, checkValue)
+		}
+	}
+}
+
 // TestDoStringDebugDumpedLocalFunctionCallName 验证 dumped chunk 仍能反查局部函数调用名。
 //
 // 官方 all.lua 会将 db.lua 通过 string.dump/load 后执行；binary chunk 不保存 locvar 寄存器号，
