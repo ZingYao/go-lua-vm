@@ -107,6 +107,26 @@ probe_warmup = nil
 LUA
 }
 
+emit_lpeg_warmup_string_close_dead_branch_after_dead_pads() {
+  local pad_count="${PROBE_STRING_CLOSE_PAD_COUNT:-0}"
+  if ! [[ "${pad_count}" =~ ^[0-9]+$ ]]; then
+    echo "invalid PROBE_STRING_CLOSE_PAD_COUNT=${pad_count}" >&2
+    return 1
+  fi
+  echo "if false then"
+  for ((pad_index = 1; pad_index <= pad_count; pad_index++)); do
+    printf "  local probe_pad%d = 'pad-before-close-%d'\n" "${pad_index}" "${pad_index}"
+  done
+  echo "end"
+  cat <<'LUA'
+local probe_warmup
+if false then
+  probe_warmup = ']'
+end
+probe_warmup = nil
+LUA
+}
+
 emit_lpeg_warmup_string_dead_pads8_only() {
   cat <<'LUA'
 if false then
@@ -576,6 +596,11 @@ LUA
       emit_lpeg_error_number_perturbation
       emit_lpeg_default_tail
       ;;
+    lpeg-warmup-string-close-dead-branch-after-dead-pads-default-tail-error-number)
+      emit_lpeg_warmup_string_close_dead_branch_after_dead_pads
+      emit_lpeg_error_number_perturbation
+      emit_lpeg_default_tail
+      ;;
     lpeg-warmup-string-dead-pads8-only-default-tail-error-number)
       emit_lpeg_warmup_string_dead_pads8_only
       emit_lpeg_error_number_perturbation
@@ -647,6 +672,7 @@ modes=(
   lpeg-warmup-string-close-dead-branch-default-tail-error-number
   lpeg-warmup-string-close-dead-branch-after-dead-pad-default-tail-error-number
   lpeg-warmup-string-close-dead-branch-after-dead-pads8-default-tail-error-number
+  lpeg-warmup-string-close-dead-branch-after-dead-pads-default-tail-error-number
   lpeg-warmup-string-dead-pads8-only-default-tail-error-number
   lpeg-warmup-string-close-dead-function-default-tail-error-number
   lpeg-warmup-string-close-called-function-default-tail-error-number

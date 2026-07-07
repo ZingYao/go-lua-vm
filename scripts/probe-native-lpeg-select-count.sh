@@ -51,6 +51,7 @@ echo "PROBE_SELECTED_HEAD_WARMUP_GC_BEFORE_TAIL=${PROBE_SELECTED_HEAD_WARMUP_GC_
 echo "PROBE_SELECTED_WARMUP_MATCH=${PROBE_SELECTED_WARMUP_MATCH:-0}"
 echo "PROBE_SELECTED_WARMUP_KIND=${PROBE_SELECTED_WARMUP_KIND:-}"
 echo "PROBE_SELECTED_WARMUP_BEFORE_MODE=${PROBE_SELECTED_WARMUP_BEFORE_MODE:-0}"
+echo "PROBE_STRING_CLOSE_PAD_COUNT=${PROBE_STRING_CLOSE_PAD_COUNT:-0}"
 echo "PROBE_SELECTED_CLEAR_BEFORE_MATCH=${PROBE_SELECTED_CLEAR_BEFORE_MATCH:-0}"
 echo "PROBE_SELECTED_GC_BEFORE_MATCH=${PROBE_SELECTED_GC_BEFORE_MATCH:-0}"
 echo "PROBE_GC_BEFORE_TAIL=${PROBE_GC_BEFORE_TAIL:-0}"
@@ -609,6 +610,24 @@ if false then
   local probe_pad7 = 'pad-before-close-7'
   local probe_pad8 = 'pad-before-close-8'
 end
+local probe_warmup
+if false then
+  probe_warmup = ']'
+end
+LUA
+      ;;
+    string-close-dead-branch-after-dead-pads)
+      local pad_count="${PROBE_STRING_CLOSE_PAD_COUNT:-0}"
+      if ! [[ "${pad_count}" =~ ^[0-9]+$ ]]; then
+        echo "invalid PROBE_STRING_CLOSE_PAD_COUNT=${pad_count}" >&2
+        return 1
+      fi
+      echo "if false then"
+      for ((pad_index = 1; pad_index <= pad_count; pad_index++)); do
+        printf "  local probe_pad%d = 'pad-before-close-%d'\n" "${pad_index}" "${pad_index}"
+      done
+      echo "end"
+      cat <<'LUA'
 local probe_warmup
 if false then
   probe_warmup = ']'
