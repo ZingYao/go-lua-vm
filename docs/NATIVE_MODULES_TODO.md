@@ -361,7 +361,8 @@
 - [x] macOS `.so` 后缀候选验证。
 - [ ] Windows `.dll` fixture 构建和 require。
 - [ ] Windows `lua53.dll` shim 或等价 import library 方案落地。
-- [ ] 在平台不可用时提供可跳过但明确原因的测试。
+- [x] 在平台不可用时提供可跳过但明确原因的测试。
+  - [x] `scripts/check-native-skip-reasons.sh` 固化 Windows shim 未落地和缺失 cross C compiler 的 skip 文本，防止脚本静默跳过。
 
 ## 第八阶段：文档与发布边界
 
@@ -376,6 +377,7 @@
   - [x] `scripts/test-native-cjson.sh`
   - [x] `scripts/build-native-lpeg.sh`
   - [x] `scripts/test-native-lpeg.sh`
+  - [x] `scripts/check-native-skip-reasons.sh`
   - [x] `scripts/probe-native-lpeg-1159.sh`
   - [x] `scripts/bisect-native-lpeg-1159-prefix.sh`
   - [x] `scripts/probe-native-lpeg-1159-call-kinds.sh`
@@ -479,6 +481,7 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-06：补齐 `lua-cjson` 运行期所需的最小 Lua 5.3 public C API：C closure upvalue、`lua_upvalueindex` 读取、`luaL_setfuncs(nup>=0)`、`lua_checkstack`、`lua_rotate`、`lua_pushlightuserdata`、`lua_rawset`、`lua_next`、`luaL_argerror`、`luaL_checkoption`、`lua_pcallk` 非 yield 路径，并把 `lua_error` / `luaL_error` / `luaL_argerror` 改为 C 层 `setjmp` 边界内不返回。当前 macOS arm64 已用仓库内 `lua-cjson` 源码完成 `require("cjson")`、`encode/decode` 和错误输入 `pcall(cjson.decode, "{")` 验收；默认 no-CGO 构建仍需本轮完整门禁确认。
 - 2026-07-06：新增 `scripts/test-native-cjson.sh`，把 `lua-cjson` 真实模块运行期验收固化为脚本：脚本先构建 native tag `glua` 和仓库内 `third_party/lua-cjson` 动态模块，再执行 `require("cjson")`、对象/数组/标量 `encode/decode`、`cjson.null` identity、非法 JSON `pcall` 和不可序列化 function `pcall`。当前 macOS arm64 验收通过；Windows 仍在 `lua53.dll` shim/import library 落地前明确 skip。
 - 2026-07-07：增强 `scripts/test-native-cjson.sh` 的官方 Lua 5.3 ABI 二进制模块验收；运行 `require("cjson")` 前先用 `nm` 确认 `cjson.so` / `cjson.dylib` 保留未解析 `lua_*` / `luaL_*` 符号，再确认 native `glua` 二进制导出的 shim 覆盖全部需求符号，并在 macOS 上用 `otool -L` 确认模块未链接外部 Lua runtime。当前 macOS arm64 `.so` 与 `.dylib` 均通过 ABI 符号验收和运行期验收；Linux/Windows 运行期平台闭环仍作为独立 TODO。
+- 2026-07-07：新增 `scripts/check-native-skip-reasons.sh`，把平台不可用时必须明确 skip 原因的门禁脚本化；当前覆盖 Windows fixture / cjson / LPeg 构建在 `lua53.dll` shim 或 import library 未落地前的 skip 文本，以及 Linux cross C compiler 缺失时 `scripts/check-native-cross-compile.sh` 的 skip 文本。该切口不把 Linux/Windows 运行期验收视为通过，只防止不可用平台被静默跳过。
 - 2026-07-06：扩展 fixture 构建与 CLI smoke 脚本；macOS 现在同时产出 `glua_native_smoke` / `glua_native_failopen` 的 `.dylib` 和 `.so` 两种后缀，并分别通过 `package.cpath` 执行 require 成功路径与 luaopen 初始化失败路径，覆盖 Lua 生态在 macOS 上常见的双后缀候选。
 - 2026-07-06：执行 `scripts/check-native-cross-compile.sh`；当前 macOS arm64 已完成 `internal/native` 测试二进制和 native tag `cmd/glua` 编译验证，Linux arm64 与 Windows arm64 因未配置 `NATIVE_CC_LINUX_ARM64` / `NATIVE_CC_WINDOWS_ARM64` 或 `CC` 明确 skip，未冒充跨平台通过。
 - 2026-07-06：扩展 `scripts/test-native-cjson.sh`；macOS 上不再用合并 `package.cpath` 只验证搜索顺序首个候选，而是分别用 `?.so` 和 `?.dylib` 独立执行 `require("cjson")`、对象/数组/标量 `encode/decode`、`cjson.null`、非法 JSON `pcall` 和不可序列化 function `pcall`，真实第三方模块双后缀运行期验收均通过。

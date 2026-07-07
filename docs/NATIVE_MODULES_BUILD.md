@@ -102,6 +102,14 @@ fixture loader smoke：
 
 该脚本需要显式输出每个目标的 `GOOS`、`GOARCH`、`CC`、`CGO_ENABLED` 和产物路径。缺少目标 C toolchain 时可以跳过对应目标，但必须打印明确 skip 原因，不能静默视为通过。目标编译器可通过 `NATIVE_CC_<GOOS>_<GOARCH>` 指定，值可以包含编译器参数，例如 `NATIVE_CC_LINUX_ARM64="zig cc -target aarch64-linux-musl"`；脚本只用第一个命令词做存在性检查，完整字符串会原样传给 Go/cgo 的 `CC`。
 
+平台不可用时的 skip 原因门禁：
+
+```bash
+./scripts/check-native-skip-reasons.sh
+```
+
+该脚本不替代 Linux/Windows 真实运行期验收，只验证 Windows shim 未落地、缺失 cross C compiler 等不可用场景会输出明确 `skip:` 原因。
+
 fixture 只验证 loader smoke，不作为最终兼容结论。真实兼容验收必须包含：
 
 - `lua-cjson`：第一真实模块，覆盖 `require`、`encode/decode` 和错误输入 `pcall`。
