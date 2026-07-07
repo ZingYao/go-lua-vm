@@ -634,6 +634,24 @@ if false then
 end
 LUA
       ;;
+    string-close-dead-branch-after-dead-number-pads)
+      local pad_count="${PROBE_STRING_CLOSE_PAD_COUNT:-0}"
+      if ! [[ "${pad_count}" =~ ^[0-9]+$ ]]; then
+        echo "invalid PROBE_STRING_CLOSE_PAD_COUNT=${pad_count}" >&2
+        return 1
+      fi
+      echo "if false then"
+      for ((pad_index = 1; pad_index <= pad_count; pad_index++)); do
+        printf "  local probe_pad%d = %d\n" "${pad_index}" "$((1000000 + pad_index))"
+      done
+      echo "end"
+      cat <<'LUA'
+local probe_warmup
+if false then
+  probe_warmup = ']'
+end
+LUA
+      ;;
     string-dead-pads8-only)
       cat <<'LUA'
 if false then
