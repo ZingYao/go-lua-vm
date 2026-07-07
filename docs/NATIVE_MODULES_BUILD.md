@@ -154,13 +154,21 @@ NATIVE_CROSS_REQUIRE_ALL=1 NATIVE_CROSS_TARGETS="linux/arm64 windows/arm64" ./sc
 
 严格模式下，缺少目标 C toolchain 仍会输出明确 `skip:` 原因，但脚本会返回失败，避免把未配置工具链的目标误记为编译验证已完成。
 
+真实模块源码构建矩阵入口：
+
+```bash
+./scripts/check-native-source-builds.sh
+```
+
+该脚本串联 fixture、lua-cjson、LPeg 和 LuaSocket 的源码构建入口，默认覆盖宿主平台、同架构 Linux 和同架构 Windows；可用 `NATIVE_SOURCE_BUILD_TARGETS="linux/arm64 windows/arm64"` 指定目标。脚本会输出每个目标的 `GOOS`、`GOARCH`、`CC`、构建目录、模块名和最终 `built/skipped/failed/modules/targets` 汇总；缺少目标 C toolchain 或 Windows Lua import library 时必须打印明确 `skip:`。启用 `NATIVE_SOURCE_REQUIRE_ALL=1` 时，任一目标或模块 skip 会使脚本返回失败，避免把源码构建未完成误记为已完成。该脚本只覆盖源码编译级验收，不替代 `require(...)` 运行期验收。
+
 平台不可用时的 skip 原因门禁：
 
 ```bash
 ./scripts/check-native-skip-reasons.sh
 ```
 
-该脚本不替代 Linux/Windows 真实运行期验收，只验证 Windows shim 未落地、缺失 cross C compiler、交叉编译严格模式缺失 toolchain、当前平台总验收被误用于 Windows 或非 Windows 异平台等不可用场景会输出明确 `skip:` 原因。
+该脚本不替代 Linux/Windows 真实运行期验收，只验证 Windows shim 未落地、缺失 cross C compiler、Go 交叉编译严格模式缺失 toolchain、真实模块源码构建严格模式缺失 toolchain、当前平台总验收被误用于 Windows 或非 Windows 异平台等不可用场景会输出明确 `skip:` 原因。
 
 当前平台 Lua 5.3 ABI 符号覆盖门禁：
 

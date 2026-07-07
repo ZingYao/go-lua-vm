@@ -141,10 +141,20 @@ run_and_require_skip \
   "skip: C compiler not found for linux/${host_goarch}: __glua_missing_native_cc__" \
   env NATIVE_CROSS_TARGETS="linux/${host_goarch}" "${cross_cc_var}=__glua_missing_native_cc__" "${repo_root}/scripts/check-native-cross-compile.sh"
 
+run_and_require_skip \
+  "linux source build missing cross compiler" \
+  "skip: C compiler not found for linux/${host_goarch}: __glua_missing_native_cc__" \
+  env NATIVE_SOURCE_BUILD_TARGETS="linux/${host_goarch}" "${cross_cc_var}=__glua_missing_native_cc__" "${repo_root}/scripts/check-native-source-builds.sh"
+
 run_and_require_failure_skip \
   "linux required missing cross compiler" \
   "skip: C compiler not found for linux/${host_goarch}: __glua_missing_native_cc__" \
   env NATIVE_CROSS_REQUIRE_ALL=1 NATIVE_CROSS_TARGETS="linux/${host_goarch}" "${cross_cc_var}=__glua_missing_native_cc__" "${repo_root}/scripts/check-native-cross-compile.sh"
+
+run_and_require_failure_skip \
+  "linux required source build missing cross compiler" \
+  "skip: C compiler not found for linux/${host_goarch}: __glua_missing_native_cc__" \
+  env NATIVE_SOURCE_REQUIRE_ALL=1 NATIVE_SOURCE_BUILD_TARGETS="linux/${host_goarch}" "${cross_cc_var}=__glua_missing_native_cc__" "${repo_root}/scripts/check-native-source-builds.sh"
 
 echo
 echo "native skip reason check passed"

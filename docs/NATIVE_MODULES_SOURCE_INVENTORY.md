@@ -26,7 +26,8 @@
 | Fixture 构建脚本 | `scripts/build-native-fixtures.sh` | 使用仓库内 Lua public headers 和 fixture C 源码构建动态库；Linux 产出 `.so`，macOS 同时产出 `.dylib` 与 `.so`，Windows 在显式 C compiler 和 Lua import library 齐备时产出 `.dll`；脚本输出宿主/目标平台、`CC`、`CGO_ENABLED` 与产物路径，缺少 Windows 输入时明确 skip | 已固定 |
 | Fixture 测试脚本 | `scripts/test-native-modules.sh` | 构建 native tag `glua`，调用 fixture 构建脚本，并按当前平台后缀执行成功 require 与 luaopen 初始化失败两条 CLI smoke；macOS 覆盖 `.dylib` 与 `.so` 两类候选 | 已固定 |
 | 交叉编译脚本 | `scripts/check-native-cross-compile.sh` | 编译 `internal/native` 测试二进制和 `cmd/glua` native 产物，显式输出目标平台、`CC`、产物路径、skip 原因和 `compiled/skipped/targets` 汇总；`NATIVE_CROSS_REQUIRE_ALL=1` 可把缺失目标 toolchain 从可跳过变为失败 | 已固定 |
-| Skip 原因检查脚本 | `scripts/check-native-skip-reasons.sh` | 验证 Windows shim 未落地、LuaSocket/真实模块总验收 Windows runtime 暂不可用、真实模块总验收非 Windows 异平台误用、缺失 cross C compiler 和交叉编译严格模式缺失 toolchain 等场景必须输出明确 `skip:` 原因，防止平台不可用被静默视为通过 | 已固定 |
+| 真实模块源码构建矩阵脚本 | `scripts/check-native-source-builds.sh` | 串联 fixture、lua-cjson、LPeg 和 LuaSocket 的源码构建入口，显式输出目标平台、`CC`、构建目录、模块名、skip 原因和 `built/skipped/failed/modules/targets` 汇总；`NATIVE_SOURCE_REQUIRE_ALL=1` 可把缺失目标 toolchain 或 Windows import library 从可跳过变为失败 | 已固定 |
+| Skip 原因检查脚本 | `scripts/check-native-skip-reasons.sh` | 验证 Windows shim 未落地、LuaSocket/真实模块总验收 Windows runtime 暂不可用、真实模块总验收非 Windows 异平台误用、缺失 cross C compiler、Go 交叉编译严格模式缺失 toolchain 和真实模块源码构建严格模式缺失 toolchain 等场景必须输出明确 `skip:` 原因，防止平台不可用被静默视为通过 | 已固定 |
 | ABI 符号检查脚本 | `scripts/check-native-lua-abi-symbols.sh` | 构建当前平台 native `glua`、fixture、lua-cjson、LPeg 和 LuaSocket，收集真实模块未解析 `lua_*` / `luaL_*` 符号，并确认 native 源码声明（Go `//export` 加 C wrapper 定义）和 native `glua` 二进制导出均覆盖这些符号；Windows 在 `lua53.dll` shim/import library 落地前明确 skip | 已固定 |
 | Windows 导出定义 | `native/lua53/windows/lua53.def` | 固定当前 native shim 暴露的 Lua 5.3 ABI 导出符号，供后续 Windows import library 或 `lua53.dll` shim 使用 | 已固定 |
 | Windows 导出定义检查脚本 | `scripts/check-native-windows-def.sh` | 从 native 源码声明重新生成 `lua53.def` 并与入仓文件比对，防止 Windows 链接期导出清单与 Go/CGO shim 漂移 | 已固定 |
@@ -54,6 +55,7 @@
 
 - 默认构建仍以 `CGO_ENABLED=0 go test ./...` 和 `./scripts/check-go-gates.sh` 作为必过门禁。
 - `native_modules` 构建当前可通过 `CGO_ENABLED=1 go test -tags native_modules ./...` 验证仓库内 Go/CGO shim、平台 loader 和 Unix 内嵌 fixture。
+- `scripts/check-native-source-builds.sh` 可作为真实模块源码构建矩阵入口，串联 fixture、lua-cjson、LPeg 和 LuaSocket 的源码构建脚本；它只证明目标平台动态模块源码可编译或明确 skip，不替代目标平台 `require(...)` 运行期验收。
 - `lua-cjson` 真实模块源码可通过 `CGO_ENABLED=1 scripts/build-native-cjson.sh` 做源码编译级验收，也可通过 `scripts/test-native-cjson.sh` 做 ABI 符号和运行期验收；运行期脚本覆盖 `require("cjson")`、`encode/decode`、`cjson.null` identity、非法 JSON `pcall` 和不可序列化 function `pcall`，并在 macOS 上分别验证 `.so` 与 `.dylib` 两类候选。Windows 分支当前只提供 `cjson.dll` 源码构建入口，不替代 Windows `require("cjson")` 运行期验收。
 - `third_party/lpeg/` 当前可通过 `CGO_ENABLED=1 scripts/build-native-lpeg.sh` 做源码编译级验收，也可通过 `scripts/test-native-lpeg.sh` 做运行期验收；macOS arm64 `.so` 与 `.dylib` 后缀已通过基础 smoke 和完整官方 `test.lua`。Windows 分支当前只提供 `lpeg.dll` 源码构建入口，不替代 Windows `require("lpeg")` 运行期验收。
 - `third_party/luasocket/` 当前可通过 `CGO_ENABLED=1 scripts/build-native-luasocket.sh` 做 `socket.core` / `mime.core` 源码编译级验收，也可通过 `scripts/test-native-luasocket.sh` 做当前平台运行期验收；脚本覆盖 `require("socket")`、`require("mime")`、MIME 编解码和可控本机 TCP/UDP loopback。Windows 分支当前只提供 `socket/core.dll` 与 `mime/core.dll` 源码构建入口，不替代 Windows `require("socket")` / `require("mime")` 或 loopback 运行期验收。

@@ -366,6 +366,10 @@
     - [x] 支持 `NATIVE_CC_*` / `CC` 使用带参数的编译器命令，便于 CI 传入 `zig cc -target ...` 或等价 cross toolchain。
     - [x] 支持 `NATIVE_CROSS_REQUIRE_ALL=1` 严格模式；缺失目标 C toolchain 时仍输出明确 `skip:`，但脚本返回失败，避免把 Linux/Windows 未配置工具链误记为编译验证完成。
     - [x] 输出 `compiled/skipped/targets` 汇总，便于区分真实编译完成和明确跳过。
+  - [x] `scripts/check-native-source-builds.sh`：串联 fixture、lua-cjson、LPeg 和 LuaSocket 的源码构建入口，显式输出目标平台、`CC`、构建目录、模块名和缺失 toolchain/import library 时的 skip 原因。
+    - [x] 支持 `NATIVE_SOURCE_BUILD_TARGETS` 指定目标平台矩阵。
+    - [x] 支持 `NATIVE_SOURCE_REQUIRE_ALL=1` 严格模式；缺失目标 C toolchain 或 Windows import library 时仍输出明确 `skip:`，但脚本返回失败，避免把真实模块源码构建未完成误记为已完成。
+    - [x] 输出 `built/skipped/failed/modules/targets` 汇总，便于区分源码模块真实构建完成和明确跳过。
   - [ ] Linux native build/test 编译验证。
   - [x] macOS native build/test 编译验证。
   - [ ] Windows native build/test 编译验证。
@@ -591,3 +595,4 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-07：扩展 `scripts/build-native-cjson.sh` 的 Windows 分支；脚本现在支持通过显式 `NATIVE_CC_WINDOWS_<ARCH>` / `CC` 和 `LUA53_IMPORT_LIB` 或 `scripts/build-native-windows-lua53-importlib.sh` 产物构建 `cjson.dll`，并在缺 Windows C compiler 或 import library 时输出可门禁的 `skip:`。当前 macOS arm64 本机缺少 Windows C toolchain 和 import library 工具，因此只验证 skip 路径和当前平台 macOS `lua-cjson` 源码/运行期验收；本轮不声明 Windows `require("cjson")` 或真实模块运行期闭环完成。
 - 2026-07-07：扩展 `scripts/build-native-lpeg.sh` 的 Windows 分支；脚本现在支持通过显式 `NATIVE_CC_WINDOWS_<ARCH>` / `CC` 和 `LUA53_IMPORT_LIB` 或 `scripts/build-native-windows-lua53-importlib.sh` 产物构建 `lpeg.dll`，并在缺 Windows C compiler 或 import library 时输出可门禁的 `skip:`。当前 macOS arm64 本机缺少 Windows C toolchain 和 import library 工具，因此只验证 skip 路径和当前平台 macOS LPeg 源码/运行期验收；本轮不声明 Windows `require("lpeg")` 或完整 LPeg 运行期闭环完成。
 - 2026-07-07：扩展 `scripts/build-native-luasocket.sh` 的 Windows 分支；脚本现在支持通过显式 `NATIVE_CC_WINDOWS_<ARCH>` / `CC` 和 `LUA53_IMPORT_LIB` 或 `scripts/build-native-windows-lua53-importlib.sh` 产物，使用 LuaSocket 的 `wsocket.c` backend 与 `ws2_32` 构建 `socket/core.dll` 和 `mime/core.dll`，并在缺 Windows C compiler 或 import library 时输出可门禁的 `skip:`。当前 macOS arm64 本机缺少 Windows C toolchain 和 import library 工具，因此只验证 skip 路径和当前平台 macOS LuaSocket 源码/运行期验收；本轮不声明 Windows `require("socket")`、`require("mime")` 或 TCP/UDP loopback 运行期闭环完成。
+- 2026-07-07：新增 `scripts/check-native-source-builds.sh`，串联 fixture、lua-cjson、LPeg 和 LuaSocket 的源码构建入口；默认覆盖宿主平台、同架构 Linux 和同架构 Windows，可用 `NATIVE_SOURCE_BUILD_TARGETS` 指定目标，并支持 `NATIVE_SOURCE_REQUIRE_ALL=1` 严格模式把缺 C toolchain 或 Windows import library 的 skip 转为失败。当前 macOS arm64 本机可完成宿主平台源码构建；Linux/Windows 因缺目标 toolchain 或 import library 仍明确 skip。本轮只新增源码编译级矩阵门禁，不声明 Linux/Windows `require(...)` 运行期闭环完成。
