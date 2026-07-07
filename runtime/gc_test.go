@@ -345,6 +345,59 @@ func TestSweepWeakTablesKeepsUserdataAssociationValues(t *testing.T) {
 	}
 }
 
+// TestSweepWeakTablesKeepsRegistryAssociationValues 验证 registry 关联边保活 weak value。
+//
+// Lua C 模块常把命名元表、registry ref 和 native userdata 挂在 registry 中；这些 registry
+// 根中的 table raw metatable、userdata user value 与 userdata raw metatable 都必须继续作为强边，
+// 否则构造期对象可能在 weak sweep 中被错误清理。
+func TestSweepWeakTablesKeepsRegistryAssociationValues(t *testing.T) {
+	state := NewState()
+	weakValueTable := NewTable()
+	weakMetatable := NewTable()
+	weakMetatable.RawSetString("__mode", StringValue("v"))
+	weakValueTable.SetMetatable(weakMetatable)
+	state.SetGlobal("weak", ReferenceValue(KindTable, weakValueTable))
+
+	registryMetatableTarget := NewTable()
+	userValueTarget := NewTable()
+	userdataMetatableTarget := NewTable()
+	weakValueTable.RawSetString("from-registry-metatable", ReferenceValue(KindTable, registryMetatableTarget))
+	weakValueTable.RawSetString("from-registry-user-value", ReferenceValue(KindTable, userValueTarget))
+	weakValueTable.RawSetString("from-registry-userdata-metatable", ReferenceValue(KindTable, userdataMetatableTarget))
+
+	namedMetatable := NewTable()
+	namedMetatableAssociation := NewTable()
+	namedMetatableAssociation.RawSetString("target", ReferenceValue(KindTable, registryMetatableTarget))
+	namedMetatable.SetMetatable(namedMetatableAssociation)
+	state.registry.RawSetString("native.named.metatable", ReferenceValue(KindTable, namedMetatable))
+
+	userdata := NewUserdata("payload")
+	userValueRoot := NewTable()
+	userValueRoot.RawSetString("target", ReferenceValue(KindTable, userValueTarget))
+	userdata.UserValue = ReferenceValue(KindTable, userValueRoot)
+	userdataMetatableRoot := NewTable()
+	userdataMetatableRoot.RawSetString("target", ReferenceValue(KindTable, userdataMetatableTarget))
+	if err := userdata.SetMetatable(userdataMetatableRoot); err != nil {
+		// 测试初始化 userdata raw 元表失败说明 userdata 基础语义异常。
+		t.Fatalf("set userdata metatable failed: %v", err)
+	}
+	state.registry.RawSetString("native.registry.userdata", userdata.Value())
+
+	state.SweepWeakTables()
+	if got := weakValueTable.RawGetString("from-registry-metatable"); got.IsNil() {
+		// registry 中 table 的 raw metatable 间接引用对象必须保活 weak value 项。
+		t.Fatalf("weak value reachable through registry table metatable was removed")
+	}
+	if got := weakValueTable.RawGetString("from-registry-user-value"); got.IsNil() {
+		// registry 中 userdata 的 user value 间接引用对象必须保活 weak value 项。
+		t.Fatalf("weak value reachable through registry userdata user value was removed")
+	}
+	if got := weakValueTable.RawGetString("from-registry-userdata-metatable"); got.IsNil() {
+		// registry 中 userdata 的 raw metatable 间接引用对象必须保活 weak value 项。
+		t.Fatalf("weak value reachable through registry userdata metatable was removed")
+	}
+}
+
 // TestSweepWeakTablesKeepsGoClosureUpvalueValues 验证显式 Go closure upvalue 保活 weak value。
 //
 // native C closure upvalue 常用于保存 registry、ktable 或 C 模块构造期对象；weak sweep 必须把这些
