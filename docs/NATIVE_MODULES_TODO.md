@@ -368,6 +368,8 @@
 - [x] macOS `.so` 后缀候选验证。
 - [ ] Windows `.dll` fixture 构建和 require。
 - [ ] Windows `lua53.dll` shim 或等价 import library 方案落地。
+  - [x] 入仓 `native/lua53/windows/lua53.def`，固定当前 native shim 可导出的 Lua 5.3 ABI 符号清单，作为后续 Windows import library 或 `lua53.dll` shim 的链接期输入。
+  - [x] 新增 `scripts/check-native-windows-def.sh`，从 native 源码声明重新生成 `.def` 并比对入仓文件，防止 Windows 符号清单漂移。
 - [x] 在平台不可用时提供可跳过但明确原因的测试。
   - [x] `scripts/check-native-skip-reasons.sh` 固化 Windows shim 未落地、LuaSocket Windows runtime 暂不可用和缺失 cross C compiler 的 skip 文本，防止脚本静默跳过。
 
@@ -395,6 +397,8 @@
   - [x] `scripts/check-native-lua-abi-symbols.sh`
     - [x] 覆盖当前平台真实模块未解析 `lua_*` / `luaL_*` 符号必须由 native 源码声明（Go `//export` 加 C wrapper 定义）和 native `glua` 二进制导出共同满足，作为 Windows `lua53.dll` shim/import library 的符号清单前置门禁。
     - [x] Windows 在 `lua53.dll` shim/import library 落地前必须明确 skip，不得把符号覆盖检查解释为 Windows 运行期闭环。
+  - [x] `scripts/check-native-windows-def.sh`
+    - [x] 覆盖 `native/lua53/windows/lua53.def` 必须与 native 源码声明中的 Lua 5.3 ABI 导出符号保持一致。
   - [x] `scripts/probe-native-lpeg-1159.sh`
   - [x] `scripts/bisect-native-lpeg-1159-prefix.sh`
   - [x] `scripts/probe-native-lpeg-1159-call-kinds.sh`
@@ -569,4 +573,5 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-07：自动化提示词已补充每轮执行命令前先 `source ~/.zshrc`，避免非交互 shell 丢失 go1.26.4 与 gopls 环境。本轮复跑 `CGO_ENABLED=1 ./scripts/test-native-real-modules.sh`，macOS arm64 当前平台总验收通过，串联 fixture、lua-cjson、LPeg 和 LuaSocket 的 `.so` / `.dylib` runtime acceptance；因此将 LuaSocket 或等价网络库验收父项收敛为完成。该结论仍只覆盖 macOS arm64，Linux/Windows 运行期闭环和 Windows `lua53.dll` shim/import library 仍保持未完成。
 - 2026-07-07：统一 native fixture 与 lua-cjson 构建脚本的 `CC` 解析语义；现在与 cross compile、LPeg、LuaSocket 脚本一致，允许 `CC="zig cc -target ..."` 这类带参数编译器命令，校验第一个命令词是否存在，实际执行时保留完整参数数组。该切口只解除后续 Linux/Windows CI toolchain 接入的脚本阻塞，不声明 Linux/Windows 编译或运行期验收完成。
 - 2026-07-07：新增 `scripts/check-native-lua-abi-symbols.sh`，构建当前平台 native `glua`、fixture、lua-cjson、LPeg 和 LuaSocket，收集真实模块未解析的 `lua_*` / `luaL_*` 符号，并确认这些符号同时存在于 native 源码声明（Go `//export` 加 C wrapper 定义）和 native `glua` 二进制导出中。该脚本作为后续 Windows `lua53.dll` shim/import library 的符号清单前置门禁；本轮只在 macOS arm64 可运行环境验证，不声明 Windows 运行期闭环完成。
+- 2026-07-07：新增 `native/lua53/windows/lua53.def` 和 `scripts/check-native-windows-def.sh`，把当前 native shim 的 Lua 5.3 ABI 导出清单固定为 Windows import library / `lua53.dll` shim 的链接期输入，并通过脚本从 native 源码声明重新生成后比对，防止符号清单漂移。本轮只完成 Windows 链接期清单前置，不声明 Windows `.dll` fixture 构建、require 或真实模块运行期闭环完成。
 - 2026-07-07：按用户纠正的“LPeg 日志相关模块”方向，临时克隆并运行 `mozilla-services/lua_sandbox_extensions` 的 `lpeg/tests/test.lua`。第一层证伪为外部套件自身 Lua 5.1/旧 LPeg 假设：模块使用 `setfenv`、测试假设 `_G.lpeg`、本地时区需固定为 `TZ=UTC`，且纳秒断言混用 Lua 5.1 double 期望与 Lua 5.3 integer。排除这些外部噪音后，确认项目侧真实缺口为三类通用语义：`os.time` date table 字段未接受 numeric string、`os.date` 常见 POSIX strftime 指令覆盖不足、native `lua_callk` 从 C 模块调用 Lua callback 时缺少可见 C frame，导致 `error(msg, 2)` 越过 C 边界给 `re.lua` 错误对象误加源码前缀。已修复上述通用语义并补充模块无关测试；`pcall(re.compile, "@{:foo")` 现返回裸 `pattern error near '@{:foo'`，临时 LPeg 日志 suite 已在 macOS arm64 native LPeg 下通过。该外部 suite 未入仓库，当前仅作为诊断压力样本，不替代正式真实模块门禁。

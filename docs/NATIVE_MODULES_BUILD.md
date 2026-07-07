@@ -138,6 +138,14 @@ NATIVE_CROSS_REQUIRE_ALL=1 NATIVE_CROSS_TARGETS="linux/arm64 windows/arm64" ./sc
 
 该脚本构建 native `glua`、fixture、lua-cjson、LPeg 和 LuaSocket，收集真实模块未解析的 `lua_*` / `luaL_*` 符号，并确认这些符号同时存在于 native 源码声明（Go `//export` 加 C wrapper 定义）和当前 native `glua` 二进制导出中。它为后续 Windows `lua53.dll` shim 或 import library 提供可复用的符号覆盖门禁，但不替代 Windows 目标平台运行期验收。
 
+Windows `lua53.dll` / import library 导出定义门禁：
+
+```bash
+./scripts/check-native-windows-def.sh
+```
+
+该脚本从 native 源码声明重新生成 Lua 5.3 ABI 导出列表，并比对 `native/lua53/windows/lua53.def`。该 `.def` 文件是后续 Windows import library 或 `lua53.dll` shim 的链接期输入，不代表 Windows `.dll` 运行期验收已完成。
+
 fixture 只验证 loader smoke，不作为最终兼容结论。真实兼容验收必须包含：
 
 - `lua-cjson`：第一真实模块，覆盖 `require`、`encode/decode` 和错误输入 `pcall`。
