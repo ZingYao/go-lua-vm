@@ -135,6 +135,35 @@ func TestGCRootsClosureUpvalueRoot(t *testing.T) {
 	}
 }
 
+// TestGCRootsGoClosureWithUpvaluesRoot 验证显式 Go closure upvalue 被纳入根采样。
+//
+// native C closure、string.gmatch 与 dofile trampoline 都会使用 GoClosureWithUpvalues；这些
+// upvalue 对 Lua 来说是可见强引用，必须与 Lua closure upvalue 一样进入 GC root。
+func TestGCRootsGoClosureWithUpvaluesRoot(t *testing.T) {
+	state := NewState()
+	closure := &GoClosureWithUpvalues{
+		Function: GoResultsFunction(func(values ...Value) ([]Value, error) {
+			// 测试只关注 root 采样，不实际调用该 closure。
+			return values, nil
+		}),
+		Upvalues: []Value{StringValue("go-upvalue"), ReferenceValue(KindTable, NewTable())},
+	}
+	thread := state.NewThread(ReferenceValue(KindGoClosure, closure))
+
+	snapshot := state.SnapshotGCRoots()
+	closureRoots := snapshot.Batches[GCRootTypeClosureUpvalue]
+	if !containsValue(closureRoots, thread.function) {
+		// Go closure 本体应纳入 closure 根集合。
+		t.Fatalf("closure root should include Go thread entry closure")
+	}
+	for index := 0; index < len(closure.Upvalues); index++ {
+		// 每个显式 Go closure upvalue 都应可见，保证 native C closure 持值可追踪。
+		if !containsValue(closureRoots, closure.Upvalues[index]) {
+			t.Fatalf("closure root should include Go upvalue #%d", index)
+		}
+	}
+}
+
 // TestGCRootsTableKeyValueRoot 验证 table 中 key/value 会进入专门 root 扫描。
 //
 // table key/value 扫描用于为第一阶段 Lua 风格的 GC 可达性补齐 table 内部边。
@@ -247,6 +276,42 @@ func TestSweepWeakTablesKeepsUserdataAssociationValues(t *testing.T) {
 	if got := weakValueTable.RawGetString("from-metatable"); got.IsNil() {
 		// raw metatable 间接引用的对象必须保活 weak value 项。
 		t.Fatalf("weak value reachable through userdata metatable was removed")
+	}
+}
+
+// TestSweepWeakTablesKeepsGoClosureUpvalueValues 验证显式 Go closure upvalue 保活 weak value。
+//
+// native C closure upvalue 常用于保存 registry、ktable 或 C 模块构造期对象；weak sweep 必须把这些
+// upvalue 视为强边，否则构造期临时对象可能被错误清理。
+func TestSweepWeakTablesKeepsGoClosureUpvalueValues(t *testing.T) {
+	state := NewState()
+	weakValueTable := NewTable()
+	weakMetatable := NewTable()
+	weakMetatable.RawSetString("__mode", StringValue("v"))
+	weakValueTable.SetMetatable(weakMetatable)
+	state.SetGlobal("weak", ReferenceValue(KindTable, weakValueTable))
+
+	upvalueTarget := NewTable()
+	weakValueTable.RawSetString("from-go-upvalue", ReferenceValue(KindTable, upvalueTarget))
+
+	upvalueRoot := NewTable()
+	upvalueRoot.RawSetString("target", ReferenceValue(KindTable, upvalueTarget))
+	closure := &GoClosureWithUpvalues{
+		Function: GoResultsFunction(func(values ...Value) ([]Value, error) {
+			// 测试只关注 weak sweep 可达图，不实际调用该 closure。
+			return values, nil
+		}),
+		Upvalues: []Value{ReferenceValue(KindTable, upvalueRoot)},
+	}
+	if err := state.Push(ReferenceValue(KindGoClosure, closure)); err != nil {
+		// Go closure 需要作为主栈强根进入 weak sweep。
+		t.Fatalf("push Go closure failed: %v", err)
+	}
+
+	state.SweepWeakTables()
+	if got := weakValueTable.RawGetString("from-go-upvalue"); got.IsNil() {
+		// Go closure upvalue 间接引用的对象必须保活 weak value 项。
+		t.Fatalf("weak value reachable through Go closure upvalue was removed")
 	}
 }
 
