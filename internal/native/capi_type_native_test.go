@@ -9,6 +9,38 @@ import (
 	"github.com/zing/go-lua-vm/runtime"
 )
 
+// TestNativeLuaVersionReturnsLua53Constant 验证 lua_version 返回 Lua 5.3 版本静态地址。
+func TestNativeLuaVersionReturnsLua53Constant(t *testing.T) {
+	// Lua 5.3 的 luaL_checkversion_ 会比较 lua_version(L) 与 lua_version(NULL) 的地址和值。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证有效 State 路径。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+
+	stateVersion := nativeLuaVersion(handle.pointer())
+	nilVersion := nativeLuaVersion(nil)
+	if stateVersion == nil {
+		// 有效 State 查询必须返回静态版本地址。
+		t.Fatalf("nativeLuaVersion state returned nil")
+	}
+	if nilVersion == nil {
+		// nil State 查询同样必须返回静态版本地址。
+		t.Fatalf("nativeLuaVersion nil returned nil")
+	}
+	if stateVersion != nilVersion {
+		// Lua 5.3 要求同一 ABI 的 lua_version 指针地址一致，供 lauxlib 版本检查使用。
+		t.Fatalf("nativeLuaVersion state pointer = %p, nil pointer = %p, want same", stateVersion, nilVersion)
+	}
+	if got := *(*float64)(stateVersion); got != 503 {
+		// Lua 5.3 public header 的 LUA_VERSION_NUM 固定为 503。
+		t.Fatalf("nativeLuaVersion value = %v, want 503", got)
+	}
+}
+
 // TestNativeCAPITypeAndNumberPrimitives 验证类型、truthiness 和 number 转换 shim。
 func TestNativeCAPITypeAndNumberPrimitives(t *testing.T) {
 	// 使用真实 State 和 opaque handle 验证 C API helper 对 Go VM 栈的读取语义。

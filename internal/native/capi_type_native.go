@@ -6,6 +6,12 @@ package native
 typedef struct lua_State lua_State;
 typedef double lua_Number;
 
+static lua_Number glua_lua_version_number = 503;
+
+static const lua_Number* glua_lua_version(void) {
+	return &glua_lua_version_number;
+}
+
 static const char* glua_lua_typename(int type_code) {
 	switch (type_code) {
 	case -1:
@@ -40,6 +46,13 @@ import (
 
 	"github.com/zing/go-lua-vm/runtime"
 )
+
+// nativeLuaVersion 返回 Lua 5.3 C API 可见的版本号静态地址。
+func nativeLuaVersion(luaState unsafe.Pointer) unsafe.Pointer {
+	// Lua 5.3 的 lua_version 忽略 L，但同一进程内必须对 nil/非 nil State 返回同一地址。
+	_ = luaState
+	return unsafe.Pointer(C.glua_lua_version())
+}
 
 // nativeLuaValueAt 读取 C API shim 视角下的栈值并区分 none 与 nil。
 func nativeLuaValueAt(luaState unsafe.Pointer, index int) (runtime.Value, bool) {
@@ -198,6 +211,14 @@ func lua_typename(luaState *C.lua_State, typeCode C.int) *C.char {
 	// lua_typename 不依赖 State 内容；保留参数只为匹配 Lua 5.3 ABI。
 	_ = luaState
 	return (*C.char)(unsafe.Pointer(C.glua_lua_typename(typeCode)))
+}
+
+// lua_version 导出 Lua 5.3 C API 版本号查询入口。
+//
+//export lua_version
+func lua_version(luaState *C.lua_State) *C.lua_Number {
+	// C API 返回静态 lua_Number 地址，调用方不得释放；nil State 与有效 State 地址必须一致。
+	return (*C.lua_Number)(nativeLuaVersion(unsafe.Pointer(luaState)))
 }
 
 // lua_toboolean 导出 Lua 5.3 C API truthiness 查询入口。
