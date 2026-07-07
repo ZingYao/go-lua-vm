@@ -978,6 +978,15 @@ func (state *State) valueGraphHasWeakTable(value Value, visitedTables map[*Table
 			}
 		}
 		return false
+	case KindUserdata:
+		// userdata 的 user value 与 raw metatable 也可能间接持有弱表。
+		for _, associatedValue := range state.userdataAssociationRoots(value) {
+			// 逐个关联边按普通强结构继续查找弱表。
+			if state.valueGraphHasWeakTable(associatedValue, visitedTables, visitedClosures) {
+				return true
+			}
+		}
+		return false
 	default:
 		// 其他值类型没有 table 子图。
 		return false
@@ -1260,8 +1269,17 @@ func (state *State) valueStronglyReferencesTable(value Value, target Value, visi
 			}
 		}
 	}
+	if value.Kind == KindUserdata {
+		for _, associatedValue := range state.userdataAssociationRoots(value) {
+			if state.valueStronglyReferencesTable(associatedValue, target, visitedTables, visitedClosures) {
+				// userdata 关联边间接命中目标 table。
+				return true
+			}
+		}
+		return false
+	}
 	if value.Kind != KindTable {
-		// 非 table/closure 值没有可继续递归的强边。
+		// 非 table/closure/userdata 值没有可继续递归的强边。
 		return false
 	}
 	table, ok := value.Ref.(*Table)
@@ -1320,37 +1338,49 @@ func (state *State) tableHasWeakAssociation(table *Table) bool {
 
 // valueHasWeakAssociation 从 value 出发查找目标 table 是否作为 weak key 出现。
 func (state *State) valueHasWeakAssociation(value Value, target Value, visited map[*Table]bool) bool {
-	if value.Kind != KindTable {
-		// 只有 table 图可能包含 weak key。
+	switch value.Kind {
+	case KindTable:
+		// table 图可能包含 weak key。
+		table, ok := value.Ref.(*Table)
+		if !ok || table == nil || visited[table] {
+			// 损坏引用或已访问 table 不重复扫描。
+			return false
+		}
+		visited[table] = true
+		weakKeys, weakValues := table.weakMode()
+		entries := table.rawIterationEntries()
+		for index := range entries {
+			if weakKeys && entries[index].key.RawEqual(target) {
+				// 目标 table 当前仍是弱 key。
+				return true
+			}
+			if !weakKeys && state.valueHasWeakAssociation(entries[index].key, target, visited) {
+				// 非弱 key 可继续递归。
+				return true
+			}
+			if !weakValues && state.valueHasWeakAssociation(entries[index].value, target, visited) {
+				// 非弱 value 可继续递归。
+				return true
+			}
+		}
+		if table.metatable != nil && state.valueHasWeakAssociation(ReferenceValue(KindTable, table.metatable), target, visited) {
+			// 元表也可能间接包含弱表。
+			return true
+		}
+		return false
+	case KindUserdata:
+		// userdata 关联边中的 table 也可能包含 weak key。
+		for _, associatedValue := range state.userdataAssociationRoots(value) {
+			if state.valueHasWeakAssociation(associatedValue, target, visited) {
+				// user value 或 raw metatable 中找到弱关联。
+				return true
+			}
+		}
+		return false
+	default:
+		// 其他值类型没有 weak-key table 子图。
 		return false
 	}
-	table, ok := value.Ref.(*Table)
-	if !ok || table == nil || visited[table] {
-		// 损坏引用或已访问 table 不重复扫描。
-		return false
-	}
-	visited[table] = true
-	weakKeys, weakValues := table.weakMode()
-	entries := table.rawIterationEntries()
-	for index := range entries {
-		if weakKeys && entries[index].key.RawEqual(target) {
-			// 目标 table 当前仍是弱 key。
-			return true
-		}
-		if !weakKeys && state.valueHasWeakAssociation(entries[index].key, target, visited) {
-			// 非弱 key 可继续递归。
-			return true
-		}
-		if !weakValues && state.valueHasWeakAssociation(entries[index].value, target, visited) {
-			// 非弱 value 可继续递归。
-			return true
-		}
-	}
-	if table.metatable != nil && state.valueHasWeakAssociation(ReferenceValue(KindTable, table.metatable), target, visited) {
-		// 元表也可能间接包含弱表。
-		return true
-	}
-	return false
 }
 
 // TableInActiveRegisters 判断 table 是否仍由当前活动 VM 的存活局部寄存器直接持有。
@@ -1475,6 +1505,15 @@ func (state *State) valueReferencesTable(value Value, target *Table, visitedTabl
 		for index := range upvalues {
 			if state.valueReferencesTable(upvalues[index], target, visitedTables, visitedClosures) {
 				// upvalue 快照间接命中目标 table。
+				return true
+			}
+		}
+		return false
+	case KindUserdata:
+		// userdata 的 user value 与 raw metatable 需要按强结构继续扫描。
+		for _, associatedValue := range state.userdataAssociationRoots(value) {
+			if state.valueReferencesTable(associatedValue, target, visitedTables, visitedClosures) {
+				// userdata 关联边间接命中目标 table。
 				return true
 			}
 		}
@@ -1707,6 +1746,15 @@ func (state *State) expandEphemeronFromValue(value Value, strongRefs map[tableKe
 		changed := false
 		for index := range upvalues {
 			if state.expandEphemeronFromValue(upvalues[index], strongRefs, visited) {
+				changed = true
+			}
+		}
+		return changed
+	case KindUserdata:
+		// userdata 关联边也可能包含 weak-key table。
+		changed := false
+		for _, associatedValue := range state.userdataAssociationRoots(value) {
+			if state.expandEphemeronFromValue(associatedValue, strongRefs, visited) {
 				changed = true
 			}
 		}

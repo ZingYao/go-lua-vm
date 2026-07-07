@@ -623,6 +623,66 @@ func TestFullGCRefreshesReachableWeakTableFlag(t *testing.T) {
 	}
 }
 
+// TestFullGCKeepsWeakTableFlagThroughUserdataAssociation 验证 userdata 关联边保留弱表扫描标志。
+//
+// native full userdata 常通过 user value 或 raw metatable 挂接构造期表；如果弱表只从这些关联边
+// 可达，完整 GC 后仍必须保留 hasWeakTables，否则后续自动 GC 会跳过必要的 weak sweep。
+func TestFullGCKeepsWeakTableFlagThroughUserdataAssociation(t *testing.T) {
+	tests := []struct {
+		name   string
+		attach func(userdata *Userdata, associatedTable *Table) error
+	}{
+		{
+			name: "user-value",
+			attach: func(userdata *Userdata, associatedTable *Table) error {
+				// user value 是 Lua 5.3 full userdata 的普通强关联边。
+				userdata.UserValue = ReferenceValue(KindTable, associatedTable)
+				return nil
+			},
+		},
+		{
+			name: "raw-metatable",
+			attach: func(userdata *Userdata, associatedTable *Table) error {
+				// raw metatable 同样是 full userdata 的强关联边。
+				return userdata.SetMetatable(associatedTable)
+			},
+		},
+	}
+
+	for index := range tests {
+		testCase := tests[index]
+		t.Run(testCase.name, func(t *testing.T) {
+			state := NewState()
+			weakTable := NewTable()
+			weakMetatable := NewTable()
+			weakMetatable.RawSetString("__mode", StringValue("v"))
+			weakTable.SetMetatable(weakMetatable)
+			state.RegisterWeakTable(weakTable)
+
+			associatedTable := NewTable()
+			associatedTable.RawSetString("weak", ReferenceValue(KindTable, weakTable))
+			userdata := NewUserdata("payload")
+			if err := testCase.attach(userdata, associatedTable); err != nil {
+				// 测试初始化 userdata 关联边失败说明基础结构异常。
+				t.Fatalf("attach userdata association failed: %v", err)
+			}
+			if err := state.Push(userdata.Value()); err != nil {
+				// userdata 必须作为栈根进入完整 GC 可达图。
+				t.Fatalf("push userdata failed: %v", err)
+			}
+
+			if err := state.FullGC(1); err != nil {
+				// 仅有 userdata 关联弱表时完整 GC 不应失败。
+				t.Fatalf("FullGC with userdata-associated weak table failed: %v", err)
+			}
+			if !state.hasWeakTables {
+				// 弱表仍从 userdata 关联边可达，自动 weak sweep 标志不能被误清。
+				t.Fatalf("userdata-associated weak table should keep weak sweep flag")
+			}
+		})
+	}
+}
+
 // TestNoteTableAllocationSeparatesFinalizerAndWeakSweep 验证自动 finalizer 节拍不连带 weak sweep。
 //
 // 强可达 finalizer 对象会让 finalizer 队列保持非空；这种状态不能导致普通分配每 16 次就执行
