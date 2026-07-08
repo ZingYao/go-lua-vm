@@ -368,7 +368,7 @@
       - [x] 离线官方脚本至少覆盖 `mimetest.lua`、`ltn12test.lua`、`urltest.lua`、`excepttest.lua`、`stufftest.lua`、`test_getaddrinfo.lua`；需要外网协议或人工环境的 FTP/HTTP/SMTP/TFTP 测试必须明确分类记录。
       - [x] 官方测试要求 `LUASOCKET_DEBUG` 时，构建脚本应提供 debug 模块构建入口，避免污染普通 release 运行期验收。
       - [x] 2026-07-07 修复 macOS arm64 官方测试阻塞点：`socket.select({accepted}, nil, 2)` 触发 `attempt to call a non-function value` 的根因是通用 Lua 5.3 C API `lua_getfield` / `lua_gettable` 对 userdata `__index` 元方法表支持不足；随后官方 `remote [[...]]` 暴露 `string.gsub("^%s*", "")` 锚定 nullable pattern 会继续扫描全串并删除中间空格的默认构建兼容 bug。上述修复均为通用语义修复，不包含 LuaSocket 专用分支；`scripts/test-native-luasocket.sh` 已在 macOS arm64 `.so` 与 `.dylib` 下通过官方离线脚本和 `testsrvr.lua` + `testclnt.lua` client/server 主路径。
-    - [ ] macOS 与 Linux 双平台真实模块最终验收：
+    - [x] macOS 与 Linux 双平台真实模块最终验收：
       - [x] macOS 当前平台在 LuaSocket 官方全量脚本通过后，重新执行 `scripts/test-native-real-modules.sh`、`CGO_ENABLED=1 go test -tags native_modules ./...` 和默认 no-CGO 门禁。
       - [x] 使用 orb 创建临时 Linux 虚拟机，在 Linux 上执行默认测试、native 全量测试、真实模块验收和 LuaSocket 官方全量测试；验证完成后删除 Linux 虚拟机，并记录创建方式、系统版本、命令和清理结果。
       - [x] Mac 与 Linux 均确认无功能问题后，按项目既有 benchmark 文档和既有脚本路径各跑 5 轮 benchmark 对比；benchmark 只输出结果和是否有明显回退，不做代码改动。
