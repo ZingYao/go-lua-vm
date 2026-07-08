@@ -1,6 +1,6 @@
 # native_modules 验收记录
 
-本文记录 `native_modules` 可选构建的真实模块验收状态。它是当前验收台账，不等同于全平台最终完成声明；Linux 与 Windows 仍需按 TODO 继续闭环。
+本文记录 `native_modules` 可选构建的真实模块验收状态。它是当前验收台账，不等同于全平台最终完成声明；Windows 仍需按 TODO 继续运行期闭环。
 
 ## 当前记录
 
@@ -85,11 +85,16 @@ CGO_ENABLED=1 ./scripts/test-native-real-modules.sh
 
 ## Android arm64
 
-当前 Android arm64 已完成最小 Lua C 模块设备侧 smoke，证明 native `glua` 能在 Android 上通过 `dlopen`/`dlsym` 加载仓库内 fixture `.so` 并调用 `luaopen_*`：
+当前 Android arm64 已完成最小 Lua C 模块设备侧 smoke 和真实模块设备侧全量主路径验收。fixture、lua-cjson、LPeg 官方完整测试、LuaSocket release smoke、LuaSocket 官方离线路径，以及 LuaSocket 官方 `testsrvr.lua` + `testclnt.lua` client/server 长脚本均已在设备侧跑通。
 
 | 模块 | 脚本 | 后缀 | 验收点 |
 | --- | --- | --- | --- |
 | fixture | `scripts/test-native-android-modules.sh` | `.so` | `require("glua_native_smoke")` 成功路径、`luaopen_glua_native_failopen` 初始化失败路径、userdata/metatable/registry/error smoke |
+| lua-cjson | `scripts/test-native-android-real-modules.sh` | `.so` | `require("cjson")`、`encode/decode`、`cjson.null`、错误输入 `pcall` |
+| LPeg | `scripts/test-native-android-real-modules.sh` | `.so` | `require("lpeg")`、基础 pattern/match、完整 `third_party/lpeg/test.lua` 和 `re` 模块官方测试 |
+| LuaSocket release | `scripts/test-native-android-real-modules.sh` | `.so` | `require("mime")`、MIME 编解码、Ltn12 filter chain、`require("socket")`、TCP/UDP loopback、DNS 基础路径 |
+| LuaSocket official offline | `scripts/test-native-android-real-modules.sh` | `.so` | `excepttest.lua`、`ltn12test.lua`、`mimetest.lua`、`stufftest.lua`、`urltest.lua`、`test_getaddrinfo.lua` |
+| LuaSocket official client/server | `scripts/test-native-android-real-modules.sh` | `.so` | `testsrvr.lua` + `testclnt.lua` 长脚本主路径，覆盖 connect、accept、select、send/receive、timeout、large transfer、non-blocking、getstats |
 
 Android 验收环境：
 
@@ -98,7 +103,8 @@ Android 验收环境：
 - Kernel：`Linux localhost 6.6.77-android15-8-gf9a1d4bd8353-abogki440974771-4k #1 SMP PREEMPT Fri Aug 29 01:48:34 UTC 2025 aarch64 Toybox`。
 - Android C toolchain：Android NDK `aarch64-linux-android35-clang`。
 - native `glua` 构建：`GOOS=android GOARCH=arm64 CGO_ENABLED=1 CC=aarch64-linux-android35-clang go build -tags native_modules`。
-- 设备目录：`/data/local/tmp/glua-native-modules/`。
+- fixture 设备目录：`/data/local/tmp/glua-native-modules/`。
+- 真实模块设备目录：`/data/local/tmp/glua-native-real-modules/`。
 
 最近一次 Android fixture 验收：
 
@@ -108,7 +114,30 @@ source ~/.zshrc && ADB_SERIAL=bc29432a ./scripts/test-native-android-modules.sh
 
 结果：通过；Android native `glua` 成功加载 `glua_native_smoke.so`，并正确捕获 `glua_native_failopen.so` 的 `native open failure` 初始化错误。
 
-当前 Android 尚未声明 lua-cjson、LPeg、LuaSocket 真实第三方模块全量验收通过；这些模块需要后续独立扩展 Android 源码构建、推送与设备侧运行脚本。
+最近一次 Android 真实模块验收复跑：
+
+```bash
+source ~/.zshrc && ADB_SERIAL=bc29432a ./scripts/test-native-android-real-modules.sh
+```
+
+结果：通过；设备侧真实模块验收覆盖 lua-cjson、完整 LPeg 官方测试、LuaSocket release smoke、LuaSocket 官方离线脚本和 LuaSocket 官方 client/server 长脚本主路径。
+
+- lua-cjson：`Android lua-cjson acceptance passed cjson 2.1devel {"a":1,"b":true,"c":null,"list":[1,2,"x"]}`。
+- LPeg：完整 `third_party/lpeg/test.lua` 与 `re` 模块官方测试输出 `OK`，并输出 `Android LPeg full official test passed`。
+- LuaSocket release：MIME、Ltn12、socket TCP/UDP loopback 和 DNS 基础路径通过，输出 `Android LuaSocket release acceptance passed LuaSocket 3.0.0 aGVsbG8= pong udp-ping`。
+- LuaSocket official offline：`excepttest.lua`、`ltn12test.lua`、`mimetest.lua`、`stufftest.lua`、`urltest.lua`、`test_getaddrinfo.lua` 均完成，输出 `Android LuaSocket official offline tests passed`。
+- LuaSocket official client/server：`testsrvr.lua` + `testclnt.lua` 长脚本完成，输出 `testing: done in 50.06s` 和 `Android native real module acceptance passed`。
+
+Android LuaSocket 官方脚本适配说明：
+
+- Android 设备 DNS 会把 `host.is.invalid` 解析到 `198.18.0.x`，验收脚本只在临时测试副本中把该官方测试输入替换为 `invalid host name`，避免平台网络环境把无效域名路径误判为可连接地址。
+- Android 设备上空 host 连接会解析到非 localhost 地址并成功建连，导致官方 server 继续停在后续 `accept()`；验收脚本只在临时测试副本中检测 peer，不是 `127.0.0.1` / `::1` 时关闭连接并回退显式 localhost，以保留后续 client/server 主路径覆盖。
+
+Android-only LPeg 栈保护：
+
+- 设备实测默认 LPeg `MAXRECLEVEL=200` 时，深递归 capture probe 在约 140 层开始 SIGSEGV，120 层仍可成功返回。
+- `scripts/build-native-lpeg.sh` 仅对 `TARGET_GOOS=android` 加 `-DMAXRECLEVEL=96`，同一路径可返回 Lua 错误 `subcapture nesting too deep`，避免 Android C stack 先于 LPeg 错误边界崩溃。
+- 该配置只影响 Android LPeg 模块源码构建；macOS、Linux、Windows 的 LPeg 构建仍使用上游默认上限。
 
 ## Mac/Linux/Android benchmark
 

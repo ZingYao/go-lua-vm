@@ -100,6 +100,7 @@ lua53_import_lib=""
 output_extensions=()
 link_args=()
 link_inputs=()
+platform_cflags=()
 case "${target_goos}" in
   darwin)
     output_extensions=(".so" ".dylib")
@@ -108,6 +109,14 @@ case "${target_goos}" in
   linux)
     output_extensions=(".so")
     link_args=("-shared" "-fPIC")
+    ;;
+  android)
+    output_extensions=(".so")
+    link_args=("-shared" "-fPIC" "-Wl,--allow-shlib-undefined")
+    # Android app/native threads commonly have a much smaller C stack than macOS/Linux shells.
+    # Keep LPeg's recursive capture expansion below the observed Android SIGSEGV threshold so
+    # the official "subcapture nesting too deep" path is reported as a Lua error instead.
+    platform_cflags=("-DMAXRECLEVEL=96")
     ;;
   windows)
     output_extensions=(".dll")
@@ -162,6 +171,7 @@ build_lpeg_module() {
     "-o" "${output_path}"
   )
 
+  args+=("${platform_cflags[@]}")
   args+=("${link_args[@]}")
   args+=("${sources[@]}")
   if [[ "${#link_inputs[@]}" -gt 0 ]]; then
