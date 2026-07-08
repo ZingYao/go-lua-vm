@@ -83,6 +83,74 @@ CGO_ENABLED=1 ./scripts/test-native-real-modules.sh
 
 结果：2026-07-08 本轮复跑通过；Linux arm64 `.so` 通过 fixture、lua-cjson、完整 LPeg 官方 `test.lua`、LuaSocket runtime acceptance、LuaSocket 官方离线脚本和 `testsrvr.lua` + `testclnt.lua` client/server 主路径。
 
+## Mac/Linux/Android benchmark
+
+2026-07-08 按 `docs/BENCHMARK.md` 的既有路径复跑默认 no-CGO benchmark。执行前已在 macOS host 和 Linux VM 内分别执行 `go mod download`；两侧均输出 `go: no module dependencies to download`。benchmark 使用 `scripts/benchmark-official.sh` 默认完整参数：`BENCH_ITERATIONS=40`、`BENCH_COMPILE_ITERATIONS=30`、`BENCH_WARMUP_ITERATIONS=5`，每个平台各跑 5 轮，按 5 轮结果分别取官方工具中位数和本项目中位数后计算 `本项目/官方`。
+
+macOS 环境：
+
+- OS：Darwin arm64。
+- Go：`go version go1.26.4 darwin/arm64`。
+- 官方工具：`build/official-lua-5.3.6/lua-5.3.6/src/lua` / `luac`。
+- 本项目工具：默认 no-CGO 重建的 `bin/glua` / `bin/gluac`。
+
+| 用例 | 官方 5 轮中位数 | 本项目 5 轮中位数 | 本项目/官方 |
+| --- | ---: | ---: | ---: |
+| `arith_add_loop` | 0.003956s | 0.003207s | 0.81x |
+| `arith_mix_loop` | 0.005777s | 0.006414s | 1.11x |
+| `arith_chain_temp` | 0.006183s | 0.006523s | 1.05x |
+| `table_rw` | 0.004103s | 0.003880s | 0.95x |
+| `function_call` | 0.003941s | 0.003614s | 0.92x |
+| `string_concat` | 0.002925s | 0.002484s | 0.85x |
+| `closure_upvalue` | 0.004186s | 0.004573s | 1.09x |
+| `stdlib_math_string` | 0.011843s | 0.007687s | 0.65x |
+| `recursion` | 0.002150s | 0.002384s | 1.11x |
+| `compile_3000_functions` | 0.003417s | 0.002677s | 0.78x |
+
+Linux benchmark 环境：
+
+- OrbStack VM：`glua-bench-linux-20260708c`，benchmark 后已执行 `orbctl delete --force glua-bench-linux-20260708c` 清理。
+- OS：Ubuntu 24.04.4 LTS `noble`，arm64。
+- Go：`go version go1.26.4 linux/arm64`。
+- C toolchain：`gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0`。
+- 官方工具：从 `build/official-lua-5.3.6/lua-5.3.6` 源码复制到 VM `/tmp` 后重新 `make linux`。
+- 本项目工具：VM 内默认 no-CGO 重建的 `/tmp/glua-bench-bin-20260708/glua` / `gluac`。
+
+| 用例 | 官方 5 轮中位数 | 本项目 5 轮中位数 | 本项目/官方 |
+| --- | ---: | ---: | ---: |
+| `arith_add_loop` | 0.002801s | 0.001145s | 0.41x |
+| `arith_mix_loop` | 0.005348s | 0.003869s | 0.72x |
+| `arith_chain_temp` | 0.005402s | 0.004240s | 0.78x |
+| `table_rw` | 0.002473s | 0.001812s | 0.73x |
+| `function_call` | 0.002370s | 0.001475s | 0.62x |
+| `string_concat` | 0.001357s | 0.000460s | 0.34x |
+| `closure_upvalue` | 0.002692s | 0.002368s | 0.88x |
+| `stdlib_math_string` | 0.009816s | 0.005226s | 0.53x |
+| `recursion` | 0.000634s | 0.000449s | 0.71x |
+| `compile_3000_functions` | 0.001633s | 0.000643s | 0.39x |
+
+Android benchmark 环境：
+
+- Device：`24129PN74C`，ABI `arm64-v8a`。
+- Android：`16`，SDK `36`。
+- Kernel：`Linux localhost 6.6.77-android15-8-gf9a1d4bd8353-abogki440974771-4k #1 SMP PREEMPT Fri Aug 29 01:48:34 UTC 2025 aarch64 Toybox`。
+- 官方工具：Lua 5.3.6 源码用 Android NDK `aarch64-linux-android35-clang` 构建后推送到 `/data/local/tmp/glua-bench-20260708/`。
+- 本项目工具：`GOOS=android GOARCH=arm64 CGO_ENABLED=0` 构建 `glua` / `gluac` 后推送到同目录。
+- 计时方式：Android 设备侧 shell 使用 `date +%s%N` 包住单次命令，Mac 端只收集输出并计算中位数；本轮为 1 轮 smoke benchmark。
+
+| 用例 | 官方工具中位数 | 本项目中位数 | 本项目/官方 |
+| --- | ---: | ---: | ---: |
+| `arith_add_loop` | 0.027255s | 0.015886s | 0.58x |
+| `arith_mix_loop` | 0.038264s | 0.023976s | 0.63x |
+| `arith_chain_temp` | 0.044829s | 0.026689s | 0.60x |
+| `table_rw` | 0.023110s | 0.018617s | 0.81x |
+| `function_call` | 0.023463s | 0.016702s | 0.71x |
+| `string_concat` | 0.018338s | 0.013049s | 0.71x |
+| `closure_upvalue` | 0.029406s | 0.019840s | 0.67x |
+| `stdlib_math_string` | 0.049671s | 0.029186s | 0.59x |
+| `recursion` | 0.014729s | 0.013385s | 0.91x |
+| `compile_3000_functions` | 0.017744s | 0.013846s | 0.78x |
+
 ## Windows
 
 Windows `.dll` 是目标支持面，但当前记录尚未声明 Windows 运行期通过：
