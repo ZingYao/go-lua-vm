@@ -141,6 +141,39 @@
 
 Windows 本轮结果显示 no-CGO `glua` 在全部用例上慢于官方 Lua 5.3.6 C 实现，倍率范围为 `1.81x` 到 `2.66x`。该记录仅代表上述 Windows 机器和当次运行环境。
 
+#### Windows 11 amd64 摊销启动成本复核
+
+该复核用于区分 Windows CLI 冷启动成本和 VM/编译器热路径成本。原始 `scripts/benchmark-official.sh` 每个样本都会重新启动一次 `lua.exe` / `glua.exe`，Windows 上进程创建、文件系统检查、Defender/安全扫描和 Go runtime 初始化会让空脚本启动时间接近正式短用例耗时。摊销方案改为每个样本只启动一次进程，在该进程内循环执行同一 fixture 多次，再由 Python 对多轮样本取中位数。
+
+- 日期：2026-07-08
+- 系统：Microsoft Windows 11 企业版 10.0.26200，64 位
+- 机器：HP Victus by HP Gaming Laptop 16-r1xxx
+- CPU：Intel(R) Core(TM) i7-14650HX，16 cores / 24 logical processors，MaxClockSpeed 2200 MHz
+- 内存：68408893440 bytes，约 63.7 GiB
+- Go：go1.26.4 windows/amd64
+- 官方 Lua：Lua 5.3.6，路径 `C:\mise-data\installs\lua\5.3.6\bin`
+- 本项目产物：`bin\glua.exe`
+- 构建模式：`CGO_ENABLED=0`
+- 脚本：`scripts/benchmark-official-amortized.sh`
+- 统计方式：每项 warmup 1 轮，计时 5 轮取中位数。
+- 运行用例：每个计时样本启动一次进程，进程内重复执行 fixture 30 次。
+- 编译用例：每个计时样本启动一次进程，进程内对 3000 函数源码重复 `load(source)` 10 次，并执行最后一次编译结果做正确性检查。
+
+| English key | 官方 Lua 5.3.6 摊销中位数 | 本项目摊销中位数 | 本项目/官方 |
+| --- | ---: | ---: | ---: |
+| `arith_add_loop` | 0.154923s | 0.153945s | 0.99x |
+| `arith_mix_loop` | 0.262008s | 0.287075s | 1.10x |
+| `arith_chain_temp` | 0.333187s | 0.321460s | 0.96x |
+| `table_rw` | 0.197526s | 0.189425s | 0.96x |
+| `function_call` | 0.150339s | 0.176525s | 1.17x |
+| `string_concat` | 0.166109s | 0.130346s | 0.78x |
+| `closure_upvalue` | 0.166237s | 0.209514s | 1.26x |
+| `stdlib_math_string` | 0.549857s | 0.391544s | 0.71x |
+| `recursion` | 0.064265s | 0.123286s | 1.92x |
+| `compile_3000_functions` | 0.071103s | 0.154198s | 2.17x |
+
+摊销复核后，Windows 运行类用例多数回落到 `0.71x` 到 `1.26x`，说明冷启动记录中的 `1.81x` 到 `2.66x` 主要由 Windows 短进程固定成本放大。`recursion` 与 `compile_3000_functions` 仍明显慢于官方，分别为 `1.92x` 和 `2.17x`，后续如继续 Windows 性能优化，应优先用进程内 benchmark 或 Go micro/profile 定位这两项，而不是用 CLI 冷启动结果直接判断 VM 热路径。
+
 ## 复现命令
 
 ```bash
@@ -151,6 +184,10 @@ LUAC_BIN=/Users/zing/.local/lua/5.3.6/bin/luac \
 GLUA_BIN=./bin/glua \
 GLUAC_BIN=./bin/gluac \
 ./scripts/benchmark-official.sh
+
+LUA_BIN=/path/to/lua-5.3.6 \
+GLUA_BIN=./bin/glua \
+./scripts/benchmark-official-amortized.sh
 ```
 
 ## 兼容门禁
