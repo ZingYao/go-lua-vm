@@ -93,6 +93,10 @@ case "${target_goos}" in
     output_extensions=(".so")
     link_args=("-shared" "-fPIC")
     ;;
+  android)
+    output_extensions=(".so")
+    link_args=("-shared" "-fPIC" "-Wl,--allow-shlib-undefined")
+    ;;
   windows)
     output_extensions=(".dll")
     link_args=("-shared" "-DLUA_BUILD_AS_DLL")

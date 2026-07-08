@@ -36,10 +36,10 @@
 
 复核口径：
 
-- 当前分支头：`90b8d3e`
+- 当前复核基线：`ac6a3e3`
 - 对比脚本：`scripts/benchmark-official.sh`
 - 统计方式：macOS 与 Linux 各跑 5 轮，按 5 轮结果分别取官方工具中位数和本项目中位数后计算倍率。
-- Android：设备侧 smoke benchmark 跑 1 轮；每个运行用例 warmup 5 次、计时 40 次取中位数，编译用例 warmup 5 次、计时 30 次取中位数。
+- Android：设备侧 benchmark 跑 5 轮；每轮的运行用例 warmup 5 次、计时 40 次取中位数，编译用例 warmup 5 次、计时 30 次取中位数；再按 5 轮结果分别取官方工具中位数和本项目中位数后计算倍率。
 - 依赖拉取：macOS host 和 Linux VM 内均执行 `go mod download`，结果均为 `go: no module dependencies to download`。
 
 ### macOS arm64 5 轮结果
@@ -88,29 +88,29 @@
 | `recursion` | 0.000634s | 0.000449s | 0.71x |
 | `compile_3000_functions` | 0.001633s | 0.000643s | 0.39x |
 
-### Android arm64 1 轮结果
+### Android arm64 5 轮结果
 
 环境：
 
 - Device：`24129PN74C`，ABI `arm64-v8a`。
 - Android：`16`，SDK `36`。
 - Kernel：`Linux localhost 6.6.77-android15-8-gf9a1d4bd8353-abogki440974771-4k #1 SMP PREEMPT Fri Aug 29 01:48:34 UTC 2025 aarch64 Toybox`。
-- 官方工具：Lua 5.3.6 源码用 Android NDK `aarch64-linux-android35-clang` 构建后推送到 `/data/local/tmp/glua-bench-20260708/`。
+- 官方工具：Lua 5.3.6 源码用 Android NDK `aarch64-linux-android35-clang` 构建后推送到 `/data/local/tmp/glua-bench-20260708-rerun/`。
 - 本项目工具：`GOOS=android GOARCH=arm64 CGO_ENABLED=0` 构建 `glua` / `gluac` 后推送到同目录。
 - 计时方式：Android 设备侧 shell 使用 `date +%s%N` 包住单次命令，Mac 端只收集输出并计算中位数。
 
-| 用例 | 官方工具中位数 | 本项目中位数 | 本项目/官方 |
+| 用例 | 官方 5 轮中位数 | 本项目 5 轮中位数 | 本项目/官方 |
 | --- | ---: | ---: | ---: |
-| `arith_add_loop` | 0.027255s | 0.015886s | 0.58x |
-| `arith_mix_loop` | 0.038264s | 0.023976s | 0.63x |
-| `arith_chain_temp` | 0.044829s | 0.026689s | 0.60x |
-| `table_rw` | 0.023110s | 0.018617s | 0.81x |
-| `function_call` | 0.023463s | 0.016702s | 0.71x |
-| `string_concat` | 0.018338s | 0.013049s | 0.71x |
-| `closure_upvalue` | 0.029406s | 0.019840s | 0.67x |
-| `stdlib_math_string` | 0.049671s | 0.029186s | 0.59x |
-| `recursion` | 0.014729s | 0.013385s | 0.91x |
-| `compile_3000_functions` | 0.017744s | 0.013846s | 0.78x |
+| `arith_add_loop` | 0.028197s | 0.015842s | 0.56x |
+| `arith_mix_loop` | 0.038319s | 0.024276s | 0.63x |
+| `arith_chain_temp` | 0.046780s | 0.026184s | 0.56x |
+| `table_rw` | 0.022113s | 0.018205s | 0.82x |
+| `function_call` | 0.024726s | 0.018068s | 0.73x |
+| `string_concat` | 0.018042s | 0.014551s | 0.81x |
+| `closure_upvalue` | 0.027542s | 0.020648s | 0.75x |
+| `stdlib_math_string` | 0.051390s | 0.029732s | 0.58x |
+| `recursion` | 0.015599s | 0.014101s | 0.90x |
+| `compile_3000_functions` | 0.019182s | 0.014471s | 0.75x |
 
 ## 复现命令
 

@@ -1,4 +1,4 @@
-//go:build native_modules && (linux || darwin)
+//go:build native_modules && (linux || darwin || android)
 
 package native
 
@@ -143,6 +143,9 @@ func unixSmokeLibrary() (string, string) {
 	case "darwin":
 		// macOS 的 libSystem 暴露 malloc，路径在 dyld shared cache 下仍可 dlopen。
 		return "/usr/lib/libSystem.B.dylib", "malloc"
+	case "android":
+		// Android bionic 通过 libc.so 暴露 malloc，适合作为设备侧 dlopen smoke。
+		return "libc.so", "malloc"
 	default:
 		// Linux 使用 libc.so.6 和 malloc，覆盖主流 glibc 环境。
 		return "libc.so.6", "malloc"

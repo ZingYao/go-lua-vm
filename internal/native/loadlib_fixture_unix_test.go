@@ -1,4 +1,4 @@
-//go:build native_modules && (linux || darwin)
+//go:build native_modules && (linux || darwin || android)
 
 package native
 
@@ -325,6 +325,9 @@ func nativeFixtureCompileArgs(includeDir string, outputPath string, sourcePath s
 	case "darwin":
 		// macOS Lua C 模块通常通过 dynamic_lookup 在宿主进程解析 lua_* / luaL_* 符号。
 		args = append(args, "-dynamiclib", "-undefined", "dynamic_lookup")
+	case "android":
+		// Android 插件依赖宿主 native glua 导出的 Lua C API shim，构建时允许这些符号延迟到 dlopen 解析。
+		args = append(args, "-shared", "-fPIC", "-Wl,--allow-shlib-undefined")
 	default:
 		// Linux 使用 shared + fPIC，未解析的 lua_* / luaL_* 符号在 dlopen 时绑定到宿主导出符号。
 		args = append(args, "-shared", "-fPIC")
@@ -451,7 +454,7 @@ func TestDynamicLibraryExtensionDocumentsFixtureSuffix(t *testing.T) {
 		t.Fatalf("darwin extension = %q, want .dylib", extension)
 	}
 	if goruntime.GOOS != "darwin" && extension != ".so" {
-		// Linux 首轮 fixture 使用 so。
+		// Linux/Android 首轮 fixture 使用 so。
 		t.Fatalf("%s extension = %q, want .so", goruntime.GOOS, extension)
 	}
 }

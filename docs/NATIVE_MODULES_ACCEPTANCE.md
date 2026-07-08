@@ -83,6 +83,33 @@ CGO_ENABLED=1 ./scripts/test-native-real-modules.sh
 
 结果：2026-07-08 本轮复跑通过；Linux arm64 `.so` 通过 fixture、lua-cjson、完整 LPeg 官方 `test.lua`、LuaSocket runtime acceptance、LuaSocket 官方离线脚本和 `testsrvr.lua` + `testclnt.lua` client/server 主路径。
 
+## Android arm64
+
+当前 Android arm64 已完成最小 Lua C 模块设备侧 smoke，证明 native `glua` 能在 Android 上通过 `dlopen`/`dlsym` 加载仓库内 fixture `.so` 并调用 `luaopen_*`：
+
+| 模块 | 脚本 | 后缀 | 验收点 |
+| --- | --- | --- | --- |
+| fixture | `scripts/test-native-android-modules.sh` | `.so` | `require("glua_native_smoke")` 成功路径、`luaopen_glua_native_failopen` 初始化失败路径、userdata/metatable/registry/error smoke |
+
+Android 验收环境：
+
+- Device：`24129PN74C`，ABI `arm64-v8a`。
+- Android：`16`，SDK `36`。
+- Kernel：`Linux localhost 6.6.77-android15-8-gf9a1d4bd8353-abogki440974771-4k #1 SMP PREEMPT Fri Aug 29 01:48:34 UTC 2025 aarch64 Toybox`。
+- Android C toolchain：Android NDK `aarch64-linux-android35-clang`。
+- native `glua` 构建：`GOOS=android GOARCH=arm64 CGO_ENABLED=1 CC=aarch64-linux-android35-clang go build -tags native_modules`。
+- 设备目录：`/data/local/tmp/glua-native-modules/`。
+
+最近一次 Android fixture 验收：
+
+```bash
+source ~/.zshrc && ADB_SERIAL=bc29432a ./scripts/test-native-android-modules.sh
+```
+
+结果：通过；Android native `glua` 成功加载 `glua_native_smoke.so`，并正确捕获 `glua_native_failopen.so` 的 `native open failure` 初始化错误。
+
+当前 Android 尚未声明 lua-cjson、LPeg、LuaSocket 真实第三方模块全量验收通过；这些模块需要后续独立扩展 Android 源码构建、推送与设备侧运行脚本。
+
 ## Mac/Linux/Android benchmark
 
 2026-07-08 按 `docs/BENCHMARK.md` 的既有路径复跑默认 no-CGO benchmark。执行前已在 macOS host 和 Linux VM 内分别执行 `go mod download`；两侧均输出 `go: no module dependencies to download`。benchmark 使用 `scripts/benchmark-official.sh` 默认完整参数：`BENCH_ITERATIONS=40`、`BENCH_COMPILE_ITERATIONS=30`、`BENCH_WARMUP_ITERATIONS=5`，每个平台各跑 5 轮，按 5 轮结果分别取官方工具中位数和本项目中位数后计算 `本项目/官方`。
@@ -134,22 +161,22 @@ Android benchmark 环境：
 - Device：`24129PN74C`，ABI `arm64-v8a`。
 - Android：`16`，SDK `36`。
 - Kernel：`Linux localhost 6.6.77-android15-8-gf9a1d4bd8353-abogki440974771-4k #1 SMP PREEMPT Fri Aug 29 01:48:34 UTC 2025 aarch64 Toybox`。
-- 官方工具：Lua 5.3.6 源码用 Android NDK `aarch64-linux-android35-clang` 构建后推送到 `/data/local/tmp/glua-bench-20260708/`。
+- 官方工具：Lua 5.3.6 源码用 Android NDK `aarch64-linux-android35-clang` 构建后推送到 `/data/local/tmp/glua-bench-20260708-rerun/`。
 - 本项目工具：`GOOS=android GOARCH=arm64 CGO_ENABLED=0` 构建 `glua` / `gluac` 后推送到同目录。
-- 计时方式：Android 设备侧 shell 使用 `date +%s%N` 包住单次命令，Mac 端只收集输出并计算中位数；本轮为 1 轮 smoke benchmark。
+- 计时方式：Android 设备侧 shell 使用 `date +%s%N` 包住单次命令，Mac 端只收集输出并计算中位数；本轮为 5 轮 benchmark。
 
-| 用例 | 官方工具中位数 | 本项目中位数 | 本项目/官方 |
+| 用例 | 官方 5 轮中位数 | 本项目 5 轮中位数 | 本项目/官方 |
 | --- | ---: | ---: | ---: |
-| `arith_add_loop` | 0.027255s | 0.015886s | 0.58x |
-| `arith_mix_loop` | 0.038264s | 0.023976s | 0.63x |
-| `arith_chain_temp` | 0.044829s | 0.026689s | 0.60x |
-| `table_rw` | 0.023110s | 0.018617s | 0.81x |
-| `function_call` | 0.023463s | 0.016702s | 0.71x |
-| `string_concat` | 0.018338s | 0.013049s | 0.71x |
-| `closure_upvalue` | 0.029406s | 0.019840s | 0.67x |
-| `stdlib_math_string` | 0.049671s | 0.029186s | 0.59x |
-| `recursion` | 0.014729s | 0.013385s | 0.91x |
-| `compile_3000_functions` | 0.017744s | 0.013846s | 0.78x |
+| `arith_add_loop` | 0.028197s | 0.015842s | 0.56x |
+| `arith_mix_loop` | 0.038319s | 0.024276s | 0.63x |
+| `arith_chain_temp` | 0.046780s | 0.026184s | 0.56x |
+| `table_rw` | 0.022113s | 0.018205s | 0.82x |
+| `function_call` | 0.024726s | 0.018068s | 0.73x |
+| `string_concat` | 0.018042s | 0.014551s | 0.81x |
+| `closure_upvalue` | 0.027542s | 0.020648s | 0.75x |
+| `stdlib_math_string` | 0.051390s | 0.029732s | 0.58x |
+| `recursion` | 0.015599s | 0.014101s | 0.90x |
+| `compile_3000_functions` | 0.019182s | 0.014471s | 0.75x |
 
 ## Windows
 
