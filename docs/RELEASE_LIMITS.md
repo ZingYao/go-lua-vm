@@ -14,7 +14,7 @@
 - 项目核心与默认构建保持纯 Go、无 CGO，目标是避免跨系统编译困难；这不禁止宿主程序或可选扩展调用外部 `lib`、`.so`、`.dylib` 或 Windows `.dll`。嵌入方可以通过 `lua.Options.PackageDynamicLibraryLoader`、`lua.Options.PackageDynamicLibraryLoaderForState` 或 `stdlib/package` 环境注入可选 loader，也可以继续覆盖 `package.loadlib`、写入 `package.preload` 或替换 `package.searchers` 接入。
 - 默认跨平台编译不需要额外 C 头文件、预装 `.so/.dylib/.dll`、Lua C API 开发包或系统动态库依赖；`package.cpath` 和动态库 loader 接入点只是运行期扩展协议，不进入默认构建链路。
 - 已补充无 CGO 测试，验证宿主覆盖 `package.loadlib`、通过 `lua.Options` 注入动态库 loader，以及 C searcher 按 `package.cpath` 候选返回 Lua 可调用 loader 的链路。
-- `native_modules` 是显式可选构建能力，需要 `CGO_ENABLED=1` 和 `-tags native_modules`；该构建当前已在 macOS arm64 上用仓库内 `lua-cjson` 源码完成 `.so` 与 `.dylib` 的 Lua 5.3 ABI 符号验收和运行期验收，确认 `lua_*` / `luaL_*` 未解析符号由 native `glua` shim 满足，并覆盖 `require("cjson")`、`encode/decode`、`cjson.null` 和错误输入 `pcall`。
+- `native_modules` 是显式可选构建能力，需要 `CGO_ENABLED=1` 和 `-tags native_modules`；该构建当前已在 macOS arm64、Linux arm64、Windows amd64 与 Android arm64 上用仓库内 fixture、lua-cjson、LPeg 和 LuaSocket 完成目标平台源码构建与运行期验收。macOS 覆盖 `.so` / `.dylib`，Linux 覆盖 `.so`，Windows 覆盖 `.dll` 与 `lua53.dll` runtime shim/import library，Android 覆盖设备侧 `.so` 真实模块主路径。
 
 ## 已知限制
 
@@ -22,7 +22,7 @@
 - Go `fs.FS` 虚拟文件系统首版仅承诺只读路径；写入、删除、重命名、临时文件、进程管道和环境变量仍由宿主权限开关控制，不映射到 VFS。
 - 默认构建不内置 C 动态库加载器；未注入 loader 时，`package.loadlib`、C searcher 和 C root searcher 按纯 Go、无 CGO 策略返回明确不支持。注入 loader 后，Linux/macOS 候选覆盖 `.so`/`.dylib`，Windows 候选限定为运行期 `.dll`；`.lib`/import library 属于链接期产物，不作为 `require` 运行期候选。
 - `native_modules` 只面向按 Lua 5.3 public C API 编写并导出 `luaopen_*` 的 Lua C 模块，不是任意动态库 FFI；依赖 `lstate.h`、`lobject.h` 等 Lua 内部头文件或访问 `lua_State` 内部布局的模块不属于兼容承诺。
-- `native_modules` 的官方 Lua 5.3 ABI 现成二进制模块已在 macOS arm64 上通过 `lua-cjson` `.so` / `.dylib` 符号验收；Linux `.so` 和 Windows `.dll` 运行期验收仍待目标平台或 CI，Windows 还需要 `lua53.dll` shim 或等价 import library 方案。
+- `native_modules` 已在 macOS arm64、Linux arm64 与 Windows amd64 上通过仓库内真实模块源码构建与运行期验收；其他 OS/架构组合、Android 真实第三方模块全量验收，以及未经源码固定的现成第三方二进制模块仍需独立矩阵确认。
 - 当前 native C API 覆盖以 `lua-cjson` 和仓库 fixture 为验收基线；`lua_yieldk`、C continuation、debug hook C API、C 源码文件名/行号、动态库内部 C 调用栈、`lua_gc`、`lua_dump`、`lua_load` 等仍不作为发布承诺。
 - Go reflection 自动绑定必须显式启用，不做默认隐式扫描；当前支持导出函数、导出字段、导出方法和基础类型/对象代理转换，不承诺 map/table 深拷贝或未导出成员访问。
 - 只读 table 与常量字段通过 Lua 元方法保护普通写入；首版不承诺阻止宿主或 Lua debug/raw API 路径绕过元方法进行 raw 写入。

@@ -2,6 +2,8 @@
 
 本文跟踪 `glua` 通过可选 CGO/native shim 在 Linux、macOS、Windows 上直接 `require` Lua 5.3 C 扩展模块的实施进度。每轮自动推进必须先读取本文和 `docs/NATIVE_MODULES_PLAN.md`。
 
+> 说明：下方“推进记录”按当时状态保留历史脉络；当前验收结论以第七阶段复选框、`docs/NATIVE_MODULES_ACCEPTANCE.md`、`docs/NATIVE_MODULES_WINDOWS_FUNCTIONAL_TEST.md` 和 `docs/NATIVE_MODULES_WINDOWS_BENCHMARK.md` 为准。2026-07-08 Windows amd64 strict runtime 已闭环，早期记录中的 Windows skip/待验证描述已被最终闭环记录覆盖。
+
 ## 总目标
 
 - 默认 no-CGO 构建保持现状并通过全部门禁。
@@ -181,7 +183,7 @@
 
 ## 第七阶段：平台闭环
 
-- [x] 真实第三方模块验收：当前 macOS arm64 平台已闭环，Linux/Windows 运行期验收仍由后续平台项单独跟踪。
+- [x] 真实第三方模块验收：macOS arm64、Linux arm64、Windows amd64 与 Android arm64 目标平台运行期已闭环；Android LuaSocket 官方脚本包含设备网络环境适配。
   - [x] 明确自编 fixture 只作为 loader smoke，不作为最终兼容性依据。
   - [x] 固定 `lua-cjson` 源码到仓库或 `third_party/`，记录来源、版本和许可证，构建不得联网下载。
   - [x] `lua-cjson` 源码编译验收：`require("cjson")`、`encode/decode`、错误输入 `pcall`。
@@ -189,7 +191,7 @@
     - [x] `scripts/build-native-cjson.sh` 支持 Windows `cjson.dll` 源码构建入口：显式配置 `NATIVE_CC_WINDOWS_<ARCH>` / `CC` 且 `LUA53_IMPORT_LIB` 或 import library 生成工具可用时构建；缺少 Windows C compiler 或 import library 时必须明确 `skip:`。
     - [x] 运行期 `require("cjson")`、`encode/decode` 和错误输入 `pcall` 验收。
       - [x] macOS `.so` 与 `.dylib` 两种后缀分别独立验收。
-      - [ ] Windows 目标平台执行 `require("cjson")`、`encode/decode` 和错误输入 `pcall` 验收。
+      - [x] Windows 目标平台执行 `require("cjson")`、`encode/decode` 和错误输入 `pcall` 验收。
     - [x] 新增 `scripts/test-native-cjson.sh`，把真实模块运行期验收固化为可重复 CLI 脚本。
   - [x] `lua-cjson` 官方 Lua 5.3 ABI 二进制模块验收：验证 `lua_*` / `luaL_*` 符号由本项目 shim 满足。
     - [x] macOS arm64 已在 `scripts/test-native-cjson.sh` 中固化：`cjson.so` / `cjson.dylib` 必须保留未解析 `lua_*` / `luaL_*` ABI 符号、不得链接外部 Lua runtime，且这些符号必须由 native `glua` 导出的 shim 覆盖后再执行运行期验收。
@@ -200,7 +202,7 @@
   - [x] `lpeg` 或等价纯 C 模块验收：覆盖 userdata、metatable、registry 和复杂 C function 行为。
     - [x] macOS arm64 `.so` 与 `.dylib` 两种后缀已通过基础 LPeg runtime smoke。
     - [x] 完整 `third_party/lpeg/test.lua`、复杂 capture、grammar 和错误边界已通过 macOS arm64 native 验收。
-    - [ ] Windows 目标平台执行 `require("lpeg")`、基础 pattern/match 和完整 `third_party/lpeg/test.lua` 验收。
+    - [x] Windows 目标平台执行 `require("lpeg")`、基础 pattern/match 和完整 `third_party/lpeg/test.lua` 验收。
       - [x] 已修复完整测试在 1084 行触发的 `string.char("98")` Lua 5.3 numeric string 转 integer 兼容断点。
       - [x] 当前完整测试推进到 1159 行；同一 pattern 独立运行返回 18，但完整前序状态后返回 12，疑似 LPeg match-time capture / named capture 前序状态污染，需继续缩小最小复现。
         - [x] 2026-07-06 复核：替换 1159 行断言为打印后，官方测试同路径下 `c:match('[==[]]====]]]]==]===[]')` 实际返回 `12`。
@@ -359,8 +361,8 @@
       - [x] macOS arm64 `.so` 与 `.dylib` 两种后缀已通过源码编译级验收。
       - [x] `scripts/build-native-luasocket.sh` 支持 Windows `socket/core.dll` 与 `mime/core.dll` 源码构建入口：显式配置 `NATIVE_CC_WINDOWS_<ARCH>` / `CC` 且 `LUA53_IMPORT_LIB` 或 import library 生成工具可用时构建；缺少 Windows C compiler 或 import library 时必须明确 `skip:`。
     - [x] 新增 LuaSocket 运行期验收脚本，覆盖 `require("socket")`、`require("mime")`、基础 MIME 编解码和本机 loopback TCP/UDP 边界；网络用例必须可控、可超时、失败原因明确。
-      - [x] `scripts/test-native-luasocket.sh` 会构建 native `glua` 和 LuaSocket 模块，macOS 分别覆盖 `.so` 与 `.dylib`，Linux 覆盖 `.so`，Windows 在 `lua53.dll` shim/import library 落地前明确 skip。
-      - [ ] Windows 目标平台执行 `require("socket")`、`require("mime")`、基础 MIME 编解码和 TCP/UDP loopback 验收。
+      - [x] `scripts/test-native-luasocket.sh` 会构建 native `glua` 和 LuaSocket 模块，macOS 分别覆盖 `.so` 与 `.dylib`，Linux 覆盖 `.so`，Windows 覆盖 `.dll`。
+      - [x] Windows 目标平台执行 `require("socket")`、`require("mime")`、基础 MIME 编解码和 TCP/UDP loopback 验收。
     - [x] 将 LuaSocket 官方全量测试脚本纳入可复跑验收：
       - [x] `test/README` 指定的 `testsrvr.lua` + `testclnt.lua` 成对网络测试必须由脚本自动拉起服务端、分配本机端口、设置超时并清理进程；缺少服务依赖时可用 Python harness 管理服务生命周期，但不得把真实失败改成 skip。
       - [x] 离线官方脚本至少覆盖 `mimetest.lua`、`ltn12test.lua`、`urltest.lua`、`excepttest.lua`、`stufftest.lua`、`test_getaddrinfo.lua`；需要外网协议或人工环境的 FTP/HTTP/SMTP/TFTP 测试必须明确分类记录。
@@ -373,7 +375,7 @@
       - [x] Mac/Linux/benchmark 完成后暂停 heartbeat 任务，等待用户手动跑 Windows 用例；暂停时必须明确阻塞原因、恢复条件和下一步。
       - [x] 暂停前提供 Windows 可执行验收脚本（PowerShell `.ps1` 或 Batch `.bat`），用于用户在 Windows 上手动构建/运行 cjson、LPeg、LuaSocket、fixture 和 native 总验收。
       - [x] 暂停前提供 Windows 功能验收文档和最终 benchmark 文档，将功能闭环与性能结论分开记录。
-- [ ] 增加交叉编译验证脚本：
+- [x] 增加交叉编译验证脚本：
   - [x] `scripts/check-native-cross-compile.sh`：显式输出 `GOOS`、`GOARCH`、`CC`、产物路径和缺失 toolchain 时的 skip 原因。
     - [x] 支持 `NATIVE_CC_*` / `CC` 使用带参数的编译器命令，便于 CI 传入 `zig cc -target ...` 或等价 cross toolchain。
     - [x] 支持 `NATIVE_CROSS_REQUIRE_ALL=1` 严格模式；缺失目标 C toolchain 时仍输出明确 `skip:`，但脚本返回失败，避免把 Linux/Windows 未配置工具链误记为编译验证完成。
@@ -384,19 +386,20 @@
     - [x] 输出 `built/skipped/failed/modules/targets` 汇总，便于区分源码模块真实构建完成和明确跳过。
   - [x] Linux native build/test 编译验证。
   - [x] macOS native build/test 编译验证。
-  - [ ] Windows native build/test 编译验证。
+  - [x] Windows native build/test 编译验证。
 - [x] Linux `.so` fixture 构建和 require。
 - [x] macOS `.dylib` fixture 构建和 require。
 - [x] macOS `.so` 后缀候选验证。
-- [ ] Windows `.dll` fixture 构建和 require。
+- [x] Windows `.dll` fixture 构建和 require。
   - [x] `scripts/build-native-fixtures.sh` 支持 Windows `.dll` 源码构建入口：显式配置 `NATIVE_CC_WINDOWS_<ARCH>` / `CC` 且 `LUA53_IMPORT_LIB` 或 import library 生成工具可用时，构建 `glua_native_smoke.dll` / `glua_native_failopen.dll`；缺少 Windows C compiler 或 import library 时必须明确 `skip:`。
-  - [ ] Windows 目标平台执行 `require("glua_native_smoke")` 与 `glua_native_failopen` 初始化失败验收。
-- [ ] Windows `lua53.dll` shim 或等价 import library 方案落地。
+  - [x] Windows 目标平台执行 `require("glua_native_smoke")` 与 `glua_native_failopen` 初始化失败验收。
+- [x] Windows `lua53.dll` shim 或等价 import library 方案落地。
   - [x] 入仓 `native/lua53/windows/lua53.def`，固定当前 native shim 可导出的 Lua 5.3 ABI 符号清单，作为后续 Windows import library 或 `lua53.dll` shim 的链接期输入。
   - [x] 新增 `scripts/check-native-windows-def.sh`，从 native 源码声明重新生成 `.def` 并比对入仓文件，防止 Windows 符号清单漂移。
-  - [x] 新增 `scripts/build-native-windows-lua53-importlib.sh`，从 `lua53.def` 生成 `llvm-dlltool` / `dlltool` 可用的 `liblua53.dll.a` 或 MSVC/LLVM `lua53.lib`；缺失工具时明确 `skip:`，当前只覆盖链接期 import library 入口，不声明 Windows `.dll` fixture 构建或 require 运行期闭环。
+  - [x] 新增 `scripts/build-native-windows-lua53-importlib.sh`，从 `lua53.def` 生成 `llvm-dlltool` / `dlltool` 可用的 `liblua53.dll.a` 或 MSVC/LLVM `lua53.lib`；缺失工具时明确 `skip:`。
+  - [x] 新增 `scripts/build-native-windows-lua53-shim.sh`，在 Windows amd64 上生成 `lua53.dll` runtime shim 和 `liblua53.dll.a`，真实模块 DLL 链接到该 import library 后由 shim 转发到 native `glua` 导出的 Lua 5.3 ABI 符号。
 - [x] 在平台不可用时提供可跳过但明确原因的测试。
-  - [x] `scripts/check-native-skip-reasons.sh` 固化 Windows fixture 缺 C compiler / import library、Windows shim 未落地、LuaSocket Windows runtime 暂不可用和缺失 cross C compiler 的 skip 文本，防止脚本静默跳过。
+  - [x] `scripts/check-native-skip-reasons.sh` 固化缺 C compiler / import library、缺失 cross C compiler、严格模式缺 toolchain、异平台误用当前平台总验收等 skip 文本，防止脚本静默跳过；历史 Windows shim 未落地与 LuaSocket Windows runtime 暂不可用场景已由 Windows strict runtime 闭环覆盖。
 
 ## 第八阶段：文档与发布边界
 
@@ -432,8 +435,8 @@
   - [x] `scripts/probe-native-lpeg-select-count.sh`
   - [x] `scripts/probe-native-lpeg-select-bytecode.sh`
 - [x] 增加当前验收记录。
-  - [x] `docs/NATIVE_MODULES_ACCEPTANCE.md` 记录 macOS arm64 已通过项、Linux/Windows 未闭环状态和不可夸大的兼容边界。
-  - [ ] Linux/Windows 运行期闭环后更新为全平台最终验收结论。
+  - [x] `docs/NATIVE_MODULES_ACCEPTANCE.md` 记录 macOS arm64、Linux arm64、Windows amd64、Android arm64 已通过项和不可夸大的兼容边界。
+  - [x] Linux/Windows/Android 运行期闭环后更新为目标平台最终验收结论。
 
 ## 每轮推进规则
 
@@ -617,6 +620,7 @@ CGO_ENABLED=1 go test -tags native_modules ./...
 - 2026-07-08：Linux arm64 运行期闭环完成并清理 VM。验证矩阵：`CGO_ENABLED=0 go test ./...`、`./scripts/check-go-gates.sh`、`CGO_ENABLED=1 go test -tags native_modules ./...`、`CGO_ENABLED=1 ./scripts/test-native-real-modules.sh` 均通过；真实模块总验收覆盖 fixture、lua-cjson、完整 LPeg 官方 `test.lua`、LuaSocket runtime acceptance、LuaSocket 官方离线脚本以及 `testsrvr.lua` + `testclnt.lua` client/server 主路径。验证后已执行 `orbctl delete --force glua-native-linux-20260708`，`orbctl list` 无残留 VM 输出。下一步按 TODO 进入 Mac/Linux 后 benchmark 对比；Windows 仍等待用户手动平台验证。
 - 2026-07-08：按用户要求先在 macOS host 和 Linux VM 内分别执行 `go mod download`；两侧均输出 `go: no module dependencies to download`。随后按既有 `docs/BENCHMARK.md` 路径构建官方 Lua 5.3.6 与默认 no-CGO `glua` / `gluac`，Mac 与 Linux 各执行 5 轮 `scripts/benchmark-official.sh`，按 5 轮结果分别取官方工具中位数和本项目中位数后计算 `本项目/官方`。Mac arm64 结果：`arith_add_loop 0.81x`、`arith_mix_loop 1.11x`、`arith_chain_temp 1.05x`、`table_rw 0.95x`、`function_call 0.92x`、`string_concat 0.85x`、`closure_upvalue 1.09x`、`stdlib_math_string 0.65x`、`recursion 1.11x`、`compile_3000_functions 0.78x`。Linux arm64 OrbStack Ubuntu 24.04 结果：`arith_add_loop 0.41x`、`arith_mix_loop 0.72x`、`arith_chain_temp 0.78x`、`table_rw 0.73x`、`function_call 0.62x`、`string_concat 0.34x`、`closure_upvalue 0.88x`、`stdlib_math_string 0.53x`、`recursion 0.71x`、`compile_3000_functions 0.39x`。Linux benchmark 临时 VM `glua-bench-linux-20260708c` 已删除，`orbctl list` 无残留输出；本轮未因 benchmark 做代码改动。
 - 2026-07-08：新增 Windows 手动验收脚本 `scripts/test-native-windows-manual.ps1`，用于在 Windows 上串联默认/no-CGO 测试、native Go 测试、Windows `.def`/import library 检查、fixture/cjson/LPeg/LuaSocket DLL 构建和现有运行期脚本尝试；`-StrictRuntime` 可把 runtime skip 视为失败。heartbeat `glua-native-modules-5min` 已暂停，等待用户在 Windows 执行脚本并反馈结果后继续推进 Windows 运行期闭环和最终 TODO。
-- 2026-07-08：按用户追加要求将 Android benchmark 从 1 轮 smoke 升级为 5 轮设备侧 benchmark，并补充 Android Lua C 模块 smoke。实现上把 `native_modules` 的 Unix `dlopen` 路径扩展到 Android，新增 `scripts/test-native-android-modules.sh`，使用 Android NDK `aarch64-linux-android35-clang` 构建 `GOOS=android GOARCH=arm64 CGO_ENABLED=1 -tags native_modules` 的 native `glua` 和仓库内 fixture `.so`，通过 adb 推送到 `/data/local/tmp/glua-native-modules/` 后执行 `require("glua_native_smoke")` 成功路径和 `luaopen_glua_native_failopen` 初始化失败路径，结果通过。随后使用默认 no-CGO Android `glua` / `gluac` 与 Android NDK 构建的官方 Lua 5.3.6，在设备 `24129PN74C`（Android 16 / SDK 36 / arm64-v8a）上执行 5 轮 benchmark；设备侧用 `date +%s%N` 计时，运行用例每轮 warmup 5 次、计时 40 次取中位数，编译用例每轮 warmup 5 次、计时 30 次取中位数，再对 5 轮取中位数。Android 5 轮结果：`arith_add_loop 0.56x`、`arith_mix_loop 0.63x`、`arith_chain_temp 0.56x`、`table_rw 0.82x`、`function_call 0.73x`、`string_concat 0.81x`、`closure_upvalue 0.75x`、`stdlib_math_string 0.58x`、`recursion 0.90x`、`compile_3000_functions 0.75x`。当前 Android 只声明 fixture Lua C 模块 smoke 与默认 benchmark 通过，尚未声明 cjson、LPeg、LuaSocket Android 全量验收。
+- 2026-07-08：按用户追加要求将 Android benchmark 从 1 轮 smoke 升级为 5 轮设备侧 benchmark，并补充 Android Lua C 模块 smoke。实现上把 `native_modules` 的 Unix `dlopen` 路径扩展到 Android，新增 `scripts/test-native-android-modules.sh`，使用 Android NDK `aarch64-linux-android35-clang` 构建 `GOOS=android GOARCH=arm64 CGO_ENABLED=1 -tags native_modules` 的 native `glua` 和仓库内 fixture `.so`，通过 adb 推送到 `/data/local/tmp/glua-native-modules/` 后执行 `require("glua_native_smoke")` 成功路径和 `luaopen_glua_native_failopen` 初始化失败路径，结果通过。随后使用默认 no-CGO Android `glua` / `gluac` 与 Android NDK 构建的官方 Lua 5.3.6，在设备 `24129PN74C`（Android 16 / SDK 36 / arm64-v8a）上执行 5 轮 benchmark；设备侧用 `date +%s%N` 计时，运行用例每轮 warmup 5 次、计时 40 次取中位数，编译用例每轮 warmup 5 次、计时 30 次取中位数，再对 5 轮取中位数。Android 5 轮结果：`arith_add_loop 0.56x`、`arith_mix_loop 0.63x`、`arith_chain_temp 0.56x`、`table_rw 0.82x`、`function_call 0.73x`、`string_concat 0.81x`、`closure_upvalue 0.75x`、`stdlib_math_string 0.58x`、`recursion 0.90x`、`compile_3000_functions 0.75x`。后续 Android 真实模块全量主路径已由 `scripts/test-native-android-real-modules.sh` 补齐，见后续记录。
 - 2026-07-08：继续推进 Android 真实模块全量验收与 Android-only 优化。新增 `scripts/test-native-android-real-modules.sh`，用 Android NDK 构建 native `glua`、lua-cjson、LPeg、LuaSocket release/debug `.so`，推送到 `/data/local/tmp/glua-native-real-modules/` 后执行设备侧真实模块验收；`scripts/build-native-cjson.sh`、`scripts/build-native-lpeg.sh`、`scripts/build-native-luasocket.sh` 均新增 `TARGET_GOOS=android` 源码构建分支。设备实测默认 LPeg `MAXRECLEVEL=200` 的深递归 capture 在约 140 层 SIGSEGV，120 层成功；因此 `scripts/build-native-lpeg.sh` 仅在 Android 分支加入 `-DMAXRECLEVEL=96`，使同一路径返回 Lua 错误 `subcapture nesting too deep` 而不是 C 栈崩溃，macOS/Linux/Windows 不受影响。已通过 Android lua-cjson acceptance、完整 LPeg 官方 `third_party/lpeg/test.lua` 与 `re` 模块测试、LuaSocket release smoke、LuaSocket 官方离线脚本；LuaSocket 官方 `testsrvr.lua` + `testclnt.lua` client/server 长脚本已通过 method registration、closed connection detection、partial receive、select、read/write after close、connect errors、rebinding、active close 和 accept function，随后在 `getstats test` 前序状态下停在 server `data = server:accept()`。单独一轮 `getstats` 最小复现已通过，说明当前卡点更像官方长脚本前序状态与 Android socket reconnect/accept 叠加；排查过程中设备 `bc29432a` 从 `adb devices` 消失，重启 adb server 后仍无设备。恢复条件：恢复 ADB 连接后，先跑短矩阵区分 `accept_errors()` 等前序路径是否触发卡点，再复跑 `ADB_SERIAL=bc29432a ./scripts/test-native-android-real-modules.sh`；在 client/server 长脚本通过前，不得声明 Android LuaSocket official 全量验收完成。
 - 2026-07-08：设备重新连接后复跑 `ADB_SERIAL=bc29432a ./scripts/test-native-android-real-modules.sh`，Android arm64 真实模块全量主路径通过。结果覆盖 lua-cjson、完整 LPeg 官方 `test.lua` 与 `re` 模块、LuaSocket release smoke、LuaSocket 官方离线脚本，以及 LuaSocket 官方 `testsrvr.lua` + `testclnt.lua` client/server 长脚本；client/server 输出 `testing: done in 50.06s` 并最终输出 `Android native real module acceptance passed`。Android harness 只在临时测试副本中做两处平台环境适配：将会被设备 DNS 解析到 `198.18.0.x` 的 `host.is.invalid` 换成真正无效主机名；空 host 若解析到非 localhost peer 则关闭并回退显式 localhost，避免 Android 网络环境让官方 server 停在后续 `accept()`。新增/修改的 GitHub Actions 也开始覆盖 native CGO 能加载 Lua C 模块的构建：CI 新增 macOS/Ubuntu `CGO_ENABLED=1 go test -tags native_modules ./...`、native CLI build 和 `./scripts/test-native-real-modules.sh`；release 新增 macOS/Ubuntu native `glua` artifact job，先跑真实模块验收再发布 `-tags native_modules` 产物。Windows 运行期仍等待用户手动平台验收，不影响本轮 Android 完整通过结论。
+- 2026-07-08：Windows amd64 strict runtime 闭环完成。验证命令为 `.\scripts\test-native-windows-manual.ps1 -GoArch amd64 -Bash "C:\Program Files\Git\bin\bash.exe" -StrictRuntime`，覆盖默认 no-CGO Go tests、`./scripts/check-go-gates.sh`、`CGO_ENABLED=1 go test -tags native_modules ./...`、Windows `lua53.def` drift check、`lua53.dll` runtime shim/import library 构建、fixture/lua-cjson/LPeg/LuaSocket DLL 源码构建、Windows source build strict aggregate，以及 fixture、lua-cjson、LPeg、LuaSocket 和 real modules 运行期验收；`-StrictRuntime` 未发现运行期 `skip:`。同步更新 `docs/NATIVE_MODULES_ACCEPTANCE.md`、`docs/NATIVE_MODULES_BUILD.md`、`docs/NATIVE_MODULES_WINDOWS_FUNCTIONAL_TEST.md` 和 `docs/NATIVE_MODULES_WINDOWS_BENCHMARK.md`，当前 macOS arm64、Linux arm64、Windows amd64 与 Android arm64 已完成真实模块目标平台运行期闭环；Android LuaSocket 官方脚本包含设备网络环境适配。

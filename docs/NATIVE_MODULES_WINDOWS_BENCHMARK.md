@@ -2,6 +2,29 @@
 
 本文用于在 Windows 目标平台生成最终 benchmark 结果。它只回答性能问题：当前分支默认 no-CGO `glua` / `gluac` 与官方 Lua 5.3.6 的差异。功能验收另见 `docs/NATIVE_MODULES_WINDOWS_FUNCTIONAL_TEST.md`。
 
+## 最近一次结果
+
+2026-07-08 已在 Windows amd64 上完成默认 cold-start benchmark，并将结果写入 `docs/BENCHMARK.md`。同日追加 `scripts/benchmark-official-amortized.sh` 摊销启动成本复核，用于区分 Windows 短进程固定成本与 VM/编译器热路径成本。
+
+环境摘要：
+
+- OS：Microsoft Windows 11 企业版 10.0.26200，64 位。
+- Go：`go version go1.26.4 windows/amd64`。
+- 官方 Lua：Lua 5.3.6，路径 `C:\mise-data\installs\lua\5.3.6\bin`。
+- 本项目产物：默认 no-CGO `bin\glua.exe` / `bin\gluac.exe`。
+
+Cold-start benchmark 结论：本项目相对官方 Lua 5.3.6 为 `1.81x` 到 `2.66x`，主要受 Windows 进程启动、文件系统检查和 Go runtime 初始化固定成本影响。
+
+摊销启动成本复核命令：
+
+```bash
+LUA_BIN=/c/mise-data/installs/lua/5.3.6/bin/lua.exe \
+GLUA_BIN="$PWD/bin/glua.exe" \
+./scripts/benchmark-official-amortized.sh
+```
+
+摊销复核结果：多数运行类用例回落到 `0.71x` 到 `1.26x`；`recursion` 和 `compile_3000_functions` 仍明显慢于官方，分别为 `1.92x` 和 `2.17x`。后续 Windows 性能优化应优先使用进程内 benchmark 或 Go micro/profile 定位这两项。
+
 ## 前置条件
 
 必须先完成 Windows 功能验收，并且 `scripts/test-native-windows-manual.ps1 -StrictRuntime` 通过。

@@ -2,6 +2,24 @@
 
 本文用于在 Windows 目标平台手动验收 `native_modules` 功能闭环。它只回答一个问题：Windows 上是否能构建并运行 Lua 5.3 public C API 原生模块。最终性能结果另见 `docs/NATIVE_MODULES_WINDOWS_BENCHMARK.md`。
 
+## 最近一次验收结果
+
+2026-07-08 已在 Windows amd64 目标平台完成严格功能验收：
+
+```powershell
+.\scripts\test-native-windows-manual.ps1 -GoArch amd64 -Bash "C:\Program Files\Git\bin\bash.exe" -StrictRuntime
+```
+
+结果：通过，脚本退出码为 0，`-StrictRuntime` 未发现运行期 `skip:`。本轮覆盖默认 no-CGO Go tests、`./scripts/check-go-gates.sh`、`CGO_ENABLED=1 go test -tags native_modules ./...`、Windows `lua53.def` drift check、`lua53.dll` runtime shim/import library 构建、fixture/lua-cjson/LPeg/LuaSocket DLL 构建、Windows source build strict aggregate，以及 fixture、lua-cjson、LPeg、LuaSocket 和 real modules 运行期验收。
+
+验收环境摘要：
+
+- OS：Microsoft Windows 11 企业版 10.0.26200，64 位。
+- Go：`go version go1.26.4 windows/amd64`。
+- C toolchain：MSYS2 MinGW GCC 16.1.0。
+- Import library 工具：GNU dlltool 2.46.1。
+- 临时目录：`C:\tmp\go-lua-vm`。
+
 ## 验收范围
 
 Windows 功能验收必须覆盖以下路径：

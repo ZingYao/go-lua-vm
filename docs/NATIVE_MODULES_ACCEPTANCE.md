@@ -1,6 +1,6 @@
 # native_modules 验收记录
 
-本文记录 `native_modules` 可选构建的真实模块验收状态。它是当前验收台账，不等同于全平台最终完成声明；Windows 仍需按 TODO 继续运行期闭环。
+本文记录 `native_modules` 可选构建的真实模块验收状态。它是当前验收台账；macOS arm64、Linux arm64、Windows amd64 与 Android arm64 已完成 fixture、lua-cjson、LPeg、LuaSocket 的目标平台运行期闭环。Android LuaSocket 官方脚本包含设备网络环境适配，其他未执行 OS/架构组合仍需独立验收。
 
 ## 当前记录
 
@@ -207,15 +207,37 @@ Android benchmark 环境：
 | `recursion` | 0.015599s | 0.014101s | 0.90x |
 | `compile_3000_functions` | 0.019182s | 0.014471s | 0.75x |
 
-## Windows
+## Windows amd64
 
-Windows `.dll` 是目标支持面，但当前记录尚未声明 Windows 运行期通过：
+当前 Windows amd64 已通过真实目标平台 `.dll` 源码自包含构建与运行期验收：
 
-- `LoadLibraryW` / `GetProcAddress` loader 代码路径已存在。
-- 真实模块构建与运行期脚本在 `lua53.dll` shim 或等价 import library 落地前明确 `skip`。
-- `scripts/check-native-skip-reasons.sh` 已覆盖 Windows fixture、cjson、LPeg、LuaSocket build/runtime 和真实模块总验收入口的 skip 文本，防止不可用平台静默通过。
-- Windows 功能验收手册：`docs/NATIVE_MODULES_WINDOWS_FUNCTIONAL_TEST.md`。
-- Windows 最终 benchmark 手册：`docs/NATIVE_MODULES_WINDOWS_BENCHMARK.md`。
+| 模块 | 脚本 | 后缀 | 验收点 |
+| --- | --- | --- | --- |
+| fixture | `scripts/test-native-modules.sh` | `.dll` | `require` 成功路径、`luaopen_*` 初始化失败、userdata/metatable/registry/error smoke |
+| lua-cjson | `scripts/test-native-cjson.sh` | `.dll` | Windows import library 链接、`require("cjson")`、`encode/decode`、错误输入 `pcall` |
+| LPeg | `scripts/test-native-lpeg.sh` | `.dll` | `require("lpeg")`、基础 pattern/match、完整 `third_party/lpeg/test.lua` 和 `re` 模块官方测试 |
+| LuaSocket | `scripts/test-native-luasocket.sh` | `.dll` | `require("mime")`、MIME 编解码、`require("socket")`、TCP/UDP loopback、官方离线脚本；官方 client/server 长测试在 Windows strict runtime 中记录为 `note:`，不作为 `skip:` |
+| 当前平台总验收 | `scripts/test-native-real-modules.sh` | `.dll` | 串联 fixture、lua-cjson、LPeg 和 LuaSocket 运行期验收 |
+
+Windows 验收环境：
+
+- OS：Microsoft Windows 11 企业版 10.0.26200，64 位。
+- 机器：HP Victus by HP Gaming Laptop 16-r1xxx。
+- CPU：Intel(R) Core(TM) i7-14650HX，16 cores / 24 logical processors。
+- Go：`go version go1.26.4 windows/amd64`。
+- C toolchain：MSYS2 MinGW GCC 16.1.0。
+- Import library 工具：GNU dlltool 2.46.1。
+- 临时目录：`C:\tmp\go-lua-vm`，用于规避非 ASCII 用户目录导致的 MinGW 汇编临时路径问题。
+
+最近一次 Windows 验证矩阵：
+
+```powershell
+.\scripts\test-native-windows-manual.ps1 -GoArch amd64 -Bash "C:\Program Files\Git\bin\bash.exe" -StrictRuntime
+```
+
+结果：2026-07-08 本轮复跑通过；脚本覆盖默认 no-CGO Go tests、`./scripts/check-go-gates.sh`、`CGO_ENABLED=1 go test -tags native_modules ./...`、Windows `lua53.def` drift check、Windows `lua53.dll` runtime shim/import library 构建、fixture/lua-cjson/LPeg/LuaSocket DLL 构建、Windows source build strict aggregate，以及 fixture、lua-cjson、LPeg、LuaSocket 和 real modules 运行期验收。`-StrictRuntime` 未发现运行期 `skip:`。
+
+Windows 性能结果见 [Benchmark 最终结果](BENCHMARK.md)；功能验收复跑说明见 [Windows 功能验收手册](NATIVE_MODULES_WINDOWS_FUNCTIONAL_TEST.md)，benchmark 复跑说明见 [Windows Benchmark 手册](NATIVE_MODULES_WINDOWS_BENCHMARK.md)。
 
 ## 不可夸大的结论
 
