@@ -1,4 +1,6 @@
 {
+  "extension.displayName": "glua 语言服务器",
+  "extension.description": "面向 Lua/glua 的语言服务扩展，支持语法高亮、诊断、补全、文档、格式化和 DAP attach 调试。",
   "glua.openBuiltinSignatureJson.title": "GLua: 打开内置方法签名 JSON",
   "glua.showBuiltinDocStatus.title": "GLua: 显示内置文档状态",
   "glua.showOutput.title": "GLua: 显示语言服务器输出",

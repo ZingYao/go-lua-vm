@@ -1,4 +1,6 @@
 {
+  "extension.displayName": "glua Language Server",
+  "extension.description": "Language server client for Lua/glua syntax highlighting, diagnostics, completion, documentation, formatting, and DAP attach debugging.",
   "glua.openBuiltinSignatureJson.title": "GLua: Open builtin signature JSON",
   "glua.showBuiltinDocStatus.title": "GLua: Show builtin doc status",
   "glua.showOutput.title": "GLua: Show language server output",

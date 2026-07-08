@@ -1,10 +1,31 @@
 {
   "name": "glua-lsp",
-  "displayName": "glua Language Server",
-  "description": "Language server client for go-lua-vm syntax extensions.",
-  "version": "0.0.1",
-  "publisher": "local",
-  "private": true,
+  "displayName": "%extension.displayName%",
+  "description": "%extension.description%",
+  "version": "1.0.0",
+  "publisher": "Zing",
+  "author": "Zing",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ZingYao/go-lua-vm.git",
+    "directory": "vscode/extensions/glua-lsp"
+  },
+  "bugs": {
+    "url": "https://github.com/ZingYao/go-lua-vm/issues"
+  },
+  "homepage": "https://github.com/ZingYao/go-lua-vm/tree/master/vscode/extensions/glua-lsp",
+  "license": "UNLICENSED",
+  "keywords": [
+    "lua",
+    "glua",
+    "language-server",
+    "debug-adapter"
+  ],
+  "scripts": {
+    "build": "esbuild extension.js --bundle --platform=node --format=cjs --external:vscode --outfile=dist/extension.js && esbuild server/index.js --bundle --platform=node --format=cjs --outfile=dist/server.js",
+    "vscode:prepublish": "npm run build",
+    "test": "node test/golden-diagnostics.test.js && node test/golden-require-definition.test.js && node test/debug-attach.test.js"
+  },
   "engines": {
     "vscode": "^1.80.0"
   },
@@ -21,7 +42,7 @@
     "onCommand:glua.startAttachDebug",
     "onDebugResolve:glua"
   ],
-  "main": "./extension.js",
+  "main": "./dist/extension.js",
   "contributes": {
     "commands": [
       {
@@ -246,5 +267,8 @@
     "vscode-languageclient": "^9.0.1",
     "vscode-languageserver": "^9.0.1",
     "vscode-languageserver-textdocument": "^1.0.12"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.1"
   }
 }

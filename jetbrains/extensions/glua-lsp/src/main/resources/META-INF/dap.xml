@@ -1,0 +1,15 @@
+<idea-plugin>
+  <extensions defaultExtensionNs="com.intellij">
+    <configurationType
+      implementation="com.glua.jetbrains.GluaDapRunConfigurationType"/>
+
+    <xdebugger.breakpointType
+      implementation="com.glua.jetbrains.GluaLineBreakpointType"/>
+
+    <platform.dap.launchArgumentsProvider
+      implementation="com.glua.jetbrains.GluaDapLaunchArgumentsProvider"/>
+
+    <platform.dap.debugAdapterSupportProvider
+      implementation="com.glua.jetbrains.GluaDapSupportProvider"/>
+  </extensions>
+</idea-plugin>
