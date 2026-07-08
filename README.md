@@ -202,6 +202,7 @@ GLUAC_BIN=./bin/gluac \
 - [docs/CUSTOM_CHUNK.md](docs/CUSTOM_CHUNK.md)：自定义加密 chunk 的 encoder/decoder 接入规划与最小 Demo。
 - [docs/NATIVE_MODULES_PLAN.md](docs/NATIVE_MODULES_PLAN.md)：Lua C 原生模块加载方案、目标、非目标、架构和分期。
 - [docs/NATIVE_MODULES_BUILD.md](docs/NATIVE_MODULES_BUILD.md)：`native_modules` 构建方式、平台前置条件、验收命令和当前 API 覆盖边界。
+- [docs/NATIVE_CROSS_TOOLCHAINS.md](docs/NATIVE_CROSS_TOOLCHAINS.md)：`native_modules` 跨系统交叉编译矩阵、mise/Zig 工具链和 CI 验证入口。
 - [docs/NATIVE_MODULES_SOURCE_INVENTORY.md](docs/NATIVE_MODULES_SOURCE_INVENTORY.md)：native shim、Lua public headers、fixture、真实模块源码和脚本的自包含清单。
 
 ### 运行时与标准库语义

@@ -24,7 +24,7 @@ func TestTracebackMatchesGolden(t *testing.T) {
 		t.Fatalf("read traceback golden failed: %v", err)
 	}
 
-	expectedText := strings.TrimRight(string(goldenBytes), "\n")
+	expectedText := strings.TrimRight(strings.ReplaceAll(string(goldenBytes), "\r\n", "\n"), "\n")
 	actualText = strings.TrimRight(actualText, "\n")
 	if actualText != expectedText {
 		// traceback 文本变化必须经过迁移语义确认后更新 golden。

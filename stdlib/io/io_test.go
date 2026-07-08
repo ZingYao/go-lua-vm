@@ -1030,6 +1030,7 @@ func TestFilesystemAccessAndProcessPolicy(t *testing.T) {
 		// io.open 成功时必须返回 file userdata。
 		t.Fatalf("OpenFile result is not file: %v", err)
 	}
+	defer openFile.Close()
 	firstLine, err := FileRead(NewFileValue(nil, openFile), runtime.StringValue("l"))
 	if err != nil {
 		// 打开的文件应可读取。
@@ -1052,6 +1053,10 @@ func TestFilesystemAccessAndProcessPolicy(t *testing.T) {
 	if len(readValues) != 1 || readValues[0].String != "alpha\nbeta\n" {
 		// io.read("a") 必须读取文件全部内容。
 		t.Fatalf("Read default input = %#v, want file content", readValues)
+	}
+	if _, err := Close(NewFileValue(nil, defaultInput)); err != nil {
+		// Windows 不允许删除仍被打开的临时文件，读取后必须显式关闭默认输入。
+		t.Fatalf("Close default input failed: %v", err)
 	}
 
 	if _, err := Output(runtime.StringValue(outputPath)); err != nil {
@@ -1093,6 +1098,10 @@ func TestFilesystemAccessAndProcessPolicy(t *testing.T) {
 			// 返回内容必须去除换行。
 			t.Fatalf("Lines iterator %d = %#v, want %q", index, result, want)
 		}
+	}
+	if result, err := iterator(); err != nil || len(result) != 0 {
+		// 路径型 iterator 必须在 EOF 调用时自动关闭文件，避免 Windows 临时文件删除失败。
+		t.Fatalf("Lines iterator EOF = %#v err=%v, want empty", result, err)
 	}
 	popenValues, err := POpen(runtime.StringValue("printf 'demo\\n'"), runtime.StringValue("r"))
 	if err != nil {

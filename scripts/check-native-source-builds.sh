@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${repo_root}/scripts/native-cross-targets.sh"
 host_goos="$(go env GOOS)"
 host_goarch="$(go env GOARCH)"
 target_list="${NATIVE_SOURCE_BUILD_TARGETS:-${NATIVE_CROSS_TARGETS:-}}"
@@ -49,10 +50,9 @@ if [[ -n "${target_list}" ]]; then
     append_target "${target}"
   done
 else
-  append_target "${host_goos}/${host_goarch}"
-  append_target "linux/${host_goarch}"
-  append_target "darwin/${host_goarch}"
-  append_target "windows/${host_goarch}"
+  while IFS= read -r target; do
+    append_target "${target}"
+  done < <(native_release_targets)
 fi
 
 normalize_env_name() {
@@ -62,16 +62,25 @@ normalize_env_name() {
 target_cc_for() {
   local target_goos="$1"
   local target_goarch="$2"
-  local env_suffix
+  local target_goarm="${3:-}"
   local env_name
+  local fallback_env_name
   local env_value
 
-  env_suffix="$(normalize_env_name "${target_goos}_${target_goarch}")"
-  env_name="NATIVE_CC_${env_suffix}"
+  env_name="$(native_target_cc_var "${target_goos}" "${target_goarch}" "${target_goarm}")"
   env_value="${!env_name:-}"
   if [[ -n "${env_value}" ]]; then
     echo "${env_value}"
     return 0
+  fi
+
+  if [[ "${target_goarch}" == "arm" && -n "${target_goarm}" ]]; then
+    fallback_env_name="$(native_target_cc_var "${target_goos}" "${target_goarch}")"
+    env_value="${!fallback_env_name:-}"
+    if [[ -n "${env_value}" ]]; then
+      echo "${env_value}"
+      return 0
+    fi
   fi
 
   if [[ "${target_goos}" == "${host_goos}" && "${target_goarch}" == "${host_goarch}" ]]; then
@@ -112,18 +121,23 @@ total_count=0
 run_module_build() {
   local target_goos="$1"
   local target_goarch="$2"
-  local cc="$3"
-  local module_name="$4"
-  local script_path="$5"
-  local module_build_dir="$6"
-  local output_file="${work_dir}/${target_goos}_${target_goarch}_${module_name}.log"
+  local target_goarm="$3"
+  local cc="$4"
+  local module_name="$5"
+  local script_path="$6"
+  local module_build_dir="$7"
+  local target_name
+  local output_file
+
+  target_name="$(native_target_name "${target_goos}/${target_goarch}${target_goarm:+/${target_goarm}}")"
+  output_file="${work_dir}/${target_name}_${module_name}.log"
 
   total_count=$((total_count + 1))
   echo "module=${module_name}"
   echo "script=${script_path}"
   echo "build_dir=${module_build_dir}"
 
-  if TARGET_GOOS="${target_goos}" TARGET_GOARCH="${target_goarch}" BUILD_DIR="${module_build_dir}" \
+  if TARGET_GOOS="${target_goos}" TARGET_GOARCH="${target_goarch}" TARGET_GOARM="${target_goarm}" BUILD_DIR="${module_build_dir}" \
     CGO_ENABLED=1 CC="${cc}" "${script_path}" >"${output_file}" 2>&1; then
     if grep -F "skip:" "${output_file}" >/dev/null; then
       grep -F "skip:" "${output_file}" | sed 's/^/  /'
@@ -147,17 +161,22 @@ run_module_build() {
 }
 
 for target in "${targets[@]}"; do
-  target_goos="${target%%/*}"
-  target_goarch="${target##*/}"
-  output_dir="${build_root}/${target_goos}-${target_goarch}"
-  cc_var="NATIVE_CC_$(normalize_env_name "${target_goos}_${target_goarch}")"
+  target_goos="$(native_target_goos "${target}")"
+  target_goarch="$(native_target_goarch "${target}")"
+  target_goarm="$(native_target_goarm "${target}")"
+  target_name="$(native_target_name "${target}")"
+  output_dir="${build_root}/${target_name}"
+  cc_var="$(native_target_cc_var "${target_goos}" "${target_goarch}" "${target_goarm}")"
 
   echo
   echo "target GOOS=${target_goos} GOARCH=${target_goarch}"
+  if [[ -n "${target_goarm}" ]]; then
+    echo "target GOARM=${target_goarm}"
+  fi
   echo "CC variable=${cc_var}"
   echo "output_dir=${output_dir}"
 
-  if ! cc="$(target_cc_for "${target_goos}" "${target_goarch}")"; then
+  if ! cc="$(target_cc_for "${target_goos}" "${target_goarch}" "${target_goarm}")"; then
     echo "skip: no C compiler configured for ${target_goos}/${target_goarch}; set ${cc_var} or CC" >&2
     skipped_count=$((skipped_count + module_count))
     total_count=$((total_count + module_count))
@@ -187,7 +206,7 @@ for target in "${targets[@]}"; do
     script_relative="${module#*:}"
     script_path="${repo_root}/${script_relative}"
     module_build_dir="${output_dir}/${module_name}"
-    run_module_build "${target_goos}" "${target_goarch}" "${cc}" "${module_name}" "${script_path}" "${module_build_dir}"
+    run_module_build "${target_goos}" "${target_goarch}" "${target_goarm}" "${cc}" "${module_name}" "${script_path}" "${module_build_dir}"
   done
 done
 

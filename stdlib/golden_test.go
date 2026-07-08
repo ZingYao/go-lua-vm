@@ -30,7 +30,7 @@ func TestStandardLibraryExportsGolden(t *testing.T) {
 		// golden 文件缺失会让标准库导出面失去稳定基线。
 		t.Fatalf("read stdlib golden failed: %v", err)
 	}
-	expected := strings.TrimRight(string(expectedBytes), "\n")
+	expected := strings.TrimRight(strings.ReplaceAll(string(expectedBytes), "\r\n", "\n"), "\n")
 	if got != expected {
 		// 标准库导出面变化必须经过兼容性确认后更新 golden。
 		t.Fatalf("stdlib exports golden mismatch:\n got:\n%s\nwant:\n%s", got, expected)

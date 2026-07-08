@@ -5,7 +5,11 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 target_goos="${TARGET_GOOS:-$(go env GOOS)}"
 target_goarch="${TARGET_GOARCH:-$(go env GOARCH)}"
 build_dir="${BUILD_DIR:-${repo_root}/build/native-fixtures/${target_goos}-${target_goarch}}"
-glua_bin="${GLUA_BIN:-${build_dir}/glua-native}"
+if [[ "${target_goos}" == "windows" && -z "${GLUA_BIN:-}" ]]; then
+  glua_bin="${build_dir}/glua-native.exe"
+else
+  glua_bin="${GLUA_BIN:-${build_dir}/glua-native}"
+fi
 template_file="${repo_root}/tests/native_modules/fixtures/glua_native_smoke.lua"
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/go-lua-vm-native-modules.XXXXXX")"
 
@@ -38,8 +42,7 @@ case "${target_goos}" in
     runtime_extensions=(".so")
     ;;
   windows)
-    echo "skip: Windows CLI smoke requires lua53.dll shim or import library, not implemented yet" >&2
-    exit 0
+    runtime_extensions=(".dll")
     ;;
   *)
     echo "skip: unsupported native module CLI smoke target GOOS=${target_goos}" >&2
@@ -58,6 +61,11 @@ elif [[ ! -x "${glua_bin}" ]]; then
   exit 1
 fi
 
+if [[ "${target_goos}" == "windows" ]]; then
+  BUILD_DIR="${build_dir}" CGO_ENABLED=1 "${repo_root}/scripts/build-native-windows-lua53-shim.sh"
+  export LUA53_IMPORT_LIB="${build_dir}/liblua53.dll.a"
+fi
+
 BUILD_DIR="${build_dir}" CGO_ENABLED=1 "${repo_root}/scripts/build-native-fixtures.sh"
 
 lua_string_literal() {
@@ -65,6 +73,15 @@ lua_string_literal() {
   text="${text//\\/\\\\}"
   text="${text//\"/\\\"}"
   printf '"%s"' "${text}"
+}
+
+runtime_path() {
+  local path="$1"
+  if [[ "${target_goos}" == "windows" ]]; then
+    cygpath -m "${path}"
+    return 0
+  fi
+  echo "${path}"
 }
 
 missing_lua_pattern="${work_dir}/missing/?.lua"
@@ -81,7 +98,7 @@ for extension in "${runtime_extensions[@]}"; do
   fi
 
   suffix_name="${extension#.}"
-  cpath_pattern="${build_dir}/?${extension}"
+  cpath_pattern="$(runtime_path "${build_dir}")/?${extension}"
   package_cpath_literal="$(lua_string_literal "${cpath_pattern}")"
 
   smoke_source="${work_dir}/glua_native_smoke_${suffix_name}.lua"

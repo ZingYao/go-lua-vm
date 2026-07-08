@@ -718,7 +718,7 @@ func TestLexerTokenGolden(t *testing.T) {
 		// golden 文件缺失意味着测试资产不完整。
 		t.Fatalf("read golden failed: %v", err)
 	}
-	expected := strings.TrimSpace(string(expectedBytes))
+	expected := strings.TrimSpace(strings.ReplaceAll(string(expectedBytes), "\r\n", "\n"))
 	if got != expected {
 		// token 序列必须与 golden 完全一致。
 		t.Fatalf("golden mismatch:\n got:\n%s\nwant:\n%s", got, expected)

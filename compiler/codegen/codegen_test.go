@@ -2170,9 +2170,10 @@ func TestCompileChunkDisassemblyGolden(t *testing.T) {
 		// golden 文件缺失表示测试资产不完整。
 		t.Fatalf("read codegen golden failed: %v", err)
 	}
-	if got != string(expectedBytes) {
+	expectedText := strings.ReplaceAll(string(expectedBytes), "\r\n", "\n")
+	if got != expectedText {
 		// 反汇编输出必须保持稳定，便于后续与官方 Lua 样例逐步对齐。
-		t.Fatalf("codegen disassembly golden mismatch:\n got:\n%s\nwant:\n%s", got, string(expectedBytes))
+		t.Fatalf("codegen disassembly golden mismatch:\n got:\n%s\nwant:\n%s", got, expectedText)
 	}
 }
 

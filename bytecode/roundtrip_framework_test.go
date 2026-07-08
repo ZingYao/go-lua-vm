@@ -25,7 +25,7 @@ func TestBytecodeRoundTripFrameworkGolden(t *testing.T) {
 		t.Fatalf("read bytecode framework golden failed: %v", err)
 	}
 
-	expectedText := strings.TrimRight(string(goldenBytes), "\n")
+	expectedText := strings.TrimRight(strings.ReplaceAll(string(goldenBytes), "\r\n", "\n"), "\n")
 	if actualText != expectedText {
 		// 框架覆盖说明变化时必须同步更新 golden，避免 TODO 状态和测试实际不一致。
 		t.Fatalf("bytecode framework golden mismatch:\n got:\n%s\nwant:\n%s", actualText, expectedText)

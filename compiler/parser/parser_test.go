@@ -1115,7 +1115,7 @@ func TestParserSemanticErrorsMatchGolden(t *testing.T) {
 		t.Fatalf("read parser golden failed: %v", readErr)
 	}
 
-	expectedText := strings.TrimRight(string(goldenBytes), "\n")
+	expectedText := strings.TrimRight(strings.ReplaceAll(string(goldenBytes), "\r\n", "\n"), "\n")
 	actualText := strings.TrimRight(err.Error(), "\n")
 	if actualText != expectedText {
 		// 错误位置或文本变化时必须显式更新迁移基线。
@@ -1181,9 +1181,10 @@ func TestParserGolden(t *testing.T) {
 		// golden 文件缺失表示测试资产不完整。
 		t.Fatalf("read parser golden failed: %v", err)
 	}
-	if got != string(expectedBytes) {
+	expectedText := strings.ReplaceAll(string(expectedBytes), "\r\n", "\n")
+	if got != expectedText {
 		// AST 摘要必须与 golden 完全一致。
-		t.Fatalf("parser golden mismatch:\n got:\n%s\nwant:\n%s", got, string(expectedBytes))
+		t.Fatalf("parser golden mismatch:\n got:\n%s\nwant:\n%s", got, expectedText)
 	}
 }
 

@@ -453,7 +453,7 @@ func TestRunIgnoreEnvironmentOption(t *testing.T) {
 	t.Setenv("LUA_CPATH", "xxx")
 
 	scriptPath := filepath.Join(t.TempDir(), "script.lua")
-	script := "assert(not string.find(package.path, 'xxx', 1, true)); assert(string.find(package.path, 'lua', 1, true)); assert(not string.find(package.cpath, 'xxx', 1, true)); assert(string.find(package.cpath, 'lua', 1, true))\n"
+	script := "assert(not string.find(package.path, 'xxx', 1, true)); assert(string.find(package.path, 'lua', 1, true)); assert(not string.find(package.cpath, 'xxx', 1, true)); assert(string.find(package.cpath, 'lua', 1, true) or string.find(package.cpath, 'dll', 1, true))\n"
 	if err := os.WriteFile(scriptPath, []byte(script), 0o600); err != nil {
 		// 测试脚本写入不应失败。
 		t.Fatalf("WriteFile script failed: %v", err)
@@ -1245,7 +1245,7 @@ func TestMainScriptSyntaxErrorPrintsCompactSourceMessage(t *testing.T) {
 		t.Fatalf("exit code = %d, want failure", exitCode)
 	}
 	wantSuffix := "/bad.lua:3: syntax error near <eof>\n"
-	if !strings.HasSuffix(stderr.String(), wantSuffix) {
+	if !strings.HasSuffix(filepath.ToSlash(stderr.String()), wantSuffix) {
 		// stderr 必须只包含可直接展示的主错误。
 		t.Fatalf("stderr = %q, want suffix %q", stderr.String(), wantSuffix)
 	}

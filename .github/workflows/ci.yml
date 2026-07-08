@@ -56,3 +56,75 @@ jobs:
 
       - name: Project Gates
         run: ./scripts/check-go-gates.sh
+
+  native-cross-compile:
+    name: native cross compile (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-windows-android
+            os: ubuntu-latest
+            targets: >-
+              linux/amd64
+              linux/386
+              linux/arm64
+              linux/arm/6
+              linux/arm/7
+              windows/amd64
+              windows/386
+              windows/arm64
+              android/arm64
+          - name: darwin
+            os: macos-latest
+            targets: >-
+              darwin/amd64
+              darwin/arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.4"
+          cache: true
+
+      - name: Setup mise tools
+        uses: jdx/mise-action@v2
+        with:
+          install: true
+          cache: true
+
+      - name: Setup Android NDK
+        id: setup-ndk
+        if: matrix.name == 'linux-windows-android'
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+
+      - name: Export Android NDK
+        if: matrix.name == 'linux-windows-android'
+        run: echo "ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}" >> "${GITHUB_ENV}"
+
+      - name: Native Toolchain Summary
+        env:
+          NATIVE_CROSS_TARGETS: ${{ matrix.targets }}
+        run: |
+          set -euo pipefail
+          ./scripts/bootstrap-native-toolchains.sh --install || true
+          eval "$(./scripts/bootstrap-native-toolchains.sh --emit-env)"
+          ./scripts/bootstrap-native-toolchains.sh || true
+
+      - name: Native Cross Compile
+        env:
+          NATIVE_CROSS_TARGETS: ${{ matrix.targets }}
+          NATIVE_CROSS_REQUIRE_ALL: "1"
+        run: |
+          set -euo pipefail
+          eval "$(./scripts/bootstrap-native-toolchains.sh --emit-env)"
+          ./scripts/check-native-cross-compile.sh

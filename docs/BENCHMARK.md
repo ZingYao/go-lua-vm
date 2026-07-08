@@ -32,7 +32,7 @@
 
 ## 2026-07-08 平台复核
 
-本段记录 `native_modules` 收尾阶段按既有 benchmark 脚本路径做的平台复核；benchmark 均使用默认 no-CGO `glua` / `gluac`，未为性能数据改动 Go 代码。
+本段记录 `native_modules` 收尾阶段按既有 benchmark 脚本路径做的平台复核；benchmark 均使用默认 no-CGO `glua` / `gluac`，未为性能数据改动 Go 代码。各平台结果受 CPU、调度器、电源模式、终端环境和系统负载影响，不能直接混合作为同一台机器上的回归判断；同一平台内的趋势用于发布说明和后续优化排查。
 
 复核口径：
 
@@ -40,6 +40,7 @@
 - 对比脚本：`scripts/benchmark-official.sh`
 - 统计方式：macOS 与 Linux 各跑 5 轮，按 5 轮结果分别取官方工具中位数和本项目中位数后计算倍率。
 - Android：设备侧 benchmark 跑 5 轮；每轮的运行用例 warmup 5 次、计时 40 次取中位数，编译用例 warmup 5 次、计时 30 次取中位数；再按 5 轮结果分别取官方工具中位数和本项目中位数后计算倍率。
+- Windows：当前记录为 3 轮默认 benchmark 中位数；后续如需与 macOS/Linux 完全同轮数对齐，可在 Windows 上追加 5 轮复核。
 - 依赖拉取：macOS host 和 Linux VM 内均执行 `go mod download`，结果均为 `go: no module dependencies to download`。
 
 ### macOS arm64 5 轮结果
@@ -111,6 +112,34 @@
 | `stdlib_math_string` | 0.051390s | 0.029732s | 0.58x |
 | `recursion` | 0.015599s | 0.014101s | 0.90x |
 | `compile_3000_functions` | 0.019182s | 0.014471s | 0.75x |
+
+### Windows 11 amd64
+
+- 日期：2026-07-08
+- 系统：Microsoft Windows 11 企业版 10.0.26200，64 位
+- 机器：HP Victus by HP Gaming Laptop 16-r1xxx
+- CPU：Intel(R) Core(TM) i7-14650HX，16 cores / 24 logical processors，MaxClockSpeed 2200 MHz
+- 内存：68408893440 bytes，约 63.7 GiB
+- Go：go1.26.4 windows/amd64
+- 官方 Lua：Lua 5.3.6，路径 `C:\mise-data\installs\lua\5.3.6\bin`
+- 本项目产物：`bin\glua.exe` / `bin\gluac.exe`
+- 构建模式：`CGO_ENABLED=0`
+- 脚本：`scripts/benchmark-official.sh`
+
+| English key | 官方 Lua 5.3.6 中位数 | 本项目中位数 | 本项目/官方 |
+| --- | ---: | ---: | ---: |
+| `arith_add_loop` | 0.049096s | 0.125993s | 2.57x |
+| `arith_mix_loop` | 0.049923s | 0.121414s | 2.43x |
+| `arith_chain_temp` | 0.050234s | 0.120178s | 2.39x |
+| `table_rw` | 0.044570s | 0.114574s | 2.57x |
+| `function_call` | 0.054492s | 0.144964s | 2.66x |
+| `string_concat` | 0.061553s | 0.119760s | 1.95x |
+| `closure_upvalue` | 0.050301s | 0.126592s | 2.52x |
+| `stdlib_math_string` | 0.062930s | 0.131121s | 2.08x |
+| `recursion` | 0.053992s | 0.118328s | 2.19x |
+| `compile_3000_functions` | 0.056098s | 0.101286s | 1.81x |
+
+Windows 本轮结果显示 no-CGO `glua` 在全部用例上慢于官方 Lua 5.3.6 C 实现，倍率范围为 `1.81x` 到 `2.66x`。该记录仅代表上述 Windows 机器和当次运行环境。
 
 ## 复现命令
 

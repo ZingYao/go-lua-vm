@@ -26,9 +26,15 @@ extern int glua_lua_callk_record(lua_State *L, int argument_count, int result_co
 #define GLUA_THREAD_LOCAL __thread
 #endif
 
+#if defined(_WIN32)
+#define GLUA_C_EXPORT __declspec(dllexport)
+#else
+#define GLUA_C_EXPORT
+#endif
+
 static GLUA_THREAD_LOCAL jmp_buf *glua_native_error_target = NULL;
 
-static void glua_lua_error_jump(void) {
+GLUA_C_EXPORT void glua_lua_error_jump(void) {
 	if (glua_native_error_target != NULL) {
 		longjmp(*glua_native_error_target, 1);
 	}

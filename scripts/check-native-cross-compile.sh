@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${repo_root}/scripts/native-cross-targets.sh"
 host_goos="$(go env GOOS)"
 host_goarch="$(go env GOARCH)"
 target_list="${NATIVE_CROSS_TARGETS:-}"
@@ -43,10 +44,9 @@ if [[ -n "${target_list}" ]]; then
     append_target "${target}"
   done
 else
-  append_target "${host_goos}/${host_goarch}"
-  append_target "linux/${host_goarch}"
-  append_target "darwin/${host_goarch}"
-  append_target "windows/${host_goarch}"
+  while IFS= read -r target; do
+    append_target "${target}"
+  done < <(native_release_targets)
 fi
 
 normalize_env_name() {
@@ -56,16 +56,25 @@ normalize_env_name() {
 target_cc_for() {
   local target_goos="$1"
   local target_goarch="$2"
-  local env_suffix
+  local target_goarm="${3:-}"
   local env_name
+  local fallback_env_name
   local env_value
 
-  env_suffix="$(normalize_env_name "${target_goos}_${target_goarch}")"
-  env_name="NATIVE_CC_${env_suffix}"
+  env_name="$(native_target_cc_var "${target_goos}" "${target_goarch}" "${target_goarm}")"
   env_value="${!env_name:-}"
   if [[ -n "${env_value}" ]]; then
     echo "${env_value}"
     return 0
+  fi
+
+  if [[ "${target_goarch}" == "arm" && -n "${target_goarm}" ]]; then
+    fallback_env_name="$(native_target_cc_var "${target_goos}" "${target_goarch}")"
+    env_value="${!fallback_env_name:-}"
+    if [[ -n "${env_value}" ]]; then
+      echo "${env_value}"
+      return 0
+    fi
   fi
 
   if [[ "${target_goos}" == "${host_goos}" && "${target_goarch}" == "${host_goarch}" ]]; then
@@ -96,12 +105,14 @@ status=0
 compiled_count=0
 skipped_count=0
 for target in "${targets[@]}"; do
-  target_goos="${target%%/*}"
-  target_goarch="${target##*/}"
-  output_dir="${build_root}/${target_goos}-${target_goarch}"
+  target_goos="$(native_target_goos "${target}")"
+  target_goarch="$(native_target_goarch "${target}")"
+  target_goarm="$(native_target_goarm "${target}")"
+  target_name="$(native_target_name "${target}")"
+  output_dir="${build_root}/${target_name}"
   test_output="${output_dir}/internal-native.test"
   glua_output="${output_dir}/glua-native"
-  cc_var="NATIVE_CC_$(normalize_env_name "${target_goos}_${target_goarch}")"
+  cc_var="$(native_target_cc_var "${target_goos}" "${target_goarch}" "${target_goarm}")"
 
   if [[ "${target_goos}" == "windows" ]]; then
     test_output="${test_output}.exe"
@@ -110,11 +121,14 @@ for target in "${targets[@]}"; do
 
   echo
   echo "target GOOS=${target_goos} GOARCH=${target_goarch}"
+  if [[ -n "${target_goarm}" ]]; then
+    echo "target GOARM=${target_goarm}"
+  fi
   echo "CC variable=${cc_var}"
   echo "test_output=${test_output}"
   echo "glua_output=${glua_output}"
 
-  if ! cc="$(target_cc_for "${target_goos}" "${target_goarch}")"; then
+  if ! cc="$(target_cc_for "${target_goos}" "${target_goarch}" "${target_goarm}")"; then
     echo "skip: no C compiler configured for ${target_goos}/${target_goarch}; set ${cc_var} or CC" >&2
     skipped_count=$((skipped_count + 1))
     if [[ "${require_all}" == "1" ]]; then
@@ -137,16 +151,18 @@ for target in "${targets[@]}"; do
   fi
 
   mkdir -p "${output_dir}"
+  go_env=(CGO_ENABLED=1 GOOS="${target_goos}" GOARCH="${target_goarch}" CC="${cc}")
+  if [[ -n "${target_goarm}" ]]; then
+    go_env+=(GOARM="${target_goarm}")
+  fi
 
-  if ! CGO_ENABLED=1 GOOS="${target_goos}" GOARCH="${target_goarch}" CC="${cc}" \
-    go test -c -tags native_modules -o "${test_output}" ./internal/native; then
+  if ! env "${go_env[@]}" go test -c -tags native_modules -o "${test_output}" ./internal/native; then
     echo "native internal test compile failed for ${target_goos}/${target_goarch}" >&2
     status=1
     continue
   fi
 
-  if ! CGO_ENABLED=1 GOOS="${target_goos}" GOARCH="${target_goarch}" CC="${cc}" \
-    go build -tags native_modules -trimpath -o "${glua_output}" ./cmd/glua; then
+  if ! env "${go_env[@]}" go build -tags native_modules -trimpath -o "${glua_output}" ./cmd/glua; then
     echo "native glua compile failed for ${target_goos}/${target_goarch}" >&2
     status=1
     continue

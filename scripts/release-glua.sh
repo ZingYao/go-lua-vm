@@ -12,19 +12,34 @@ if [[ "${go_version}" != "go1.26.4" ]]; then
 fi
 
 platforms=(
+  "linux/amd64"
+  "linux/386"
+  "linux/arm64"
+  "linux/arm/6"
+  "linux/arm/7"
+  "windows/amd64"
+  "windows/386"
+  "windows/arm64"
   "darwin/amd64"
   "darwin/arm64"
-  "linux/amd64"
-  "linux/arm64"
-  "windows/amd64"
+  "android/arm64"
 )
 
 mkdir -p "${release_dir}"
 
 for platform in "${platforms[@]}"; do
-  goos="${platform%/*}"
-  goarch="${platform#*/}"
-  artifact_name="glua-${version}-${goos}-${goarch}"
+  goos="${platform%%/*}"
+  remainder="${platform#*/}"
+  goarch="${remainder%%/*}"
+  goarm=""
+  if [[ "${remainder}" == */* ]]; then
+    goarm="${remainder#*/}"
+  fi
+  if [[ "${goarch}" == "arm" && -n "${goarm}" ]]; then
+    artifact_name="glua-${version}-${goos}-armv${goarm}"
+  else
+    artifact_name="glua-${version}-${goos}-${goarch}"
+  fi
   binary_path="${release_dir}/${artifact_name}/glua"
   if [[ "${goos}" == "windows" ]]; then
     binary_path="${binary_path}.exe"
@@ -32,7 +47,11 @@ for platform in "${platforms[@]}"; do
 
   mkdir -p "$(dirname "${binary_path}")"
   echo "building ${artifact_name}"
-  CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" go build -trimpath -o "${binary_path}" ./cmd/glua
+  go_env=(CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}")
+  if [[ -n "${goarm}" ]]; then
+    go_env+=(GOARM="${goarm}")
+  fi
+  env "${go_env[@]}" go build -trimpath -o "${binary_path}" ./cmd/glua
 
   (
     cd "${release_dir}"

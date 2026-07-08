@@ -52,9 +52,20 @@ function Invoke-Bash {
         $prefix = ($envPairs -join " ") + " "
     }
 
-    & $script:BashPath -lc "cd `"$script:RepoRootForBash`" && ${prefix}./$Script"
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Script failed with exit code $LASTEXITCODE"
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $output = & $script:BashPath -lc "cd `"$script:RepoRootForBash`" && ${prefix}./$Script" 2>&1
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    $text = ($output | Out-String).TrimEnd()
+    if ($text.Length -gt 0) {
+        Write-Host $text
+    }
+    if ($exitCode -ne 0) {
+        throw "$Script failed with exit code $exitCode"
     }
 }
 
@@ -159,8 +170,14 @@ $runtimeScripts = @(
 
 foreach ($runtimeScript in $runtimeScripts) {
     Invoke-Step "runtime attempt: $runtimeScript" {
-        $output = & $script:BashPath -lc "cd `"$script:RepoRootForBash`" && CGO_ENABLED=1 TARGET_GOOS=windows TARGET_GOARCH=$script:TargetArch ./$runtimeScript" 2>&1
-        $exitCode = $LASTEXITCODE
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            $output = & $script:BashPath -lc "cd `"$script:RepoRootForBash`" && CGO_ENABLED=1 TARGET_GOOS=windows TARGET_GOARCH=$script:TargetArch ./$runtimeScript" 2>&1
+            $exitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
         $text = ($output | Out-String).TrimEnd()
         if ($text.Length -gt 0) {
             Write-Host $text
@@ -168,7 +185,7 @@ foreach ($runtimeScript in $runtimeScripts) {
         if ($exitCode -ne 0) {
             throw "$runtimeScript failed with exit code $exitCode"
         }
-        if ($StrictRuntime -and $text -match "(?m)^skip:") {
+        if ($StrictRuntime -and $text -match "(?m)(^|:\s+)skip:") {
             throw "$runtimeScript skipped runtime acceptance under -StrictRuntime"
         }
     }
