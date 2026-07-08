@@ -144,7 +144,7 @@ case "${target_goos}" in
     selected_socket_sources=("${socket_sources[@]}")
     output_extensions=(".so")
     link_args=("-shared" "-fPIC")
-    platform_cflags=()
+    platform_cflags=("-D_DEFAULT_SOURCE" "-D_POSIX_C_SOURCE=200809L")
     ;;
   windows)
     selected_socket_sources=("${socket_windows_sources[@]}")

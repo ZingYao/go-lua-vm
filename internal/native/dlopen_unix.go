@@ -3,7 +3,7 @@
 package native
 
 /*
-#cgo linux LDFLAGS: -ldl
+#cgo linux LDFLAGS: -ldl -Wl,-E
 #include <dlfcn.h>
 #include <stdlib.h>
 

@@ -40,6 +40,8 @@ var (
 	nativeStateHandles = make(map[uintptr]*runtime.State)
 	// nativeStateBuffers 保存 C API 返回给 C 模块的临时 C buffer，并绑定到 lua_State handle 生命周期。
 	nativeStateBuffers = make(map[uintptr][]unsafe.Pointer)
+	// nativeStateCallBuffers 保存当前 lua_State handle 上嵌套 C function 调用期间创建的临时 C buffer。
+	nativeStateCallBuffers = make(map[uintptr][][]unsafe.Pointer)
 	// nativeStateCallBases 保存当前 lua_State handle 上嵌套 C function 调用的 Go State 栈基址。
 	nativeStateCallBases = make(map[uintptr][]int)
 	// nativeStateCallUpvalues 保存当前 lua_State handle 上嵌套 C closure 调用的 upvalue 快照。
@@ -105,7 +107,9 @@ func (handle *nativeStateHandle) close() {
 	callFrameCount := len(nativeStateCallBases[key])
 	delete(nativeStateHandles, key)
 	buffers := nativeStateBuffers[key]
+	callBuffers := nativeStateCallBuffers[key]
 	delete(nativeStateBuffers, key)
+	delete(nativeStateCallBuffers, key)
 	delete(nativeStateCallBases, key)
 	delete(nativeStateCallUpvalues, key)
 	delete(nativeStatePendingErrors, key)
@@ -120,6 +124,10 @@ func (handle *nativeStateHandle) close() {
 	for _, buffer := range buffers {
 		// buffer 都由 C malloc 分配，可安全在 handle 生命周期结束时统一释放。
 		C.glua_free_native_buffer(buffer)
+	}
+	for _, buffers := range callBuffers {
+		// 异常关闭时仍可能存在未弹出的 C frame buffer，需要随 handle 一起兜底释放。
+		freeNativeStateBuffers(buffers)
 	}
 	C.glua_free_state_token(token)
 }
@@ -180,6 +188,7 @@ func pushNativeStateCallFrame(token unsafe.Pointer, baseTop int, upvalues []runt
 	}
 	nativeStateCallBases[key] = append(nativeStateCallBases[key], baseTop)
 	nativeStateCallUpvalues[key] = append(nativeStateCallUpvalues[key], upvalueSnapshot)
+	nativeStateCallBuffers[key] = append(nativeStateCallBuffers[key], nil)
 	nativeStateHandlesMu.Unlock()
 	if !state.PushExternalGCRootFrame(upvalueSnapshot) {
 		// external root 登记失败时回滚刚建立的 C frame，避免 upvalue 栈与 GC 根栈错位。
@@ -205,11 +214,25 @@ func popNativeStateCallFrame(token unsafe.Pointer) {
 		nativeStateHandlesMu.Unlock()
 		return
 	}
+	callBuffers := nativeStateCallBuffers[key]
+	var buffers []unsafe.Pointer
+	if len(callBuffers) > 0 {
+		// C frame buffer 与调用帧同步压栈；弹出当前帧时只释放最内层 buffer。
+		buffers = callBuffers[len(callBuffers)-1]
+		if len(callBuffers) == 1 {
+			// 最后一层 frame buffer 退出后删除 map 项，避免长期保留空切片。
+			delete(nativeStateCallBuffers, key)
+		} else {
+			// 外层 C frame 仍在执行，保留其对应的 buffer 切片。
+			nativeStateCallBuffers[key] = callBuffers[:len(callBuffers)-1]
+		}
+	}
 	if len(bases) == 1 {
 		// 最后一层退出后删除 map 项，避免长期保留空切片。
 		delete(nativeStateCallBases, key)
 		delete(nativeStateCallUpvalues, key)
 		nativeStateHandlesMu.Unlock()
+		freeNativeStateBuffers(buffers)
 		if state != nil {
 			// 同步弹出当前 C frame 的 external root 帧。
 			state.PopExternalGCRootFrame()
@@ -222,6 +245,7 @@ func popNativeStateCallFrame(token unsafe.Pointer) {
 		// upvalue 栈与基址栈理论上同步；异常时清空，避免后续读到错配闭包。
 		delete(nativeStateCallUpvalues, key)
 		nativeStateHandlesMu.Unlock()
+		freeNativeStateBuffers(buffers)
 		if state != nil {
 			// 即便 upvalue 栈异常，也要弹出与基址帧对应的 external root。
 			state.PopExternalGCRootFrame()
@@ -230,6 +254,7 @@ func popNativeStateCallFrame(token unsafe.Pointer) {
 	}
 	nativeStateCallUpvalues[key] = upvalueFrames[:len(upvalueFrames)-1]
 	nativeStateHandlesMu.Unlock()
+	freeNativeStateBuffers(buffers)
 	if state != nil {
 		// 同步弹出当前 C frame 的 external root 帧。
 		state.PopExternalGCRootFrame()
@@ -310,8 +335,29 @@ func rememberNativeStateBuffer(token unsafe.Pointer, buffer unsafe.Pointer) bool
 		C.glua_free_native_buffer(buffer)
 		return false
 	}
+	callBuffers := nativeStateCallBuffers[key]
+	if len(callBuffers) > 0 {
+		// 活动 C function 内返回的 C 字符串指针只需撑到当前 C 调用退出，避免长连接反复转换泄漏。
+		lastFrame := len(callBuffers) - 1
+		callBuffers[lastFrame] = append(callBuffers[lastFrame], buffer)
+		nativeStateCallBuffers[key] = callBuffers
+		return true
+	}
 	nativeStateBuffers[key] = append(nativeStateBuffers[key], buffer)
 	return true
+}
+
+// freeNativeStateBuffers 释放由 C malloc 分配并挂到 native State 生命周期里的 buffer。
+func freeNativeStateBuffers(buffers []unsafe.Pointer) {
+	// buffer 均由 native C helper 分配，释放时不触碰 Go VM 栈和值对象。
+	for _, buffer := range buffers {
+		// nil buffer 可能来自异常回滚路径，保持 no-op。
+		if buffer == nil {
+			// nil 指针不需要释放，继续处理后续 buffer。
+			continue
+		}
+		C.glua_free_native_buffer(buffer)
+	}
 }
 
 // nativeLightUserdata 保存 Lua lightuserdata 的 C 指针 identity。

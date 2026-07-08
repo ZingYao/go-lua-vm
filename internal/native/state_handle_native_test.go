@@ -5,6 +5,7 @@ package native
 import (
 	"errors"
 	"testing"
+	"unsafe"
 
 	"github.com/ZingYao/go-lua-vm/runtime"
 )
@@ -78,5 +79,99 @@ func TestNativeStateHandleLookupRejectsClosedState(t *testing.T) {
 	if gotState, ok := lookupNativeStateHandle(handle.pointer()); ok || gotState != nil {
 		// State 关闭后不能再把 token 映射回 VM。
 		t.Fatalf("lookup after state close = state=%p ok=%v, want nil false", gotState, ok)
+	}
+}
+
+// TestNativeStateBuffersFollowCallFrames 验证 C frame 内创建的临时 buffer 随 frame 退出回收。
+func TestNativeStateBuffersFollowCallFrames(t *testing.T) {
+	// 构造真实 State 和 native handle，直接观测 handle 级与 C frame 级 buffer 归属。
+	state := runtime.NewState()
+	defer state.Close()
+	handle, err := newNativeStateHandle(state)
+	if err != nil {
+		// handle 创建失败说明 State 映射不可用，无法验证 buffer 生命周期。
+		t.Fatalf("newNativeStateHandle failed: %v", err)
+	}
+	defer handle.close()
+	luaState := handle.pointer()
+	token := uintptr(luaState)
+
+	outside := []byte{'o', 'u', 't', 's', 'i', 'd', 'e', 0}
+	if returned := nativeLuaPushString(luaState, unsafe.Pointer(&outside[0])); returned == nil {
+		// 无 C frame 时仍需返回 handle 生命周期内稳定的 C 字符串副本。
+		t.Fatalf("nativeLuaPushString outside frame returned nil")
+	}
+	nativeStateHandlesMu.Lock()
+	handleBufferCount := len(nativeStateBuffers[token])
+	callFrameCount := len(nativeStateCallBuffers[token])
+	nativeStateHandlesMu.Unlock()
+	if handleBufferCount != 1 || callFrameCount != 0 {
+		// 无活动 C frame 的 buffer 必须保持在 handle 级列表，不能误进 frame 栈。
+		t.Fatalf("outside buffer counts = handle %d frame %d, want 1 0", handleBufferCount, callFrameCount)
+	}
+
+	if !pushNativeStateCallFrame(luaState, state.StackTop(), nil) {
+		// 无法建立 outer C frame 时，本测试不能继续验证 frame buffer。
+		t.Fatalf("pushNativeStateCallFrame outer failed")
+	}
+	outer := []byte{'o', 'u', 't', 'e', 'r', 0}
+	if returned := nativeLuaPushString(luaState, unsafe.Pointer(&outer[0])); returned == nil {
+		// outer frame 内仍需向 C 模块返回可读指针。
+		t.Fatalf("nativeLuaPushString outer frame returned nil")
+	}
+
+	if !pushNativeStateCallFrame(luaState, state.StackTop(), nil) {
+		// 无法建立 inner C frame 时，需要先弹出 outer frame 再失败。
+		popNativeStateCallFrame(luaState)
+		t.Fatalf("pushNativeStateCallFrame inner failed")
+	}
+	inner := []byte{'i', 'n', 'n', 'e', 'r', 0}
+	if returned := nativeLuaPushString(luaState, unsafe.Pointer(&inner[0])); returned == nil {
+		// inner frame 内仍需向 C 模块返回可读指针。
+		popNativeStateCallFrame(luaState)
+		popNativeStateCallFrame(luaState)
+		t.Fatalf("nativeLuaPushString inner frame returned nil")
+	}
+
+	nativeStateHandlesMu.Lock()
+	handleBufferCount = len(nativeStateBuffers[token])
+	callBuffers := nativeStateCallBuffers[token]
+	outerBufferCount := 0
+	if len(callBuffers) > 0 {
+		// 只有实际建立了 outer frame buffer 后才能读取该层计数。
+		outerBufferCount = len(callBuffers[0])
+	}
+	innerBufferCount := 0
+	if len(callBuffers) > 1 {
+		// 只有实际建立了 inner frame buffer 后才能读取该层计数。
+		innerBufferCount = len(callBuffers[1])
+	}
+	nativeStateHandlesMu.Unlock()
+	if handleBufferCount != 1 || len(callBuffers) != 2 || outerBufferCount != 1 || innerBufferCount != 1 {
+		// 嵌套 C frame 必须各自持有本层创建的临时 buffer。
+		popNativeStateCallFrame(luaState)
+		popNativeStateCallFrame(luaState)
+		t.Fatalf("nested buffer counts = handle %d frames %d outer %d inner %d, want 1 2 1 1", handleBufferCount, len(callBuffers), outerBufferCount, innerBufferCount)
+	}
+
+	popNativeStateCallFrame(luaState)
+	nativeStateHandlesMu.Lock()
+	handleBufferCount = len(nativeStateBuffers[token])
+	callBuffers = nativeStateCallBuffers[token]
+	nativeStateHandlesMu.Unlock()
+	if handleBufferCount != 1 || len(callBuffers) != 1 || len(callBuffers[0]) != 1 {
+		// 弹出 inner frame 后只应保留 outer frame 的临时 buffer。
+		popNativeStateCallFrame(luaState)
+		t.Fatalf("after inner pop counts = handle %d frames %d, want 1 1", handleBufferCount, len(callBuffers))
+	}
+
+	popNativeStateCallFrame(luaState)
+	nativeStateHandlesMu.Lock()
+	handleBufferCount = len(nativeStateBuffers[token])
+	_, stillTracksFrames := nativeStateCallBuffers[token]
+	nativeStateHandlesMu.Unlock()
+	if handleBufferCount != 1 || stillTracksFrames {
+		// 所有 C frame 退出后，frame buffer 栈必须清空且不影响 handle 级 buffer。
+		t.Fatalf("after outer pop = handle %d tracksFrames %v, want 1 false", handleBufferCount, stillTracksFrames)
 	}
 }
