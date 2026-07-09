@@ -50,14 +50,6 @@ jobs:
             os: ubuntu-latest
             goos: windows
             goarch: arm64
-          - target: darwin-amd64
-            os: macos-latest
-            goos: darwin
-            goarch: amd64
-          - target: darwin-arm64
-            os: macos-latest
-            goos: darwin
-            goarch: arm64
           - target: android-arm64
             os: ubuntu-latest
             goos: android
@@ -133,58 +125,6 @@ jobs:
             dist/glua-${{ matrix.target }}.zip
           if-no-files-found: ignore
 
-  native-cli:
-    name: native cli (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    defaults:
-      run:
-        shell: bash
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-latest
-    env:
-      CGO_ENABLED: "1"
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.26.4"
-          cache: true
-
-      - name: Resolve native target
-        id: target
-        run: |
-          set -euo pipefail
-          echo "name=$(go env GOOS)-$(go env GOARCH)" >> "${GITHUB_OUTPUT}"
-
-      - name: Native Real Module Acceptance
-        run: ./scripts/test-native-real-modules.sh
-
-      - name: Build native glua
-        run: |
-          set -euo pipefail
-          target="${{ steps.target.outputs.name }}"
-          mkdir -p "dist/native-${target}"
-          go build -tags native_modules -trimpath -ldflags="-s -w" -o "dist/native-${target}/glua" ./cmd/glua
-
-      - name: Archive native glua
-        run: |
-          set -euo pipefail
-          target="${{ steps.target.outputs.name }}"
-          cd dist
-          tar -czf "glua-native-${target}.tar.gz" "native-${target}"
-
-      - name: Upload native CLI artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: glua-native-${{ steps.target.outputs.name }}
-          path: dist/glua-native-${{ steps.target.outputs.name }}.tar.gz
-
   vscode-extension:
     name: vscode extension
     runs-on: ubuntu-latest
@@ -252,7 +192,6 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - cli
-      - native-cli
       - vscode-extension
       - jetbrains-extension
     if: startsWith(github.ref, 'refs/tags/')

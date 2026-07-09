@@ -34,7 +34,7 @@ fi
   echo
   echo "## English"
   echo
-  echo "This release publishes full-feature CLI artifacts built with \`CGO_ENABLED=1\` and the \`native_modules\` build tag, so native Lua C module loading is included in the release build."
+  echo "This release publishes full-feature CLI artifacts for non-macOS targets built with \`CGO_ENABLED=1\` and the \`native_modules\` build tag, so native Lua C module loading is included in those release builds. macOS native artifacts are built locally and uploaded separately."
   echo
   echo "- Range: ${compare_text}"
   if [[ -n "${compare_url}" ]]; then
@@ -47,6 +47,7 @@ fi
   echo "- Added and refined editor extension support for VS Code and JetBrains, including completion, diagnostics, formatting, debugging, DAP variable editing, source navigation, settings, and localized UI text."
   echo "- Added new GLua syntax sugar and language-server awareness for \`const\`, extended control-flow syntax, event APIs, and conditional extension modes."
   echo "- Added multilingual CLI help and documentation output so command-line tools can present localized user-facing text."
+  echo "- Release CLI artifacts are native_modules builds for Linux, Windows, and Android; macOS native_modules packages are produced from a local Mac build."
   echo
   echo "### Changes"
   echo
@@ -54,7 +55,7 @@ fi
   echo
   echo "## 中文"
   echo
-  echo "本次发布会生成全功能 CLI 产物，构建时启用 \`CGO_ENABLED=1\` 和 \`native_modules\` build tag，因此发布版本包含 Lua C 原生模块加载能力。"
+  echo "本次发布会为非 macOS 目标生成全功能 CLI 产物，构建时启用 \`CGO_ENABLED=1\` 和 \`native_modules\` build tag，因此这些发布版本包含 Lua C 原生模块加载能力。macOS native 产物由本机编译后单独上传。"
   echo
   echo "- 范围：${compare_text}"
   if [[ -n "${compare_url}" ]]; then
@@ -67,6 +68,7 @@ fi
   echo "- 完善 VS Code 与 JetBrains 扩展支持，覆盖补全、诊断、格式化、调试、DAP 变量修改、源码跳转、设置项和界面多语言。"
   echo "- 新增 GLua 语法糖与语言服务语义支持，包括 \`const\`、扩展控制流语法、event API 和条件扩展模式。"
   echo "- 增加 CLI 工具的多语言帮助与文档输出，让命令行用户可看到本地化说明。"
+  echo "- Linux、Windows 和 Android 的 CLI 发布产物均为 native_modules 构建；macOS native_modules 包由本机 Mac 构建补充。"
   echo
   echo "### 变更列表"
   echo
