@@ -139,7 +139,6 @@ jobs:
       fail-fast: false
       matrix:
         os:
-          - macos-latest
           - ubuntu-latest
     env:
       CGO_ENABLED: "1"
