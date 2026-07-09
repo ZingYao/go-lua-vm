@@ -128,6 +128,117 @@ func TestServerBreakpointStopsAndContinues(t *testing.T) {
 	}
 }
 
+// TestServerVariablesAndStep 验证暂停后可读取局部变量，并且 next 会在下一条源码行再次暂停。
+func TestServerVariablesAndStep(t *testing.T) {
+	// 启动本机 DAP server 并完成 initialize 握手。
+	server, connection, reader := startTestServerAndConnect(t)
+	defer server.Close()
+	defer connection.Close()
+	writeRequest(t, connection, 1, "initialize")
+	_ = readProtocolMessage(t, reader)
+	_ = readProtocolMessage(t, reader)
+
+	arguments := map[string]any{
+		"source": map[string]any{"path": "main.glua"},
+		"breakpoints": []map[string]any{
+			{"line": 7},
+		},
+	}
+	writeRequestWithArguments(t, connection, 2, "setBreakpoints", arguments)
+	_ = readProtocolMessage(t, reader)
+
+	state := runtime.NewState()
+	defer state.Close()
+	vm := runtime.NewVM(1)
+	proto := &bytecode.Proto{
+		Source:   "@main.glua",
+		LineInfo: []int{7, 8},
+		Code:     []bytecode.Instruction{0, 0},
+		LocalVars: []bytecode.LocalVar{
+			{Name: "i", Register: 0, StartPC: 0, EndPC: 2},
+		},
+	}
+	vm.BindPrototype(proto)
+	if err := vm.SetRegister(0, runtime.IntegerValue(42)); err != nil {
+		// 测试 VM 只有一个寄存器，写入 0 号寄存器应成功。
+		t.Fatalf("SetRegister failed: %v", err)
+	}
+
+	firstStop := make(chan error, 1)
+	go func() {
+		// 第 7 行命中断点并暂停。
+		firstStop <- server.BeforeInstruction(state, vm, proto, 0)
+	}()
+	stoppedEvent := readProtocolMessage(t, reader)
+	if stoppedEvent["event"] != "stopped" {
+		// 命中断点必须发送 stopped。
+		t.Fatalf("stopped event = %#v", stoppedEvent)
+	}
+
+	writeRequest(t, connection, 3, "scopes")
+	scopesResponse := readProtocolMessage(t, reader)
+	scopesBody := scopesResponse["body"].(map[string]any)
+	scopes := scopesBody["scopes"].([]any)
+	if len(scopes) != 1 {
+		// 暂停帧应暴露 Locals scope。
+		t.Fatalf("scopes response = %#v", scopesResponse)
+	}
+	writeRequest(t, connection, 4, "variables")
+	variablesResponse := readProtocolMessage(t, reader)
+	variablesBody := variablesResponse["body"].(map[string]any)
+	variables := variablesBody["variables"].([]any)
+	if len(variables) != 1 || variables[0].(map[string]any)["name"] != "i" {
+		// 局部变量 i 必须可见。
+		t.Fatalf("variables response = %#v", variablesResponse)
+	}
+
+	clearBreakpointArguments := map[string]any{
+		"source":      map[string]any{"path": "main.glua"},
+		"breakpoints": []map[string]any{},
+	}
+	writeRequestWithArguments(t, connection, 5, "setBreakpoints", clearBreakpointArguments)
+	_ = readProtocolMessage(t, reader)
+
+	writeRequest(t, connection, 6, "next")
+	_ = readProtocolMessage(t, reader)
+	select {
+	case err := <-firstStop:
+		if err != nil {
+			// next 会先释放当前暂停点。
+			t.Fatalf("first stop returned %v", err)
+		}
+	case <-time.After(time.Second):
+		// 当前暂停点必须被 next 释放。
+		t.Fatalf("next did not resume first stop")
+	}
+	if err := server.BeforeInstruction(state, vm, proto, 0); err != nil {
+		// 同一源码行不应立即再次暂停。
+		t.Fatalf("same-line step returned %v", err)
+	}
+	secondStop := make(chan error, 1)
+	go func() {
+		// 下一条不同源码行应由 next 再次暂停。
+		secondStop <- server.BeforeInstruction(state, vm, proto, 1)
+	}()
+	secondStoppedEvent := readProtocolMessage(t, reader)
+	if secondStoppedEvent["event"] != "stopped" {
+		// step 命中必须再次发送 stopped。
+		t.Fatalf("second stopped event = %#v", secondStoppedEvent)
+	}
+	writeRequest(t, connection, 7, "continue")
+	_ = readProtocolMessage(t, reader)
+	select {
+	case err := <-secondStop:
+		if err != nil {
+			// continue 后第二次暂停应正常释放。
+			t.Fatalf("second stop returned %v", err)
+		}
+	case <-time.After(time.Second):
+		// 第二次暂停必须被 continue 释放。
+		t.Fatalf("continue did not resume second stop")
+	}
+}
+
 // TestServerWaitForConfigurationDone 验证 CLI 可等待 IDE 完成断点配置后再执行脚本。
 func TestServerWaitForConfigurationDone(t *testing.T) {
 	// 启动 DAP server 并建立客户端连接。

@@ -1030,6 +1030,21 @@ function extractCompletionContext(text, tokens, position) {
   }
 
   const beforeToken = tokens[before];
+  if (beforeToken && (beforeToken.type === "identifier" || beforeToken.type === "keyword")) {
+    const separator = before - 1 >= 0 ? tokens[before - 1] : null;
+    const maybeModule = before - 2 >= 0 ? tokens[before - 2] : null;
+    if (separator && (separator.text === "." || separator.text === ":") && maybeModule && (maybeModule.type === "identifier" || maybeModule.type === "keyword")) {
+      const moduleName = completionModule(tokens, before - 1, before - 2, position);
+      return {
+        mode: "method",
+        module: moduleName,
+        receiver: maybeModule.text,
+        separator: separator.text,
+        prefix: beforeToken.text,
+        range: makeRange(position.line, beforeToken.startColumn, position.line, beforeToken.range.end.character),
+      };
+    }
+  }
   const trimmedLine = lineText.trimEnd();
   if (trimmedLine.endsWith(".") || trimmedLine.endsWith(":")) {
     const tokenIsSeparator = beforeToken && (beforeToken.text === "." || beforeToken.text === ":");
@@ -1196,6 +1211,7 @@ function buildSymbolSnapshot(tokens) {
     ]),
     definitions: new Map(),
     userSymbols: new Map(),
+    functionSignatures: new Map(),
   };
   for (let index = 0; index < tokens.length; index++) {
     const token = tokens[index];
@@ -1205,7 +1221,7 @@ function buildSymbolSnapshot(tokens) {
     if (token.text === "local") {
       const next = tokens[index + 1];
       if (next && next.text === "function" && isNameToken(tokens[index + 2])) {
-        addSymbolToken(snapshot, tokens[index + 2]);
+        addFunctionSymbol(snapshot, tokens[index + 2], functionSignature(tokens, index + 2));
         collectFunctionParameters(tokens, index + 2, snapshot);
         continue;
       }
@@ -1219,7 +1235,7 @@ function buildSymbolSnapshot(tokens) {
       continue;
     }
     if (token.text === "function" && isNameToken(tokens[index + 1])) {
-      addSymbolToken(snapshot, tokens[index + 1]);
+      addFunctionSymbol(snapshot, tokens[index + 1], functionSignature(tokens, index + 1));
       collectFunctionParameters(tokens, index + 1, snapshot);
       continue;
     }
@@ -1253,6 +1269,13 @@ function addSymbolToken(snapshot, token) {
     snapshot.definitions.set(token.text, []);
   }
   snapshot.definitions.get(token.text).push(token.range);
+}
+
+function addFunctionSymbol(snapshot, token, signature) {
+  addSymbolToken(snapshot, token);
+  if (isNameToken(token)) {
+    snapshot.functionSignatures.set(token.text, signature || `${token.text}()`);
+  }
 }
 
 function collectAssignmentTargets(tokens, snapshot) {
@@ -1362,6 +1385,39 @@ function collectFunctionParameters(tokens, functionNameIndex, snapshot) {
     }
     addSymbolToken(snapshot, current);
   }
+}
+
+function functionSignature(tokens, functionNameIndex) {
+  const token = tokens[functionNameIndex];
+  const name = token && token.text ? token.text : "function";
+  return `${name}(${functionParameterNames(tokens, functionNameIndex).join(", ")})`;
+}
+
+function functionParameterNames(tokens, functionNameIndex) {
+  let openIndex = -1;
+  for (let cursor = functionNameIndex + 1; cursor < tokens.length; cursor++) {
+    if (tokens[cursor].text === "(") {
+      openIndex = cursor;
+      break;
+    }
+    if (tokens[cursor].range.start.line !== tokens[functionNameIndex].range.start.line) {
+      return [];
+    }
+  }
+  if (openIndex < 0) {
+    return [];
+  }
+  const params = [];
+  for (let cursor = openIndex + 1; cursor < tokens.length; cursor++) {
+    const current = tokens[cursor];
+    if (current.text === ")") {
+      return params;
+    }
+    if (isNameToken(current) && current.type !== "keyword") {
+      params.push(current.text);
+    }
+  }
+  return params;
 }
 
 function collectFunctionExpressionParameters(tokens, functionIndex, snapshot) {
@@ -1490,11 +1546,13 @@ function buildCompletionCandidates(context, snapshot, tokens, documentUri) {
       if (!name.startsWith(context.prefix) || seen.has(name)) {
         continue;
       }
+      const signature = snapshot.functionSignatures.get(name);
       items.push({
         name,
-        kind: CompletionItemKind.Variable,
-        detail: "GLua file symbol",
-        documentation: "Declared in the current Lua file.",
+        kind: signature ? CompletionItemKind.Function : CompletionItemKind.Variable,
+        detail: signature || "GLua file symbol",
+        documentation: signature ? "Function declared in the current Lua file." : "Declared in the current Lua file.",
+        snippet: signature ? completionSnippet(name, signature) : undefined,
       });
       seen.add(name);
     }
@@ -1525,8 +1583,17 @@ function signatureParameters(signature) {
     .split(",")
     .map((param) => param.trim())
     .filter(Boolean)
-    .map((param) => param.replace(/^\[|\]$/g, "").replace(/\s*=.*$/, "").trim())
+    .map((param) => cleanupSignatureParameter(param))
     .filter(Boolean);
+}
+
+function cleanupSignatureParameter(param) {
+  return String(param || "")
+    .trim()
+    .replace(/\[/g, "")
+    .replace(/\]/g, "")
+    .replace(/\s*=.*$/, "")
+    .trim();
 }
 
 function snippetEscape(value) {
@@ -1739,6 +1806,102 @@ function generateSemanticTokens(text, syntax) {
   return { data };
 }
 
+function collectDuplicateSwitchCaseDiagnostics(tokens) {
+  const diagnostics = [];
+  const blockStack = [];
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (token.type !== "keyword") {
+      continue;
+    }
+    if (token.text === "switch") {
+      blockStack.push({ kind: "switch", values: new Map() });
+      continue;
+    }
+    if (token.text === "if" || token.text === "while" || token.text === "for" || token.text === "function" || token.text === "repeat") {
+      blockStack.push({ kind: token.text });
+      continue;
+    }
+    if (token.text === "do") {
+      const previous = index > 0 ? tokens[index - 1] : null;
+      if (!previous || previous.text !== "switch") {
+        blockStack.push({ kind: "do" });
+      }
+      continue;
+    }
+    if (token.text === "end") {
+      if (blockStack.length > 0) {
+        blockStack.pop();
+      }
+      continue;
+    }
+    if (token.text === "until") {
+      const repeatIndex = blockStack.map((block) => block.kind).lastIndexOf("repeat");
+      if (repeatIndex >= 0) {
+        blockStack.splice(repeatIndex, 1);
+      }
+      continue;
+    }
+    const currentSwitch = nearestOpenSwitch(blockStack);
+    if (token.text !== "case" || currentSwitch === null) {
+      continue;
+    }
+    for (let valueIndex = index + 1; valueIndex < tokens.length; valueIndex++) {
+      const valueToken = tokens[valueIndex];
+      if (valueToken.range.start.line !== token.range.start.line) {
+        break;
+      }
+      if (valueToken.text === ",") {
+        continue;
+      }
+      const key = staticCaseValueKey(valueToken);
+      if (key === null) {
+        continue;
+      }
+      if (currentSwitch.values.has(key)) {
+        diagnostics.push({
+          range: valueToken.range,
+          severity: DiagnosticSeverity.Error,
+          source: "glua",
+          message: "duplicate switch case value",
+        });
+      } else {
+        currentSwitch.values.set(key, valueToken.range);
+      }
+    }
+  }
+  return diagnostics;
+}
+
+function nearestOpenSwitch(blockStack) {
+  for (let index = blockStack.length - 1; index >= 0; index--) {
+    if (blockStack[index].kind === "switch") {
+      return blockStack[index];
+    }
+  }
+  return null;
+}
+
+function staticCaseValueKey(token) {
+  if (token.type === "number") {
+    const value = Number(token.text);
+    if (Number.isFinite(value)) {
+      if (Number.isInteger(value)) {
+        return `number:int:${value}`;
+      }
+      return `number:float:${value}`;
+    }
+    return `number:text:${token.text}`;
+  }
+  if (token.type === "string") {
+    return `string:${token.text}`;
+  }
+  if (token.type === "keyword" && (token.text === "nil" || token.text === "true" || token.text === "false")) {
+    return `keyword:${token.text}`;
+  }
+  return null;
+}
+
 function collectParseLikeErrors(text, syntax) {
   const scanned = scanTokens(text, syntax);
   const diagnostics = [];
@@ -1830,6 +1993,7 @@ function collectParseLikeErrors(text, syntax) {
   }
 
   const snapshot = buildSymbolSnapshot(tokens);
+  diagnostics.push(...collectDuplicateSwitchCaseDiagnostics(tokens));
   diagnostics.push(...collectTypedMethodDiagnostics(tokens));
   diagnostics.push(...collectUndeclaredIdentifierDiagnostics(tokens, snapshot));
   return diagnostics;

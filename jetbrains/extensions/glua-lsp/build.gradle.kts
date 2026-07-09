@@ -21,7 +21,6 @@ dependencies {
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
     intellijPlatform {
         intellijIdea(providers.gradleProperty("platformVersion"))
-        bundledModule("intellij.platform.dap")
     }
 }
 

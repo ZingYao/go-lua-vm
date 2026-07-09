@@ -281,8 +281,8 @@ func Run(args []string, streams Streams) error {
 		return nil
 	}
 	if options.Version {
-		// 版本文本复用 glua 的 Lua 5.3 兼容版本输出。
-		_, _ = fmt.Fprintln(stdout, cli.VersionText)
+		// 版本文本复用 glua 的 GLua 版本输出。
+		_, _ = fmt.Fprintln(stdout, cli.LocalizedVersionText())
 		if options.InputPath == "" {
 			// 仅请求版本时已经完成全部工作。
 			return nil
@@ -318,7 +318,7 @@ func Run(args []string, streams Streams) error {
 func HelpText() string {
 	// 帮助文本集中维护，便于测试和 cmd/gluac 复用。
 	var builder strings.Builder
-	builder.WriteString(cli.VersionText)
+	builder.WriteString(cli.LocalizedVersionText())
 	builder.WriteString("\n\n")
 	builder.WriteString("Usage: gluac [options] [filenames]\n\n")
 	builder.WriteString("Lua compatible options:\n")

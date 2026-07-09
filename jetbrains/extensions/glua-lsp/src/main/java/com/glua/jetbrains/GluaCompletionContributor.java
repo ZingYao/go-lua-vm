@@ -70,10 +70,14 @@ public final class GluaCompletionContributor extends CompletionContributor {
                         .withInsertHandler(insertFunctionTemplate(name, builtin.signature)));
                 }
                 if (!completion.method()) {
-                    for (String name : GluaAnalysis.symbolCompletionNames(parameters.getEditor().getDocument(), completion.prefix())) {
-                        result.addElement(LookupElementBuilder.create(name)
-                            .withTypeText("GLua file symbol", true)
-                            .withTailText(" declared in current file", true));
+                    for (GluaAnalysis.SymbolCompletion symbol : GluaAnalysis.symbolCompletions(parameters.getEditor().getDocument(), completion.prefix())) {
+                        LookupElementBuilder builder = LookupElementBuilder.create(symbol.name())
+                            .withTypeText(symbol.signature() == null ? "GLua file symbol" : symbol.signature(), true)
+                            .withTailText(symbol.signature() == null ? " declared in current file" : " function in current file", true);
+                        if (symbol.signature() != null) {
+                            builder = builder.withInsertHandler(insertFunctionTemplate(symbol.name(), symbol.signature()));
+                        }
+                        result.addElement(builder);
                     }
                 } else {
                     for (GluaRequireSupport.ExportedMember member : GluaRequireSupport.requiredModuleCompletionMembers(
@@ -141,9 +145,13 @@ public final class GluaCompletionContributor extends CompletionContributor {
                 if (i > 0) {
                     template.addTextSegment(", ");
                 }
-                template.addVariable(params.get(i), "\"" + params.get(i) + "\"", "\"" + params.get(i) + "\"", true);
+                String variableName = "p" + i;
+                String defaultValue = quoteTemplateExpression(params.get(i));
+                template.addVariable(variableName, defaultValue, defaultValue, true);
+                template.addVariableSegment(variableName);
             }
             template.addTextSegment(")");
+            template.addEndVariable();
             template.setToReformat(false);
             TemplateManager.getInstance(context.getProject()).startTemplate(context.getEditor(), template);
         };
@@ -154,6 +162,10 @@ public final class GluaCompletionContributor extends CompletionContributor {
         return name + "(" + String.join(", ", params) + ")";
     }
 
+    static String quoteTemplateExpression(String value) {
+        return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
+    }
+
     private static List<String> signatureParameters(String signature) {
         java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("\\((.*)\\)").matcher(signature == null ? "" : signature);
         if (!matcher.find()) {
@@ -161,11 +173,19 @@ public final class GluaCompletionContributor extends CompletionContributor {
         }
         List<String> params = new ArrayList<>();
         for (String raw : matcher.group(1).split(",")) {
-            String param = raw.trim().replaceAll("^\\[|\\]$", "").replaceAll("\\s*=.*$", "").trim();
+            String param = cleanupSignatureParameter(raw);
             if (!param.isBlank()) {
                 params.add(param);
             }
         }
         return params;
+    }
+
+    private static String cleanupSignatureParameter(String raw) {
+        return raw.trim()
+            .replace("[", "")
+            .replace("]", "")
+            .replaceAll("\\s*=.*$", "")
+            .trim();
     }
 }

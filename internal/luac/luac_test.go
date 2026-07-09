@@ -94,6 +94,7 @@ func TestParseArgsSyntaxOptions(t *testing.T) {
 
 // TestRunHelpOutput 验证 gluac -h 输出帮助和当前构建能力。
 func TestRunHelpOutput(t *testing.T) {
+	t.Setenv("GLUA_LANG", "en")
 	// 使用 stdout buffer 捕获帮助文本，帮助模式不应要求输入文件。
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

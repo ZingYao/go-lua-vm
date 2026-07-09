@@ -1,6 +1,7 @@
 package com.glua.jetbrains;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonObject;
 import com.intellij.openapi.editor.Document;
 import com.intellij.openapi.editor.impl.DocumentImpl;
 import org.junit.jupiter.api.Test;
@@ -155,6 +156,19 @@ final class GluaAnalysisGoldenTest {
         Document completionDocument = new DocumentImpl(completeSource + "\nval");
         assertTrue(GluaAnalysis.symbolCompletionNames(completionDocument, "val").contains("value"));
         assertTrue(GluaAnalysis.symbolCompletionNames(completionDocument, "mak").contains("maker"));
+        GluaAnalysis.SymbolCompletion makerCompletion = GluaAnalysis.symbolCompletions(completionDocument, "mak").stream()
+            .filter(item -> item.name().equals("maker"))
+            .findFirst()
+            .orElseThrow();
+        assertEquals("maker(arg)", makerCompletion.signature());
+    }
+
+    @Test
+    void functionTemplateEscapesParameterDefaults() {
+        assertEquals("\"plain\"", GluaCompletionContributor.quoteTemplateExpression("plain"));
+        assertEquals("\"quote\\\"name\"", GluaCompletionContributor.quoteTemplateExpression("quote\"name"));
+        assertEquals("\"path\\\\name\"", GluaCompletionContributor.quoteTemplateExpression("path\\name"));
+        assertEquals("match(s, pattern, init)", GluaCompletionContributor.functionSnippetText("match", "string.match(s, pattern [, init])"));
     }
 
     @Test
@@ -309,8 +323,37 @@ final class GluaAnalysisGoldenTest {
                 .map(GluaRequireSupport.ExportedMember::name)
                 .toList();
         }
+        if ("builtin-member".equals(testCase.kind)) {
+            GluaAnalysis.CompletionContext context = GluaAnalysis.completionContext(
+                new DocumentImpl(testCase.source),
+                testCase.source.indexOf(testCase.marker) + testCase.marker.length()
+            );
+            assertTrue(context.method(), testCase.name + " builtin method context");
+            List<String> result = new ArrayList<>();
+            for (String name : builtinNamesFromResource()) {
+                String prefix = context.module() + ".";
+                if (name.startsWith(prefix)) {
+                    String method = name.substring(prefix.length());
+                    if (method.startsWith(context.prefix())) {
+                        result.add(method);
+                    }
+                }
+            }
+            return result;
+        }
         Document document = new DocumentImpl(testCase.source);
         return GluaAnalysis.symbolCompletionNames(document, completionPrefix(testCase.source, testCase.marker));
+    }
+
+    private static List<String> builtinNamesFromResource() {
+        try {
+            Path builtinPath = Path.of("src", "main", "resources", "builtin-functions.json");
+            JsonObject root = new Gson().fromJson(Files.readString(builtinPath, StandardCharsets.UTF_8), JsonObject.class);
+            JsonObject functions = root.getAsJsonObject("functions");
+            return functions.keySet().stream().sorted().toList();
+        } catch (IOException error) {
+            throw new AssertionError("failed to read builtin-functions.json", error);
+        }
     }
 
     private static List<GluaRequireSupport.ExportedMember> moduleMembersFor(CompletionGoldenFile golden, CompletionGoldenCase testCase) {

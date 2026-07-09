@@ -2,6 +2,7 @@ package com.glua.jetbrains;
 
 import com.intellij.execution.ExecutionException;
 import com.intellij.execution.configurations.CommandLineState;
+import com.intellij.execution.filters.TextConsoleBuilderFactory;
 import com.intellij.execution.process.ProcessHandler;
 import com.intellij.execution.runners.ExecutionEnvironment;
 import org.jetbrains.annotations.NotNull;
@@ -16,10 +17,11 @@ public final class GluaDapRunProfileState extends CommandLineState {
         super(environment);
         this.gluaExecutable = gluaExecutable;
         this.program = program;
+        setConsoleBuilder(TextConsoleBuilderFactory.getInstance().createBuilder(environment.getProject()));
     }
 
     @Override
     protected @NotNull ProcessHandler startProcess() throws ExecutionException {
-        return GluaDapLaunchProcessHandler.create(gluaExecutable, program);
+        return GluaDapLaunchProcessHandler.create(getEnvironment().getProject(), gluaExecutable, program);
     }
 }

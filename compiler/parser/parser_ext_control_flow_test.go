@@ -2,7 +2,10 @@
 
 package parser
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestParserContinueSwitchStatements 验证扩展 continue 与 switch/case/default 语法。
 //
@@ -36,5 +39,20 @@ func TestParserContinueSwitchStatements(t *testing.T) {
 	if len(switchStatement.Cases) != 1 || len(switchStatement.Cases[0].Values) != 2 || switchStatement.DefaultBlock == nil {
 		// switch 应保留多值 case 和 default block。
 		t.Fatalf("unexpected switch statement=%+v", switchStatement)
+	}
+}
+
+// TestParserRejectsDuplicateSwitchCaseValue 验证同一个 switch 内重复 case 值会报错。
+func TestParserRejectsDuplicateSwitchCaseValue(t *testing.T) {
+	parser := New("switch 1 do\ncase 1, 2\nprint('x')\ncase 2\nprint('y')\nend\n")
+
+	_, err := parser.ParseChunk()
+	if err == nil {
+		// 重复 case 值会让后续分支不可达，必须在 parser 语义阶段报错。
+		t.Fatalf("parse should reject duplicate switch case value")
+	}
+	if !strings.Contains(err.Error(), "duplicate switch case value") {
+		// 错误应明确提示重复 case 值。
+		t.Fatalf("error = %v", err)
 	}
 }

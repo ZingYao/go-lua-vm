@@ -3,6 +3,10 @@
 package parser
 
 import (
+	"fmt"
+	"math"
+	"strconv"
+
 	"github.com/ZingYao/go-lua-vm/compiler/lexer"
 	"github.com/ZingYao/go-lua-vm/extensions"
 )
@@ -128,6 +132,7 @@ func analyzeSwitchExtensionStatement(analyzer *semanticAnalyzer, _ *Block, scope
 // switch 不改变循环深度；因此 loop 内 switch 的 continue 仍绑定外层最近循环，函数内 switch 外
 // continue 仍会被拒绝。
 func (analyzer *semanticAnalyzer) analyzeSwitchStatement(parent *ScopeInfo, depth int, parentStatementIndex int, statement *SwitchStatement, namespace *functionNamespace) {
+	analyzer.validateSwitchCaseValues(statement)
 	for caseIndex := range statement.Cases {
 		// 每个 case 分支都创建独立子作用域，避免 case 内 local 泄漏到后续分支。
 		analyzer.analyzeBlock(statement.Cases[caseIndex].Body, parent, parentStatementIndex, depth+1, nil, false, namespace)
@@ -136,4 +141,59 @@ func (analyzer *semanticAnalyzer) analyzeSwitchStatement(parent *ScopeInfo, dept
 		// default 分支存在时同样创建独立子作用域。
 		analyzer.analyzeBlock(statement.DefaultBlock, parent, parentStatementIndex, depth+1, nil, false, namespace)
 	}
+}
+
+// validateSwitchCaseValues 校验同一个 switch 内可静态判断的重复 case 值。
+func (analyzer *semanticAnalyzer) validateSwitchCaseValues(statement *SwitchStatement) {
+	seen := make(map[string]lexer.Position)
+	for caseIndex := range statement.Cases {
+		switchCase := statement.Cases[caseIndex]
+		for valueIndex := range switchCase.Values {
+			valueExpression := switchCase.Values[valueIndex]
+			key, ok := switchCaseStaticValueKey(valueExpression)
+			if !ok {
+				// 非字面量表达式无法在编译期可靠判断是否重复，避免误报。
+				continue
+			}
+			if firstPosition, exists := seen[key]; exists {
+				// 同一个 switch 内重复 case 值会让后续分支永远无法匹配，直接报语义错误。
+				analyzer.addError(valueExpression.Pos(), fmt.Sprintf("duplicate switch case value; first declared at %d:%d", firstPosition.Line, firstPosition.Column))
+				continue
+			}
+			seen[key] = valueExpression.Pos()
+		}
+	}
+}
+
+// switchCaseStaticValueKey 返回可静态比较的 case 字面量 key。
+func switchCaseStaticValueKey(expression Expression) (string, bool) {
+	literal, ok := expression.(*LiteralExpression)
+	if !ok {
+		// 目前只判断简单字面量，避免把运行期表达式错误折叠。
+		return "", false
+	}
+	switch literal.Kind {
+	case lexer.TokenNumber:
+		// Lua 5.3 中 integer 与可精确表示的同值 float 比较相等，因此优先归一到整数 key。
+		switch literal.Number.Kind {
+		case lexer.NumberDecimalInteger, lexer.NumberHexInteger:
+			return "number:int:" + strconv.FormatInt(literal.Number.Integer, 10), true
+		case lexer.NumberDecimalFloat, lexer.NumberHexFloat:
+			if math.Trunc(literal.Number.Number) == literal.Number.Number && literal.Number.Number >= -9223372036854775808 && literal.Number.Number <= 9223372036854775807 {
+				return "number:int:" + strconv.FormatInt(int64(literal.Number.Number), 10), true
+			}
+			return "number:float:" + strconv.FormatFloat(literal.Number.Number, 'g', -1, 64), true
+		default:
+			return "number:text:" + literal.Value, true
+		}
+	case lexer.TokenString:
+		// 字符串使用解码后的值，保证不同引号形式的同值字符串也能判重。
+		return "string:" + literal.Value, true
+	case lexer.TokenKeyword:
+		if literal.Value == "nil" || literal.Value == "true" || literal.Value == "false" {
+			// 只折叠基础布尔/nil 字面量。
+			return "keyword:" + literal.Value, true
+		}
+	}
+	return "", false
 }

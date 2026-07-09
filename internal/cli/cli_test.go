@@ -533,6 +533,7 @@ func TestShouldExecuteImplicitStdin(t *testing.T) {
 // 官方 Lua 5.3 在无脚本、无 -e/-l 且 stdin 为终端时会输出交互提示；这里用系统字符设备
 // 模拟终端类型，读取到 EOF 后应正常退出。
 func TestRunImplicitREPLForTerminalStdin(t *testing.T) {
+	t.Setenv("GLUA_LANG", "en")
 	// os.DevNull 在本机是字符设备，可覆盖 CLI 对终端 stdin 的判定路径。
 	stdin, err := os.Open(os.DevNull)
 	if err != nil {
@@ -565,6 +566,7 @@ func TestRunImplicitREPLForTerminalStdin(t *testing.T) {
 //
 // 官方 Lua 5.3 单独执行 -v 时只输出版本并退出；即使 stdin 是终端也不应追加交互提示。
 func TestRunVersionDoesNotEnterImplicitREPL(t *testing.T) {
+	t.Setenv("GLUA_LANG", "en")
 	// 使用字符设备覆盖终端 stdin 判定，确保 -v 能压制隐式 REPL。
 	stdin, err := os.Open(os.DevNull)
 	if err != nil {
@@ -652,6 +654,7 @@ func TestSetArgTable(t *testing.T) {
 //
 // 当前 -i 进入 REPL 读取 stdin；合法输入应完成执行且不写 stderr。
 func TestMainInteractiveMode(t *testing.T) {
+	t.Setenv("GLUA_LANG", "en")
 	// 使用 bytes.Buffer 捕获 stdout/stderr，避免测试污染真实终端。
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -678,6 +681,7 @@ func TestMainInteractiveMode(t *testing.T) {
 //
 // 官方 Lua 5.3 在交互模式输入 os.exit() 会直接退出；不能被 REPL 当成普通错误恢复。
 func TestMainInteractiveOSExit(t *testing.T) {
+	t.Setenv("GLUA_LANG", "en")
 	// 通过 Main 验证 os.exit 错误会映射为真实退出码且不写 stderr。
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -729,9 +733,9 @@ func TestTerminalREPLLineReaderCursorInsert(t *testing.T) {
 	}
 }
 
-// TestTerminalREPLLineReaderCompletesUniqueRoot 验证 Tab 可补全唯一根名称。
+// TestTerminalREPLLineReaderCompletesUniqueRoot 验证 Tab 可补全唯一根函数。
 //
-// 用户输入 `pri<Tab>` 时应补成 `print`，回车提交的源码也必须是补全后的文本。
+// 用户输入 `pri<Tab>` 时应补成 `print()`，回车提交的源码也必须是补全后的文本。
 func TestTerminalREPLLineReaderCompletesUniqueRoot(t *testing.T) {
 	// 构造 Tab 输入，避免测试依赖真实终端补全能力。
 	var stdout bytes.Buffer
@@ -748,13 +752,17 @@ func TestTerminalREPLLineReaderCompletesUniqueRoot(t *testing.T) {
 		// 回车前已有内容，不能被当成 EOF。
 		t.Fatalf("readLine returned EOF")
 	}
-	if line != "print" {
-		// 唯一候选必须直接补齐。
-		t.Fatalf("line = %q, want print", line)
+	if line != "print()" {
+		// 唯一函数候选必须直接补齐调用括号。
+		t.Fatalf("line = %q, want print()", line)
 	}
-	if !strings.Contains(stdout.String(), "> print") {
+	if !strings.Contains(stdout.String(), "> print()") {
 		// 终端输出应重绘为补全后的内容。
 		t.Fatalf("stdout = %q, want completed line", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "\x1b[1D") {
+		// 函数补全后光标应回到括号中，便于继续输入参数。
+		t.Fatalf("stdout = %q, want cursor inside parentheses", stdout.String())
 	}
 }
 
@@ -789,9 +797,9 @@ func TestTerminalREPLLineReaderShowsMultipleCompletions(t *testing.T) {
 	}
 }
 
-// TestTerminalREPLLineReaderCompletesTableMember 验证 Tab 可补全标准库表成员。
+// TestTerminalREPLLineReaderCompletesTableMember 验证 Tab 可补全标准库表函数成员。
 //
-// 用户输入 `string.fo<Tab>` 时应只替换点号后的成员前缀，保留 `string.`。
+// 用户输入 `string.fo<Tab>` 时应只替换点号后的成员前缀，保留 `string.` 并补齐调用括号。
 func TestTerminalREPLLineReaderCompletesTableMember(t *testing.T) {
 	// 构造标准库成员补全输入。
 	var stdout bytes.Buffer
@@ -808,13 +816,153 @@ func TestTerminalREPLLineReaderCompletesTableMember(t *testing.T) {
 		// 回车前已有内容，不能被当成 EOF。
 		t.Fatalf("readLine returned EOF")
 	}
-	if line != "string.format" {
-		// 成员补全必须补齐点号后的函数名。
-		t.Fatalf("line = %q, want string.format", line)
+	if line != "string.format()" {
+		// 成员函数补全必须补齐点号后的函数名和调用括号。
+		t.Fatalf("line = %q, want string.format()", line)
 	}
-	if !strings.Contains(stdout.String(), "string.format") {
+	if !strings.Contains(stdout.String(), "string.format()") {
 		// 终端输出应重绘为补全后的成员访问。
 		t.Fatalf("stdout = %q, want completed member", stdout.String())
+	}
+}
+
+// TestTerminalREPLLineReaderCompletesSessionTableMember 验证 Tab 可补全 REPL 上文全局 table 字段。
+//
+// 用户先执行 `a = { c = function(...) ... end }` 后，输入 `a.c<Tab>` 应补成可调用成员。
+func TestTerminalREPLLineReaderCompletesSessionTableMember(t *testing.T) {
+	// 先把成功执行过的全局 table 字面量写入会话补全索引。
+	completions := newREPLSessionCompletions()
+	completions.recordSource("a = { c = function(a,b) return a+b end, value = 1 }")
+
+	var stdout bytes.Buffer
+	reader := &terminalREPLLineReader{
+		reader:      bufio.NewReader(strings.NewReader("a.c\t\n")),
+		stdout:      &stdout,
+		completions: completions,
+	}
+	line, ok, err := reader.readLine("> ")
+	if err != nil {
+		// 模拟输入不应产生底层读取错误。
+		t.Fatalf("readLine failed: %v", err)
+	}
+	if !ok {
+		// 回车前已有内容，不能被当成 EOF。
+		t.Fatalf("readLine returned EOF")
+	}
+	if line != "a.c()" {
+		// 会话中记录的函数字段必须补齐调用括号。
+		t.Fatalf("line = %q, want a.c()", line)
+	}
+	if !strings.Contains(stdout.String(), "a.c()") {
+		// 终端输出应重绘为补全后的会话成员访问。
+		t.Fatalf("stdout = %q, want completed session member", stdout.String())
+	}
+}
+
+// TestREPLSessionCompletionsTrackGlobalFieldAssignment 验证会话索引记录后续全局字段函数赋值。
+func TestREPLSessionCompletionsTrackGlobalFieldAssignment(t *testing.T) {
+	// 字段函数赋值通常分多行逐步扩展模块表，补全索引应增量合并。
+	completions := newREPLSessionCompletions()
+	completions.recordSource("tool = {}")
+	completions.recordSource("tool.run = function() return true end")
+
+	members, ok := completions.memberCandidates("tool")
+	if !ok {
+		// 已记录字段赋值后必须能找到 tool 的成员候选。
+		t.Fatalf("tool members not found")
+	}
+	if !slicesContainString(members, "run") {
+		// 字段函数赋值应加入候选列表。
+		t.Fatalf("members = %v, want run", members)
+	}
+	if _, ok := completions.memberFunctionCandidates("tool")["run"]; !ok {
+		// function 右值应标记为可调用候选。
+		t.Fatalf("run should be function candidate")
+	}
+}
+
+// TestREPLSessionCompletionsIgnoreLocalAssignments 验证 local 不污染跨 chunk 补全候选。
+func TestREPLSessionCompletionsIgnoreLocalAssignments(t *testing.T) {
+	// REPL 单行 local 在下一条输入不可见，因此不能建立会话级候选。
+	completions := newREPLSessionCompletions()
+	completions.recordSource("local hidden = { c = function() end }")
+
+	if _, ok := completions.memberCandidates("hidden"); ok {
+		// local table 若被补全，用户下一行运行仍会得到 nil，必须避免误导。
+		t.Fatalf("local hidden should not create session member candidates")
+	}
+	roots := completions.rootCandidates(nil)
+	if slicesContainString(roots, "hidden") {
+		// local 名称不能进入根候选。
+		t.Fatalf("roots = %v, should not contain hidden", roots)
+	}
+}
+
+// TestTerminalREPLLineReaderDoesNotCallCompleteConstants 验证 Tab 不会给常量候选追加调用括号。
+//
+// 用户输入 `math.p<Tab>` 时唯一候选是常量 `pi`，补全结果必须是 `math.pi`。
+func TestTerminalREPLLineReaderDoesNotCallCompleteConstants(t *testing.T) {
+	// 构造标准库常量补全输入，避免把所有表成员都当成函数。
+	var stdout bytes.Buffer
+	reader := &terminalREPLLineReader{
+		reader: bufio.NewReader(strings.NewReader("math.p\t\n")),
+		stdout: &stdout,
+	}
+	line, ok, err := reader.readLine("> ")
+	if err != nil {
+		// 模拟输入不应产生底层读取错误。
+		t.Fatalf("readLine failed: %v", err)
+	}
+	if !ok {
+		// 回车前已有内容，不能被当成 EOF。
+		t.Fatalf("readLine returned EOF")
+	}
+	if line != "math.pi" {
+		// 常量候选不应补成函数调用。
+		t.Fatalf("line = %q, want math.pi", line)
+	}
+	if strings.Contains(stdout.String(), "math.pi()") {
+		// 输出中不能出现错误的调用括号。
+		t.Fatalf("stdout = %q, want constant without call parentheses", stdout.String())
+	}
+}
+
+// TestTerminalREPLLineReaderCompletesBlockKeywords 验证 Tab 可按语法上下文补全块关键字。
+//
+// 用户在 for/if 头部输入关键字前缀时，应优先补 do/then，而不是展示 dofile/default 等全局候选。
+func TestTerminalREPLLineReaderCompletesBlockKeywords(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "for do", input: "for i=1,100 d\t\n", want: "for i=1,100 do"},
+		{name: "if then", input: "if ok t\t\n", want: "if ok then"},
+		{name: "global end", input: "en\t\n", want: "end"},
+		{name: "global local", input: "loc\t\n", want: "local"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			// 构造 Tab 输入，避免测试依赖真实终端。
+			var stdout bytes.Buffer
+			reader := &terminalREPLLineReader{
+				reader: bufio.NewReader(strings.NewReader(test.input)),
+				stdout: &stdout,
+			}
+			line, ok, err := reader.readLine("> ")
+			if err != nil {
+				// 模拟输入不应产生底层读取错误。
+				t.Fatalf("readLine failed: %v", err)
+			}
+			if !ok {
+				// 回车前已有内容，不能被当成 EOF。
+				t.Fatalf("readLine returned EOF")
+			}
+			if line != test.want {
+				// 上下文关键字补全必须提交补全后的源码。
+				t.Fatalf("line = %q, want %q; stdout=%q", line, test.want, stdout.String())
+			}
+		})
 	}
 }
 
@@ -1290,6 +1438,7 @@ error(m)
 //
 // -v 必须写 stdout，且没有其他任务时成功退出。
 func TestMainVersionOutput(t *testing.T) {
+	t.Setenv("GLUA_LANG", "en")
 	// 使用 stdout buffer 捕获版本文本。
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -1310,6 +1459,7 @@ func TestMainVersionOutput(t *testing.T) {
 
 // TestMainHelpOutput 验证 -h 输出 GLua 帮助和当前构建能力。
 func TestMainHelpOutput(t *testing.T) {
+	t.Setenv("GLUA_LANG", "en")
 	// 使用 stdout buffer 捕获帮助文本，确保帮助模式不会误写 stderr。
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -1327,6 +1477,24 @@ func TestMainHelpOutput(t *testing.T) {
 	if stderr.Len() != 0 {
 		// 成功路径不应写 stderr。
 		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+// TestMainHelpOutputChinese 验证 glua 帮助输出支持中文。
+func TestMainHelpOutputChinese(t *testing.T) {
+	t.Setenv("GLUA_LANG", "zh-CN")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := Main(context.Background(), []string{"-h"}, Streams{Stdout: &stdout, Stderr: &stderr})
+	if exitCode != ExitOK {
+		// 帮助输出应成功退出。
+		t.Fatalf("exit code = %d stderr=%q", exitCode, stderr.String())
+	}
+	for _, want := range []string{"GLua 1.0（兼容 Lua 5.3.6）Copyright (C) 2026 Zing", "用法：glua", "GLua 选项：", "GLua 构建能力：", "Lua C 模块/native_module"} {
+		// 中文帮助文本必须包含命令说明和构建能力。
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout = %q, missing %q", stdout.String(), want)
+		}
 	}
 }
 
@@ -1588,4 +1756,16 @@ func TestMainFormatRejectsExecutionOptions(t *testing.T) {
 		// 错误信息应明确指出互斥参数。
 		t.Fatalf("stderr = %q", stderr.String())
 	}
+}
+
+// slicesContainString 判断字符串切片是否包含目标值。
+func slicesContainString(values []string, target string) bool {
+	// 线性扫描测试候选列表，保持 helper 简单直接。
+	for _, value := range values {
+		if value == target {
+			// 命中目标值即可提前返回。
+			return true
+		}
+	}
+	return false
 }

@@ -1539,6 +1539,26 @@ assert(out == 24)
 	}
 }
 
+// TestDoStringRejectsDuplicateSwitchCaseValue 验证 GLua switch 会拒绝重复 case 值。
+func TestDoStringRejectsDuplicateSwitchCaseValue(t *testing.T) {
+	if !DefaultSyntaxExtensions().Has(SyntaxSwitch) {
+		// 当前构建未编译 switch 扩展时跳过扩展语法用例。
+		t.Skip("switch syntax extension is not compiled")
+	}
+	state := NewState()
+	defer state.Close()
+
+	err := DoString(state, "switch 1 do\ncase 1, 2\nprint('x')\ncase 2\nprint('y')\nend\n")
+	if err == nil {
+		// 重复 case 值必须在编译阶段被拒绝，CLI/IDE 才能一致报错。
+		t.Fatalf("DoString should reject duplicate switch case value")
+	}
+	if !strings.Contains(err.Error(), "duplicate switch case value") {
+		// 错误文本应能指导用户定位重复 case。
+		t.Fatalf("error = %v", err)
+	}
+}
+
 // TestDoStringLua53SyntaxDisablesExtensions 验证 Go API 可关闭扩展语法。
 //
 // 关闭扩展后 continue 和 switch 应按普通标识符处理，语法糖语句不再被接受。

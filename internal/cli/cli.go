@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"github.com/ZingYao/go-lua-vm/compiler/parser"
 	"github.com/ZingYao/go-lua-vm/extensions"
 	"github.com/ZingYao/go-lua-vm/internal/buildinfo"
+	"github.com/ZingYao/go-lua-vm/internal/localize"
 	"github.com/ZingYao/go-lua-vm/lua"
 	"github.com/ZingYao/go-lua-vm/runtime"
 	"github.com/ZingYao/go-lua-vm/runtime/dap"
@@ -37,11 +39,24 @@ const (
 	ExitFailure = 1
 	// ExitInterrupted 表示 CLI 被 Ctrl-C 中断。
 	ExitInterrupted = 130
-	// VersionText 是 Lua 5.3.6 官方兼容版本输出。
-	VersionText = "Lua 5.3.6  Copyright (C) 1994-2020 Lua.org, PUC-Rio"
+	// GLuaVersion 是当前 GLua 命令行工具版本号。
+	GLuaVersion = "1.0"
+	// LuaCompatibleVersion 是当前 GLua 兼容的 Lua 语言版本。
+	LuaCompatibleVersion = "Lua 5.3.6"
+	// VersionText 是 GLua 英文版本输出，括号中保留 Lua 5.3.6 兼容版本。
+	VersionText = "GLua 1.0 (Lua 5.3.6 compatible) Copyright (C) 2026 Zing"
 )
 
 var errCLIInterrupted = errors.New("interrupted")
+
+// LocalizedVersionText 返回适合 CLI banner、-v 和帮助页展示的 GLua 版本文本。
+//
+// 该文本强调当前二进制是 GLua 自身版本，括号中仅标注 Lua 5.3.6 兼容关系；错误语义为空，
+// 不读取项目配置，也不影响 Lua 5.3 运行时兼容行为。
+func LocalizedVersionText() string {
+	// 统一经由 localize.Text 选择语言，确保交互 banner、-v 和帮助页文案一致。
+	return localize.Text(VersionText, "GLua 1.0（兼容 Lua 5.3.6）Copyright (C) 2026 Zing")
+}
 
 // Streams 保存 CLI 与宿主标准流之间的连接。
 //
@@ -326,7 +341,7 @@ func Run(ctx context.Context, args []string, streams Streams) error {
 	if options.Version {
 		// -v 只写 stdout，不阻止后续 -l/-e/script 执行。
 		stdout := safeWriter(streams.Stdout)
-		_, _ = fmt.Fprintln(stdout, VersionText)
+		_, _ = fmt.Fprintln(stdout, LocalizedVersionText())
 	}
 	if options.Help {
 		// 帮助模式只输出命令能力说明，不创建 State 或执行任何 Lua 代码。
@@ -432,7 +447,7 @@ func Run(ctx context.Context, args []string, streams Streams) error {
 		if !options.Version {
 			// 进入交互解释器前输出版本 banner，对齐官方 lua 裸启动和 -i 行为。
 			stdout := safeWriter(streams.Stdout)
-			_, _ = fmt.Fprintln(stdout, VersionText)
+			_, _ = fmt.Fprintln(stdout, LocalizedVersionText())
 			_, _ = fmt.Fprint(stdout, buildinfo.FeatureText(true))
 		}
 		// -i 或裸终端启动进入 REPL；REPL 内部错误写 stderr 并继续读取下一条输入。
@@ -445,24 +460,24 @@ func Run(ctx context.Context, args []string, streams Streams) error {
 func HelpText() string {
 	// 帮助文本集中维护，确保 -h 输出与 README/IDE 中暴露的参数保持一致。
 	var builder strings.Builder
-	builder.WriteString(VersionText)
+	builder.WriteString(LocalizedVersionText())
 	builder.WriteString("\n\n")
-	builder.WriteString("Usage: glua [options] [script [args]]\n\n")
-	builder.WriteString("Lua compatible options:\n")
-	builder.WriteString("  -e stat                  execute string 'stat'\n")
-	builder.WriteString("  -l mod                   require library 'mod'\n")
-	builder.WriteString("  -i                       enter interactive mode after executing script\n")
-	builder.WriteString("  -v                       show version information\n")
-	builder.WriteString("  -E                       ignore LUA_INIT, LUA_PATH and LUA_CPATH\n")
-	builder.WriteString("  --                       stop handling options\n")
-	builder.WriteString("  -                        execute stdin as a script\n\n")
-	builder.WriteString("GLua options:\n")
-	builder.WriteString("  -h, --help               show this help\n")
-	builder.WriteString("  --glua-syntax value      select syntax mode: lua53, extended, all, continue,switch\n")
-	builder.WriteString("  --glua-disable-syntax v  disable syntax sugar names from the selected mode\n")
-	builder.WriteString("  --glua-format [-w] file  format a Lua/GLua file, optionally writing back with -w\n")
-	builder.WriteString("  --glua-list-bytecode f   print bytecode listing for a source or binary chunk\n")
-	builder.WriteString("  --glua-dap-listen addr   start the built-in DAP server, for example 127.0.0.1:0\n\n")
+	builder.WriteString(localize.Text("Usage: glua [options] [script [args]]\n\n", "用法：glua [选项] [脚本 [参数]]\n\n"))
+	builder.WriteString(localize.Text("Lua compatible options:\n", "Lua 兼容选项：\n"))
+	builder.WriteString(localize.Text("  -e stat                  execute string 'stat'\n", "  -e stat                  执行字符串 stat\n"))
+	builder.WriteString(localize.Text("  -l mod                   require library 'mod'\n", "  -l mod                   require 指定模块 mod\n"))
+	builder.WriteString(localize.Text("  -i                       enter interactive mode after executing script\n", "  -i                       执行脚本后进入交互模式\n"))
+	builder.WriteString(localize.Text("  -v                       show version information\n", "  -v                       显示版本信息\n"))
+	builder.WriteString(localize.Text("  -E                       ignore LUA_INIT, LUA_PATH and LUA_CPATH\n", "  -E                       忽略 LUA_INIT、LUA_PATH 和 LUA_CPATH\n"))
+	builder.WriteString(localize.Text("  --                       stop handling options\n", "  --                       停止解析选项\n"))
+	builder.WriteString(localize.Text("  -                        execute stdin as a script\n\n", "  -                        将 stdin 作为脚本执行\n\n"))
+	builder.WriteString(localize.Text("GLua options:\n", "GLua 选项：\n"))
+	builder.WriteString(localize.Text("  -h, --help               show this help\n", "  -h, --help               显示帮助信息\n"))
+	builder.WriteString(localize.Text("  --glua-syntax value      select syntax mode: lua53, extended, all, continue,switch\n", "  --glua-syntax value      选择语法模式：lua53、extended、all、continue,switch\n"))
+	builder.WriteString(localize.Text("  --glua-disable-syntax v  disable syntax sugar names from the selected mode\n", "  --glua-disable-syntax v  从当前语法模式中关闭指定语法糖\n"))
+	builder.WriteString(localize.Text("  --glua-format [-w] file  format a Lua/GLua file, optionally writing back with -w\n", "  --glua-format [-w] file  格式化 Lua/GLua 文件，使用 -w 写回\n"))
+	builder.WriteString(localize.Text("  --glua-list-bytecode f   print bytecode listing for a source or binary chunk\n", "  --glua-list-bytecode f   输出源码或 binary chunk 的字节码列表\n"))
+	builder.WriteString(localize.Text("  --glua-dap-listen addr   start the built-in DAP server, for example 127.0.0.1:0\n\n", "  --glua-dap-listen addr   启动内置 DAP 服务，例如 127.0.0.1:0\n\n"))
 	builder.WriteString(buildinfo.FeatureText(true))
 	return builder.String()
 }
@@ -1374,7 +1389,8 @@ func runREPL(state *lua.State, streams Streams) error {
 	// REPL 只依赖传入流，便于测试 stdout/stderr 分离。
 	stdout := safeWriter(streams.Stdout)
 	stderr := safeWriter(streams.Stderr)
-	lineReader, restoreTerminal := newREPLLineReader(streams.Stdin, stdout)
+	replCompletions := newREPLSessionCompletions()
+	lineReader, restoreTerminal := newREPLLineReader(streams.Stdin, stdout, replCompletions)
 	defer restoreTerminal()
 	var pendingLines []string
 	for {
@@ -1411,6 +1427,9 @@ func runREPL(state *lua.State, streams Streams) error {
 			}
 			// REPL 错误写 stderr 后恢复下一条输入，不中断进程。
 			_, _ = fmt.Fprintln(stderr, replErrorText(state, err))
+		} else {
+			// 只有执行成功的 chunk 才进入补全索引，避免错误输入污染后续候选。
+			replCompletions.recordSource(source)
 		}
 		pendingLines = nil
 	}
@@ -1480,15 +1499,16 @@ type replLineReader interface {
 // newREPLLineReader 根据输入流选择 REPL 行读取器。
 //
 // stdin/stdout 都是终端且 raw mode 可用时启用最小行编辑；否则回退到 Scanner，保持非终端输入兼容。
-func newREPLLineReader(stdin io.Reader, stdout io.Writer) (replLineReader, func()) {
+func newREPLLineReader(stdin io.Reader, stdout io.Writer, completions *replSessionCompletions) (replLineReader, func()) {
 	if file, ok := stdin.(*os.File); ok {
 		// 只有真实文件描述符才可能切换终端 raw mode。
 		restore, rawOK := makeRawTerminal(file)
 		if rawOK {
 			// raw mode 成功后按字节处理方向键、退格和插入。
 			return &terminalREPLLineReader{
-				reader: bufio.NewReader(file),
-				stdout: stdout,
+				reader:      bufio.NewReader(file),
+				stdout:      stdout,
+				completions: completions,
 			}, restore
 		}
 	}
@@ -1526,8 +1546,9 @@ func (reader *scannerREPLLineReader) readLine(prompt string) (string, bool, erro
 //
 // 当前支持左右方向键、Home/End、Delete、Backspace、Ctrl-D 和中间插入，覆盖官方 lua 常见交互输入。
 type terminalREPLLineReader struct {
-	reader *bufio.Reader
-	stdout io.Writer
+	reader      *bufio.Reader
+	stdout      io.Writer
+	completions *replSessionCompletions
 }
 
 // readLine 输出提示符并在 raw mode 中读取一行。
@@ -1571,7 +1592,7 @@ func (reader *terminalREPLLineReader) readLine(prompt string) (string, bool, err
 			buffer = nextBuffer
 		case '\t':
 			// Tab 触发 REPL 静态补全，只修改当前编辑缓冲，不执行 Lua 代码。
-			nextCursor, nextBuffer, err := completeREPLLine(reader.stdout, prompt, buffer, cursor)
+			nextCursor, nextBuffer, err := completeREPLLine(reader.stdout, prompt, buffer, cursor, reader.completions)
 			if err != nil {
 				// 输出候选或重绘失败时停止 REPL。
 				return "", false, err
@@ -1699,12 +1720,18 @@ var replRootCompletions = []string{
 	"collectgarbage",
 	"continue",
 	"coroutine",
+	"do",
 	"default",
 	"dofile",
+	"else",
+	"elseif",
+	"end",
 	"error",
+	"false",
 	"for",
 	"function",
 	"if",
+	"in",
 	"io",
 	"ipairs",
 	"local",
@@ -1721,11 +1748,13 @@ var replRootCompletions = []string{
 	"rawset",
 	"repeat",
 	"require",
+	"return",
 	"select",
 	"string",
 	"switch",
 	"table",
 	"then",
+	"true",
 	"tonumber",
 	"tostring",
 	"type",
@@ -1733,6 +1762,28 @@ var replRootCompletions = []string{
 	"utf8",
 	"while",
 	"xpcall",
+}
+
+var replRootFunctionCompletions = map[string]struct{}{
+	"assert":         {},
+	"collectgarbage": {},
+	"dofile":         {},
+	"error":          {},
+	"ipairs":         {},
+	"next":           {},
+	"pairs":          {},
+	"pcall":          {},
+	"print":          {},
+	"rawequal":       {},
+	"rawget":         {},
+	"rawlen":         {},
+	"rawset":         {},
+	"require":        {},
+	"select":         {},
+	"tonumber":       {},
+	"tostring":       {},
+	"type":           {},
+	"xpcall":         {},
 }
 
 var replMemberCompletions = map[string][]string{
@@ -1746,10 +1797,272 @@ var replMemberCompletions = map[string][]string{
 	"utf8":      {"char", "charpattern", "codepoint", "codes", "len", "offset"},
 }
 
+var replMemberFunctionCompletions = map[string]map[string]struct{}{
+	"coroutine": {"close": {}, "create": {}, "isyieldable": {}, "resume": {}, "running": {}, "status": {}, "wrap": {}, "yield": {}},
+	"io":        {"close": {}, "flush": {}, "input": {}, "lines": {}, "open": {}, "output": {}, "popen": {}, "read": {}, "tmpfile": {}, "type": {}, "write": {}},
+	"math":      {"abs": {}, "acos": {}, "asin": {}, "atan": {}, "ceil": {}, "cos": {}, "deg": {}, "exp": {}, "floor": {}, "fmod": {}, "log": {}, "max": {}, "min": {}, "modf": {}, "rad": {}, "random": {}, "randomseed": {}, "sin": {}, "sqrt": {}, "tan": {}, "tointeger": {}, "type": {}, "ult": {}},
+	"os":        {"clock": {}, "date": {}, "difftime": {}, "execute": {}, "exit": {}, "getenv": {}, "remove": {}, "rename": {}, "setlocale": {}, "time": {}, "tmpname": {}},
+	"package":   {"loadlib": {}, "searchpath": {}},
+	"string":    {"byte": {}, "char": {}, "dump": {}, "find": {}, "format": {}, "gmatch": {}, "gsub": {}, "len": {}, "lower": {}, "match": {}, "pack": {}, "packsize": {}, "rep": {}, "reverse": {}, "sub": {}, "unpack": {}, "upper": {}},
+	"table":     {"concat": {}, "insert": {}, "move": {}, "pack": {}, "remove": {}, "sort": {}, "unpack": {}},
+	"utf8":      {"char": {}, "codepoint": {}, "codes": {}, "len": {}, "offset": {}},
+}
+
+// replSessionSymbol 记录 REPL 会话内一个可补全名称的静态摘要。
+type replSessionSymbol struct {
+	// function 表示该名称来自 function 声明或函数表达式，可在唯一补全时追加调用括号。
+	function bool
+}
+
+// replSessionCompletions 保存 REPL 成功执行过的全局名称和表字段候选。
+type replSessionCompletions struct {
+	// roots 保存全局名称候选，例如 `tool = ...` 或 `function helper() ... end`。
+	roots map[string]replSessionSymbol
+	// members 按 owner path 保存表字段候选，例如 `a.c` 记录在 members["a"]["c"]。
+	members map[string]map[string]replSessionSymbol
+}
+
+// newREPLSessionCompletions 创建空的 REPL 会话补全索引。
+func newREPLSessionCompletions() *replSessionCompletions {
+	// 初始化 map，后续执行成功的 chunk 会逐步追加候选。
+	return &replSessionCompletions{
+		roots:   make(map[string]replSessionSymbol),
+		members: make(map[string]map[string]replSessionSymbol),
+	}
+}
+
+// recordSource 解析并记录一个成功执行的 REPL chunk 中可跨 chunk 访问的全局符号。
+func (completion *replSessionCompletions) recordSource(source string) {
+	// nil 索引常见于单元测试直接构造 reader 的旧路径，此时跳过动态补全。
+	if completion == nil {
+		return
+	}
+	chunk, err := parser.New(source).ParseChunk()
+	if err != nil {
+		// 执行已成功但工具 AST 解析失败时，保持补全索引不变，避免影响 REPL 主流程。
+		return
+	}
+	if chunk == nil || chunk.Block == nil {
+		// 空 chunk 没有可记录符号。
+		return
+	}
+	for _, statement := range chunk.Block.Statements {
+		// 按源码顺序记录顶层语句，后写入的函数标记可覆盖旧的非函数摘要。
+		completion.recordStatement(statement)
+	}
+}
+
+// recordStatement 从单条顶层语句提取全局赋值、字段赋值和函数声明候选。
+func (completion *replSessionCompletions) recordStatement(statement parser.Statement) {
+	// 根据公开 AST 类型分派，只处理成功执行后仍可跨 REPL chunk 访问的全局形态。
+	switch typedStatement := statement.(type) {
+	case *parser.AssignmentStatement:
+		for index, leftExpression := range typedStatement.Left {
+			// 多赋值按同下标右值建立静态摘要；缺少右值时仍记录左侧全局名称。
+			var rightExpression parser.Expression
+			if index < len(typedStatement.Right) {
+				rightExpression = typedStatement.Right[index]
+			}
+			completion.recordAssignment(leftExpression, rightExpression)
+		}
+	case *parser.FunctionStatement:
+		if typedStatement.Name != "" {
+			// 简单 function name(...) 声明等价于全局函数赋值。
+			completion.roots[typedStatement.Name] = replSessionSymbol{function: true}
+		}
+	case *parser.CompactFunctionStatement:
+		if typedStatement.Name != "" {
+			// compact parser 节点仍表示简单全局函数，补全可按函数处理。
+			completion.roots[typedStatement.Name] = replSessionSymbol{function: true}
+		}
+	}
+}
+
+// recordAssignment 记录一条全局或字段赋值产生的补全候选。
+func (completion *replSessionCompletions) recordAssignment(leftExpression parser.Expression, rightExpression parser.Expression) {
+	// 左侧必须能归约为 `name` 或 `owner.field`，其他动态索引不进入静态补全。
+	if nameExpression, ok := leftExpression.(*parser.NameExpression); ok {
+		completion.roots[nameExpression.Name] = replSessionSymbol{function: replExpressionIsFunction(rightExpression)}
+		if tableExpression, ok := rightExpression.(*parser.TableConstructorExpression); ok {
+			// table 字面量赋给全局时，记录第一层和嵌套静态字段。
+			completion.recordTableMembers(nameExpression.Name, tableExpression)
+		}
+		return
+	}
+	fieldExpression, ok := leftExpression.(*parser.FieldAccessExpression)
+	if !ok {
+		// 非点号字段访问不具备稳定 owner 名称。
+		return
+	}
+	ownerPath, ok := replExpressionPath(fieldExpression.Receiver)
+	if !ok {
+		// 动态 owner 无法在补全时可靠定位。
+		return
+	}
+	completion.recordMember(ownerPath, fieldExpression.Field, replSessionSymbol{function: replExpressionIsFunction(rightExpression)})
+	if tableExpression, ok := rightExpression.(*parser.TableConstructorExpression); ok {
+		// 字段被赋为 table 时，也建立该字段自己的子成员候选。
+		completion.recordTableMembers(ownerPath+"."+fieldExpression.Field, tableExpression)
+	}
+}
+
+// recordTableMembers 记录 table constructor 中的静态 `name = value` 字段。
+func (completion *replSessionCompletions) recordTableMembers(ownerPath string, tableExpression *parser.TableConstructorExpression) {
+	// nil table 表达式没有字段可提取。
+	if tableExpression == nil {
+		return
+	}
+	for _, field := range tableExpression.RecordFields {
+		// 只记录名称键字段；数组字段和动态 key 不具备稳定补全文本。
+		completion.recordMember(ownerPath, field.Name, replSessionSymbol{function: replExpressionIsFunction(field.Value)})
+		if nestedTable, ok := field.Value.(*parser.TableConstructorExpression); ok {
+			// 嵌套 table 字面量允许 `a.child.<Tab>` 继续补全下一层字段。
+			completion.recordTableMembers(ownerPath+"."+field.Name, nestedTable)
+		}
+	}
+}
+
+// recordMember 把 owner.field 写入成员候选表。
+func (completion *replSessionCompletions) recordMember(ownerPath string, fieldName string, symbol replSessionSymbol) {
+	// 空 owner 或字段没有可展示候选。
+	if ownerPath == "" || fieldName == "" {
+		return
+	}
+	fields := completion.members[ownerPath]
+	if fields == nil {
+		// 首次记录该 owner 时创建字段表。
+		fields = make(map[string]replSessionSymbol)
+		completion.members[ownerPath] = fields
+	}
+	fields[fieldName] = symbol
+}
+
+// rootCandidates 合并静态根候选和 REPL 会话根候选。
+func (completion *replSessionCompletions) rootCandidates(staticCandidates []string) []string {
+	// nil 或空动态索引直接复用静态切片，避免改变既有候选顺序。
+	if completion == nil || len(completion.roots) == 0 {
+		return staticCandidates
+	}
+	return mergeREPLCompletionCandidates(staticCandidates, completion.roots)
+}
+
+// rootFunctionCandidates 合并静态根函数候选和 REPL 会话根函数候选。
+func (completion *replSessionCompletions) rootFunctionCandidates(staticFunctions map[string]struct{}) map[string]struct{} {
+	// 先复制静态函数集合，避免后续动态候选污染包级变量。
+	mergedFunctions := make(map[string]struct{}, len(staticFunctions))
+	for name := range staticFunctions {
+		mergedFunctions[name] = struct{}{}
+	}
+	if completion == nil {
+		// 无动态索引时返回静态副本，调用方可安全只读。
+		return mergedFunctions
+	}
+	for name, symbol := range completion.roots {
+		if symbol.function {
+			// 函数摘要才允许唯一补全时追加调用括号。
+			mergedFunctions[name] = struct{}{}
+		}
+	}
+	return mergedFunctions
+}
+
+// memberCandidates 返回 owner 的静态和会话字段候选。
+func (completion *replSessionCompletions) memberCandidates(ownerPath string) ([]string, bool) {
+	// 静态候选优先覆盖标准库表；动态候选可补充用户表字段。
+	staticCandidates := replMemberCompletions[ownerPath]
+	var dynamicCandidates map[string]replSessionSymbol
+	if completion != nil {
+		dynamicCandidates = completion.members[ownerPath]
+	}
+	if len(staticCandidates) == 0 && len(dynamicCandidates) == 0 {
+		// owner 不存在任何候选时，调用方应放弃本次补全。
+		return nil, false
+	}
+	return mergeREPLCompletionCandidates(staticCandidates, dynamicCandidates), true
+}
+
+// memberFunctionCandidates 返回 owner 的静态和会话函数字段候选。
+func (completion *replSessionCompletions) memberFunctionCandidates(ownerPath string) map[string]struct{} {
+	// 复制静态函数集合，避免动态会话字段污染包级标准库元数据。
+	staticFunctions := replMemberFunctionCompletions[ownerPath]
+	mergedFunctions := make(map[string]struct{}, len(staticFunctions))
+	for name := range staticFunctions {
+		mergedFunctions[name] = struct{}{}
+	}
+	if completion == nil {
+		return mergedFunctions
+	}
+	for name, symbol := range completion.members[ownerPath] {
+		if symbol.function {
+			// 只有函数表达式或函数声明来源的字段才追加调用括号。
+			mergedFunctions[name] = struct{}{}
+		}
+	}
+	return mergedFunctions
+}
+
+// mergeREPLCompletionCandidates 合并静态候选和动态候选，并按字典序稳定输出。
+func mergeREPLCompletionCandidates(staticCandidates []string, dynamicCandidates map[string]replSessionSymbol) []string {
+	// 没有动态候选时保持原静态顺序，兼容既有展示快照。
+	if len(dynamicCandidates) == 0 {
+		return staticCandidates
+	}
+	seenCandidates := make(map[string]struct{}, len(staticCandidates)+len(dynamicCandidates))
+	mergedCandidates := make([]string, 0, len(staticCandidates)+len(dynamicCandidates))
+	for _, candidate := range staticCandidates {
+		if _, exists := seenCandidates[candidate]; exists {
+			// 静态候选重复时只保留首次出现，避免展示噪声。
+			continue
+		}
+		seenCandidates[candidate] = struct{}{}
+		mergedCandidates = append(mergedCandidates, candidate)
+	}
+	for candidate := range dynamicCandidates {
+		if _, exists := seenCandidates[candidate]; exists {
+			// 动态候选与静态候选重名时复用静态展示项。
+			continue
+		}
+		seenCandidates[candidate] = struct{}{}
+		mergedCandidates = append(mergedCandidates, candidate)
+	}
+	sort.Strings(mergedCandidates)
+	return mergedCandidates
+}
+
+// replExpressionIsFunction 判断表达式是否静态表示函数值。
+func replExpressionIsFunction(expression parser.Expression) bool {
+	// 只有 function 表达式可稳定视为可调用；其他运行时值不做猜测。
+	_, ok := expression.(*parser.FunctionExpression)
+	return ok
+}
+
+// replExpressionPath 将名称或点号字段访问表达式转为补全 owner path。
+func replExpressionPath(expression parser.Expression) (string, bool) {
+	// 根据表达式形态递归收集点号路径，动态索引和调用表达式不进入会话补全。
+	switch typedExpression := expression.(type) {
+	case *parser.NameExpression:
+		if typedExpression.Name == "" {
+			// 空名称不是合法补全 owner。
+			return "", false
+		}
+		return typedExpression.Name, true
+	case *parser.FieldAccessExpression:
+		ownerPath, ok := replExpressionPath(typedExpression.Receiver)
+		if !ok || typedExpression.Field == "" {
+			// receiver 动态或字段为空时无法形成稳定路径。
+			return "", false
+		}
+		return ownerPath + "." + typedExpression.Field, true
+	default:
+		// 其他表达式不能安全映射为静态路径。
+		return "", false
+	}
+}
+
 // completeREPLLine 对当前 REPL 行执行一次 Tab 补全。
-func completeREPLLine(stdout io.Writer, prompt string, buffer []rune, cursor int) (int, []rune, error) {
+func completeREPLLine(stdout io.Writer, prompt string, buffer []rune, cursor int, completions *replSessionCompletions) (int, []rune, error) {
 	// 先定位光标左侧可补全 token，再根据 token 类型选择根候选或表成员候选。
-	request, ok := replCompletionRequest(buffer, cursor)
+	request, ok := replCompletionRequest(buffer, cursor, completions)
 	if !ok {
 		// 没有可补全 token 时保持当前行不变。
 		return cursor, buffer, nil
@@ -1763,6 +2076,10 @@ func completeREPLLine(stdout io.Writer, prompt string, buffer []rune, cursor int
 	if len(matches) == 1 {
 		// 唯一候选直接补完整个名称。
 		replacement = matches[0]
+		if request.isFunctionCandidate(matches[0]) && !replCompletionHasCallSuffix(buffer, cursor) {
+			// 函数候选额外补齐调用括号，光标停在括号中便于继续输入参数。
+			return replaceREPLCompletionWithCursor(stdout, prompt, buffer, request.start, cursor, replacement+"()", len([]rune(replacement))+1)
+		}
 	} else {
 		// 多候选先尝试补最长公共前缀，不能推进时再展示候选列表。
 		replacement = commonREPLCompletionPrefix(matches)
@@ -1791,10 +2108,22 @@ type replCompletion struct {
 	prefix string
 	// candidates 是当前上下文可用候选。
 	candidates []string
+	// functionCandidates 保存当前上下文中可追加调用括号的函数候选。
+	functionCandidates map[string]struct{}
+}
+
+// isFunctionCandidate 判断当前候选是否是可调用函数。
+func (completion replCompletion) isFunctionCandidate(candidate string) bool {
+	// 没有函数候选表时按非函数处理，避免关键字或常量被追加括号。
+	if completion.functionCandidates == nil {
+		return false
+	}
+	_, ok := completion.functionCandidates[candidate]
+	return ok
 }
 
 // replCompletionRequest 从当前输入缓冲提取补全请求。
-func replCompletionRequest(buffer []rune, cursor int) (replCompletion, bool) {
+func replCompletionRequest(buffer []rune, cursor int, completions *replSessionCompletions) (replCompletion, bool) {
 	// 光标异常时不猜测用户意图，直接拒绝补全。
 	if cursor < 0 || cursor > len(buffer) {
 		return replCompletion{}, false
@@ -1806,23 +2135,68 @@ func replCompletionRequest(buffer []rune, cursor int) (replCompletion, bool) {
 	}
 	token := string(buffer[tokenStart:cursor])
 	if dotIndex := strings.LastIndex(token, "."); dotIndex >= 0 {
-		// 点号后的片段按表成员补全；只支持静态标准库表，避免执行用户代码。
+		// 点号后的片段按表成员补全；候选来自静态标准库和 REPL 成功执行过的会话索引。
 		owner := token[:dotIndex]
-		members, ok := replMemberCompletions[owner]
+		members, ok := completions.memberCandidates(owner)
 		if !ok {
 			return replCompletion{}, false
 		}
 		return replCompletion{
-			start:      tokenStart + dotIndex + 1,
-			prefix:     token[dotIndex+1:],
-			candidates: members,
+			start:              tokenStart + dotIndex + 1,
+			prefix:             token[dotIndex+1:],
+			candidates:         members,
+			functionCandidates: completions.memberFunctionCandidates(owner),
+		}, true
+	}
+	if keywordCandidates := replContextKeywordCompletions(buffer[:tokenStart]); len(keywordCandidates) > 0 {
+		return replCompletion{
+			start:      tokenStart,
+			prefix:     token,
+			candidates: keywordCandidates,
 		}, true
 	}
 	return replCompletion{
-		start:      tokenStart,
-		prefix:     token,
-		candidates: replRootCompletions,
+		start:              tokenStart,
+		prefix:             token,
+		candidates:         completions.rootCandidates(replRootCompletions),
+		functionCandidates: completions.rootFunctionCandidates(replRootFunctionCompletions),
 	}, true
+}
+
+// replContextKeywordCompletions 根据当前行上下文返回更精确的 Lua/GLua 关键字补全候选。
+func replContextKeywordCompletions(prefixBuffer []rune) []string {
+	// 只看当前行，避免多行 REPL 已输入内容影响本行关键字判断。
+	line := string(prefixBuffer)
+	if newlineIndex := strings.LastIndexAny(line, "\r\n"); newlineIndex >= 0 {
+		line = line[newlineIndex+1:]
+	}
+	trimmedLine := strings.TrimSpace(line)
+	if trimmedLine == "" {
+		// 空行仍使用全局候选，允许补 local/for/if 等起始关键字。
+		return nil
+	}
+	fields := strings.Fields(trimmedLine)
+	if len(fields) == 0 {
+		return nil
+	}
+	first := fields[0]
+	if first == "for" || first == "while" || first == "switch" {
+		// for/while/switch 头部最终都需要 do；上下文补全避免被 default/dofile 干扰。
+		return []string{"do"}
+	}
+	if first == "if" || first == "elseif" {
+		// if/elseif 条件后需要 then。
+		return []string{"then"}
+	}
+	if first == "repeat" {
+		// repeat 块结尾通常需要 until。
+		return []string{"until"}
+	}
+	if first == "else" || first == "default" || first == "case" {
+		// 分支块内部最常见的是 end/else/case/default 这类结构关键字。
+		return []string{"case", "default", "else", "elseif", "end"}
+	}
+	return nil
 }
 
 // isREPLCompletionRune 判断字符是否属于补全 token。
@@ -1865,18 +2239,44 @@ func commonREPLCompletionPrefix(matches []string) string {
 
 // replaceREPLCompletion 替换当前补全 token 并重绘输入行。
 func replaceREPLCompletion(stdout io.Writer, prompt string, buffer []rune, start int, cursor int, replacement string) (int, []rune, error) {
+	// 默认光标落在替换文本末尾，兼容普通名称补全。
+	return replaceREPLCompletionWithCursor(stdout, prompt, buffer, start, cursor, replacement, len([]rune(replacement)))
+}
+
+// replaceREPLCompletionWithCursor 替换当前补全 token，并把光标放到替换文本内的指定位置。
+func replaceREPLCompletionWithCursor(stdout io.Writer, prompt string, buffer []rune, start int, cursor int, replacement string, replacementCursor int) (int, []rune, error) {
 	// 使用 rune 切片替换，避免 ASCII 候选破坏用户已输入的非 ASCII 内容。
 	replacementRunes := []rune(replacement)
 	nextBuffer := make([]rune, 0, len(buffer)-(cursor-start)+len(replacementRunes))
 	nextBuffer = append(nextBuffer, buffer[:start]...)
 	nextBuffer = append(nextBuffer, replacementRunes...)
 	nextBuffer = append(nextBuffer, buffer[cursor:]...)
-	nextCursor := start + len(replacementRunes)
+	if replacementCursor < 0 {
+		// 负数光标没有合法语义，回退到替换文本起点。
+		replacementCursor = 0
+	} else if replacementCursor > len(replacementRunes) {
+		// 超过替换文本长度时夹到末尾，避免越界移动。
+		replacementCursor = len(replacementRunes)
+	}
+	nextCursor := start + replacementCursor
 	if err := redrawREPLLine(stdout, prompt, nextBuffer, nextCursor); err != nil {
 		// 重绘失败时返回给上层终止 REPL。
 		return cursor, buffer, err
 	}
 	return nextCursor, nextBuffer, nil
+}
+
+// replCompletionHasCallSuffix 判断当前补全位置后面是否已经存在调用左括号。
+func replCompletionHasCallSuffix(buffer []rune, cursor int) bool {
+	// 跳过空白后检查左括号，避免用户已输入 `print (` 时重复补成 `print() (`。
+	for index := cursor; index < len(buffer); index++ {
+		if buffer[index] == ' ' || buffer[index] == '\t' {
+			// 空白不影响已有调用判断。
+			continue
+		}
+		return buffer[index] == '('
+	}
+	return false
 }
 
 // executeREPLChunk 执行单个 REPL chunk。

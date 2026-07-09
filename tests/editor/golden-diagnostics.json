@@ -50,6 +50,14 @@
       "diagnostics": [
         "undefined identifier 'run'"
       ]
+    },
+    {
+      "name": "duplicate switch case value is diagnosed",
+      "source": "switch value do\ncase 1, 2\n  print('x')\ncase 2\n  print('y')\nend\n",
+      "diagnostics": [
+        "duplicate switch case value",
+        "undefined identifier 'value'"
+      ]
     }
   ]
 }

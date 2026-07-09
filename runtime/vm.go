@@ -2184,6 +2184,17 @@ func (vm *VM) RegistersSnapshot() []Value {
 	return append([]Value(nil), vm.registers...)
 }
 
+// ActiveLocalSnapshot 表示当前 PC 可见的单个局部变量快照。
+//
+// Name 保存调试信息中的局部变量名；Value 是对应寄存器的当前值副本。该结构用于 DAP 变量展示，
+// 不允许调用方借它写回 VM 寄存器。
+type ActiveLocalSnapshot struct {
+	// Name 是局部变量名称。
+	Name string
+	// Value 是局部变量当前值。
+	Value Value
+}
+
 // BindPrototype 绑定当前 VM 正在执行的函数原型。
 //
 // proto 可以为 nil；nil 时后续活动寄存器快照会退回完整寄存器窗口，保持手写 VM 单测兼容。
@@ -6404,6 +6415,43 @@ func (vm *VM) ActiveRegistersSnapshot() []Value {
 
 	// 返回活动寄存器副本。
 	return activeRegisters
+}
+
+// ActiveLocalSnapshots 返回当前 PC 下仍处于生命周期内的具名局部变量副本。
+//
+// 返回值只用于调试展示；缺少 Proto、LocalVars 或寄存器映射时返回 nil。该方法不会暴露临时槽位，
+// 也不会返回重复寄存器，避免 IDE 变量窗口展示已经离开作用域的历史值。
+func (vm *VM) ActiveLocalSnapshots() []ActiveLocalSnapshot {
+	if vm == nil || vm.proto == nil || len(vm.proto.LocalVars) == 0 {
+		// 缺少 VM 或调试信息时没有稳定变量名可展示。
+		return nil
+	}
+
+	locals := make([]ActiveLocalSnapshot, 0, len(vm.proto.LocalVars))
+	seenRegisters := make(map[int]bool)
+	for index := range vm.proto.LocalVars {
+		localVar := vm.proto.LocalVars[index]
+		if !localVar.ActiveAt(vm.currentPC) {
+			// 不在当前 PC 生命周期内的 local 不应展示。
+			continue
+		}
+		if localVar.Name == "" || localVar.Name == "(*temporary)" {
+			// 匿名和临时槽位不是用户可理解变量。
+			continue
+		}
+		registerIndex := localVar.Register
+		if registerIndex < 0 || registerIndex >= len(vm.registers) {
+			// 损坏调试信息不能读取寄存器。
+			continue
+		}
+		if seenRegisters[registerIndex] {
+			// 同一寄存器只展示第一个活动名称，避免重复项。
+			continue
+		}
+		locals = append(locals, ActiveLocalSnapshot{Name: localVar.Name, Value: vm.registers[registerIndex]})
+		seenRegisters[registerIndex] = true
+	}
+	return locals
 }
 
 // SetRegister 写入指定寄存器。

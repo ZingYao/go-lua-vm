@@ -1,16 +1,14 @@
 local tools = require('module')
 
-tools.timesPrint('zing',1000000000)
-tools.timesPrint('zing1',1000000000)
 
 for i = 1,100 do
   switch i do
-    case 1
-      print('h1')
+    case 1,2
+      print('h'..i)
     case 2
-      print('h2')
+      print('???')
     case 3
-      print('h3')
+      print('h',i)
     default
       print('hello',i)
   end

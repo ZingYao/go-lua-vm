@@ -1,9 +1,0 @@
-<idea-plugin>
-  <extensions defaultExtensionNs="com.intellij">
-    <platform.dap.launchArgumentsProvider
-      implementation="com.glua.jetbrains.GluaDapLaunchArgumentsProvider"/>
-
-    <platform.dap.debugAdapterSupportProvider
-      implementation="com.glua.jetbrains.GluaDapSupportProvider"/>
-  </extensions>
-</idea-plugin>

@@ -37,7 +37,13 @@
         "name",
         "prefix",
         "suffix"
-      ]
+      ],
+      "detailContains": {
+        "greet": "greet(name)"
+      },
+      "insertTextContains": {
+        "greet": "greet(${1:name})"
+      }
     },
     {
       "name": "for statement do keyword completion",
@@ -139,6 +145,22 @@
       "notExpected": [
         "hidden"
       ]
+    },
+    {
+      "name": "builtin optional signature snippet",
+      "kind": "builtin-member",
+      "source": "string.ma",
+      "marker": "string.ma",
+      "cursor": "after-marker",
+      "expected": [
+        "match"
+      ],
+      "detailContains": {
+        "match": "string.match(s, pattern [, init])"
+      },
+      "insertTextContains": {
+        "match": "match(${1:s}, ${2:pattern}, ${3:init})"
+      }
     }
   ]
 }

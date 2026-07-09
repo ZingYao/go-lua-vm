@@ -36,14 +36,18 @@ type Server struct {
 	closed   chan struct{}
 	once     sync.Once
 
-	mu            sync.Mutex
-	breakpoints   map[string]map[int]bool
-	activeSession *connectionSession
-	continueCh    chan struct{}
-	configuredCh  chan struct{}
-	configOnce    sync.Once
-	stopped       bool
-	currentStop   *stoppedLocation
+	mu             sync.Mutex
+	breakpoints    map[string]map[int]bool
+	activeSession  *connectionSession
+	continueCh     chan struct{}
+	configuredCh   chan struct{}
+	configOnce     sync.Once
+	stopped        bool
+	currentStop    *stoppedLocation
+	stepMode       bool
+	stepSource     string
+	stepLine       int
+	pauseRequested bool
 }
 
 // NewServer 创建一个 GLua DAP server。
@@ -56,11 +60,11 @@ func NewServer(address string) (*Server, error) {
 		return nil, errors.New("glua DAP listen address is required")
 	}
 	return &Server{
-		Address:     strings.TrimSpace(address),
-		Ready:       make(chan struct{}),
-		closed:      make(chan struct{}),
-		breakpoints: make(map[string]map[int]bool),
-		continueCh:  make(chan struct{}),
+		Address:      strings.TrimSpace(address),
+		Ready:        make(chan struct{}),
+		closed:       make(chan struct{}),
+		breakpoints:  make(map[string]map[int]bool),
+		continueCh:   make(chan struct{}),
 		configuredCh: make(chan struct{}),
 	}, nil
 }
@@ -178,9 +182,11 @@ func (server *Server) acceptLoop(ctx context.Context) {
 //
 // Source 已归一化为无 @ 前缀路径；Line 使用 DAP/源码展示的一基行号；PC 使用 Proto.Code 的零基指令位置。
 type stoppedLocation struct {
-	Source string
-	Line   int
-	PC     int
+	Source    string
+	Line      int
+	PC        int
+	Reason    string
+	Variables []runtime.ActiveLocalSnapshot
 }
 
 // protocolMessage 表示 DAP JSON 消息的通用字段。
@@ -379,11 +385,11 @@ func (session *connectionSession) responseBody(request protocolMessage) (any, bo
 		// 当前先暴露暂停点所在的顶层帧，后续再扩展完整调用栈。
 		return session.server.stackTrace(), true
 	case "scopes":
-		// 没有 stack frame 时没有 scope。
-		return map[string]any{"scopes": []any{}}, true
+		// 暂停时暴露当前帧局部变量 scope；未暂停时没有 scope。
+		return session.server.scopes(), true
 	case "variables":
-		// 变量读取后续通过 debug.getlocal/upvalue 接入。
-		return map[string]any{"variables": []any{}}, true
+		// 返回暂停点保存的局部变量快照。
+		return session.server.variables(), true
 	case "continue":
 		// 继续请求释放 VM 暂停点。
 		session.server.resumeAll()
@@ -392,8 +398,14 @@ func (session *connectionSession) responseBody(request protocolMessage) (any, bo
 		// 断开调试会话时释放暂停点，避免 CLI 永久等待。
 		session.server.resumeAll()
 		return map[string]any{}, true
-	case "next", "stepIn", "stepOut", "pause":
-		// 步进命令后续接入 hook；当前只保持 IDE 会话可关闭。
+	case "next", "stepIn", "stepOut":
+		// 当前先实现源码行级步进；三种步进都会在下一条不同源码行暂停。
+		session.server.prepareStep()
+		session.server.resumeAll()
+		return map[string]any{}, true
+	case "pause":
+		// pause 会在下一条可见源码行暂停。
+		session.server.requestPause()
 		return map[string]any{}, true
 	default:
 		// 未列出的命令一律按未实现处理。
@@ -482,6 +494,73 @@ func (server *Server) stackTrace() map[string]any {
 	return map[string]any{"stackFrames": []map[string]any{frame}, "totalFrames": 1}
 }
 
+// scopes 返回当前暂停帧的 DAP 变量作用域。
+//
+// 当前实现只暴露局部变量作用域；variablesReference 固定为 1，并由 variables 方法读取当前暂停点快照。
+func (server *Server) scopes() map[string]any {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if server.currentStop == nil || len(server.currentStop.Variables) == 0 {
+		// 未暂停或没有局部变量时返回空 scope。
+		return map[string]any{"scopes": []any{}}
+	}
+	scope := map[string]any{
+		"name":               "Locals",
+		"variablesReference": 1,
+		"expensive":          false,
+	}
+	return map[string]any{"scopes": []map[string]any{scope}}
+}
+
+// variables 返回当前暂停点保存的局部变量快照。
+//
+// GLua 当前只使用 variablesReference=1 表示局部变量列表；未知 reference 返回空列表，保持 DAP 客户端
+// 请求幂等且不会 panic。
+func (server *Server) variables() map[string]any {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if server.currentStop == nil {
+		// 未暂停时没有变量。
+		return map[string]any{"variables": []any{}}
+	}
+	values := make([]map[string]any, 0, len(server.currentStop.Variables))
+	for index := range server.currentStop.Variables {
+		local := server.currentStop.Variables[index]
+		values = append(values, map[string]any{
+			"name":               local.Name,
+			"value":              local.Value.DebugString(),
+			"type":               valueTypeName(local.Value),
+			"variablesReference": 0,
+		})
+	}
+	return map[string]any{"variables": values}
+}
+
+// prepareStep 设置一次源码行级步进请求。
+//
+// 如果当前已暂停，则记录当前 source:line，恢复后遇到不同可见源码行时再次暂停；如果未暂停，则退化为
+// pause 请求，在下一条可见源码行暂停。
+func (server *Server) prepareStep() {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	server.stepMode = true
+	if server.currentStop != nil {
+		// 从当前暂停位置开始，避免刚 resume 就停在同一源码行。
+		server.stepSource = server.currentStop.Source
+		server.stepLine = server.currentStop.Line
+		return
+	}
+	server.stepSource = ""
+	server.stepLine = 0
+}
+
+// requestPause 请求在下一条可见源码行暂停。
+func (server *Server) requestPause() {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	server.pauseRequested = true
+}
+
 // resumeAll 释放当前暂停的 VM。
 //
 // 没有暂停态时保持无副作用；关闭旧 channel 后立即换新，供下一次断点暂停等待。
@@ -513,11 +592,53 @@ func (server *Server) BeforeInstruction(state *runtime.State, vm *runtime.VM, pr
 		return nil
 	}
 	source := normalizeSourcePath(proto.Source)
-	if source == "" || !server.hasBreakpoint(source, line) {
-		// 没有命中用户设置的断点。
+	if source == "" {
+		// 缺少源码路径时不能匹配断点或步进。
 		return nil
 	}
-	return server.pauseAt(state, stoppedLocation{Source: source, Line: line, PC: pc})
+	reason := ""
+	if server.hasBreakpoint(source, line) {
+		// 命中用户设置的断点。
+		reason = "breakpoint"
+	} else if server.consumeStepStop(source, line) {
+		// 命中 step/pause 请求。
+		reason = "step"
+	}
+	if reason == "" {
+		// 没有命中断点或步进请求。
+		return nil
+	}
+	variables := []runtime.ActiveLocalSnapshot(nil)
+	if vm != nil {
+		// 暂停前复制当前活动局部变量，供 DAP variables 请求读取。
+		variables = vm.ActiveLocalSnapshots()
+	}
+	return server.pauseAt(state, stoppedLocation{Source: source, Line: line, PC: pc, Reason: reason, Variables: variables})
+}
+
+// consumeStepStop 判断当前 source:line 是否满足步进或 pause 请求。
+//
+// 返回 true 时会消费本次 step/pause 状态；行级 step 会跳过恢复前所在的同一源码行。
+func (server *Server) consumeStepStop(source string, line int) bool {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if server.pauseRequested {
+		// 用户显式暂停时，下一条可见源码行立即停住。
+		server.pauseRequested = false
+		return true
+	}
+	if !server.stepMode {
+		// 没有步进请求时不暂停。
+		return false
+	}
+	if server.stepSource == source && server.stepLine == line {
+		// 仍在恢复前同一行，继续执行到下一条可见行。
+		return false
+	}
+	server.stepMode = false
+	server.stepSource = ""
+	server.stepLine = 0
+	return true
 }
 
 // hasBreakpoint 判断 source:line 是否命中已保存断点。
@@ -554,7 +675,7 @@ func (server *Server) pauseAt(state *runtime.State, location stoppedLocation) er
 		Type:  "event",
 		Event: "stopped",
 		Body: map[string]any{
-			"reason":            "breakpoint",
+			"reason":            location.Reason,
 			"threadId":          1,
 			"allThreadsStopped": true,
 		},
@@ -581,6 +702,40 @@ func normalizeSourcePath(source string) string {
 		return ""
 	}
 	return filepath.Clean(trimmed)
+}
+
+// valueTypeName 返回 DAP 变量展示使用的 Lua 类型名称。
+func valueTypeName(value runtime.Value) string {
+	// 按运行时值类型映射到 Lua 用户可理解的类型名。
+	switch value.Kind {
+	case runtime.KindNil:
+		// nil 类型直接展示 nil。
+		return "nil"
+	case runtime.KindBoolean:
+		// boolean 类型展示 boolean。
+		return "boolean"
+	case runtime.KindInteger, runtime.KindNumber:
+		// Lua 5.3 integer/float 都属于 number 类型。
+		return "number"
+	case runtime.KindString:
+		// 字符串类型展示 string。
+		return "string"
+	case runtime.KindTable:
+		// table 引用展示 table。
+		return "table"
+	case runtime.KindLuaClosure, runtime.KindGoClosure:
+		// Lua 和 Go closure 对用户都表现为 function。
+		return "function"
+	case runtime.KindUserdata:
+		// userdata 引用展示 userdata。
+		return "userdata"
+	case runtime.KindThread:
+		// coroutine/thread 引用展示 thread。
+		return "thread"
+	default:
+		// 未知扩展类型保守展示 value。
+		return "value"
+	}
 }
 
 // readMessage 从 reader 读取一个 DAP Content-Length 帧。

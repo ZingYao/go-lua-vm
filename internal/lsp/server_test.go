@@ -26,6 +26,24 @@ func TestAnalyzeDiagnosticsAcceptsExtensions(t *testing.T) {
 	}
 }
 
+// TestAnalyzeDiagnosticsRejectsDuplicateSwitchCaseValue 验证 PLS 会诊断 switch 内重复 case 值。
+func TestAnalyzeDiagnosticsRejectsDuplicateSwitchCaseValue(t *testing.T) {
+	if !extensions.Default().Has(extensions.SyntaxSwitch) {
+		// lua53 构建不包含 switch 扩展，扩展诊断用例在该模式下不执行。
+		t.Skip("switch syntax extension is not compiled")
+	}
+	source := "switch 1 do\ncase 1, 2\nprint('x')\ncase 2\nprint('y')\nend\n"
+	diagnostics := analyzeDiagnostics(source, extensions.Default())
+	if len(diagnostics) == 0 {
+		// 重复 case 值必须通过 PLS 展示为错误。
+		t.Fatalf("diagnostics should not be empty")
+	}
+	if !strings.Contains(diagnostics[0].Message, "duplicate switch case value") {
+		// 诊断消息应直接说明重复 case 值。
+		t.Fatalf("diagnostic message = %q", diagnostics[0].Message)
+	}
+}
+
 // TestAnalyzeDiagnosticsRejectsDisabledExtensions 验证关闭扩展后会产生诊断。
 func TestAnalyzeDiagnosticsRejectsDisabledExtensions(t *testing.T) {
 	diagnostics := analyzeDiagnostics("while true do continue end\n", extensions.None())

@@ -18,13 +18,12 @@
     <ul>
       <li>版本 1.0：发布 JetBrains glua 语言支持。</li>
       <li>新增 Lua/glua 文件识别、语法高亮、扩展语法诊断、补全、文档和格式化。</li>
-      <li>新增可选 DAP attach 调试能力，避免 DAP 模块缺失时影响基础语言插件安装。</li>
+      <li>新增 GLua Debug 入口，由扩展内部启动 glua DAP 服务并输出启动日志。</li>
       <li>补充 require 返回表成员跳转和 table.member = function(...) 格式化支持。</li>
     </ul>
   ]]></change-notes>
 
   <depends>com.intellij.modules.platform</depends>
-  <depends optional="true" config-file="dap.xml">intellij.platform.dap</depends>
 
   <extensions defaultExtensionNs="com.intellij">
     <fileType
@@ -87,29 +86,27 @@
     <configurationType
       implementation="com.glua.jetbrains.GluaDapRunConfigurationType"/>
 
+    <programRunner
+      id="GluaDebugProgramRunner"
+      implementation="com.glua.jetbrains.GluaDebugProgramRunner"/>
+
   </extensions>
 
-  <actions>
+  <actions resource-bundle="messages.GluaActionsBundle">
     <action
       id="Glua.FormatFile"
-      class="com.glua.jetbrains.GluaFormatAction"
-      text="Format GLua File"
-      description="Format the current GLua file">
+      class="com.glua.jetbrains.GluaFormatAction">
       <add-to-group group-id="CodeMenu" anchor="last"/>
     </action>
     <action
       id="Glua.RunCurrentFile"
-      class="com.glua.jetbrains.GluaRunCurrentFileAction"
-      text="Run Current GLua File"
-      description="Run the current Lua/glua file with the configured glua executable">
+      class="com.glua.jetbrains.GluaRunCurrentFileAction">
       <add-to-group group-id="EditorPopupMenu" anchor="last"/>
       <add-to-group group-id="ToolsMenu" anchor="last"/>
     </action>
     <action
       id="Glua.DebugCurrentFile"
-      class="com.glua.jetbrains.GluaRunCurrentFileAction$Debug"
-      text="Debug Current GLua File"
-      description="Debug the current Lua/glua file with the configured glua executable">
+      class="com.glua.jetbrains.GluaRunCurrentFileAction$Debug">
       <add-to-group group-id="EditorPopupMenu" anchor="last"/>
       <add-to-group group-id="ToolsMenu" anchor="last"/>
     </action>
