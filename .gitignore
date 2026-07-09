@@ -1,5 +1,6 @@
 .DS_Store
 .idea/
+.vscode/
 logs/
 *.log
 tmp/
@@ -13,4 +14,4 @@ coverage.out
 *.test
 luac.out
 test.glua
-third_party/lua-5.3.6/
+third_party/
