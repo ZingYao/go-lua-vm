@@ -1,0 +1,9 @@
+test/**
+*.vsix
+.vscodeignore
+.npmrc
+.DS_Store
+coverage/**
+extension.js
+server/**
+node_modules/**

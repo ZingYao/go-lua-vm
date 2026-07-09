@@ -6,6 +6,7 @@ import com.intellij.execution.configurations.ConfigurationFactory;
 import com.intellij.execution.configurations.LocatableConfigurationBase;
 import com.intellij.execution.configurations.RuntimeConfigurationError;
 import com.intellij.execution.configurations.RunProfileState;
+import com.intellij.execution.executors.DefaultRunExecutor;
 import com.intellij.execution.runners.ExecutionEnvironment;
 import com.intellij.openapi.options.SettingsEditor;
 import com.intellij.openapi.project.Project;
@@ -14,11 +15,13 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 public final class GluaDapRunConfiguration extends LocatableConfigurationBase<Object> {
-    private static final String HOST_ATTR = "host";
-    private static final String PORT_ATTR = "port";
+    private static final String GLUA_EXECUTABLE_ATTR = "gluaExecutable";
+    private static final String PROGRAM_ATTR = "program";
+    static final String INTERNAL_DAP_HOST = "127.0.0.1";
+    static final int INTERNAL_DAP_PORT = 5678;
 
-    private String host = "127.0.0.1";
-    private int port = 5678;
+    private String gluaExecutable = "";
+    private String program = "";
 
     public GluaDapRunConfiguration(@NotNull Project project,
                                    @NotNull ConfigurationFactory factory,
@@ -34,59 +37,58 @@ public final class GluaDapRunConfiguration extends LocatableConfigurationBase<Ob
     @Override
     public @Nullable RunProfileState getState(@NotNull Executor executor,
                                               @NotNull ExecutionEnvironment environment) throws ExecutionException {
-        return new GluaDapRunProfileState(environment, host(), port());
+        if (DefaultRunExecutor.EXECUTOR_ID.equals(executor.getId())) {
+            return new GluaRunProfileState(environment, gluaExecutable(), program());
+        }
+        return new GluaDapRunProfileState(environment, gluaExecutable(), program());
     }
 
     @Override
     public void checkConfiguration() throws RuntimeConfigurationError {
-        if (host().isBlank()) {
-            throw new RuntimeConfigurationError("DAP attach host is required.");
-        }
-        if (port() < 1 || port() > 65535) {
-            throw new RuntimeConfigurationError("DAP attach port must be between 1 and 65535.");
+        if (program().isBlank()) {
+            throw new RuntimeConfigurationError(GluaUiText.text("GLua program file is required.", "必须选择 GLua 程序文件。"));
         }
     }
 
     @Override
     public void readExternal(@NotNull Element element) {
         super.readExternal(element);
-        host = normalizeHost(element.getAttributeValue(HOST_ATTR));
-        port = normalizePort(element.getAttributeValue(PORT_ATTR));
+        gluaExecutable = normalizePath(element.getAttributeValue(GLUA_EXECUTABLE_ATTR));
+        program = normalizePath(element.getAttributeValue(PROGRAM_ATTR));
     }
 
     @Override
     public void writeExternal(@NotNull Element element) {
         super.writeExternal(element);
-        element.setAttribute(HOST_ATTR, host());
-        element.setAttribute(PORT_ATTR, String.valueOf(port()));
+        element.setAttribute(GLUA_EXECUTABLE_ATTR, gluaExecutable());
+        element.setAttribute(PROGRAM_ATTR, program());
     }
 
     public String host() {
-        return normalizeHost(host);
-    }
-
-    public void setHost(String host) {
-        this.host = normalizeHost(host);
+        return INTERNAL_DAP_HOST;
     }
 
     public int port() {
-        return normalizePort(String.valueOf(port));
+        return INTERNAL_DAP_PORT;
     }
 
-    public void setPort(int port) {
-        this.port = normalizePort(String.valueOf(port));
+    public String gluaExecutable() {
+        return normalizePath(gluaExecutable);
     }
 
-    private static String normalizeHost(String value) {
-        return value == null || value.isBlank() ? "127.0.0.1" : value.trim();
+    public void setGluaExecutable(String gluaExecutable) {
+        this.gluaExecutable = normalizePath(gluaExecutable);
     }
 
-    private static int normalizePort(String value) {
-        try {
-            int parsed = Integer.parseInt(value == null ? "" : value.trim());
-            return parsed >= 1 && parsed <= 65535 ? parsed : 5678;
-        } catch (NumberFormatException ignored) {
-            return 5678;
-        }
+    public String program() {
+        return normalizePath(program);
+    }
+
+    public void setProgram(String program) {
+        this.program = normalizePath(program);
+    }
+
+    private static String normalizePath(String value) {
+        return value == null ? "" : value.trim();
     }
 }

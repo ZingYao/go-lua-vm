@@ -7,17 +7,19 @@ import com.intellij.execution.runners.ExecutionEnvironment;
 import org.jetbrains.annotations.NotNull;
 
 public final class GluaDapRunProfileState extends CommandLineState {
-    private final String host;
-    private final int port;
+    private final String gluaExecutable;
+    private final String program;
 
-    public GluaDapRunProfileState(@NotNull ExecutionEnvironment environment, @NotNull String host, int port) {
+    public GluaDapRunProfileState(@NotNull ExecutionEnvironment environment,
+                                  @NotNull String gluaExecutable,
+                                  @NotNull String program) {
         super(environment);
-        this.host = host;
-        this.port = port;
+        this.gluaExecutable = gluaExecutable;
+        this.program = program;
     }
 
     @Override
     protected @NotNull ProcessHandler startProcess() throws ExecutionException {
-        return new GluaDapAttachProcessHandler(host, port);
+        return GluaDapLaunchProcessHandler.create(gluaExecutable, program);
     }
 }

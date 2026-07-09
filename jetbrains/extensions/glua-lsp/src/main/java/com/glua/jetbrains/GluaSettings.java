@@ -18,6 +18,8 @@ public final class GluaSettings implements PersistentStateComponent<GluaSettings
         public List<String> builtinDocs = new ArrayList<>();
         public String dapHost = "127.0.0.1";
         public int dapPort = 5678;
+        public String gluaExecutable = "";
+        public String gluacExecutable = "";
     }
 
     private StateData state = new StateData();
@@ -65,5 +67,21 @@ public final class GluaSettings implements PersistentStateComponent<GluaSettings
 
     public void setDapPort(int dapPort) {
         state.dapPort = dapPort >= 1 && dapPort <= 65535 ? dapPort : 5678;
+    }
+
+    public String gluaExecutable() {
+        return state.gluaExecutable == null ? "" : state.gluaExecutable.trim();
+    }
+
+    public void setGluaExecutable(String gluaExecutable) {
+        state.gluaExecutable = gluaExecutable == null ? "" : gluaExecutable.trim();
+    }
+
+    public String gluacExecutable() {
+        return state.gluacExecutable == null ? "" : state.gluacExecutable.trim();
+    }
+
+    public void setGluacExecutable(String gluacExecutable) {
+        state.gluacExecutable = gluacExecutable == null ? "" : gluacExecutable.trim();
     }
 }

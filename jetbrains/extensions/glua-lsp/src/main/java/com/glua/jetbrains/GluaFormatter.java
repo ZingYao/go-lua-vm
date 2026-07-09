@@ -11,21 +11,89 @@ final class GluaFormatter {
         String[] lines = source.replace("\r\n", "\n").replace('\r', '\n').split("\n", -1);
         StringBuilder builder = new StringBuilder();
         List<String> frames = new ArrayList<>();
+        CommentState commentState = new CommentState();
         for (int i = 0; i < lines.length; i++) {
-            String trimmed = normalizeSpaces(lines[i].trim());
-            if (trimmed.isEmpty()) {
+            String rawTrimmed = lines[i].trim();
+            if (rawTrimmed.isEmpty()) {
                 builder.append('\n');
                 continue;
             }
-            String first = firstWord(trimmed);
+            SplitLine split = splitLineComment(rawTrimmed, commentState);
+            String code = normalizeSpaces(split.code().trim());
+            String comment = split.comment().trim();
+            String first = firstWord(code);
             adjustBeforeLine(frames, first);
-            builder.append("  ".repeat(Math.max(0, frames.size()))).append(trimmed);
+            builder.append("  ".repeat(Math.max(0, frames.size()))).append(joinCodeAndComment(code, comment));
             if (i < lines.length - 1) {
                 builder.append('\n');
             }
-            adjustAfterLine(frames, first, trimmed);
+            adjustAfterLine(frames, first, code);
         }
         return builder.toString();
+    }
+
+    private static SplitLine splitLineComment(String line, CommentState state) {
+        if (!state.longCommentClose.isBlank()) {
+            if (line.contains(state.longCommentClose)) {
+                state.longCommentClose = "";
+            }
+            return new SplitLine("", line);
+        }
+        char quote = 0;
+        boolean escaped = false;
+        for (int i = 0; i < line.length(); i++) {
+            char ch = line.charAt(i);
+            if (quote != 0) {
+                if (escaped) {
+                    escaped = false;
+                    continue;
+                }
+                if (ch == '\\') {
+                    escaped = true;
+                    continue;
+                }
+                if (ch == quote) {
+                    quote = 0;
+                }
+                continue;
+            }
+            if (ch == '"' || ch == '\'') {
+                quote = ch;
+                continue;
+            }
+            if (ch == '-' && i + 1 < line.length() && line.charAt(i + 1) == '-') {
+                String closeText = longBracketCloseText(line, i + 2);
+                if (!closeText.isBlank() && !line.substring(i + 2).contains(closeText)) {
+                    state.longCommentClose = closeText;
+                }
+                return new SplitLine(line.substring(0, i), line.substring(i));
+            }
+        }
+        return new SplitLine(line, "");
+    }
+
+    private static String longBracketCloseText(String line, int openIndex) {
+        if (openIndex >= line.length() || line.charAt(openIndex) != '[') {
+            return "";
+        }
+        int index = openIndex + 1;
+        while (index < line.length() && line.charAt(index) == '=') {
+            index++;
+        }
+        if (index >= line.length() || line.charAt(index) != '[') {
+            return "";
+        }
+        return "]" + "=".repeat(index - openIndex - 1) + "]";
+    }
+
+    private static String joinCodeAndComment(String code, String comment) {
+        if (code.isBlank()) {
+            return comment;
+        }
+        if (comment.isBlank()) {
+            return code;
+        }
+        return code + " " + comment;
     }
 
     private static void adjustBeforeLine(List<String> frames, String first) {
@@ -95,9 +163,33 @@ final class GluaFormatter {
 
     private static boolean opensBlock(String first, String line) {
         if (List.of("function", "repeat").contains(first)) {
-            return true;
+            return blockOpenCount(line) > blockCloseCount(line);
         }
-        return line.endsWith(" then") || line.endsWith(" do") || line.startsWith("function ");
+        if (line.endsWith(" then") || line.endsWith(" do") || line.startsWith("function ") || hasFunctionExpression(line)) {
+            return blockOpenCount(line) > blockCloseCount(line);
+        }
+        return false;
+    }
+
+    private static boolean hasFunctionExpression(String line) {
+        return line.matches(".*(^|[^A-Za-z0-9_])function\\s*\\(.*");
+    }
+
+    private static int blockOpenCount(String line) {
+        return wordCount(line, "function") + wordCount(line, "then") + wordCount(line, "do");
+    }
+
+    private static int blockCloseCount(String line) {
+        return wordCount(line, "end") + wordCount(line, "until");
+    }
+
+    private static int wordCount(String line, String word) {
+        int count = 0;
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("(^|[^A-Za-z0-9_])" + word + "([^A-Za-z0-9_]|$)").matcher(line);
+        while (matcher.find()) {
+            count++;
+        }
+        return count;
     }
 
     private static String firstWord(String line) {
@@ -139,5 +231,12 @@ final class GluaFormatter {
             previousSpace = false;
         }
         return builder.toString();
+    }
+
+    private static final class CommentState {
+        private String longCommentClose = "";
+    }
+
+    private record SplitLine(String code, String comment) {
     }
 }

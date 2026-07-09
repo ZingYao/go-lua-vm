@@ -1,0 +1,55 @@
+{
+  "cases": [
+    {
+      "name": "global module table can be returned",
+      "source": "M = {}\nM.name = \"demo\"\nfunction M.hello(name)\n  return name\nend\nreturn M\n",
+      "diagnostics": []
+    },
+    {
+      "name": "global assignment can be reused",
+      "source": "value = \"hello\"\nprint(value)\nreturn value\n",
+      "diagnostics": []
+    },
+    {
+      "name": "native module require binding can be returned",
+      "source": "local cjson = require(\"cjson\")\nreturn cjson\n",
+      "diagnostics": []
+    },
+    {
+      "name": "function member parameters and module return are declared",
+      "source": "local M = {}\nfunction M.make(prefix, value)\n  local suffix = prefix .. value\n  return suffix\nend\nreturn M\n",
+      "diagnostics": []
+    },
+    {
+      "name": "for variables and upvalue are declared",
+      "source": "local total = 0\nfor index = 1, 3 do\n  total = total + index\nend\nlocal function read()\n  return total\nend\nreturn read()\n",
+      "diagnostics": []
+    },
+    {
+      "name": "local global function expression generic for and upvalue are declared",
+      "source": "global_total = 0\nlocal values = { one = 1 }\nlocal add = function(delta)\n  for key, value in pairs(values) do\n    global_total = global_total + value + delta\n  end\n  return global_total\nend\nreturn add(2)\n",
+      "diagnostics": []
+    },
+    {
+      "name": "table field assignment does not declare global",
+      "source": "local t = {\n  exported = true\n}\nreturn exported\n",
+      "diagnostics": [
+        "undefined identifier 'exported'"
+      ]
+    },
+    {
+      "name": "index assignment does not declare global",
+      "source": "local t = {}\nt[\"exported\"] = true\nreturn exported\n",
+      "diagnostics": [
+        "undefined identifier 'exported'"
+      ]
+    },
+    {
+      "name": "method name is not a global but method parameter is declared",
+      "source": "local M = {}\nfunction M:run(arg)\n  return arg\nend\nreturn run\n",
+      "diagnostics": [
+        "undefined identifier 'run'"
+      ]
+    }
+  ]
+}

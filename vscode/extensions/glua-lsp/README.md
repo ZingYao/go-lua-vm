@@ -1,6 +1,10 @@
-# glua Language Server
+# GLua 语言扩展
 
-VS Code extension for `go-lua-vm` / `glua`. It provides syntax highlighting, diagnostics, hover docs, go to definition, formatting, and completion for Lua plus glua syntax extensions such as `switch` and `continue`.
+面向 `go-lua-vm` / `glua` 的 VS Code 编辑器扩展，提供 GLua/Lua 编码、模块导航、文档提示、格式化和 DAP 调试连接能力。
+
+## Overview
+
+GLua 语言扩展面向日常开发场景设计：写 Lua/glua 文件时能获得语法高亮、扩展语法诊断、作用域补全、`require` 模块成员补全、冒号方法跳转和悬停文档；配置 `glua` 可执行文件后，可以在 VS Code 内快速运行或 Debug 当前文件。
 
 ## Features
 
@@ -12,7 +16,14 @@ VS Code extension for `go-lua-vm` / `glua`. It provides syntax highlighting, dia
 - Completion for builtin and custom functions
 - User-defined builtin/function signature JSON
 - Multi-language function documentation
-- Native VS Code debug attach to a running GLua DAP server over TCP
+- Quick run/debug commands for the current `.lua` or `.glua` file
+- Native VS Code debug attach with DAP address managed by the extension
+
+## License
+
+This extension is currently marked `UNLICENSED`. The VSIX includes a `LICENSE`
+file that records this publishing constraint; do not redistribute it publicly
+unless the project owner publishes a separate license grant.
 
 ## Settings
 
@@ -20,11 +31,11 @@ VS Code extension for `go-lua-vm` / `glua`. It provides syntax highlighting, dia
 {
   "glua.syntax": "extended",
   "glua.docLanguage": "auto",
+  "glua.executable": "/path/to/glua",
+  "glua.gluacExecutable": "/path/to/gluac",
   "glua.builtinDocs": [
     ".vscode/glua-builtin-docs.json"
-  ],
-  "glua.debug.host": "127.0.0.1",
-  "glua.debug.port": 5678
+  ]
 }
 ```
 
@@ -255,35 +266,31 @@ Use:
 Developer: Reload Window
 ```
 
-## Debug Attach
+## Run And Debug
 
 The extension contributes a native VS Code debugger type named `glua`.
-It attaches the VS Code Debug UI to an already running GLua Debug Adapter Protocol server over TCP.
-
-Create `.vscode/launch.json` with the Command Palette:
+After setting `glua.executable`, use the editor context menu or Command Palette:
 
 ```text
-GLua: Create DAP attach configuration
+GLua: Run current file
+GLua: Debug current file
 ```
 
-To attach once without editing `launch.json`, run:
+`Run current file` executes `glua <current-file>` in the file's workspace or directory.
+`Debug current file` starts a `glua` debug session. The DAP address is managed internally by the extension and is not a user-editable setting.
 
-```text
-GLua: Attach to DAP server
-```
-
-The command prompts for `host` and `port`, then starts a native VS Code debug session immediately.
-
-Or add the configuration manually:
+You can still create a minimal `.vscode/launch.json` entry:
 
 ```json
 {
   "type": "glua",
   "request": "attach",
-  "name": "Attach to GLua DAP",
-  "host": "127.0.0.1",
-  "port": 5678
+  "name": "Attach to GLua DAP"
 }
 ```
 
-`host` and `port` must point to a process that speaks DAP. The editor extension does not start the GLua VM debugger by itself.
+If Debug fails:
+
+- Check that `glua.executable` points to the expected executable.
+- Check that the GLua runtime you use has DAP support enabled.
+- Open `Output -> glua Language Server` for the failure reason.

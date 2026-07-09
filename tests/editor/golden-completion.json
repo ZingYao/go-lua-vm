@@ -1,0 +1,144 @@
+{
+  "files": {
+    "app/completion_module.lua": "local M = {}\n-- description: print many times\n-- param: name string user name\n-- param: times number repeat count\nM.timesPrint = function(name, times) end\nfunction M.dotCall(value) end\n-- description: call with self\n-- param: value string payload\n-- return: string result\nfunction M:colonCall(value) end\nM['bracketCall'] = function() end\nreturn M\n",
+    "app/literal_completion.lua": "local M = { literalCall = function() end, ['indexedLiteral'] = function() end, plainValue = true }\nreturn M\n",
+    "app/non_function_completion.lua": "local M = { ccc = true, value = 1 }\nreturn M\n",
+    "app/private_completion.lua": "local Private = {}\nPrivate.hidden = function() end\nlocal Public = {}\nPublic.visible = function() end\nreturn Public\n"
+  },
+  "cases": [
+    {
+      "name": "numeric for variable completion",
+      "kind": "file-symbol",
+      "source": "local total = 0\nfor i = 1, 3 do\n  \nend\n",
+      "marker": "  \nend",
+      "expected": [
+        "i",
+        "total"
+      ]
+    },
+    {
+      "name": "generic for variables completion",
+      "kind": "file-symbol",
+      "source": "local values = {}\nfor a, d in pairs(values) do\n  \nend\n",
+      "marker": "  \nend",
+      "expected": [
+        "a",
+        "d",
+        "values"
+      ]
+    },
+    {
+      "name": "function parameter and local completion",
+      "kind": "file-symbol",
+      "source": "local prefix = 'hello'\nlocal function greet(name)\n  local suffix = '!'\n  \nend\n",
+      "marker": "  \nend",
+      "expected": [
+        "greet",
+        "name",
+        "prefix",
+        "suffix"
+      ]
+    },
+    {
+      "name": "for statement do keyword completion",
+      "kind": "keyword",
+      "source": "for i = 1, 100 d\n",
+      "marker": "d\n",
+      "expected": [
+        "do"
+      ],
+      "notExpected": [
+        "dofile",
+        "glua doc comment",
+        "glua documented function"
+      ]
+    },
+    {
+      "name": "required module dot member completion",
+      "kind": "module-member",
+      "document": "app/main.lua",
+      "source": "local tools = require('completion_module')\ntools.",
+      "marker": "tools.",
+      "cursor": "after-marker",
+      "expected": [
+        "timesPrint",
+        "dotCall",
+        "colonCall",
+        "bracketCall"
+      ],
+      "detailContains": {
+        "timesPrint": "timesPrint(name, times)",
+        "colonCall": "method"
+      },
+      "insertTextContains": {
+        "timesPrint": "timesPrint(${1:name}, ${2:times})"
+      },
+      "documentationContains": {
+        "timesPrint": "print many times",
+        "colonCall": "call with self"
+      }
+    },
+    {
+      "name": "required module colon member completion",
+      "kind": "module-member",
+      "document": "app/main.lua",
+      "source": "local tools = require('completion_module')\ntools:",
+      "marker": "tools:",
+      "cursor": "after-marker",
+      "expected": [
+        "colonCall"
+      ],
+      "detailContains": {
+        "colonCall": "colonCall(value) method"
+      },
+      "insertTextContains": {
+        "colonCall": "colonCall(${1:value})"
+      },
+      "documentationContains": {
+        "colonCall": "payload"
+      }
+    },
+    {
+      "name": "required table literal member completion",
+      "kind": "module-member",
+      "document": "app/main.lua",
+      "source": "local tools = require('literal_completion')\ntools.",
+      "marker": "tools.",
+      "cursor": "after-marker",
+      "expected": [
+        "literalCall",
+        "indexedLiteral"
+      ],
+      "notExpected": [
+        "plainValue"
+      ]
+    },
+    {
+      "name": "required table literal non function guard",
+      "kind": "module-member",
+      "document": "app/main.lua",
+      "source": "local tools = require('non_function_completion')\ntools.",
+      "marker": "tools.",
+      "cursor": "after-marker",
+      "expected": [],
+      "notExpected": [
+        "ccc",
+        "value"
+      ]
+    },
+    {
+      "name": "required non returned table guard",
+      "kind": "module-member",
+      "document": "app/main.lua",
+      "source": "local tools = require('private_completion')\ntools.",
+      "marker": "tools.",
+      "cursor": "after-marker",
+      "expected": [
+        "visible"
+      ],
+      "notExpected": [
+        "hidden"
+      ]
+    }
+  ]
+}

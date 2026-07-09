@@ -24,7 +24,7 @@
   "scripts": {
     "build": "esbuild extension.js --bundle --platform=node --format=cjs --external:vscode --outfile=dist/extension.js && esbuild server/index.js --bundle --platform=node --format=cjs --outfile=dist/server.js",
     "vscode:prepublish": "npm run build",
-    "test": "node test/golden-diagnostics.test.js && node test/golden-require-definition.test.js && node test/debug-attach.test.js"
+    "test": "node test/golden-diagnostics.test.js && node test/golden-require-definition.test.js && node test/golden-completion.test.js && node test/formatting.test.js && node test/debug-attach.test.js"
   },
   "engines": {
     "vscode": "^1.80.0"
@@ -40,6 +40,10 @@
     "onCommand:glua.openBuiltinSignatureJson",
     "onCommand:glua.showBuiltinDocStatus",
     "onCommand:glua.startAttachDebug",
+    "onCommand:glua.runCurrentFile",
+    "onCommand:glua.debugCurrentFile",
+    "onCommand:glua.selectGluaExecutable",
+    "onCommand:glua.selectGluacExecutable",
     "onDebugResolve:glua"
   ],
   "main": "./dist/extension.js",
@@ -64,6 +68,22 @@
       {
         "command": "glua.startAttachDebug",
         "title": "%glua.startAttachDebug.title%"
+      },
+      {
+        "command": "glua.runCurrentFile",
+        "title": "%glua.runCurrentFile.title%"
+      },
+      {
+        "command": "glua.debugCurrentFile",
+        "title": "%glua.debugCurrentFile.title%"
+      },
+      {
+        "command": "glua.selectGluaExecutable",
+        "title": "%glua.selectGluaExecutable.title%"
+      },
+      {
+        "command": "glua.selectGluacExecutable",
+        "title": "%glua.selectGluacExecutable.title%"
       }
     ],
     "menus": {
@@ -87,6 +107,34 @@
         {
           "command": "glua.startAttachDebug",
           "when": "true"
+        },
+        {
+          "command": "glua.runCurrentFile",
+          "when": "true"
+        },
+        {
+          "command": "glua.debugCurrentFile",
+          "when": "true"
+        },
+        {
+          "command": "glua.selectGluaExecutable",
+          "when": "true"
+        },
+        {
+          "command": "glua.selectGluacExecutable",
+          "when": "true"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "glua.runCurrentFile",
+          "when": "resourceExtname == .glua || resourceExtname == .lua",
+          "group": "navigation@1"
+        },
+        {
+          "command": "glua.debugCurrentFile",
+          "when": "resourceExtname == .glua || resourceExtname == .lua",
+          "group": "navigation@2"
         }
       ]
     },
@@ -103,9 +151,7 @@
             "required": [
               "request",
               "type",
-              "name",
-              "host",
-              "port"
+              "name"
             ],
             "properties": {
               "type": {
@@ -125,18 +171,54 @@
               "name": {
                 "type": "string",
                 "description": "Configuration name shown in the debug dropdown."
-              },
-              "host": {
+              }
+            }
+          },
+          "launch": {
+            "required": [
+              "request",
+              "type",
+              "name",
+              "program"
+            ],
+            "properties": {
+              "type": {
                 "type": "string",
-                "default": "127.0.0.1",
-                "description": "GLua DAP server IP address or host name."
+                "enum": [
+                  "glua"
+                ],
+                "description": "Debug adapter type."
               },
-              "port": {
-                "type": "number",
-                "default": 5678,
-                "minimum": 1,
-                "maximum": 65535,
-                "description": "GLua DAP server TCP port."
+              "request": {
+                "type": "string",
+                "enum": [
+                  "launch"
+                ],
+                "description": "Launch GLua script debugging. The extension manages the DAP connection address internally."
+              },
+              "name": {
+                "type": "string",
+                "description": "Configuration name shown in the debug dropdown."
+              },
+              "program": {
+                "type": "string",
+                "description": "Lua/glua script file to debug."
+              },
+              "gluaExecutable": {
+                "type": "string",
+                "description": "Path to glua executable. Defaults to glua.executable."
+              },
+              "args": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": [],
+                "description": "Arguments passed to glua by launch helpers."
+              },
+              "cwd": {
+                "type": "string",
+                "description": "Working directory for glua."
               }
             }
           }
@@ -145,9 +227,16 @@
           {
             "type": "glua",
             "request": "attach",
-            "name": "Attach to GLua DAP",
-            "host": "127.0.0.1",
-            "port": 5678
+            "name": "Attach to GLua DAP"
+          },
+          {
+            "type": "glua",
+            "request": "launch",
+            "name": "Debug current GLua file",
+            "program": "${file}",
+            "gluaExecutable": "${config:glua.executable}",
+            "args": [],
+            "cwd": "${workspaceFolder}"
           }
         ],
         "configurationSnippets": [
@@ -157,9 +246,20 @@
             "body": {
               "type": "glua",
               "request": "attach",
-              "name": "Attach to GLua DAP",
-              "host": "${1:127.0.0.1}",
-              "port": 5678
+              "name": "Attach to GLua DAP"
+            }
+          },
+          {
+            "label": "GLua: Debug current file",
+            "description": "Debug the current Lua/glua file using the configured glua executable.",
+            "body": {
+              "type": "glua",
+              "request": "launch",
+              "name": "Debug current GLua file",
+              "program": "${file}",
+              "gluaExecutable": "${config:glua.executable}",
+              "args": [],
+              "cwd": "${workspaceFolder}"
             }
           }
         ]
@@ -233,12 +333,33 @@
         "glua.syntax": {
           "type": "string",
           "default": "extended",
+          "enum": [
+            "extended",
+            "lua53",
+            "continue",
+            "switch"
+          ],
           "description": "Syntax mode passed to gluals: extended, lua53, continue, switch, or comma-separated extensions."
         },
         "glua.docLanguage": {
           "type": "string",
           "default": "auto",
-          "description": "Language tag used for builtin docs, hover text and signatures. Use auto to follow VS Code, or set tags like en, zh-CN, ja, ko, fr-FR."
+          "enum": [
+            "auto",
+            "en",
+            "zh-CN"
+          ],
+          "description": "Language tag used for builtin docs, hover text and signatures."
+        },
+        "glua.executable": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the glua executable used by debug launch helpers."
+        },
+        "glua.gluacExecutable": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the gluac executable used by compile helpers."
         },
         "glua.builtinDocs": {
           "type": "array",
@@ -247,18 +368,6 @@
             "type": "string"
           },
           "description": "Absolute or workspace-relative JSON files to extend or override builtin function docs."
-        },
-        "glua.debug.host": {
-          "type": "string",
-          "default": "127.0.0.1",
-          "description": "Default GLua DAP server IP address or host name used when creating attach configurations."
-        },
-        "glua.debug.port": {
-          "type": "number",
-          "default": 5678,
-          "minimum": 1,
-          "maximum": 65535,
-          "description": "Default GLua DAP server TCP port used when creating attach configurations."
         }
       }
     }

@@ -23,8 +23,10 @@ import (
 	"github.com/ZingYao/go-lua-vm/compiler/lexer"
 	"github.com/ZingYao/go-lua-vm/compiler/parser"
 	"github.com/ZingYao/go-lua-vm/extensions"
+	"github.com/ZingYao/go-lua-vm/internal/buildinfo"
 	"github.com/ZingYao/go-lua-vm/lua"
 	"github.com/ZingYao/go-lua-vm/runtime"
+	"github.com/ZingYao/go-lua-vm/runtime/dap"
 	oslib "github.com/ZingYao/go-lua-vm/stdlib/os"
 )
 
@@ -57,6 +59,8 @@ type Streams struct {
 //
 // Expressions 对应一个或多个 `-e stat`；Libraries 对应一个或多个 `-l mod`；Interactive 对应 `-i`。
 type Options struct {
+	// Help 表示是否输出 glua 帮助信息。
+	Help bool
 	// Expressions 保存待执行的命令行 Lua 片段。
 	Expressions []string
 	// Libraries 保存待 require 的模块名。
@@ -85,6 +89,8 @@ type Options struct {
 	SyntaxExtensionsSet bool
 	// DisabledSyntaxExtensions 保存命令行显式关闭的语法扩展集合。
 	DisabledSyntaxExtensions extensions.SyntaxSet
+	// DAPListen 保存 GLua DAP server 的 TCP 监听地址；为空表示不启用调试端口。
+	DAPListen string
 }
 
 // Main 执行 glua 命令行并返回进程退出码。
@@ -322,6 +328,12 @@ func Run(ctx context.Context, args []string, streams Streams) error {
 		stdout := safeWriter(streams.Stdout)
 		_, _ = fmt.Fprintln(stdout, VersionText)
 	}
+	if options.Help {
+		// 帮助模式只输出命令能力说明，不创建 State 或执行任何 Lua 代码。
+		stdout := safeWriter(streams.Stdout)
+		_, _ = fmt.Fprint(stdout, HelpText())
+		return nil
+	}
 	if options.ListBytecodePath != "" {
 		// 可选反汇编模式只做调试输出，不创建 State，也不执行脚本。
 		return runBytecodeList(options.ListBytecodePath, streams.Stdout, syntaxForOptions(options))
@@ -330,10 +342,32 @@ func Run(ctx context.Context, args []string, streams Streams) error {
 		// 格式化模式只读取并输出/写回源码，不执行脚本。
 		return runFormat(options.FormatPath, options.FormatWrite, streams.Stdout, syntaxForOptions(options))
 	}
+	var dapServer *dap.Server
+	if options.DAPListen != "" {
+		// 显式 DAP 参数会在脚本执行前启动协议 server，编辑器可据此 attach。
+		dapServer, err = dap.NewServer(options.DAPListen)
+		if err != nil {
+			// 地址为空或非法时直接返回可展示错误。
+			return err
+		}
+		if err := dapServer.Start(ctx, safeWriter(streams.Stdout)); err != nil {
+			// 监听失败必须传播到 CLI stderr，避免 IDE Debug 面板静默空白。
+			return err
+		}
+		defer dapServer.Close()
+		if err := dapServer.WaitForConfigurationDone(ctx, 30*time.Second, safeWriter(streams.Stdout)); err != nil {
+			// DAP 模式下脚本必须等 IDE 下发断点配置后再执行，避免断点被脚本启动竞态错过。
+			return err
+		}
+	}
 
 	// 创建带 context 的 State，保证后续加载和调用可观察取消。
 	stateOptions := lua.DefaultOptions()
 	stateOptions = lua.WithSyntaxExtensions(stateOptions, syntaxForOptions(options))
+	if dapServer != nil {
+		// DAP server 同时作为 VM 调试观察器接收指令级源码行事件。
+		stateOptions.DebugObserver = dapServer
+	}
 	stateOptions = applyNativeModuleOptions(stateOptions)
 	stateOptions.AllowHostFilesystem = true
 	stateOptions.AllowProcess = true
@@ -399,11 +433,38 @@ func Run(ctx context.Context, args []string, streams Streams) error {
 			// 进入交互解释器前输出版本 banner，对齐官方 lua 裸启动和 -i 行为。
 			stdout := safeWriter(streams.Stdout)
 			_, _ = fmt.Fprintln(stdout, VersionText)
+			_, _ = fmt.Fprint(stdout, buildinfo.FeatureText(true))
 		}
 		// -i 或裸终端启动进入 REPL；REPL 内部错误写 stderr 并继续读取下一条输入。
 		return runREPL(state, streams)
 	}
 	return nil
+}
+
+// HelpText 返回 glua 命令帮助文本。
+func HelpText() string {
+	// 帮助文本集中维护，确保 -h 输出与 README/IDE 中暴露的参数保持一致。
+	var builder strings.Builder
+	builder.WriteString(VersionText)
+	builder.WriteString("\n\n")
+	builder.WriteString("Usage: glua [options] [script [args]]\n\n")
+	builder.WriteString("Lua compatible options:\n")
+	builder.WriteString("  -e stat                  execute string 'stat'\n")
+	builder.WriteString("  -l mod                   require library 'mod'\n")
+	builder.WriteString("  -i                       enter interactive mode after executing script\n")
+	builder.WriteString("  -v                       show version information\n")
+	builder.WriteString("  -E                       ignore LUA_INIT, LUA_PATH and LUA_CPATH\n")
+	builder.WriteString("  --                       stop handling options\n")
+	builder.WriteString("  -                        execute stdin as a script\n\n")
+	builder.WriteString("GLua options:\n")
+	builder.WriteString("  -h, --help               show this help\n")
+	builder.WriteString("  --glua-syntax value      select syntax mode: lua53, extended, all, continue,switch\n")
+	builder.WriteString("  --glua-disable-syntax v  disable syntax sugar names from the selected mode\n")
+	builder.WriteString("  --glua-format [-w] file  format a Lua/GLua file, optionally writing back with -w\n")
+	builder.WriteString("  --glua-list-bytecode f   print bytecode listing for a source or binary chunk\n")
+	builder.WriteString("  --glua-dap-listen addr   start the built-in DAP server, for example 127.0.0.1:0\n\n")
+	builder.WriteString(buildinfo.FeatureText(true))
+	return builder.String()
 }
 
 // enableSignalInterrupts 将宿主 SIGINT 转换为 Lua 级一次性中断。
@@ -465,6 +526,11 @@ func ParseArgs(args []string) (Options, error) {
 	var options Options
 	for index := 0; index < len(args); index++ {
 		argument := args[index]
+		if argument == "-h" || argument == "--help" {
+			// -h/--help 输出 GLua 帮助和当前构建能力，不执行脚本。
+			options.Help = true
+			continue
+		}
 		if argument == "-i" {
 			// -i 只设置交互模式标记，不消耗额外参数。
 			options.Interactive = true
@@ -564,6 +630,29 @@ func ParseArgs(args []string) (Options, error) {
 				return Options{}, fmt.Errorf("--glua-format can only be specified once")
 			}
 			options.FormatPath = formatPath
+			continue
+		}
+		if argument == "--glua-dap-listen" {
+			// --glua-dap-listen 必须消费 host:port，用于编辑器启动后 attach。
+			index++
+			if index >= len(args) {
+				// 缺少地址时无法启动 DAP server。
+				return Options{}, fmt.Errorf("option --glua-dap-listen requires an argument")
+			}
+			options.DAPListen = strings.TrimSpace(args[index])
+			if options.DAPListen == "" {
+				// 空地址没有明确监听目标。
+				return Options{}, fmt.Errorf("option --glua-dap-listen requires an argument")
+			}
+			continue
+		}
+		if strings.HasPrefix(argument, "--glua-dap-listen=") {
+			// 等号形式便于 VS Code/JetBrains 启动配置直接拼接参数。
+			options.DAPListen = strings.TrimSpace(strings.TrimPrefix(argument, "--glua-dap-listen="))
+			if options.DAPListen == "" {
+				// 空地址没有明确监听目标。
+				return Options{}, fmt.Errorf("option --glua-dap-listen requires an argument")
+			}
 			continue
 		}
 		if argument == "--glua-syntax" {
@@ -1480,6 +1569,15 @@ func (reader *terminalREPLLineReader) readLine(prompt string) (string, bool, err
 			}
 			cursor = nextCursor
 			buffer = nextBuffer
+		case '\t':
+			// Tab 触发 REPL 静态补全，只修改当前编辑缓冲，不执行 Lua 代码。
+			nextCursor, nextBuffer, err := completeREPLLine(reader.stdout, prompt, buffer, cursor)
+			if err != nil {
+				// 输出候选或重绘失败时停止 REPL。
+				return "", false, err
+			}
+			cursor = nextCursor
+			buffer = nextBuffer
 		case '\b', '\x7f':
 			if cursor > 0 {
 				// 删除光标左侧字符后重绘当前行。
@@ -1591,6 +1689,194 @@ func redrawREPLLine(stdout io.Writer, prompt string, buffer []rune, cursor int) 
 		}
 	}
 	return nil
+}
+
+var replRootCompletions = []string{
+	"_G",
+	"_VERSION",
+	"assert",
+	"case",
+	"collectgarbage",
+	"continue",
+	"coroutine",
+	"default",
+	"dofile",
+	"error",
+	"for",
+	"function",
+	"if",
+	"io",
+	"ipairs",
+	"local",
+	"math",
+	"next",
+	"os",
+	"package",
+	"pairs",
+	"pcall",
+	"print",
+	"rawequal",
+	"rawget",
+	"rawlen",
+	"rawset",
+	"repeat",
+	"require",
+	"select",
+	"string",
+	"switch",
+	"table",
+	"then",
+	"tonumber",
+	"tostring",
+	"type",
+	"until",
+	"utf8",
+	"while",
+	"xpcall",
+}
+
+var replMemberCompletions = map[string][]string{
+	"coroutine": {"close", "create", "isyieldable", "resume", "running", "status", "wrap", "yield"},
+	"io":        {"close", "flush", "input", "lines", "open", "output", "popen", "read", "stderr", "stdin", "stdout", "tmpfile", "type", "write"},
+	"math":      {"abs", "acos", "asin", "atan", "ceil", "cos", "deg", "exp", "floor", "fmod", "huge", "log", "max", "maxinteger", "min", "mininteger", "modf", "pi", "rad", "random", "randomseed", "sin", "sqrt", "tan", "tointeger", "type", "ult"},
+	"os":        {"clock", "date", "difftime", "execute", "exit", "getenv", "remove", "rename", "setlocale", "time", "tmpname"},
+	"package":   {"config", "cpath", "loaded", "loadlib", "path", "preload", "searchers", "searchpath"},
+	"string":    {"byte", "char", "dump", "find", "format", "gmatch", "gsub", "len", "lower", "match", "pack", "packsize", "rep", "reverse", "sub", "unpack", "upper"},
+	"table":     {"concat", "insert", "move", "pack", "remove", "sort", "unpack"},
+	"utf8":      {"char", "charpattern", "codepoint", "codes", "len", "offset"},
+}
+
+// completeREPLLine 对当前 REPL 行执行一次 Tab 补全。
+func completeREPLLine(stdout io.Writer, prompt string, buffer []rune, cursor int) (int, []rune, error) {
+	// 先定位光标左侧可补全 token，再根据 token 类型选择根候选或表成员候选。
+	request, ok := replCompletionRequest(buffer, cursor)
+	if !ok {
+		// 没有可补全 token 时保持当前行不变。
+		return cursor, buffer, nil
+	}
+	matches := filterREPLCompletions(request.candidates, request.prefix)
+	if len(matches) == 0 {
+		// 没有候选时不响铃、不改写，避免干扰用户输入。
+		return cursor, buffer, nil
+	}
+	replacement := ""
+	if len(matches) == 1 {
+		// 唯一候选直接补完整个名称。
+		replacement = matches[0]
+	} else {
+		// 多候选先尝试补最长公共前缀，不能推进时再展示候选列表。
+		replacement = commonREPLCompletionPrefix(matches)
+	}
+	if replacement != "" && replacement != request.prefix {
+		// 公共前缀能推进时只改写当前 token，不额外展开候选列表。
+		return replaceREPLCompletion(stdout, prompt, buffer, request.start, cursor, replacement)
+	}
+	if len(matches) > 1 {
+		// 多候选且无法推进时换行展示候选，然后恢复当前输入行和光标位置。
+		if _, err := fmt.Fprintf(stdout, "\r\n%s\r\n", strings.Join(matches, "  ")); err != nil {
+			return cursor, buffer, err
+		}
+		if err := redrawREPLLine(stdout, prompt, buffer, cursor); err != nil {
+			return cursor, buffer, err
+		}
+	}
+	return cursor, buffer, nil
+}
+
+// replCompletion 保存一次补全请求的 token 边界和候选池。
+type replCompletion struct {
+	// start 是本次补全要替换的起始 rune 下标。
+	start int
+	// prefix 是用户已输入的待补全文本。
+	prefix string
+	// candidates 是当前上下文可用候选。
+	candidates []string
+}
+
+// replCompletionRequest 从当前输入缓冲提取补全请求。
+func replCompletionRequest(buffer []rune, cursor int) (replCompletion, bool) {
+	// 光标异常时不猜测用户意图，直接拒绝补全。
+	if cursor < 0 || cursor > len(buffer) {
+		return replCompletion{}, false
+	}
+	tokenStart := cursor
+	for tokenStart > 0 && isREPLCompletionRune(buffer[tokenStart-1]) {
+		// token 允许标识符字符和点号，用于支持 string.format 这类成员路径。
+		tokenStart--
+	}
+	token := string(buffer[tokenStart:cursor])
+	if dotIndex := strings.LastIndex(token, "."); dotIndex >= 0 {
+		// 点号后的片段按表成员补全；只支持静态标准库表，避免执行用户代码。
+		owner := token[:dotIndex]
+		members, ok := replMemberCompletions[owner]
+		if !ok {
+			return replCompletion{}, false
+		}
+		return replCompletion{
+			start:      tokenStart + dotIndex + 1,
+			prefix:     token[dotIndex+1:],
+			candidates: members,
+		}, true
+	}
+	return replCompletion{
+		start:      tokenStart,
+		prefix:     token,
+		candidates: replRootCompletions,
+	}, true
+}
+
+// isREPLCompletionRune 判断字符是否属于补全 token。
+func isREPLCompletionRune(value rune) bool {
+	// 标识符字符覆盖 Lua 名称；点号用于标准库表成员补全。
+	return value == '.' || value == '_' || (value >= '0' && value <= '9') || (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z')
+}
+
+// filterREPLCompletions 按前缀筛选补全候选。
+func filterREPLCompletions(candidates []string, prefix string) []string {
+	// 候选表本身按字典序维护；筛选时保留原序，保证展示稳定。
+	matches := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		if strings.HasPrefix(candidate, prefix) {
+			// 前缀匹配的候选才展示或用于公共前缀推进。
+			matches = append(matches, candidate)
+		}
+	}
+	return matches
+}
+
+// commonREPLCompletionPrefix 返回候选之间的最长公共前缀。
+func commonREPLCompletionPrefix(matches []string) string {
+	// 空候选没有公共前缀。
+	if len(matches) == 0 {
+		return ""
+	}
+	prefix := matches[0]
+	for _, match := range matches[1:] {
+		for !strings.HasPrefix(match, prefix) {
+			// 逐步缩短前缀，直到当前候选也能匹配。
+			if prefix == "" {
+				return ""
+			}
+			prefix = prefix[:len(prefix)-1]
+		}
+	}
+	return prefix
+}
+
+// replaceREPLCompletion 替换当前补全 token 并重绘输入行。
+func replaceREPLCompletion(stdout io.Writer, prompt string, buffer []rune, start int, cursor int, replacement string) (int, []rune, error) {
+	// 使用 rune 切片替换，避免 ASCII 候选破坏用户已输入的非 ASCII 内容。
+	replacementRunes := []rune(replacement)
+	nextBuffer := make([]rune, 0, len(buffer)-(cursor-start)+len(replacementRunes))
+	nextBuffer = append(nextBuffer, buffer[:start]...)
+	nextBuffer = append(nextBuffer, replacementRunes...)
+	nextBuffer = append(nextBuffer, buffer[cursor:]...)
+	nextCursor := start + len(replacementRunes)
+	if err := redrawREPLLine(stdout, prompt, nextBuffer, nextCursor); err != nil {
+		// 重绘失败时返回给上层终止 REPL。
+		return cursor, buffer, err
+	}
+	return nextCursor, nextBuffer, nil
 }
 
 // executeREPLChunk 执行单个 REPL chunk。

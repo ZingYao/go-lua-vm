@@ -2353,19 +2353,20 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 		return nil, err
 	}
 	debugEnvironment, hasDebugEnvironment := debuglib.EnvironmentForState(runtimeState)
+	debugObserver := runtimeState.Options().DebugObserver
 	hooksEnabled := hasDebugEnvironment && debugEnvironment.HasActiveHook()
 	coroutinesCreated := runtimeState.HasCreatedCoroutines()
-	preciseFrameSync := hooksEnabled || continuation != nil || coroutinesCreated
+	preciseFrameSync := hooksEnabled || debugObserver != nil || continuation != nil || coroutinesCreated
 	refreshHookState := func() {
 		coroutinesCreated = runtimeState.HasCreatedCoroutines()
 		if !hasDebugEnvironment {
 			// 未打开 debug 库时仍需刷新 coroutine 创建状态。
-			preciseFrameSync = continuation != nil || coroutinesCreated
+			preciseFrameSync = debugObserver != nil || continuation != nil || coroutinesCreated
 			vm.EnableBorrowedSelfRecursiveLocalFunctionClosure(!preciseFrameSync)
 			return
 		}
 		hooksEnabled = debugEnvironment.HasActiveHook()
-		preciseFrameSync = hooksEnabled || continuation != nil || coroutinesCreated
+		preciseFrameSync = hooksEnabled || debugObserver != nil || continuation != nil || coroutinesCreated
 		vm.EnableBorrowedSelfRecursiveLocalFunctionClosure(!preciseFrameSync && !hooksEnabled)
 	}
 	if hooksEnabled && continuation == nil {
@@ -2533,6 +2534,13 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 		if preciseFrameSync {
 			if err := syncCurrentFrame(pc); err != nil {
 				// active hook、coroutine 和 continuation 路径需要逐指令同步调用帧 PC。
+				return nil, err
+			}
+		}
+		if debugObserver != nil {
+			// DAP 等外部调试器需要在指令执行前观察源码行，并可在此处阻塞等待继续。
+			if err := debugObserver.BeforeInstruction(runtimeState, vm, proto, pc); err != nil {
+				// 调试器返回错误表示会话取消或断开，直接中断当前 Lua 执行。
 				return nil, err
 			}
 		}

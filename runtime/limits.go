@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io/fs"
 
+	"github.com/ZingYao/go-lua-vm/bytecode"
 	"github.com/ZingYao/go-lua-vm/extensions"
 )
 
@@ -50,6 +51,19 @@ type Options struct {
 	SyntaxExtensions extensions.SyntaxSet
 	// SyntaxExtensionsSet 表示调用方是否显式设置过 SyntaxExtensions。
 	SyntaxExtensionsSet bool
+	// DebugObserver 保存可选 VM 调试观察器。
+	//
+	// nil 表示不启用外部调试能力；非 nil 时执行循环会在每条 Lua 指令前调用观察器，调用方可据此实现
+	// DAP 断点、单步和挂起控制。观察器必须自行处理并发和取消。
+	DebugObserver DebugObserver
+}
+
+// DebugObserver 表示 VM 指令级调试观察器。
+//
+// state 是当前 Lua 状态；vm/proto/pc 指向即将执行的 Lua 指令。返回错误会中断当前 Lua 执行，
+// 用于调试会话断开、宿主取消或观察器内部失败。
+type DebugObserver interface {
+	BeforeInstruction(state *State, vm *VM, proto *bytecode.Proto, pc int) error
 }
 
 // NormalizeOptions 规范化 State 资源限制选项。

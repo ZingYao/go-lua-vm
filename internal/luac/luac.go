@@ -17,6 +17,7 @@ import (
 	"github.com/ZingYao/go-lua-vm/compiler/lexer"
 	"github.com/ZingYao/go-lua-vm/compiler/parser"
 	"github.com/ZingYao/go-lua-vm/extensions"
+	"github.com/ZingYao/go-lua-vm/internal/buildinfo"
 	"github.com/ZingYao/go-lua-vm/internal/cli"
 )
 
@@ -57,6 +58,8 @@ type FailureReporter interface {
 // 输入文件支持一个或多个；ListLevel 对应 `-l` 出现次数；StripDebug 对应 `-s`；
 // ParseOnly 对应 `-p`；输出路径由 `-o` 指定，未指定时使用 luac.out。
 type Options struct {
+	// Help 表示是否输出 gluac 帮助信息。
+	Help bool
 	// InputPath 是待编译源码或待反汇编 binary chunk 路径。
 	InputPath string
 	// InputPaths 保存全部待编译源码或待反汇编 binary chunk 路径。
@@ -96,6 +99,9 @@ func ParseArgs(args []string) (Options, error) {
 	for index := 0; index < len(args); index++ {
 		argument := args[index]
 		switch argument {
+		case "-h", "--help":
+			// -h/--help 输出帮助信息，不要求输入文件。
+			options.Help = true
 		case "-l":
 			// -l 每出现一次提升详细级别，-l -l 会额外输出 debug dump。
 			options.ListLevel++
@@ -183,7 +189,7 @@ func ParseArgs(args []string) (Options, error) {
 			options.addInputPath(argument)
 		}
 	}
-	if options.InputPath == "" && !options.Version {
+	if options.InputPath == "" && !options.Version && !options.Help {
 		// 只输出版本时允许无输入；其他模式必须有输入文件。
 		return Options{}, fmt.Errorf("missing input file")
 	}
@@ -269,6 +275,11 @@ func Run(args []string, streams Streams) error {
 		return err
 	}
 	stdout := safeWriter(streams.Stdout)
+	if options.Help {
+		// 帮助模式只输出命令说明，不读取输入文件或写出 luac.out。
+		_, _ = fmt.Fprint(stdout, HelpText())
+		return nil
+	}
 	if options.Version {
 		// 版本文本复用 glua 的 Lua 5.3 兼容版本输出。
 		_, _ = fmt.Fprintln(stdout, cli.VersionText)
@@ -301,6 +312,32 @@ func Run(args []string, streams Streams) error {
 		}
 	}
 	return nil
+}
+
+// HelpText 返回 gluac 命令帮助文本。
+func HelpText() string {
+	// 帮助文本集中维护，便于测试和 cmd/gluac 复用。
+	var builder strings.Builder
+	builder.WriteString(cli.VersionText)
+	builder.WriteString("\n\n")
+	builder.WriteString("Usage: gluac [options] [filenames]\n\n")
+	builder.WriteString("Lua compatible options:\n")
+	builder.WriteString("  -l                       list bytecodes for compiled chunks\n")
+	builder.WriteString("  -o name                  output to file 'name', default is luac.out\n")
+	builder.WriteString("  -p                       parse only\n")
+	builder.WriteString("  -s                       strip debug information\n")
+	builder.WriteString("  -v                       show version information\n")
+	builder.WriteString("  --                       stop handling options\n\n")
+	builder.WriteString("GLua options:\n")
+	builder.WriteString("  -h, --help               show this help\n")
+	builder.WriteString("  --gluac-syntax value     select syntax mode: lua53, extended, all, continue,switch\n")
+	builder.WriteString("  --gluac-disable-syntax v disable syntax sugar names from the selected mode\n")
+	builder.WriteString("  --gluac-opcode-trace     print static opcode trace\n")
+	builder.WriteString("  --gluac-step-trace       print static VM step trace\n")
+	builder.WriteString("  --gluac-minimal-disassembly\n")
+	builder.WriteString("                           print compact disassembly for failure diagnostics\n\n")
+	builder.WriteString(buildinfo.FeatureText(false))
+	return builder.String()
 }
 
 // protoForOptions 按命令行输入加载单个 Proto 或组合多个输入 Proto。

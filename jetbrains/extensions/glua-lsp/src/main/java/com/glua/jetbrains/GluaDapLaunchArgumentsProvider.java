@@ -2,7 +2,6 @@ package com.glua.jetbrains;
 
 import com.intellij.execution.configurations.RunProfile;
 import com.intellij.execution.executors.DefaultDebugExecutor;
-import com.intellij.execution.executors.DefaultRunExecutor;
 import com.intellij.openapi.project.Project;
 import com.intellij.platform.dap.DapLaunchArgumentsProvider;
 import com.intellij.platform.dap.DapStartRequest;
@@ -18,7 +17,7 @@ public final class GluaDapLaunchArgumentsProvider implements DapLaunchArgumentsP
         if (!(profile instanceof GluaDapRunConfiguration)) {
             return false;
         }
-        return DefaultDebugExecutor.EXECUTOR_ID.equals(executorId) || DefaultRunExecutor.EXECUTOR_ID.equals(executorId);
+        return DefaultDebugExecutor.EXECUTOR_ID.equals(executorId);
     }
 
     @Override
@@ -30,6 +29,8 @@ public final class GluaDapLaunchArgumentsProvider implements DapLaunchArgumentsP
         arguments.put("name", configuration.getName());
         arguments.put("host", configuration.host());
         arguments.put("port", configuration.port());
+        arguments.put("program", configuration.program());
+        arguments.put("gluaExecutable", configuration.gluaExecutable());
         return new LaunchRequestArguments(GluaDapAdapterId.INSTANCE, DapStartRequest.Attach, arguments);
     }
 }

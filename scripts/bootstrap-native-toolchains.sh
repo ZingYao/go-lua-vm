@@ -13,6 +13,9 @@ for arg in "$@"; do
     --emit-env)
       mode="emit-env"
       ;;
+    --emit-github-env)
+      mode="emit-github-env"
+      ;;
     --help|-h)
       cat <<'USAGE'
 Usage: scripts/bootstrap-native-toolchains.sh [--install] [--emit-env]
@@ -21,7 +24,8 @@ Checks or prepares the C toolchain environment used by native_modules cross
 compile scripts. The target matrix mirrors .github/workflows/release.yml.
 
   --install   install managed tools through mise when they are missing
-  --emit-env  print export commands after discovering toolchains
+  --emit-env         print shell export commands after discovering toolchains
+  --emit-github-env  print GitHub Actions environment file entries
 USAGE
       exit 0
       ;;
@@ -43,6 +47,17 @@ fi
 
 native_configure_github_actions_toolchains
 
+selected_native_targets() {
+  if [[ -n "${NATIVE_CROSS_TARGETS:-}" ]]; then
+    for target in ${NATIVE_CROSS_TARGETS}; do
+      echo "${target}"
+    done
+    return 0
+  fi
+
+  native_release_targets
+}
+
 if [[ "${mode}" == "emit-env" ]]; then
   echo "export NATIVE_CROSS_TARGETS='${NATIVE_CROSS_TARGETS}'"
   echo "export NATIVE_SOURCE_BUILD_TARGETS='${NATIVE_SOURCE_BUILD_TARGETS}'"
@@ -54,7 +69,22 @@ if [[ "${mode}" == "emit-env" ]]; then
     if [[ -n "${!cc_var:-}" ]]; then
       printf "export %s='%s'\n" "${cc_var}" "${!cc_var}"
     fi
-  done < <(native_release_targets)
+  done < <(selected_native_targets)
+  exit 0
+fi
+
+if [[ "${mode}" == "emit-github-env" ]]; then
+  echo "NATIVE_CROSS_TARGETS=${NATIVE_CROSS_TARGETS}"
+  echo "NATIVE_SOURCE_BUILD_TARGETS=${NATIVE_SOURCE_BUILD_TARGETS}"
+  while IFS= read -r target; do
+    goos="$(native_target_goos "${target}")"
+    goarch="$(native_target_goarch "${target}")"
+    goarm="$(native_target_goarm "${target}")"
+    cc_var="$(native_target_cc_var "${goos}" "${goarch}" "${goarm}")"
+    if [[ -n "${!cc_var:-}" ]]; then
+      printf "%s=%s\n" "${cc_var}" "${!cc_var}"
+    fi
+  done < <(selected_native_targets)
   exit 0
 fi
 
@@ -86,7 +116,7 @@ while IFS= read -r target; do
     echo "missing ${target_name}: compiler executable not found in ${cc_value}"
     missing=$((missing + 1))
   fi
-done < <(native_release_targets)
+done < <(selected_native_targets)
 
 if [[ "${missing}" -gt 0 ]]; then
   echo "native toolchain bootstrap completed with missing compilers: ${missing}" >&2

@@ -1,5 +1,6 @@
 const path = require("path");
 const fs = require("fs");
+const { spawn } = require("child_process");
 const vscode = require("vscode");
 const {
   getBuiltinFunction,
@@ -17,10 +18,18 @@ const COMMAND_SHOW_BUILTIN_DOC_STATUS = "glua.showBuiltinDocStatus";
 const COMMAND_SHOW_OUTPUT = "glua.showOutput";
 const COMMAND_CREATE_ATTACH_CONFIG = "glua.createAttachConfig";
 const COMMAND_START_ATTACH_DEBUG = "glua.startAttachDebug";
+const COMMAND_RUN_CURRENT_FILE = "glua.runCurrentFile";
+const COMMAND_DEBUG_CURRENT_FILE = "glua.debugCurrentFile";
+const COMMAND_SELECT_GLUA_EXECUTABLE = "glua.selectGluaExecutable";
+const COMMAND_SELECT_GLUAC_EXECUTABLE = "glua.selectGluacExecutable";
 const BUILTIN_SIG_FILE_NAME = "glua-builtin-docs.json";
 const DEBUG_TYPE = "glua";
 const DEFAULT_DEBUG_HOST = "127.0.0.1";
 const DEFAULT_DEBUG_PORT = 5678;
+const DEFAULT_DAP_READY_TIMEOUT_MS = 5000;
+const GLUA_DAP_READY_PREFIX = "GLua DAP server listening on ";
+const managedDebugProcesses = new Map();
+let managedDebugProcessSeq = 0;
 
 function isChineseEnvironment() {
   return String(vscode.env.language || "").toLowerCase().startsWith("zh");
@@ -366,14 +375,41 @@ function isValidDebugPort(value) {
 }
 
 function defaultDebugAttachConfig() {
-  const config = vscode.workspace.getConfiguration("glua");
   return {
     type: DEBUG_TYPE,
     request: "attach",
     name: "Attach to GLua DAP",
-    host: resolveDebugHost(config.get("debug.host", DEFAULT_DEBUG_HOST)),
-    port: resolveDebugPort(config.get("debug.port", DEFAULT_DEBUG_PORT)),
+    host: DEFAULT_DEBUG_HOST,
+    port: DEFAULT_DEBUG_PORT,
   };
+}
+
+function publicDebugConfig(config) {
+  const { host, port, ...rest } = config;
+  return rest;
+}
+
+function gluaExecutableConfig() {
+  const config = vscode.workspace.getConfiguration("glua");
+  return String(config.get("executable", "") || "").trim();
+}
+
+async function selectExecutableSetting(settingKey, title, outputChannel) {
+  const selected = await vscode.window.showOpenDialog({
+    title,
+    canSelectFiles: true,
+    canSelectFolders: false,
+    canSelectMany: false,
+    openLabel: localizeText({ en: "Use executable", zh: "使用该可执行文件" }),
+  });
+  const file = selected && selected[0] ? selected[0].fsPath : "";
+  if (!file) {
+    return;
+  }
+  await vscode.workspace.getConfiguration("glua").update(settingKey, file, vscode.ConfigurationTarget.Workspace);
+  if (outputChannel) {
+    outputChannel.appendLine(`[glua-lsp] set glua.${settingKey}=${file}`);
+  }
 }
 
 async function createAttachDebugConfiguration(outputChannel) {
@@ -381,7 +417,7 @@ async function createAttachDebugConfiguration(outputChannel) {
   const target = workspaceFolder
     ? vscode.Uri.joinPath(workspaceFolder.uri, ".vscode", "launch.json")
     : null;
-  const attachConfig = defaultDebugAttachConfig();
+  const attachConfig = publicDebugConfig(defaultDebugAttachConfig());
   const snippet = JSON.stringify(attachConfig, null, 2);
   if (!target) {
     await vscode.env.clipboard.writeText(snippet);
@@ -422,49 +458,356 @@ async function createAttachDebugConfiguration(outputChannel) {
 
 async function promptAndStartAttachDebug(outputChannel) {
   const defaults = defaultDebugAttachConfig();
-  const host = await vscode.window.showInputBox({
-    title: "GLua DAP Attach Host",
-    prompt: localizeText({
-      en: "Enter the IP address or host name of the running GLua DAP server.",
-      zh: "输入正在运行的 GLua DAP server IP 或主机名。",
-    }),
-    value: defaults.host,
-    validateInput(value) {
-      return String(value || "").trim()
-        ? null
-        : localizeText({ en: "Host is required.", zh: "必须填写 Host。" });
-    },
+  if (outputChannel) {
+    outputChannel.appendLine(`[glua-dap] start attach host=${defaults.host}; port=${defaults.port}`);
+  }
+  await startAttachDebugSession(defaults, outputChannel);
+}
+
+function debugAttachFailureMessage(attachConfig, error) {
+  const reason = error && error.message ? ` ${error.message}` : "";
+  return localizeText({
+    en: `GLua DAP attach failed for ${attachConfig.host}:${attachConfig.port}.${reason} Check that glua was started with its DAP server enabled and that host/port are reachable.`,
+    zh: `GLua DAP attach 连接 ${attachConfig.host}:${attachConfig.port} 失败。${reason}请确认 glua 已启用 DAP server，且 host/port 可访问。`,
   });
-  if (!host) {
+}
+
+function tailText(text, maxLength = 4000) {
+  const value = String(text || "");
+  if (value.length <= maxLength) {
+    return value;
+  }
+  return value.slice(value.length - maxLength);
+}
+
+function parseGluaDapReadyLine(text) {
+  const lines = String(text || "").split(/\r?\n/);
+  for (const line of lines) {
+    const index = line.indexOf(GLUA_DAP_READY_PREFIX);
+    if (index < 0) {
+      continue;
+    }
+    const address = line.slice(index + GLUA_DAP_READY_PREFIX.length).trim();
+    const match = address.match(/^(.+):(\d+)$/);
+    if (!match) {
+      continue;
+    }
+    const port = Number(match[2]);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      continue;
+    }
+    return {
+      host: match[1],
+      port,
+    };
+  }
+  return null;
+}
+
+function managedDebugFailureMessage(launchConfig, details) {
+  const stderrTail = tailText(details.stderr || "").trim();
+  const stdoutTail = tailText(details.stdout || "").trim();
+  const parts = [
+    localizeText({ en: "Failed to start GLua debug session.", zh: "启动 GLua Debug 会话失败。" }),
+    `command=${details.command || launchConfig.gluaExecutable || configuredGluaExecutable()}`,
+    `cwd=${details.cwd || launchConfig.cwd || ""}`,
+    `listen=${details.listen || `${DEFAULT_DEBUG_HOST}:0`}`,
+  ];
+  if (details.exitCode !== undefined || details.signal) {
+    parts.push(`exit=${details.exitCode === null || details.exitCode === undefined ? "null" : details.exitCode}${details.signal ? ` signal=${details.signal}` : ""}`);
+  }
+  if (details.error) {
+    parts.push(`error=${details.error.message || details.error}`);
+  }
+  if (stderrTail) {
+    parts.push(`stderr=${stderrTail}`);
+  }
+  if (stdoutTail) {
+    parts.push(`stdout=${stdoutTail}`);
+  }
+  return parts.join(" | ");
+}
+
+function normalizeLaunchArgs(args) {
+  return Array.isArray(args) ? args.map((arg) => String(arg)) : [];
+}
+
+function startManagedGluaDapProcess(launchConfig, outputChannel) {
+  const executable = String(launchConfig.gluaExecutable || gluaExecutableConfig() || "glua").trim() || "glua";
+  const program = String(launchConfig.program || "").trim();
+  const cwd = String(launchConfig.cwd || (program ? path.dirname(program) : "") || process.cwd());
+  const listen = `${DEFAULT_DEBUG_HOST}:0`;
+  const args = [
+    `--glua-dap-listen=${listen}`,
+    program,
+    ...normalizeLaunchArgs(launchConfig.args),
+  ].filter(Boolean);
+  const commandText = `${executable} ${args.map((arg) => JSON.stringify(arg)).join(" ")}`;
+  const processId = `glua-${Date.now()}-${++managedDebugProcessSeq}`;
+  let stdout = "";
+  let stderr = "";
+  let settled = false;
+  if (outputChannel) {
+    outputChannel.show(true);
+    outputChannel.appendLine(`[glua-dap] launch command=${commandText}; cwd=${cwd}; listen=${listen}`);
+  }
+  return new Promise((resolve, reject) => {
+    const child = spawn(executable, args, { cwd, shell: false });
+    const fail = (details) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      try {
+        child.kill();
+      } catch (error) {
+        // Ignore kill errors; the process may already have exited.
+      }
+      reject(new Error(managedDebugFailureMessage(launchConfig, {
+        command: commandText,
+        cwd,
+        listen,
+        stdout,
+        stderr,
+        ...details,
+      })));
+    };
+    const timer = setTimeout(() => {
+      fail({ error: new Error(`Timed out waiting for '${GLUA_DAP_READY_PREFIX}'`) });
+    }, DEFAULT_DAP_READY_TIMEOUT_MS);
+    const handleOutput = (chunk, streamName) => {
+      const text = chunk.toString("utf8");
+      if (streamName === "stderr") {
+        stderr = tailText(stderr + text);
+      } else {
+        stdout = tailText(stdout + text);
+      }
+      if (outputChannel) {
+        outputChannel.append(text);
+      }
+      const ready = parseGluaDapReadyLine(`${stdout}\n${stderr}`);
+      if (!ready || settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      managedDebugProcesses.set(processId, child);
+      if (outputChannel) {
+        outputChannel.appendLine(`[glua-dap] ready host=${ready.host}; port=${ready.port}; process=${processId}`);
+      }
+      resolve({
+        host: ready.host,
+        port: ready.port,
+        processId,
+        child,
+      });
+    };
+    child.stdout.on("data", (chunk) => handleOutput(chunk, "stdout"));
+    child.stderr.on("data", (chunk) => handleOutput(chunk, "stderr"));
+    child.on("error", (error) => fail({ error }));
+    child.on("exit", (exitCode, signal) => {
+      managedDebugProcesses.delete(processId);
+      if (settled) {
+        if (outputChannel) {
+          outputChannel.appendLine(`[glua-dap] process exited code=${exitCode === null ? "null" : exitCode}${signal ? ` signal=${signal}` : ""}`);
+        }
+        return;
+      }
+      fail({ exitCode, signal });
+    });
+  });
+}
+
+function stopManagedDebugProcess(processId) {
+  if (!processId) {
     return;
   }
-
-  const portText = await vscode.window.showInputBox({
-    title: "GLua DAP Attach Port",
-    prompt: localizeText({
-      en: "Enter the TCP port of the running GLua DAP server.",
-      zh: "输入正在运行的 GLua DAP server TCP 端口。",
-    }),
-    value: String(defaults.port),
-    validateInput(value) {
-      return isValidDebugPort(Number(value))
-        ? null
-        : localizeText({ en: "Port must be a number from 1 to 65535.", zh: "端口必须是 1 到 65535 的数字。" });
-    },
-  });
-  if (!portText) {
+  const child = managedDebugProcesses.get(processId);
+  managedDebugProcesses.delete(processId);
+  if (!child || child.killed) {
     return;
   }
+  try {
+    child.kill();
+  } catch (error) {
+    // Ignore cleanup errors; VS Code is already ending the debug session.
+  }
+}
 
-  const attachConfig = {
-    ...defaults,
-    host: resolveDebugHost(host),
-    port: resolveDebugPort(Number(portText)),
+function currentGluaDocument() {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || !editor.document || editor.document.uri.scheme !== "file") {
+    return null;
+  }
+  const languageId = editor.document.languageId;
+  const filePath = editor.document.uri.fsPath;
+  if (languageId !== "glua" && languageId !== "lua" && !filePath.endsWith(".glua") && !filePath.endsWith(".lua")) {
+    return null;
+  }
+  return editor.document;
+}
+
+function configuredGluaExecutable() {
+  return gluaExecutableConfig() || "glua";
+}
+
+async function runCurrentFile(outputChannel) {
+  const document = currentGluaDocument();
+  if (!document) {
+    vscode.window.showWarningMessage(localizeText({ en: "Open a .glua or .lua file first.", zh: "请先打开 .glua 或 .lua 文件。" }));
+    return false;
+  }
+  if (document.isDirty) {
+    await document.save();
+  }
+  const executable = configuredGluaExecutable();
+  const cwd = vscode.workspace.getWorkspaceFolder(document.uri)?.uri.fsPath || path.dirname(document.uri.fsPath);
+  if (outputChannel) {
+    outputChannel.show(true);
+    outputChannel.appendLine(`[glua-run] ${executable} ${document.uri.fsPath}`);
+  }
+  const child = spawn(executable, [document.uri.fsPath], { cwd, shell: false });
+  child.stdout.on("data", (chunk) => outputChannel && outputChannel.append(chunk.toString("utf8")));
+  child.stderr.on("data", (chunk) => outputChannel && outputChannel.append(chunk.toString("utf8")));
+  child.on("error", (error) => {
+    const message = localizeText({
+      en: `Failed to run glua: ${error.message}. Configure glua.executable first.`,
+      zh: `运行 glua 失败：${error.message}。请先配置 glua.executable。`,
+    });
+    if (outputChannel) {
+      outputChannel.appendLine(`[glua-run] ${message}`);
+    }
+    vscode.window.showErrorMessage(message);
+  });
+  child.on("exit", (code, signal) => {
+    if (outputChannel) {
+      outputChannel.appendLine(`[glua-run] exited code=${code === null ? "null" : code}${signal ? ` signal=${signal}` : ""}`);
+    }
+  });
+  return true;
+}
+
+async function debugCurrentFile(outputChannel) {
+  const document = currentGluaDocument();
+  if (!document) {
+    vscode.window.showWarningMessage(localizeText({ en: "Open a .glua or .lua file first.", zh: "请先打开 .glua 或 .lua 文件。" }));
+    return false;
+  }
+  if (document.isDirty) {
+    await document.save();
+  }
+  const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+  const config = {
+    type: DEBUG_TYPE,
+    request: "launch",
+    name: localizeText({ en: "Debug current GLua file", zh: "调试当前 GLua 文件" }),
+    program: document.uri.fsPath,
+    gluaExecutable: configuredGluaExecutable(),
+    args: [],
+    cwd: workspaceFolder ? workspaceFolder.uri.fsPath : path.dirname(document.uri.fsPath),
+    host: DEFAULT_DEBUG_HOST,
+    port: 0,
   };
   if (outputChannel) {
-    outputChannel.appendLine(`[glua-dap] start attach host=${attachConfig.host}; port=${attachConfig.port}`);
+    outputChannel.appendLine(`[glua-dap] debug current file=${document.uri.fsPath}; glua=${config.gluaExecutable}`);
   }
-  await vscode.debug.startDebugging(undefined, attachConfig);
+  return startAttachDebugSession(config, outputChannel);
+}
+
+function blockEnterExpansion(source, offset) {
+  const safeOffset = Math.max(0, Math.min(Number(offset) || 0, source.length));
+  const lineStart = source.lastIndexOf("\n", Math.max(0, safeOffset - 1)) + 1;
+  const lineBeforeCaret = source.slice(lineStart, safeOffset);
+  const trimmed = lineBeforeCaret.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const indent = (lineBeforeCaret.match(/^\s*/) || [""])[0];
+  const expansionText = (closeText) => {
+    const innerIndent = `${indent}  `;
+    return {
+      text: `\n${innerIndent}\n${indent}${closeText}`,
+      caretDelta: 1 + innerIndent.length,
+    };
+  };
+  if (/^switch\b.*\bdo\s*$/.test(trimmed)) {
+    const caseIndent = `${indent}  `;
+    const bodyIndent = `${indent}    `;
+    return {
+      text: `\n${caseIndent}case \n${bodyIndent}\n${indent}end`,
+      caretDelta: 1 + caseIndent.length + "case ".length,
+    };
+  }
+  if (/^(case\b.+|default)\s*$/.test(trimmed)) {
+    const bodyIndent = `${indent}  `;
+    return {
+      text: `\n${bodyIndent}`,
+      caretDelta: 1 + bodyIndent.length,
+    };
+  }
+  if (trimmed === "repeat") {
+    return expansionText("until ");
+  }
+  if (
+    (trimmed.endsWith(" do") && !/^switch\b/.test(trimmed))
+    || trimmed.endsWith(" then")
+    || /^(local\s+)?function\b.*\)\s*$/.test(trimmed)
+    || /.*=\s*function\s*\([^)]*\)\s*$/.test(trimmed)
+    || /.*\bfunction\s*\([^)]*\)\s*$/.test(trimmed)
+  ) {
+    return expansionText("end");
+  }
+  return null;
+}
+
+async function handleTypeCommand(args) {
+  const text = args && typeof args.text === "string" ? args.text : "";
+  const editor = vscode.window.activeTextEditor;
+  if (text !== "\n" || !editor || !editor.selection || !editor.selection.isEmpty) {
+    return vscode.commands.executeCommand("default:type", args);
+  }
+  const languageId = editor.document.languageId;
+  if (languageId !== "glua" && languageId !== "lua") {
+    return vscode.commands.executeCommand("default:type", args);
+  }
+  const offset = editor.document.offsetAt(editor.selection.active);
+  const expansion = blockEnterExpansion(editor.document.getText(), offset);
+  if (!expansion) {
+    return vscode.commands.executeCommand("default:type", args);
+  }
+  const insertPosition = editor.selection.active;
+  await editor.edit((editBuilder) => {
+    editBuilder.insert(insertPosition, expansion.text);
+  });
+  const caretOffset = offset + expansion.caretDelta;
+  const caretPosition = editor.document.positionAt(caretOffset);
+  editor.selection = new vscode.Selection(caretPosition, caretPosition);
+  return undefined;
+}
+
+async function startAttachDebugSession(attachConfig, outputChannel) {
+  try {
+    const started = await vscode.debug.startDebugging(undefined, attachConfig);
+    if (started) {
+      return true;
+    }
+    const message = debugAttachFailureMessage(attachConfig);
+    if (outputChannel) {
+      outputChannel.appendLine(`[glua-dap] ${message}`);
+      outputChannel.show(true);
+    }
+    vscode.window.showErrorMessage(message);
+    return false;
+  } catch (error) {
+    const message = debugAttachFailureMessage(attachConfig, error);
+    if (outputChannel) {
+      outputChannel.appendLine(`[glua-dap] ${message}`);
+      outputChannel.show(true);
+    }
+    vscode.window.showErrorMessage(message);
+    return false;
+  }
 }
 
 function registerDebugSupport(context, outputChannel) {
@@ -476,19 +819,34 @@ function registerDebugSupport(context, outputChannel) {
         ...(config || {}),
       };
       next.type = DEBUG_TYPE;
-      next.request = "attach";
-      next.host = resolveDebugHost(next.host);
-      next.port = resolveDebugPort(next.port);
+      next.request = next.request === "launch" ? "launch" : "attach";
+      if (next.request === "launch") {
+        next.gluaExecutable = String(next.gluaExecutable || gluaExecutableConfig() || "").trim();
+        next.program = next.program || "${file}";
+        next.args = Array.isArray(next.args) ? next.args : [];
+        next.cwd = next.cwd || (folder && folder.uri ? folder.uri.fsPath : undefined);
+        next.host = DEFAULT_DEBUG_HOST;
+        next.port = 0;
+        return next;
+      }
+      next.host = DEFAULT_DEBUG_HOST;
+      next.port = DEFAULT_DEBUG_PORT;
       return next;
     },
   };
 
   const descriptorFactory = {
-    createDebugAdapterDescriptor(session) {
-      const host = resolveDebugHost(session.configuration.host);
-      const port = resolveDebugPort(session.configuration.port);
+    async createDebugAdapterDescriptor(session) {
+      let host = resolveDebugHost(session.configuration.host);
+      let port = resolveDebugPort(session.configuration.port);
+      if (session.configuration.request === "launch") {
+        const launchResult = await startManagedGluaDapProcess(session.configuration, outputChannel);
+        host = launchResult.host || DEFAULT_DEBUG_HOST;
+        port = launchResult.port;
+        session.configuration.__gluaManagedProcessId = launchResult.processId;
+      }
       if (outputChannel) {
-        outputChannel.appendLine(`[glua-dap] attach host=${host}; port=${port}`);
+        outputChannel.appendLine(`[glua-dap] ${session.configuration.request || "attach"} host=${host}; port=${port}; glua=${session.configuration.gluaExecutable || gluaExecutableConfig() || "(not set)"}`);
       }
       return new vscode.DebugAdapterServer(port, host);
     },
@@ -496,7 +854,10 @@ function registerDebugSupport(context, outputChannel) {
 
   context.subscriptions.push(
     vscode.debug.registerDebugConfigurationProvider(DEBUG_TYPE, configurationProvider),
-    vscode.debug.registerDebugAdapterDescriptorFactory(DEBUG_TYPE, descriptorFactory)
+    vscode.debug.registerDebugAdapterDescriptorFactory(DEBUG_TYPE, descriptorFactory),
+    vscode.debug.onDidTerminateDebugSession((session) => {
+      stopManagedDebugProcess(session.configuration && session.configuration.__gluaManagedProcessId);
+    })
   );
 }
 
@@ -670,6 +1031,27 @@ function activate(context) {
       promptAndStartAttachDebug(outputChannel)
     )
   );
+  context.subscriptions.push(
+    vscode.commands.registerCommand(COMMAND_RUN_CURRENT_FILE, () =>
+      runCurrentFile(outputChannel)
+    )
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand(COMMAND_DEBUG_CURRENT_FILE, () =>
+      debugCurrentFile(outputChannel)
+    )
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand(COMMAND_SELECT_GLUA_EXECUTABLE, () =>
+      selectExecutableSetting("executable", "Select glua executable", outputChannel)
+    )
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand(COMMAND_SELECT_GLUAC_EXECUTABLE, () =>
+      selectExecutableSetting("gluacExecutable", "Select gluac executable", outputChannel)
+    )
+  );
+  context.subscriptions.push(vscode.commands.registerCommand("type", handleTypeCommand));
 
   registerBuiltinDocumentProvider(context);
   registerDebugSupport(context, outputChannel);
@@ -691,7 +1073,9 @@ function activate(context) {
   lastDocConfig = docConfig;
   logResolvedDocLanguage(outputChannel, "activate", docConfig);
   const syntax = config.get("syntax", "extended");
-  const extensionServerPath = path.join(__dirname, "server", "index.js");
+  const bundledServerPath = path.join(__dirname, "server.js");
+  const sourceServerPath = path.join(__dirname, "server", "index.js");
+  const extensionServerPath = fs.existsSync(bundledServerPath) ? bundledServerPath : sourceServerPath;
 
   const serverOptions = {
     run: {
@@ -777,4 +1161,13 @@ function deactivate() {
 module.exports = {
   activate,
   deactivate,
+  _test: {
+    debugAttachFailureMessage,
+    startAttachDebugSession,
+    runCurrentFile,
+    debugCurrentFile,
+    parseGluaDapReadyLine,
+    managedDebugFailureMessage,
+    blockEnterExpansion,
+  },
 };

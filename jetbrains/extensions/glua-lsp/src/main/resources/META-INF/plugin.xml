@@ -1,15 +1,25 @@
 <idea-plugin>
   <id>com.glua.jetbrains</id>
-  <name>glua Language Support</name>
+  <name>GLua 语言扩展</name>
   <vendor url="https://github.com/ZingYao/go-lua-vm">Zing</vendor>
   <description><![CDATA[
-    glua 语言支持插件，提供 Lua/glua 语法高亮、诊断、补全、文档、格式化和可选 DAP 调试接入。
+    <h2>GLua 语言扩展</h2>
+    <p>面向 <b>go-lua-vm</b> 的 Lua/glua 编辑器支持，覆盖日常编码、模块跳转、文档提示和 DAP 调试连接。</p>
+    <ul>
+      <li>识别 <code>.lua</code> / <code>.glua</code> 文件，并提供语法高亮。</li>
+      <li>支持 glua 扩展语法诊断、关键字补全、作用域符号补全和模块成员补全。</li>
+      <li>支持 <code>require</code> 返回表成员、<code>function M:foo()</code> 冒号方法、table literal 函数字段的跳转与文档提示。</li>
+      <li>支持格式化、自定义内置函数 JSON 文档、中文/英文文档语言切换。</li>
+      <li>支持配置 <code>glua</code> / <code>gluac</code> 可执行文件，并在 <code>.lua</code> / <code>.glua</code> 文件中快速运行或 Debug。</li>
+    </ul>
+    <p>调试能力基于 JetBrains DAP，DAP 地址由扩展内部管理，用户不需要填写 host/port。</p>
   ]]></description>
   <change-notes><![CDATA[
     <ul>
       <li>版本 1.0：发布 JetBrains glua 语言支持。</li>
       <li>新增 Lua/glua 文件识别、语法高亮、扩展语法诊断、补全、文档和格式化。</li>
       <li>新增可选 DAP attach 调试能力，避免 DAP 模块缺失时影响基础语言插件安装。</li>
+      <li>补充 require 返回表成员跳转和 table.member = function(...) 格式化支持。</li>
     </ul>
   ]]></change-notes>
 
@@ -44,6 +54,9 @@
       language="GLua"
       implementationClass="com.glua.jetbrains.GluaCompletionContributor"/>
 
+    <enterHandlerDelegate
+      implementation="com.glua.jetbrains.GluaEnterHandler"/>
+
     <psi.referenceContributor
       language="GLua"
       implementation="com.glua.jetbrains.GluaBuiltinReferenceContributor"/>
@@ -58,6 +71,9 @@
     <postFormatProcessor
       implementation="com.glua.jetbrains.GluaPostFormatProcessor"/>
 
+    <xdebugger.breakpointType
+      implementation="com.glua.jetbrains.GluaLineBreakpointType"/>
+
     <com.intellij.platform.backend.documentation.targetProvider
       implementation="com.glua.jetbrains.GluaDocumentationTargetProvider"/>
 
@@ -67,6 +83,9 @@
     <applicationConfigurable
       instance="com.glua.jetbrains.GluaSettingsConfigurable"
       displayName="GLua"/>
+
+    <configurationType
+      implementation="com.glua.jetbrains.GluaDapRunConfigurationType"/>
 
   </extensions>
 
@@ -79,10 +98,19 @@
       <add-to-group group-id="CodeMenu" anchor="last"/>
     </action>
     <action
-      id="Glua.CopyDapAttachConfig"
-      class="com.glua.jetbrains.GluaDapAttachConfigAction"
-      text="Copy GLua DAP Attach Config"
-      description="Copy GLua DAP attach host and port configuration as JSON">
+      id="Glua.RunCurrentFile"
+      class="com.glua.jetbrains.GluaRunCurrentFileAction"
+      text="Run Current GLua File"
+      description="Run the current Lua/glua file with the configured glua executable">
+      <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+      <add-to-group group-id="ToolsMenu" anchor="last"/>
+    </action>
+    <action
+      id="Glua.DebugCurrentFile"
+      class="com.glua.jetbrains.GluaRunCurrentFileAction$Debug"
+      text="Debug Current GLua File"
+      description="Debug the current Lua/glua file with the configured glua executable">
+      <add-to-group group-id="EditorPopupMenu" anchor="last"/>
       <add-to-group group-id="ToolsMenu" anchor="last"/>
     </action>
   </actions>

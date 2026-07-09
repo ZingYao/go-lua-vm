@@ -1,0 +1,9 @@
+UNLICENSED
+
+This VS Code extension package is currently not licensed for public redistribution.
+It is distributed only as part of the go-lua-vm project workspace unless the
+project owner publishes a separate license grant.
+
+The package metadata intentionally uses:
+
+license: UNLICENSED

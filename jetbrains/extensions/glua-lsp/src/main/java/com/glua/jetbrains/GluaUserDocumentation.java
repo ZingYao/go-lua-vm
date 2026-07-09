@@ -10,8 +10,11 @@ final class GluaUserDocumentation {
     }
 
     static Entry documentationAt(CharSequence source, int nameStart, int nameEnd, String name) {
+        return documentationAt(source, nameStart, nameEnd, name, GluaBuiltinCatalog.getInstance().locale());
+    }
+
+    static Entry documentationAt(CharSequence source, int nameStart, int nameEnd, String name, String locale) {
         String comment = commentBlockBeforeOffset(source, nameStart);
-        String locale = GluaBuiltinCatalog.getInstance().locale();
         Labels labels = Labels.of(locale);
         int line = lineNumber(source, nameStart);
         int column = columnNumber(source, nameStart);

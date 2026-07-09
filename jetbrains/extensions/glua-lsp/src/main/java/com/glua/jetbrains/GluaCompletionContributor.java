@@ -8,10 +8,15 @@ import com.intellij.codeInsight.completion.CompletionType;
 import com.intellij.codeInsight.completion.InsertHandler;
 import com.intellij.codeInsight.lookup.LookupElement;
 import com.intellij.codeInsight.lookup.LookupElementBuilder;
+import com.intellij.codeInsight.template.Template;
+import com.intellij.codeInsight.template.TemplateManager;
 import com.intellij.openapi.editor.Document;
 import com.intellij.patterns.PlatformPatterns;
 import com.intellij.util.ProcessingContext;
 import org.jetbrains.annotations.NotNull;
+
+import java.util.ArrayList;
+import java.util.List;
 
 public final class GluaCompletionContributor extends CompletionContributor {
     public GluaCompletionContributor() {
@@ -28,6 +33,13 @@ public final class GluaCompletionContributor extends CompletionContributor {
                     parameters.getEditor().getDocument(),
                     parameters.getOffset()
                 );
+                if (completion.keywordOnly()) {
+                    if ("do".startsWith(completion.prefix())) {
+                        result.addElement(LookupElementBuilder.create("do")
+                            .withTypeText("Lua keyword", true));
+                    }
+                    return;
+                }
                 addAnnotationTemplates(completion, result);
                 for (String name : catalog.sortedNames()) {
                     GluaBuiltin builtin = catalog.get(name);
@@ -45,7 +57,8 @@ public final class GluaCompletionContributor extends CompletionContributor {
                         }
                         result.addElement(LookupElementBuilder.create(method)
                             .withTypeText(builtin.signature, true)
-                            .withTailText(" " + builtin.description, true));
+                            .withTailText(" " + builtin.description, true)
+                            .withInsertHandler(insertFunctionTemplate(method, builtin.signature)));
                         continue;
                     }
                     if (name.contains(".") || !name.startsWith(completion.prefix())) {
@@ -53,7 +66,29 @@ public final class GluaCompletionContributor extends CompletionContributor {
                     }
                     result.addElement(LookupElementBuilder.create(name)
                         .withTypeText(builtin.signature, true)
-                        .withTailText(" " + builtin.description, true));
+                        .withTailText(" " + builtin.description, true)
+                        .withInsertHandler(insertFunctionTemplate(name, builtin.signature)));
+                }
+                if (!completion.method()) {
+                    for (String name : GluaAnalysis.symbolCompletionNames(parameters.getEditor().getDocument(), completion.prefix())) {
+                        result.addElement(LookupElementBuilder.create(name)
+                            .withTypeText("GLua file symbol", true)
+                            .withTailText(" declared in current file", true));
+                    }
+                } else {
+                    for (GluaRequireSupport.ExportedMember member : GluaRequireSupport.requiredModuleCompletionMembers(
+                        parameters.getOriginalFile(),
+                        completion.receiver(),
+                        completion.separator(),
+                        completion.prefix()
+                    )) {
+                        String typeText = member.detail();
+                        String tailText = " from " + member.sourcePath().getFileName();
+                        result.addElement(LookupElementBuilder.create(member.name())
+                            .withTypeText(typeText, true)
+                            .withTailText(tailText, true)
+                            .withInsertHandler(insertFunctionTemplate(member.name(), member.signature())));
+                    }
                 }
             }
         });
@@ -90,5 +125,47 @@ public final class GluaCompletionContributor extends CompletionContributor {
             document.replaceString(start, end, text);
             context.getEditor().getCaretModel().moveToOffset(start + text.length());
         };
+    }
+
+    private static InsertHandler<LookupElement> insertFunctionTemplate(String name, String signature) {
+        return (context, item) -> {
+            Document document = context.getDocument();
+            int start = context.getStartOffset();
+            int end = context.getTailOffset();
+            document.deleteString(start, end);
+            context.getEditor().getCaretModel().moveToOffset(start);
+            Template template = TemplateManager.getInstance(context.getProject()).createTemplate("", "GLua");
+            template.addTextSegment(name + "(");
+            List<String> params = signatureParameters(signature);
+            for (int i = 0; i < params.size(); i++) {
+                if (i > 0) {
+                    template.addTextSegment(", ");
+                }
+                template.addVariable(params.get(i), "\"" + params.get(i) + "\"", "\"" + params.get(i) + "\"", true);
+            }
+            template.addTextSegment(")");
+            template.setToReformat(false);
+            TemplateManager.getInstance(context.getProject()).startTemplate(context.getEditor(), template);
+        };
+    }
+
+    static String functionSnippetText(String name, String signature) {
+        List<String> params = signatureParameters(signature);
+        return name + "(" + String.join(", ", params) + ")";
+    }
+
+    private static List<String> signatureParameters(String signature) {
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("\\((.*)\\)").matcher(signature == null ? "" : signature);
+        if (!matcher.find()) {
+            return List.of();
+        }
+        List<String> params = new ArrayList<>();
+        for (String raw : matcher.group(1).split(",")) {
+            String param = raw.trim().replaceAll("^\\[|\\]$", "").replaceAll("\\s*=.*$", "").trim();
+            if (!param.isBlank()) {
+                params.add(param);
+            }
+        }
+        return params;
     }
 }

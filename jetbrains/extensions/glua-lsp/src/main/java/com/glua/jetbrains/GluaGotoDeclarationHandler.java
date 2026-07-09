@@ -1,11 +1,16 @@
 package com.glua.jetbrains;
 
 import com.intellij.codeInsight.navigation.actions.GotoDeclarationHandler;
+import com.intellij.codeInsight.hint.HintManager;
+import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.editor.Editor;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.project.Project;
 import com.intellij.psi.PsiElement;
 import org.jetbrains.annotations.Nullable;
+
+import java.nio.file.Path;
+import java.util.List;
 
 public final class GluaGotoDeclarationHandler implements GotoDeclarationHandler {
     private static final Logger LOG = Logger.getInstance(GluaGotoDeclarationHandler.class);
@@ -24,6 +29,19 @@ public final class GluaGotoDeclarationHandler implements GotoDeclarationHandler 
         if (requiredMember != null) {
             LOG.info("glua goto required member target=" + requiredMember.path() + ", offset=" + offset);
             return new PsiElement[]{requiredMember.element()};
+        }
+        List<GluaRequireSupport.Target> memberCallers = GluaRequireSupport.requiredMemberCallersAt(sourceElement.getContainingFile(), offset);
+        if (memberCallers != null) {
+            if (memberCallers.isEmpty()) {
+                ApplicationManager.getApplication().invokeLater(() ->
+                    HintManager.getInstance().showInformationHint(editor, "没有找到调用方")
+                );
+                return PsiElement.EMPTY_ARRAY;
+            }
+            LOG.info("glua goto member callers count=" + memberCallers.size() + ", offset=" + offset);
+            return memberCallers.stream()
+                .map(target -> new GluaCallerNavigationElement(target.element(), target.name(), callerLocation(sourceElement.getProject(), target)))
+                .toArray(PsiElement[]::new);
         }
         GluaRequireSupport.MemberDefinition localMember = GluaRequireSupport.localMemberReferenceDefinitionAt(sourceElement.getContainingFile().getText(), offset);
         if (localMember != null) {
@@ -55,5 +73,30 @@ public final class GluaGotoDeclarationHandler implements GotoDeclarationHandler 
         int start = Math.max(0, offset - 24);
         int end = Math.min(source.length(), offset + 24);
         return source.subSequence(start, end).toString().replace('\n', ' ');
+    }
+
+    private static String callerLocation(Project project, GluaRequireSupport.Target target) {
+        Path path = target.path();
+        String basePath = project.getBasePath();
+        String label = path.getFileName() == null ? path.toString() : path.getFileName().toString();
+        if (basePath != null) {
+            Path base = Path.of(basePath).normalize();
+            Path normalized = path.normalize();
+            if (normalized.startsWith(base)) {
+                label = base.relativize(normalized).toString();
+            }
+        }
+        return label + ":" + oneBasedLine(target.file().getText(), target.start());
+    }
+
+    private static int oneBasedLine(CharSequence text, int offset) {
+        int safeOffset = Math.max(0, Math.min(offset, text.length()));
+        int line = 1;
+        for (int i = 0; i < safeOffset; i++) {
+            if (text.charAt(i) == '\n') {
+                line++;
+            }
+        }
+        return line;
     }
 }

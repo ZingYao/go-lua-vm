@@ -3,8 +3,10 @@ package com.glua.jetbrains;
 import com.intellij.openapi.editor.Document;
 
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -126,17 +128,40 @@ final class GluaAnalysis {
             if (current.isName()) {
                 if (at > 1 && isSeparator(tokens.get(at - 1)) && tokens.get(at - 2).isName()) {
                     String module = completionModule(tokens, at - 1, at - 2, current.start);
-                    return new CompletionContext(true, module, current.text);
+                    return new CompletionContext(true, false, module, tokens.get(at - 2).text, tokens.get(at - 1).text, current.text);
                 }
-                return new CompletionContext(false, "", current.text);
+                return new CompletionContext(false, keywordCompletionMode(tokens, at), "", "", "", current.text);
             }
         }
         int before = GluaLexerUtil.tokenIndexBefore(tokens, offset);
         if (before >= 0 && isSeparator(tokens.get(before)) && before > 0 && tokens.get(before - 1).isName()) {
             String module = completionModule(tokens, before, before - 1, offset);
-            return new CompletionContext(true, module, "");
+            return new CompletionContext(true, false, module, tokens.get(before - 1).text, tokens.get(before).text, "");
         }
-        return new CompletionContext(false, "", "");
+        return new CompletionContext(false, false, "", "", "", "");
+    }
+
+    private static boolean keywordCompletionMode(List<GluaToken> tokens, int tokenIndex) {
+        if (tokenIndex < 0) {
+            return false;
+        }
+        for (int cursor = tokenIndex - 1; cursor >= 0; cursor--) {
+            GluaToken token = tokens.get(cursor);
+            if (token.type.equals("space") || token.type.equals("comment")) {
+                continue;
+            }
+            if (token.text.equals("for") || token.text.equals("while") || token.text.equals("if")) {
+                return true;
+            }
+            if (token.text.equals("do") || token.text.equals("then") || token.text.equals("end") || token.text.equals(";")) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    static List<String> symbolCompletionNames(Document document, String prefix) {
+        return symbolSnapshot(document.getCharsSequence()).completionNames(prefix);
     }
 
     private static String completionModule(List<GluaToken> tokens, int separatorIndex, int receiverIndex, int offset) {
@@ -192,24 +217,7 @@ final class GluaAnalysis {
     }
 
     static TextDefinition localDefinition(Document document, String name, int offset) {
-        List<GluaToken> tokens = GluaLexerUtil.scan(document.getCharsSequence());
-        TextDefinition best = null;
-        for (int i = 0; i < tokens.size(); i++) {
-            GluaToken token = tokens.get(i);
-            if (!token.text.equals(name)) {
-                continue;
-            }
-            if (!isDefinitionAt(tokens, i)) {
-                continue;
-            }
-            TextDefinition current = new TextDefinition(token.start, token.end);
-            if (token.start <= offset) {
-                best = current;
-            } else if (best == null) {
-                best = current;
-            }
-        }
-        return best;
+        return symbolSnapshot(document.getCharsSequence()).definition(name, offset);
     }
 
     static void collectDiagnostics(CharSequence source, DiagnosticSink sink) {
@@ -255,8 +263,9 @@ final class GluaAnalysis {
             int end = source.length();
             sink.error(Math.max(0, end - 1), end, "syntax error near <eof>");
         }
+        SymbolSnapshot symbols = symbolSnapshot(source, tokens);
         collectTypedMethodDiagnostics(tokens, sink);
-        collectUndeclaredIdentifierDiagnostics(tokens, sink);
+        collectUndeclaredIdentifierDiagnostics(tokens, symbols, sink);
     }
 
     private static void collectTypedMethodDiagnostics(List<GluaToken> tokens, DiagnosticSink sink) {
@@ -266,6 +275,10 @@ final class GluaAnalysis {
             GluaToken method = tokens.get(i);
             GluaToken call = nextVisible(tokens, i);
             if (!separator.text.equals(":") || !receiver.isName() || !method.isName() || call == null || !call.text.equals("(")) {
+                continue;
+            }
+            GluaToken beforeReceiver = previousVisible(tokens, i - 2);
+            if (beforeReceiver != null && beforeReceiver.text.equals("function")) {
                 continue;
             }
             String receiverType = inferredReceiverType(tokens, i - 2, method.start);
@@ -280,8 +293,8 @@ final class GluaAnalysis {
         }
     }
 
-    private static void collectUndeclaredIdentifierDiagnostics(List<GluaToken> tokens, DiagnosticSink sink) {
-        Set<String> declared = declaredIdentifiers(tokens);
+    private static void collectUndeclaredIdentifierDiagnostics(List<GluaToken> tokens, SymbolSnapshot symbols, DiagnosticSink sink) {
+        Set<String> declared = symbols.declared();
         Set<String> reported = new HashSet<>();
         for (int i = 0; i < tokens.size(); i++) {
             GluaToken token = tokens.get(i);
@@ -304,8 +317,12 @@ final class GluaAnalysis {
         }
     }
 
-    private static Set<String> declaredIdentifiers(List<GluaToken> tokens) {
-        Set<String> declared = new HashSet<>(STANDARD_DECLARED);
+    private static SymbolSnapshot symbolSnapshot(CharSequence source) {
+        return symbolSnapshot(source, GluaLexerUtil.scan(source));
+    }
+
+    private static SymbolSnapshot symbolSnapshot(CharSequence source, List<GluaToken> tokens) {
+        SymbolSnapshot symbols = new SymbolSnapshot(new HashSet<>(STANDARD_DECLARED), new LinkedHashMap<>(), new LinkedHashMap<>());
         for (int i = 0; i < tokens.size(); i++) {
             GluaToken token = tokens.get(i);
             if (!token.type.equals("keyword")) {
@@ -316,8 +333,8 @@ final class GluaAnalysis {
                 if (next >= 0 && tokens.get(next).text.equals("function")) {
                     int name = nextVisibleIndex(tokens, next);
                     if (name >= 0 && tokens.get(name).isName()) {
-                        declared.add(tokens.get(name).text);
-                        collectFunctionParameters(tokens, name, declared);
+                        addSymbol(symbols, tokens.get(name));
+                        collectFunctionParameters(tokens, name, symbols);
                     }
                     continue;
                 }
@@ -326,20 +343,18 @@ final class GluaAnalysis {
                     if (current.text.equals("=") || current.text.equals("do")) {
                         break;
                     }
-                    if (current.isName()) {
-                        declared.add(current.text);
-                    }
+                    addSymbol(symbols, current);
                 }
                 continue;
             }
             if (token.text.equals("function")) {
                 int name = nextVisibleIndex(tokens, i);
                 if (name >= 0 && tokens.get(name).isName()) {
-                    declared.add(tokens.get(name).text);
-                    collectFunctionParameters(tokens, name, declared);
+                    addSymbol(symbols, tokens.get(name));
+                    collectFunctionParameters(tokens, name, symbols);
                     continue;
                 }
-                collectFunctionExpressionParameters(tokens, i, declared);
+                collectFunctionExpressionParameters(tokens, i, symbols);
                 continue;
             }
             if (token.text.equals("for")) {
@@ -348,16 +363,125 @@ final class GluaAnalysis {
                     if (current.text.equals("in") || current.text.equals("=") || current.text.equals("do")) {
                         break;
                     }
-                    if (current.isName()) {
-                        declared.add(current.text);
-                    }
+                    addSymbol(symbols, current);
                 }
             }
         }
-        return declared;
+        collectAssignmentTargets(source, tokens, symbols);
+        return symbols;
     }
 
-    private static void collectFunctionParameters(List<GluaToken> tokens, int functionNameIndex, Set<String> declared) {
+    private static void addSymbol(SymbolSnapshot symbols, GluaToken token) {
+        if (token == null || !token.isName() || token.type.equals("keyword")) {
+            return;
+        }
+        symbols.declared().add(token.text);
+        TextDefinition definition = new TextDefinition(token.start, token.end);
+        symbols.definitions().computeIfAbsent(token.text, ignored -> new ArrayList<>()).add(definition);
+        symbols.userSymbols().putIfAbsent(token.text, definition);
+    }
+
+    private static void collectAssignmentTargets(CharSequence source, List<GluaToken> tokens, SymbolSnapshot symbols) {
+        for (int i = 0; i < tokens.size(); i++) {
+            GluaToken token = tokens.get(i);
+            if (!token.text.equals("=")) {
+                continue;
+            }
+            if (delimiterDepthBefore(tokens, i) != 0) {
+                continue;
+            }
+            int statementStart = assignmentStatementStart(source, tokens, i);
+            collectSimpleAssignmentTargets(tokens, statementStart, i, symbols);
+        }
+    }
+
+    private static void collectSimpleAssignmentTargets(List<GluaToken> tokens, int statementStart, int equalsIndex, SymbolSnapshot symbols) {
+        int segmentStart = statementStart;
+        int depth = 0;
+        for (int cursor = statementStart; cursor <= equalsIndex; cursor++) {
+            GluaToken current = tokens.get(cursor);
+            if (cursor == equalsIndex || (current.text.equals(",") && depth == 0)) {
+                addSimpleAssignmentTarget(tokens, segmentStart, cursor, symbols);
+                segmentStart = cursor + 1;
+                continue;
+            }
+            if (isOpenDelimiter(current.text)) {
+                depth++;
+                continue;
+            }
+            if (isCloseDelimiter(current.text) && depth > 0) {
+                depth--;
+            }
+        }
+    }
+
+    private static void addSimpleAssignmentTarget(List<GluaToken> tokens, int start, int end, SymbolSnapshot symbols) {
+        GluaToken onlyName = null;
+        for (int cursor = start; cursor < end; cursor++) {
+            GluaToken current = tokens.get(cursor);
+            if (current.type.equals("space") || current.type.equals("comment")) {
+                continue;
+            }
+            if (current.type.equals("keyword") && current.text.equals("local")) {
+                continue;
+            }
+            if (onlyName != null || !current.isName() || current.type.equals("keyword")) {
+                return;
+            }
+            onlyName = current;
+        }
+        if (onlyName != null) {
+            addSymbol(symbols, onlyName);
+        }
+    }
+
+    private static int assignmentStatementStart(CharSequence source, List<GluaToken> tokens, int equalsIndex) {
+        GluaToken equalsToken = tokens.get(equalsIndex);
+        for (int cursor = previousVisibleIndex(tokens, equalsIndex); cursor >= 0; cursor = previousVisibleIndex(tokens, cursor)) {
+            GluaToken current = tokens.get(cursor);
+            if (current.text.equals(";") || !sameLine(source, current.end, equalsToken.start)) {
+                return nextVisibleIndex(tokens, cursor);
+            }
+        }
+        return nextVisibleIndex(tokens, -1);
+    }
+
+    private static int delimiterDepthBefore(List<GluaToken> tokens, int tokenIndex) {
+        int depth = 0;
+        for (int cursor = 0; cursor < tokenIndex; cursor++) {
+            GluaToken current = tokens.get(cursor);
+            if (isOpenDelimiter(current.text)) {
+                depth++;
+                continue;
+            }
+            if (isCloseDelimiter(current.text) && depth > 0) {
+                depth--;
+            }
+        }
+        return depth;
+    }
+
+    private static boolean isOpenDelimiter(String text) {
+        return text.equals("(") || text.equals("{") || text.equals("[");
+    }
+
+    private static boolean isCloseDelimiter(String text) {
+        return text.equals(")") || text.equals("}") || text.equals("]");
+    }
+
+    private static boolean sameLine(CharSequence source, int start, int end) {
+        int lower = Math.max(0, Math.min(start, end));
+        int upper = Math.min(source.length(), Math.max(start, end));
+        for (int i = lower; i < upper; i++) {
+            char ch = source.charAt(i);
+            if (ch == '\n' || ch == '\r') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static void collectFunctionParameters(List<GluaToken> tokens, int functionNameIndex, SymbolSnapshot symbols) {
         int openIndex = -1;
         for (int cursor = nextVisibleIndex(tokens, functionNameIndex); cursor >= 0 && cursor < tokens.size(); cursor = nextVisibleIndex(tokens, cursor)) {
             if (tokens.get(cursor).text.equals("(")) {
@@ -365,18 +489,18 @@ final class GluaAnalysis {
                 break;
             }
         }
-        collectParametersAfterOpen(tokens, openIndex, declared);
+        collectParametersAfterOpen(tokens, openIndex, symbols);
     }
 
-    private static void collectFunctionExpressionParameters(List<GluaToken> tokens, int functionIndex, Set<String> declared) {
+    private static void collectFunctionExpressionParameters(List<GluaToken> tokens, int functionIndex, SymbolSnapshot symbols) {
         int openIndex = nextVisibleIndex(tokens, functionIndex);
         if (openIndex < 0 || !tokens.get(openIndex).text.equals("(")) {
             return;
         }
-        collectParametersAfterOpen(tokens, openIndex, declared);
+        collectParametersAfterOpen(tokens, openIndex, symbols);
     }
 
-    private static void collectParametersAfterOpen(List<GluaToken> tokens, int openIndex, Set<String> declared) {
+    private static void collectParametersAfterOpen(List<GluaToken> tokens, int openIndex, SymbolSnapshot symbols) {
         if (openIndex < 0) {
             return;
         }
@@ -385,21 +509,12 @@ final class GluaAnalysis {
             if (current.text.equals(")")) {
                 return;
             }
-            if (current.isName()) {
-                declared.add(current.text);
-            }
+            addSymbol(symbols, current);
         }
     }
 
     private static boolean isSeparator(GluaToken token) {
         return token != null && (token.text.equals(".") || token.text.equals(":"));
-    }
-
-    private static boolean isDefinitionAt(List<GluaToken> tokens, int index) {
-        GluaToken prev = previousVisible(tokens, index);
-        GluaToken prev2 = previousVisible(tokens, tokens.indexOf(prev));
-        return prev != null && (prev.text.equals("local") || prev.text.equals("function") || prev.text.equals(":"))
-            || prev != null && prev2 != null && prev2.text.equals("local") && prev.text.equals("function");
     }
 
     private static GluaToken previousVisible(List<GluaToken> tokens, int index) {
@@ -450,10 +565,36 @@ final class GluaAnalysis {
         return true;
     }
 
-    record CompletionContext(boolean method, String module, String prefix) {
+    record CompletionContext(boolean method, boolean keywordOnly, String module, String receiver, String separator, String prefix) {
     }
 
     record TextDefinition(int start, int end) {
+    }
+
+    record SymbolSnapshot(Set<String> declared, Map<String, List<TextDefinition>> definitions, Map<String, TextDefinition> userSymbols) {
+        TextDefinition definition(String name, int offset) {
+            List<TextDefinition> matches = definitions.getOrDefault(name, List.of());
+            TextDefinition best = null;
+            for (TextDefinition current : matches) {
+                if (current.start() <= offset) {
+                    best = current;
+                } else if (best == null) {
+                    best = current;
+                }
+            }
+            return best;
+        }
+
+        List<String> completionNames(String prefix) {
+            String effectivePrefix = prefix == null ? "" : prefix;
+            List<String> names = new ArrayList<>();
+            for (String name : userSymbols.keySet()) {
+                if (name.startsWith(effectivePrefix)) {
+                    names.add(name);
+                }
+            }
+            return names;
+        }
     }
 
     interface DiagnosticSink {

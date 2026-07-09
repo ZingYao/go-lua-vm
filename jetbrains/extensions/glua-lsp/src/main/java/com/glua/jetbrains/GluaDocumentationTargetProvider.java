@@ -52,6 +52,13 @@ public final class GluaDocumentationTargetProvider implements DocumentationTarge
                 requiredMember.element()
             ));
         }
+        String nativeModule = GluaRequireSupport.nativeRequiredModuleAt(file, offset);
+        if (nativeModule != null) {
+            String documentation = "<p><code>" + nativeModule + "</code> is a native Lua C module resolved through <code>package.cpath</code>.</p>"
+                + "<p>No Lua source file target is required, so declaration navigation intentionally has no jump target.</p>";
+            String hint = nativeModule + " native module via package.cpath";
+            return List.of(new GluaDocumentationTarget(nativeModule, documentation, hint, "GLua native module", file));
+        }
         String name = GluaAnalysis.builtinTargetAt(file.getText(), offset);
         GluaBuiltin builtin = name == null ? null : GluaBuiltinCatalog.getInstance().get(name);
         if (builtin == null) {

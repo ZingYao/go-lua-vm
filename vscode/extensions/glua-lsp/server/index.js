@@ -98,6 +98,7 @@ const baseKeywords = new Set([
 ]);
 
 const standardLibraries = new Set(["string", "math", "table", "io", "os", "coroutine", "debug", "utf8", "package"]);
+const nativeRequireModules = new Set(["cjson", "cjson.safe", "lpeg", "socket.core", "mime.core"]);
 const valueReturnTypes = new Map([
   ["io.open", "file"],
   ["io.popen", "file"],
@@ -677,18 +678,25 @@ function lineClassification(tokens, code) {
 }
 
 function lineOpensBlock(tokens) {
+  let opens = 0;
+  let closes = 0;
   for (let i = 0; i < tokens.length; i++) {
     const tokenText = tokens[i].text;
     if (tokenText === "then" || tokenText === "function") {
-      return true;
+      opens++;
+      continue;
     }
     if (tokenText === "do") {
       if (!(tokens.length > 0 && tokens[0].text === "switch")) {
-        return true;
+        opens++;
       }
+      continue;
+    }
+    if (tokenText === "end" || tokenText === "until") {
+      closes++;
     }
   }
-  return false;
+  return opens > closes;
 }
 
 function firstWord(code) {
@@ -755,7 +763,24 @@ function adjustAfterLine(frames, kind) {
   }
 }
 
-function splitLineComment(line) {
+function longBracketCloseText(line, openIndex) {
+  if (line[openIndex] !== "[") {
+    return "";
+  }
+  let index = openIndex + 1;
+  while (line[index] === "=") {
+    index++;
+  }
+  return line[index] === "[" ? `]${"=".repeat(index - openIndex - 1)}]` : "";
+}
+
+function splitLineComment(line, state) {
+  if (state.longCommentClose) {
+    if (line.includes(state.longCommentClose)) {
+      state.longCommentClose = "";
+    }
+    return ["", line];
+  }
   let quote = "";
   let escaped = false;
   for (let i = 0; i < line.length; i++) {
@@ -779,6 +804,10 @@ function splitLineComment(line) {
       continue;
     }
     if (value === "-" && line[i + 1] === "-") {
+      const closeText = longBracketCloseText(line, i + 2);
+      if (closeText && !line.slice(i + 2).includes(closeText)) {
+        state.longCommentClose = closeText;
+      }
       return [line.slice(0, i), line.slice(i)];
     }
   }
@@ -855,6 +884,7 @@ function formatDocument(text, syntax) {
   const lines = text.split("\n");
   const frames = [];
   const output = [];
+  const commentState = { longCommentClose: "" };
   for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
     const rawLine = lines[lineIndex];
     if (lineIndex === lines.length - 1 && rawLine === "" && text.endsWith("\n")) {
@@ -866,7 +896,7 @@ function formatDocument(text, syntax) {
       output.push("");
       continue;
     }
-    const [rawCode, comment] = splitLineComment(trimmed);
+    const [rawCode, comment] = splitLineComment(trimmed, commentState);
     const code = rawCode.trim();
     const scan = tokenizeLine(code, syntax);
     const classification = lineClassification(scan.tokens, code);
@@ -975,13 +1005,15 @@ function extractCompletionContext(text, tokens, position) {
           return {
             mode: "method",
             module: moduleName,
+            receiver: maybeModule.text,
+            separator: tokens[atCursor - 1].text,
             prefix: cursorToken.text,
             range: makeRange(position.line, cursorToken.startColumn, position.line, cursorToken.range.end.character),
           };
         }
       }
       return {
-        mode: "global",
+        mode: keywordCompletionMode(tokens, atCursor) ? "keyword" : "global",
         prefix: cursorToken.text,
         range: makeRange(position.line, cursorToken.startColumn, position.line, cursorToken.range.end.character),
       };
@@ -1010,6 +1042,8 @@ function extractCompletionContext(text, tokens, position) {
     return {
       mode: useMethodMode ? "method" : "global",
       module: useMethodMode ? moduleName : "",
+      receiver: useMethodMode && moduleCandidate ? moduleCandidate.text : "",
+      separator: tokenIsSeparator ? beforeToken.text : "",
       prefix: "",
       range: makeRange(position.line, position.character, position.line, position.character),
     };
@@ -1020,6 +1054,25 @@ function extractCompletionContext(text, tokens, position) {
     prefix: "",
     range: makeRange(position.line, position.character, position.line, position.character),
   };
+}
+
+function keywordCompletionMode(tokens, tokenIndex) {
+  if (tokenIndex < 0 || !tokens[tokenIndex] || !tokens[tokenIndex].text) {
+    return false;
+  }
+  for (let cursor = tokenIndex - 1; cursor >= 0; cursor--) {
+    const token = tokens[cursor];
+    if (!token || token.type === "space" || token.type === "comment") {
+      continue;
+    }
+    if (token.text === "for" || token.text === "while" || token.text === "if") {
+      return true;
+    }
+    if (token.text === "do" || token.text === "then" || token.text === "end" || token.text === ";") {
+      return false;
+    }
+  }
+  return false;
 }
 
 function completionModule(tokens, separatorIndex, receiverIndex, position) {
@@ -1082,6 +1135,10 @@ function collectTypedMethodDiagnostics(tokens) {
     if (!receiver || !separator || !method || !call || separator.text !== ":" || !isNameToken(receiver) || !isNameToken(method) || call.text !== "(") {
       continue;
     }
+    const beforeReceiver = previousVisibleToken(tokens, index - 2);
+    if (beforeReceiver && beforeReceiver.text === "function") {
+      continue;
+    }
     const receiverType = inferredReceiverType(tokens, index - 2, method.range.start);
     if (!receiverType) {
       continue;
@@ -1100,17 +1157,46 @@ function collectTypedMethodDiagnostics(tokens) {
   return diagnostics;
 }
 
-function declaredIdentifiers(tokens) {
-  const declared = new Set([
-    "_G",
-    "_VERSION",
-    "_ENV",
-    "false",
-    "nil",
-    "true",
-    ...standardLibraries,
-    ...Array.from(baseBuiltinFunctions).filter((name) => !name.includes(".")),
-  ]);
+function previousVisibleToken(tokens, index) {
+  const previous = previousVisibleIndex(tokens, index);
+  return previous >= 0 ? tokens[previous] : null;
+}
+
+function previousVisibleIndex(tokens, index) {
+  for (let cursor = index - 1; cursor >= 0; cursor--) {
+    const current = tokens[cursor];
+    if (current && current.type !== "space" && current.type !== "comment") {
+      return cursor;
+    }
+  }
+  return -1;
+}
+
+function nextVisibleIndex(tokens, index) {
+  for (let cursor = index + 1; cursor < tokens.length; cursor++) {
+    const current = tokens[cursor];
+    if (current && current.type !== "space" && current.type !== "comment") {
+      return cursor;
+    }
+  }
+  return -1;
+}
+
+function buildSymbolSnapshot(tokens) {
+  const snapshot = {
+    declared: new Set([
+      "_G",
+      "_VERSION",
+      "_ENV",
+      "false",
+      "nil",
+      "true",
+      ...standardLibraries,
+      ...Array.from(baseBuiltinFunctions).filter((name) => !name.includes(".")),
+    ]),
+    definitions: new Map(),
+    userSymbols: new Map(),
+  };
   for (let index = 0; index < tokens.length; index++) {
     const token = tokens[index];
     if (!token || token.type !== "keyword") {
@@ -1119,8 +1205,8 @@ function declaredIdentifiers(tokens) {
     if (token.text === "local") {
       const next = tokens[index + 1];
       if (next && next.text === "function" && isNameToken(tokens[index + 2])) {
-        declared.add(tokens[index + 2].text);
-        collectFunctionParameters(tokens, index + 2, declared);
+        addSymbolToken(snapshot, tokens[index + 2]);
+        collectFunctionParameters(tokens, index + 2, snapshot);
         continue;
       }
       for (let cursor = index + 1; cursor < tokens.length; cursor++) {
@@ -1128,19 +1214,17 @@ function declaredIdentifiers(tokens) {
         if (!current || current.text === "=" || current.text === "do" || current.range.start.line !== token.range.start.line) {
           break;
         }
-        if (isNameToken(current)) {
-          declared.add(current.text);
-        }
+        addSymbolToken(snapshot, current);
       }
       continue;
     }
     if (token.text === "function" && isNameToken(tokens[index + 1])) {
-      declared.add(tokens[index + 1].text);
-      collectFunctionParameters(tokens, index + 1, declared);
+      addSymbolToken(snapshot, tokens[index + 1]);
+      collectFunctionParameters(tokens, index + 1, snapshot);
       continue;
     }
     if (token.text === "function" && tokens[index + 1] && tokens[index + 1].text === "(") {
-      collectFunctionExpressionParameters(tokens, index, declared);
+      collectFunctionExpressionParameters(tokens, index, snapshot);
       continue;
     }
     if (token.text === "for") {
@@ -1149,16 +1233,115 @@ function declaredIdentifiers(tokens) {
         if (!current || current.text === "in" || current.text === "=" || current.text === "do") {
           break;
         }
-        if (isNameToken(current)) {
-          declared.add(current.text);
-        }
+        addSymbolToken(snapshot, current);
       }
     }
   }
-  return declared;
+  collectAssignmentTargets(tokens, snapshot);
+  return snapshot;
 }
 
-function collectFunctionParameters(tokens, functionNameIndex, declared) {
+function addSymbolToken(snapshot, token) {
+  if (!isNameToken(token) || token.type === "keyword") {
+    return;
+  }
+  snapshot.declared.add(token.text);
+  if (!snapshot.userSymbols.has(token.text)) {
+    snapshot.userSymbols.set(token.text, token.range);
+  }
+  if (!snapshot.definitions.has(token.text)) {
+    snapshot.definitions.set(token.text, []);
+  }
+  snapshot.definitions.get(token.text).push(token.range);
+}
+
+function collectAssignmentTargets(tokens, snapshot) {
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (!token || token.text !== "=") {
+      continue;
+    }
+    if (delimiterDepthBefore(tokens, index) !== 0) {
+      continue;
+    }
+    const statementStart = assignmentStatementStart(tokens, index);
+    collectSimpleAssignmentTargets(tokens, statementStart, index, snapshot);
+  }
+}
+
+function collectSimpleAssignmentTargets(tokens, statementStart, equalsIndex, snapshot) {
+  let segmentStart = statementStart;
+  let depth = 0;
+  for (let cursor = statementStart; cursor <= equalsIndex; cursor++) {
+    const current = tokens[cursor];
+    if (!current) {
+      continue;
+    }
+    if (cursor === equalsIndex || (current.text === "," && depth === 0)) {
+      addSimpleAssignmentTarget(tokens.slice(segmentStart, cursor), snapshot);
+      segmentStart = cursor + 1;
+      continue;
+    }
+    if (isOpenDelimiter(current.text)) {
+      depth++;
+      continue;
+    }
+    if (isCloseDelimiter(current.text) && depth > 0) {
+      depth--;
+    }
+  }
+}
+
+function addSimpleAssignmentTarget(segment, snapshot) {
+  const visible = segment.filter((token) => token && !(token.type === "keyword" && token.text === "local"));
+  if (visible.length !== 1 || !isNameToken(visible[0]) || visible[0].type === "keyword") {
+    return;
+  }
+  addSymbolToken(snapshot, visible[0]);
+}
+
+function assignmentStatementStart(tokens, equalsIndex) {
+  const equalsToken = tokens[equalsIndex];
+  if (!equalsToken) {
+    return equalsIndex;
+  }
+  for (let cursor = equalsIndex - 1; cursor >= 0; cursor--) {
+    const current = tokens[cursor];
+    if (!current || current.range.start.line !== equalsToken.range.start.line || current.text === ";") {
+      return cursor + 1;
+    }
+  }
+  return 0;
+}
+
+function delimiterDepthBefore(tokens, tokenIndex) {
+  let depth = 0;
+  for (let cursor = 0; cursor < tokenIndex; cursor++) {
+    const current = tokens[cursor];
+    if (!current) {
+      continue;
+    }
+    if (isOpenDelimiter(current.text)) {
+      depth++;
+      continue;
+    }
+    if (isCloseDelimiter(current.text) && depth > 0) {
+      depth--;
+    }
+  }
+  return depth;
+}
+
+function isOpenDelimiter(text) {
+  return text === "(" || text === "{" || text === "[";
+}
+
+function isCloseDelimiter(text) {
+  return text === ")" || text === "}" || text === "]";
+}
+
+
+function collectFunctionParameters(tokens, functionNameIndex, snapshot) {
   let openIndex = -1;
   for (let cursor = functionNameIndex + 1; cursor < tokens.length; cursor++) {
     if (tokens[cursor].text === "(") {
@@ -1177,13 +1360,11 @@ function collectFunctionParameters(tokens, functionNameIndex, declared) {
     if (current.text === ")") {
       return;
     }
-    if (isNameToken(current)) {
-      declared.add(current.text);
-    }
+    addSymbolToken(snapshot, current);
   }
 }
 
-function collectFunctionExpressionParameters(tokens, functionIndex, declared) {
+function collectFunctionExpressionParameters(tokens, functionIndex, snapshot) {
   const openIndex = functionIndex + 1;
   if (!tokens[openIndex] || tokens[openIndex].text !== "(") {
     return;
@@ -1193,14 +1374,12 @@ function collectFunctionExpressionParameters(tokens, functionIndex, declared) {
     if (current.text === ")") {
       return;
     }
-    if (isNameToken(current)) {
-      declared.add(current.text);
-    }
+    addSymbolToken(snapshot, current);
   }
 }
 
-function collectUndeclaredIdentifierDiagnostics(tokens) {
-  const declared = declaredIdentifiers(tokens);
+function collectUndeclaredIdentifierDiagnostics(tokens, snapshot = buildSymbolSnapshot(tokens)) {
+  const declared = snapshot.declared;
   const diagnostics = [];
   const reported = new Set();
   for (let index = 0; index < tokens.length; index++) {
@@ -1231,9 +1410,12 @@ function collectUndeclaredIdentifierDiagnostics(tokens) {
   return diagnostics;
 }
 
-function buildCompletionCandidates(context) {
+function buildCompletionCandidates(context, snapshot, tokens, documentUri) {
   const items = [];
   const seen = new Set();
+  if (context.mode === "keyword") {
+    return keywordCompletionCandidates(context);
+  }
   const names = builtinFunctionNames();
 
   for (const name of names) {
@@ -1258,6 +1440,7 @@ function buildCompletionCandidates(context) {
         fullName: name,
         detail: builtin.signature || methodName,
         documentation: formatBuiltinMarkdown(name, builtin),
+        snippet: completionSnippet(methodName, builtin.signature || methodName),
       });
       seen.add(methodName);
       continue;
@@ -1273,6 +1456,45 @@ function buildCompletionCandidates(context) {
         fullName: name,
         detail: builtin.signature || name,
         documentation: formatBuiltinMarkdown(name, builtin),
+        snippet: completionSnippet(name, builtin.signature || name),
+      });
+      seen.add(name);
+    }
+  }
+
+  if (context.mode === "method" && context.receiver && tokens && documentUri) {
+    const requireBindings = localRequireBindings(tokens, documentUri);
+    const moduleFile = requireBindings.get(context.receiver);
+    if (moduleFile) {
+      for (const member of moduleExportSnapshot(moduleFile, context.receiver).members) {
+        if (!member.name.startsWith(context.prefix) || seen.has(member.name)) {
+          continue;
+        }
+        if (context.separator === ":" && member.callStyle !== ":") {
+          continue;
+        }
+        items.push({
+          name: member.name,
+          kind: CompletionItemKind.Function,
+          detail: member.detail,
+          documentation: member.documentation || `Exported from ${path.basename(moduleFile)}.`,
+          snippet: completionSnippet(member.name, member.signature),
+        });
+        seen.add(member.name);
+      }
+    }
+  }
+
+  if (context.mode === "global" && snapshot) {
+    for (const [name] of snapshot.userSymbols) {
+      if (!name.startsWith(context.prefix) || seen.has(name)) {
+        continue;
+      }
+      items.push({
+        name,
+        kind: CompletionItemKind.Variable,
+        detail: "GLua file symbol",
+        documentation: "Declared in the current Lua file.",
       });
       seen.add(name);
     }
@@ -1283,6 +1505,44 @@ function buildCompletionCandidates(context) {
   }
 
   return items;
+}
+
+function completionSnippet(name, signature) {
+  const params = signatureParameters(signature);
+  if (params.length === 0) {
+    return `${snippetEscape(name)}()`;
+  }
+  const placeholders = params.map((param, index) => `\${${index + 1}:${snippetEscape(param)}}`);
+  return `${snippetEscape(name)}(${placeholders.join(", ")})`;
+}
+
+function signatureParameters(signature) {
+  const match = String(signature || "").match(/\((.*)\)/);
+  if (!match) {
+    return [];
+  }
+  return match[1]
+    .split(",")
+    .map((param) => param.trim())
+    .filter(Boolean)
+    .map((param) => param.replace(/^\[|\]$/g, "").replace(/\s*=.*$/, "").trim())
+    .filter(Boolean);
+}
+
+function snippetEscape(value) {
+  return String(value || "").replace(/\\/g, "\\\\").replace(/\$/g, "\\$").replace(/}/g, "\\}");
+}
+
+function keywordCompletionCandidates(context) {
+  const keywords = ["do", "then", "end"];
+  return keywords
+    .filter((keyword) => keyword.startsWith(context.prefix || ""))
+    .map((keyword) => ({
+      name: keyword,
+      kind: CompletionItemKind.Keyword,
+      detail: "Lua keyword",
+      documentation: `Insert \`${keyword}\`.`,
+    }));
 }
 
 function buildDocSnippetCandidates(context) {
@@ -1379,52 +1639,24 @@ function resolveBuiltinTarget(tokens, position) {
   return token.text;
 }
 
-function isDefinitionAt(tokens, index, name) {
-  if (index < 0 || index >= tokens.length) {
-    return false;
-  }
-  if (tokens[index].text !== name) {
-    return false;
-  }
-  if (index > 0 && tokens[index - 1].text === "local") {
-    return true;
-  }
-  if (index > 0 && tokens[index - 1].text === "function") {
-    return true;
-  }
-  if (index > 1 && tokens[index - 2].text === "local" && tokens[index - 1].text === "function") {
-    return true;
-  }
-  if (index > 0 && tokens[index - 1].text === ":") {
-    return true;
-  }
-  if (index > 0 && index + 1 < tokens.length && tokens[index - 1].text === "::" && tokens[index + 1].text === "::") {
-    return true;
-  }
-  return false;
-}
-
 function findDefinition(text, targetName, position, syntax) {
   const result = scanTokens(text, syntax);
-  const tokens = result.tokens;
+  const snapshot = buildSymbolSnapshot(result.tokens);
+  return definitionFromSnapshot(snapshot, targetName, position);
+}
+
+function definitionFromSnapshot(snapshot, targetName, position) {
+  const definitions = snapshot.definitions.get(targetName) || [];
   let best = null;
-  for (let i = 0; i < tokens.length; i++) {
-    if (!isRangeBeforeOrEqual(tokens[i].range, position)) {
-      continue;
-    }
-    if (isDefinitionAt(tokens, i, targetName)) {
-      best = tokens[i].range;
+  for (const range of definitions) {
+    if (isRangeBeforeOrEqual(range, position)) {
+      best = range;
     }
   }
   if (best) {
     return best;
   }
-  for (let i = 0; i < tokens.length; i++) {
-    if (isDefinitionAt(tokens, i, targetName)) {
-      return tokens[i].range;
-    }
-  }
-  return null;
+  return definitions.length > 0 ? definitions[0] : null;
 }
 
 function isContextToken(text) {
@@ -1597,8 +1829,9 @@ function collectParseLikeErrors(text, syntax) {
     });
   }
 
+  const snapshot = buildSymbolSnapshot(tokens);
   diagnostics.push(...collectTypedMethodDiagnostics(tokens));
-  diagnostics.push(...collectUndeclaredIdentifierDiagnostics(tokens));
+  diagnostics.push(...collectUndeclaredIdentifierDiagnostics(tokens, snapshot));
   return diagnostics;
 }
 
@@ -1640,15 +1873,26 @@ function uriFromFilePath(filePath) {
 
 function modulePathCandidates(moduleName, baseDir) {
   const relative = String(moduleName || "").replace(/\./g, path.sep);
-  const roots = [baseDir, ...workspaceRoots].filter(Boolean);
+  const roots = [];
+  if (baseDir) {
+    roots.push({ root: baseDir, prefixes: [""] });
+  }
+  for (const workspaceRoot of workspaceRoots) {
+    if (workspaceRoot) {
+      roots.push({ root: workspaceRoot, prefixes: ["", "lua", "src"] });
+    }
+  }
   const candidates = [];
-  for (const root of roots) {
-    candidates.push(
-      path.join(root, `${relative}.glua`),
-      path.join(root, `${relative}.lua`),
-      path.join(root, relative, "init.glua"),
-      path.join(root, relative, "init.lua")
-    );
+  for (const entry of roots) {
+    for (const prefix of entry.prefixes) {
+      const root = prefix ? path.join(entry.root, prefix) : entry.root;
+      candidates.push(
+        path.join(root, `${relative}.glua`),
+        path.join(root, `${relative}.lua`),
+        path.join(root, relative, "init.glua"),
+        path.join(root, relative, "init.lua")
+      );
+    }
   }
   return [...new Set(candidates)];
 }
@@ -1662,6 +1906,44 @@ function resolveRequiredModuleFile(moduleName, documentUri) {
     }
   }
   return "";
+}
+
+function isNativeRequireModule(moduleName) {
+  return nativeRequireModules.has(String(moduleName || ""));
+}
+
+function nativeRequiredModuleAt(tokens, position, documentUri) {
+  const index = findTokenIndexAtPosition(tokens, position);
+  if (index < 0 || tokens[index].type !== "string") {
+    return "";
+  }
+  if (index < 2 || tokens[index - 1].text !== "(" || tokens[index - 2].text !== "require") {
+    return "";
+  }
+  const moduleName = tokens[index].text.slice(1, -1);
+  if (!isNativeRequireModule(moduleName) || resolveRequiredModuleFile(moduleName, documentUri)) {
+    return "";
+  }
+  return moduleName;
+}
+
+function hoverForNativeRequiredModule(tokens, position, documentUri) {
+  const moduleName = nativeRequiredModuleAt(tokens, position, documentUri);
+  if (!moduleName) {
+    return null;
+  }
+  return {
+    contents: {
+      kind: "markdown",
+      value: [
+        `\`${moduleName}\``,
+        "",
+        "Native Lua C module resolved through `package.cpath`.",
+        "",
+        "No Lua source file target is required, so definition intentionally has no jump target.",
+      ].join("\n"),
+    },
+  };
 }
 
 function requiredModuleAt(tokens, position, documentUri) {
@@ -1685,36 +1967,425 @@ function requiredModuleAt(tokens, position, documentUri) {
 
 function localRequireBindings(tokens, documentUri) {
   const bindings = new Map();
-  for (let index = 0; index + 5 < tokens.length; index++) {
-    if (tokens[index].text !== "local" || !isNameToken(tokens[index + 1]) || tokens[index + 2].text !== "=" || tokens[index + 3].text !== "require" || tokens[index + 4].text !== "(" || tokens[index + 5].type !== "string") {
+  for (let index = 0; index < tokens.length; index++) {
+    const receiverIndex = tokens[index].text === "local" ? nextVisibleIndex(tokens, index) : index;
+    const equalsIndex = nextVisibleIndex(tokens, receiverIndex);
+    const requireIndex = nextVisibleIndex(tokens, equalsIndex);
+    const moduleIndex = moduleStringIndex(tokens, requireIndex);
+    if (receiverIndex < 0 || equalsIndex < 0 || requireIndex < 0 || moduleIndex < 0) {
       continue;
     }
-    const moduleName = tokens[index + 5].text.slice(1, -1);
+    if (!isNameToken(tokens[receiverIndex]) || tokens[equalsIndex].text !== "=" || tokens[requireIndex].text !== "require" || tokens[moduleIndex].type !== "string") {
+      continue;
+    }
+    const moduleName = tokens[moduleIndex].text.slice(1, -1);
     const filePath = resolveRequiredModuleFile(moduleName, documentUri);
     if (filePath) {
-      bindings.set(tokens[index + 1].text, filePath);
+      bindings.set(tokens[receiverIndex].text, filePath);
     }
   }
   return bindings;
 }
 
+function moduleStringIndex(tokens, requireIndex) {
+  const firstIndex = nextVisibleIndex(tokens, requireIndex);
+  if (firstIndex < 0) {
+    return -1;
+  }
+  if (tokens[firstIndex].type === "string") {
+    return firstIndex;
+  }
+  const secondIndex = nextVisibleIndex(tokens, firstIndex);
+  if (tokens[firstIndex].text === "(" && secondIndex >= 0 && tokens[secondIndex].type === "string") {
+    return secondIndex;
+  }
+  return -1;
+}
+
 function exportedMemberDefinition(filePath, receiverName, memberName) {
+  const member = moduleExportSnapshot(filePath, receiverName).members.find((current) => current.name === memberName);
+  if (member) {
+    return {
+      uri: uriFromFilePath(filePath),
+      range: member.range,
+      member,
+    };
+  }
+  return null;
+}
+
+function exportedMemberDefinitionAtPosition(tokens, position) {
+  const index = findTokenIndexAtPosition(tokens, position);
+  if (index < 0 || !isNameToken(tokens[index])) {
+    return null;
+  }
+  const separatorIndex = previousVisibleIndex(tokens, index);
+  const receiverIndex = previousVisibleIndex(tokens, separatorIndex);
+  if (receiverIndex < 0 || separatorIndex < 0 || !isNameToken(tokens[receiverIndex])) {
+    return null;
+  }
+  const separator = tokens[separatorIndex].text;
+  if (separator !== "." && separator !== ":") {
+    return null;
+  }
+  const exportedTables = returnedTableNames(tokens);
+  if (!exportedTables.has(tokens[receiverIndex].text)) {
+    return null;
+  }
+  if (separator === ":" && isFunctionStatementMember(tokens, receiverIndex)) {
+    return { receiver: tokens[receiverIndex].text, member: tokens[index].text, range: tokens[index].range };
+  }
+  if (separator === "." && isFunctionStatementMember(tokens, receiverIndex)) {
+    return { receiver: tokens[receiverIndex].text, member: tokens[index].text, range: tokens[index].range };
+  }
+  if (separator === "." && memberFunctionAssignmentIndex(tokens, index) >= 0) {
+    return { receiver: tokens[receiverIndex].text, member: tokens[index].text, range: tokens[index].range };
+  }
+  return null;
+}
+
+function workspaceLuaFiles() {
+  const files = [];
+  const skipped = new Set([".git", ".gradle", ".idea", ".vscode", "build", "dist", "node_modules", "out"]);
+  const visit = (directory) => {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(directory, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name));
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const absolutePath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        if (!skipped.has(entry.name)) {
+          visit(absolutePath);
+        }
+        continue;
+      }
+      if (entry.isFile() && (entry.name.endsWith(".lua") || entry.name.endsWith(".glua"))) {
+        files.push(absolutePath);
+      }
+    }
+  };
+  for (const root of workspaceRoots) {
+    if (root) {
+      visit(root);
+    }
+  }
+  return [...new Set(files)].sort();
+}
+
+function callerTargetsForMemberDefinition(tokens, position, documentUri) {
+  const definition = exportedMemberDefinitionAtPosition(tokens, position);
+  if (!definition) {
+    return null;
+  }
+  const modulePath = path.resolve(filePathFromUri(documentUri));
+  const targets = [];
+  for (const filePath of workspaceLuaFiles()) {
+    let text = "";
+    try {
+      text = fs.readFileSync(filePath, "utf8");
+    } catch {
+      continue;
+    }
+    const candidateUri = uriFromFilePath(filePath);
+    const candidateTokens = scanTokens(text, syntax).tokens;
+    const bindings = localRequireBindings(candidateTokens, candidateUri);
+    const receivers = [...bindings.entries()]
+      .filter(([, resolvedPath]) => path.resolve(resolvedPath) === modulePath)
+      .map(([receiver]) => receiver);
+    if (receivers.length === 0) {
+      continue;
+    }
+    const receiverSet = new Set(receivers);
+    for (let index = 2; index < candidateTokens.length; index++) {
+      const separator = candidateTokens[index - 1].text;
+      if (!isNameToken(candidateTokens[index]) || (separator !== "." && separator !== ":") || !receiverSet.has(candidateTokens[index - 2].text)) {
+        continue;
+      }
+      if (candidateTokens[index].text === definition.member) {
+        targets.push({ uri: candidateUri, range: candidateTokens[index].range });
+      }
+    }
+  }
+  return targets;
+}
+
+function moduleExportSnapshot(filePath, receiverName) {
   let text = "";
   try {
     text = fs.readFileSync(filePath, "utf8");
   } catch {
-    return null;
+    return {
+      filePath,
+      text: "",
+      tokens: [],
+      exportedTables: new Set(),
+      members: [],
+    };
   }
   const tokens = scanTokens(text, syntax).tokens;
+  const exportedTables = returnedTableNames(tokens);
+  if (receiverName) {
+    exportedTables.add(receiverName);
+  }
+  const members = [];
+  const seen = new Set();
+  const addMember = (token, callStyle, functionIndex) => {
+    const name = stringTokenValue(token) || (token ? token.text : "");
+    if (!name || seen.has(name)) {
+      return;
+    }
+    seen.add(name);
+    const signature = memberSignature(tokens, functionIndex, name);
+    const documentation = hoverMarkdownForDefinition(signature, text, token.range);
+    members.push({
+      name,
+      range: token.range,
+      callStyle,
+      signature,
+      detail: callStyle === ":" ? `${signature} method` : signature,
+      documentation,
+      sourcePath: filePath,
+    });
+  };
+
   for (let index = 0; index + 2 < tokens.length; index++) {
-    if (tokens[index].text === receiverName && tokens[index + 1].text === "." && tokens[index + 2].text === memberName) {
-      return {
-        uri: uriFromFilePath(filePath),
-        range: tokens[index + 2].range,
-      };
+    const receiverMatches = exportedTables.has(tokens[index].text);
+    const separator = tokens[index + 1];
+    const member = tokens[index + 2];
+    if (receiverMatches && separator && member && (separator.text === "." || separator.text === ":") && isNameToken(member)) {
+      if (separator.text === ":" && isFunctionStatementMember(tokens, index)) {
+        addMember(member, ":", previousVisibleIndex(tokens, index));
+        continue;
+      }
+      const assignmentFunctionIndex = memberFunctionAssignmentIndex(tokens, index + 2);
+      if (separator.text === "." && isFunctionStatementMember(tokens, index)) {
+        addMember(member, ".", previousVisibleIndex(tokens, index));
+        continue;
+      }
+      if (separator.text === "." && assignmentFunctionIndex >= 0) {
+        addMember(member, ".", assignmentFunctionIndex);
+        continue;
+      }
+    }
+    const indexedMember = indexedMemberFunctionDefinition(tokens, index, exportedTables, "");
+    if (indexedMember) {
+      addMember(indexedMember.token, ".", indexedMember.functionIndex);
+    }
+  }
+
+  for (const tableName of exportedTables) {
+    for (const range of tableConstructorRanges(tokens, tableName)) {
+      for (const field of tableFieldFunctionDefinitions(tokens, range.openIndex + 1, range.closeIndex)) {
+        addMember(field.token, ".", field.functionIndex);
+      }
+    }
+  }
+  return {
+    filePath,
+    text,
+    tokens,
+    exportedTables,
+    members,
+  };
+}
+
+function returnedTableNames(tokens) {
+  const names = new Set();
+  for (let index = 0; index < tokens.length; index++) {
+    if (tokens[index].text !== "return") {
+      continue;
+    }
+    const nextIndex = nextVisibleIndex(tokens, index);
+    if (nextIndex >= 0 && isNameToken(tokens[nextIndex])) {
+      names.add(tokens[nextIndex].text);
+    }
+  }
+  return names;
+}
+
+function isMemberFunctionDefinition(tokens, memberIndex) {
+  return memberFunctionAssignmentIndex(tokens, memberIndex) >= 0;
+}
+
+function memberFunctionAssignmentIndex(tokens, memberIndex) {
+  const line = tokens[memberIndex].range.start.line;
+  let hasEquals = false;
+  for (let cursor = memberIndex + 1; cursor < tokens.length && tokens[cursor].range.start.line === line; cursor++) {
+    if (tokens[cursor].text === "=") {
+      hasEquals = true;
+      continue;
+    }
+    if (hasEquals && tokens[cursor].text === "function") {
+      return cursor;
+    }
+  }
+  return -1;
+}
+
+function indexedMemberFunctionDefinition(tokens, receiverIndex, exportedTables, memberName) {
+  if (!exportedTables.has(tokens[receiverIndex].text)) {
+    return null;
+  }
+  const openIndex = nextVisibleIndex(tokens, receiverIndex);
+  const keyIndex = nextVisibleIndex(tokens, openIndex);
+  const closeIndex = nextVisibleIndex(tokens, keyIndex);
+  if (openIndex < 0 || keyIndex < 0 || closeIndex < 0 || tokens[openIndex].text !== "[" || tokens[closeIndex].text !== "]") {
+    return null;
+  }
+  if (memberName && stringTokenValue(tokens[keyIndex]) !== memberName) {
+    return null;
+  }
+  const functionIndex = indexedFunctionIndex(tokens, closeIndex);
+  return functionIndex >= 0 ? { token: tokens[keyIndex], functionIndex } : null;
+}
+
+function tableLiteralMemberFunctionDefinition(tokens, exportedTables, memberName) {
+  for (const tableName of exportedTables) {
+    for (const range of tableConstructorRanges(tokens, tableName)) {
+      const field = tableFieldFunctionDefinition(tokens, range.openIndex + 1, range.closeIndex, memberName);
+      if (field) {
+        return field;
+      }
     }
   }
   return null;
+}
+
+function tableConstructorRanges(tokens, tableName) {
+  const ranges = [];
+  for (let index = 0; index < tokens.length; index++) {
+    if (tokens[index].text !== tableName) {
+      continue;
+    }
+    const equalsIndex = nextVisibleIndex(tokens, index);
+    const openIndex = nextVisibleIndex(tokens, equalsIndex);
+    if (equalsIndex < 0 || openIndex < 0 || tokens[equalsIndex].text !== "=" || tokens[openIndex].text !== "{") {
+      continue;
+    }
+    const closeIndex = matchingDelimiterIndex(tokens, openIndex);
+    if (closeIndex > openIndex) {
+      ranges.push({ openIndex, closeIndex });
+    }
+  }
+  return ranges;
+}
+
+function tableFieldFunctionDefinition(tokens, startIndex, endIndex, memberName) {
+  return tableFieldFunctionDefinitions(tokens, startIndex, endIndex).find((field) => {
+    const name = stringTokenValue(field.token) || field.token.text;
+    return name === memberName;
+  })?.token || null;
+}
+
+function tableFieldFunctionDefinitions(tokens, startIndex, endIndex) {
+  const fields = [];
+  for (let index = startIndex; index < endIndex; index++) {
+    const token = tokens[index];
+    if (!token) {
+      continue;
+    }
+    if (token.text === "[" && index + 2 < endIndex) {
+      const keyIndex = nextVisibleIndex(tokens, index);
+      const closeIndex = nextVisibleIndex(tokens, keyIndex);
+      const functionIndex = indexedFunctionIndex(tokens, closeIndex);
+      if (closeIndex < endIndex && tokens[closeIndex].text === "]" && stringTokenValue(tokens[keyIndex]) && functionIndex >= 0) {
+        fields.push({ token: tokens[keyIndex], functionIndex });
+      }
+      continue;
+    }
+    const functionIndex = bareTableFieldFunctionIndex(tokens, index, endIndex);
+    if (isNameToken(token) && functionIndex >= 0) {
+      fields.push({ token, functionIndex });
+    }
+  }
+  return fields;
+}
+
+function isFunctionStatementMember(tokens, receiverIndex) {
+  const previous = previousVisibleToken(tokens, receiverIndex);
+  return previous && previous.text === "function";
+}
+
+function isIndexedFunctionDefinition(tokens, closeBracketIndex) {
+  return indexedFunctionIndex(tokens, closeBracketIndex) >= 0;
+}
+
+function indexedFunctionIndex(tokens, closeBracketIndex) {
+  const equalsIndex = nextVisibleIndex(tokens, closeBracketIndex);
+  const functionIndex = nextVisibleIndex(tokens, equalsIndex);
+  return equalsIndex >= 0 && functionIndex >= 0 && tokens[equalsIndex].text === "=" && tokens[functionIndex].text === "function" ? functionIndex : -1;
+}
+
+function isBareTableFieldFunctionDefinition(tokens, keyIndex, endIndex) {
+  return bareTableFieldFunctionIndex(tokens, keyIndex, endIndex) >= 0;
+}
+
+function bareTableFieldFunctionIndex(tokens, keyIndex, endIndex) {
+  const equalsIndex = nextVisibleIndex(tokens, keyIndex);
+  const functionIndex = nextVisibleIndex(tokens, equalsIndex);
+  return equalsIndex > keyIndex && functionIndex < endIndex && tokens[equalsIndex].text === "=" && tokens[functionIndex].text === "function" ? functionIndex : -1;
+}
+
+function memberSignature(tokens, functionIndex, name) {
+  if (functionIndex < 0 || !tokens[functionIndex] || tokens[functionIndex].text !== "function") {
+    return `${name}()`;
+  }
+  let openIndex = -1;
+  for (let cursor = functionIndex + 1; cursor < tokens.length; cursor++) {
+    if (tokens[cursor].text === "(") {
+      openIndex = cursor;
+      break;
+    }
+    if (tokens[cursor].range.start.line > tokens[functionIndex].range.start.line && openIndex < 0) {
+      break;
+    }
+  }
+  if (openIndex < 0) {
+    return `${name}()`;
+  }
+  const closeIndex = matchingDelimiterIndex(tokens, openIndex);
+  if (closeIndex < 0) {
+    return `${name}()`;
+  }
+  const params = [];
+  for (let cursor = openIndex + 1; cursor < closeIndex; cursor++) {
+    if (isNameToken(tokens[cursor]) || tokens[cursor].text === "...") {
+      params.push(tokens[cursor].text);
+    }
+  }
+  return `${name}(${params.join(", ")})`;
+}
+
+function matchingDelimiterIndex(tokens, openIndex) {
+  const open = tokens[openIndex] ? tokens[openIndex].text : "";
+  const close = open === "{" ? "}" : open === "[" ? "]" : open === "(" ? ")" : "";
+  if (!close) {
+    return -1;
+  }
+  let depth = 0;
+  for (let index = openIndex; index < tokens.length; index++) {
+    if (tokens[index].text === open) {
+      depth++;
+      continue;
+    }
+    if (tokens[index].text === close) {
+      depth--;
+      if (depth === 0) {
+        return index;
+      }
+    }
+  }
+  return -1;
+}
+
+function stringTokenValue(token) {
+  if (!token || token.type !== "string" || token.text.length < 2) {
+    return "";
+  }
+  return token.text.slice(1, -1);
 }
 
 function commentBlockBeforeLine(text, lineNumber) {
@@ -1976,6 +2647,15 @@ function hoverForRequiredMember(tokens, position, documentUri) {
   const targetName = tokenIndex >= 2 && tokens[tokenIndex - 1].text === "." && isNameToken(tokens[tokenIndex - 2])
     ? `${tokens[tokenIndex - 2].text}.${tokens[tokenIndex].text}`
     : (tokenIndex >= 0 ? tokens[tokenIndex].text : path.basename(filePath));
+  if (target.member && target.member.documentation) {
+    return {
+      contents: {
+        kind: "markdown",
+        value: target.member.documentation,
+      },
+      range: target.range,
+    };
+  }
   return {
     contents: {
       kind: "markdown",
@@ -1987,7 +2667,7 @@ function hoverForRequiredMember(tokens, position, documentUri) {
 
 function requiredMemberTarget(tokens, position, documentUri) {
   const index = findTokenIndexAtPosition(tokens, position);
-  if (index < 2 || !isNameToken(tokens[index]) || tokens[index - 1].text !== "." || !isNameToken(tokens[index - 2])) {
+  if (index < 2 || !isNameToken(tokens[index]) || (tokens[index - 1].text !== "." && tokens[index - 1].text !== ":") || !isNameToken(tokens[index - 2])) {
     return null;
   }
   const bindings = localRequireBindings(tokens, documentUri);
@@ -2157,6 +2837,13 @@ connection.onDefinition((params) => {
   const text = doc.getText();
   const tokens = scanTokens(text, syntax).tokens;
   const position = parsePositionOffset(text, params.position);
+  const callerTargets = callerTargetsForMemberDefinition(tokens, position, params.textDocument.uri);
+  if (callerTargets) {
+    if (callerTargets.length === 0) {
+      connection.window.showInformationMessage("没有找到调用方");
+    }
+    return callerTargets;
+  }
   const requiredModule = requiredModuleAt(tokens, position, params.textDocument.uri);
   if (requiredModule) {
     return [requiredModule];
@@ -2192,7 +2879,8 @@ connection.onCompletion((params) => {
   const tokens = scanTokens(text, syntax).tokens;
   const position = parsePositionOffset(text, params.position);
   const context = extractCompletionContext(text, tokens, position);
-  const candidates = buildCompletionCandidates(context);
+  const snapshot = buildSymbolSnapshot(tokens);
+  const candidates = buildCompletionCandidates(context, snapshot, tokens, params.textDocument.uri);
   return candidates.map((item) => ({
     label: item.name,
     kind: item.kind || CompletionItemKind.Function,
@@ -2229,6 +2917,10 @@ connection.onHover((params) => {
   const requiredMemberHover = hoverForRequiredMember(tokens, position, params.textDocument.uri);
   if (requiredMemberHover) {
     return requiredMemberHover;
+  }
+  const nativeRequiredModuleHover = hoverForNativeRequiredModule(tokens, position, params.textDocument.uri);
+  if (nativeRequiredModuleHover) {
+    return nativeRequiredModuleHover;
   }
   const target = resolveBuiltinTarget(tokens, position);
   if (!target) {

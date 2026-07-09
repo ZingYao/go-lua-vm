@@ -1,0 +1,16 @@
+extensions = {}
+
+-- description: function description
+-- param: name string parameter description
+-- return: nil
+-- example:
+-- module.function(name)
+-- output:
+-- expected output
+extensions.timesPrint = function(name,times)
+  for i = 1,times do
+    print('hello,'..name)
+  end
+end
+
+return extensions

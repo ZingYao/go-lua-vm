@@ -13,15 +13,19 @@ fi
 : >/tmp/go-lua-vm-cgo-check.txt
 while IFS= read -r go_file; do
   if grep -Eq 'import[[:space:]]+"C"|^[[:space:]]*"C"[[:space:]]*$' "${go_file}"; then
+    if [[ "${go_file}" != internal/native/* ]]; then
+      echo "${go_file}: CGO is only allowed under internal/native/" >>/tmp/go-lua-vm-cgo-check.txt
+      continue
+    fi
     if ! grep -Eq '^//go:build .*native_modules' "${go_file}"; then
-      echo "${go_file}: CGO is only allowed in native_modules-tagged files" >>/tmp/go-lua-vm-cgo-check.txt
+      echo "${go_file}: CGO files must be guarded by the native_modules build tag" >>/tmp/go-lua-vm-cgo-check.txt
     fi
   fi
 done < <(git ls-files '*.go')
 
 if [[ -s /tmp/go-lua-vm-cgo-check.txt ]]; then
   cat /tmp/go-lua-vm-cgo-check.txt >&2
-  echo "CGO is forbidden outside native_modules build tag" >&2
+  echo "CGO is forbidden outside the internal/native native_modules boundary" >&2
   exit 1
 fi
 
@@ -33,3 +37,9 @@ if [[ -s /tmp/go-lua-vm-untracked-go.txt ]]; then
 fi
 
 CGO_ENABLED=0 go test ./...
+
+if [[ "${GO_LUA_VM_CHECK_NATIVE_MODULES:-0}" == "1" ]]; then
+  CGO_ENABLED=1 go test -tags native_modules ./internal/native ./internal/cli ./cmd/glua
+else
+  echo "skip native_modules gate: set GO_LUA_VM_CHECK_NATIVE_MODULES=1 to run CGO_ENABLED=1 go test -tags native_modules ./internal/native ./internal/cli ./cmd/glua"
+fi

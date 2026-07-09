@@ -1,6 +1,10 @@
-# glua Language Support for JetBrains IDEs
+# GLua 语言扩展 for JetBrains IDEs
 
-This is the JetBrains IntelliJ Platform plugin for `go-lua-vm` / `glua`.
+这是面向 `go-lua-vm` / `glua` 的 JetBrains IntelliJ Platform 插件，提供 GLua/Lua 编码、模块导航、文档提示、格式化和 DAP 调试连接能力。
+
+## Overview
+
+GLua 语言扩展覆盖日常开发中的核心链路：`.lua` / `.glua` 文件识别、语法高亮、扩展语法诊断、作用域补全、`require` 模块成员补全、冒号方法跳转、快速文档、自定义函数文档和 GLua DAP Debug/Attach。
 
 It is implemented as a pure IntelliJ Platform plugin, so it can run in JetBrains IDEs built on the IntelliJ Platform, including IntelliJ IDEA, GoLand, WebStorm, PyCharm, PhpStorm, RubyMine, CLion, DataGrip, Rider, and Android Studio versions compatible with the plugin build range.
 
@@ -15,8 +19,8 @@ It is implemented as a pure IntelliJ Platform plugin, so it can run in JetBrains
 - `Code -> Format GLua File` action
 - Multi-language builtin/function documentation
 - User JSON files that extend or override function signatures
-- Native JetBrains DAP attach configuration for running GLua Debug Adapter Protocol servers
-- GLua DAP attach host/port settings and a helper action for sharing attach JSON
+- Quick run/debug actions for the current `.lua` or `.glua` file
+- Native JetBrains DAP support with the DAP address managed by the plugin
 
 ## Settings
 
@@ -28,10 +32,10 @@ Settings / Preferences -> GLua
 
 Available settings:
 
-- `Doc language tag`: `auto`, `en`, `zh-CN`, `ja-JP`, `ko`, `fr-FR`, etc.
+- `Documentation language`: `auto`, `en`, `zh-CN`
+- `glua executable`: path to the `glua` executable used by quick run/debug helpers
+- `gluac executable`: path to the `gluac` executable used by compile helpers
 - `Builtin docs JSON files`: one JSON file path per line
-- `DAP attach host`: GLua DAP server IP address or host name
-- `DAP attach port`: GLua DAP server TCP port, from 1 to 65535
 
 `auto` uses the IDE/JVM default locale and normalizes it to a language tag. For example, `zh-cn` becomes `zh-CN`, and `ja-jp` becomes `ja-JP`.
 
@@ -165,48 +169,31 @@ Function names can be global functions or qualified library functions:
 
 After adding the JSON file to settings, completion and documentation include these functions.
 
-## Debug Attach
+## Run And Debug
 
-Create a native JetBrains Run/Debug configuration:
+After setting `glua executable`, open a `.lua` or `.glua` file and use the editor context menu or Tools menu:
+
+```text
+Run Current GLua File
+Debug Current GLua File
+```
+
+`Run Current GLua File` starts `glua <current-file>`.
+`Debug Current GLua File` creates and selects a GLua Debug configuration for the current file. The DAP address is managed internally by the plugin and is not shown as an editable host/port field.
+
+You can also create a native JetBrains Run/Debug configuration:
 
 ```text
 Run -> Edit Configurations -> Add New Configuration -> GLua DAP Attach
 ```
 
-Set:
+The configuration asks for the `glua` executable and program file only.
 
-- `DAP attach host`: GLua DAP server IP address or host name
-- `DAP attach port`: GLua DAP server TCP port
+If Debug fails:
 
-Use the Debug action to start a JetBrains DAP session backed by the configured TCP server. The GLua VM debugger process must already be listening on that address.
-
-You can also store default attach values in:
-
-```text
-Settings / Preferences -> GLua
-```
-
-New `GLua DAP Attach` configurations use these saved defaults.
-
-For sharing or copying the attach payload, run:
-
-```text
-Tools -> Copy GLua DAP Attach Config
-```
-
-The action copies this JSON shape to the clipboard:
-
-```json
-{
-  "type": "glua",
-  "request": "attach",
-  "name": "Attach to GLua DAP",
-  "host": "127.0.0.1",
-  "port": 5678
-}
-```
-
-The JSON shape matches the VS Code attach configuration.
+- Check that the configured `glua` executable is correct.
+- Check that the GLua runtime you use has DAP support enabled.
+- Open the Run/Debug console to see the failure reason.
 
 ## Override Default Builtins
 
@@ -272,8 +259,43 @@ The plugin normalizes this into the multi-language structure internally.
 
 ## Build
 
-From this directory:
+Use JDK 21 as the Gradle JVM for IDE sync and plugin builds.
+
+In JetBrains IDEs, open:
+
+```text
+Settings / Preferences -> Build, Execution, Deployment -> Build Tools -> Gradle -> Gradle JVM
+```
+
+Select a JDK 21 installation. On macOS with Homebrew, common paths are:
+
+```text
+/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
+/usr/local/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
+```
+
+If JDK 21 is missing:
 
 ```bash
-gradle buildPlugin
+brew install openjdk@21
+```
+
+Java 26 can fail IDE sync with Gradle 9.0.0 because the IDE-supported Gradle JVM ceiling is lower than Java 26. The command-line wrapper may still run on newer Java in some environments, but JDK 21 is the supported local baseline for this plugin.
+
+From this directory, run tests:
+
+```bash
+./gradlew --no-daemon --no-configuration-cache test
+```
+
+Build the installable plugin zip:
+
+```bash
+./gradlew --no-daemon --no-configuration-cache buildPlugin
+```
+
+The plugin package is written to:
+
+```text
+build/distributions/glua-jetbrains-0.0.1.zip
 ```

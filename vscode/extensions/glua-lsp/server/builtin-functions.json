@@ -57,6 +57,822 @@
         "zh-CN": "collectgarbage('collect')\nlocal count = collectgarbage('count')\n-- count: 当前内存使用量，单位 KB"
       }
     },
+    "cjson.decode": {
+      "signature": {
+        "en": "cjson.decode(text)",
+        "zh-CN": "cjson.decode(text)"
+      },
+      "returns": {
+        "en": "returns: decoded Lua value; throws an error when the JSON text is invalid.",
+        "zh-CN": "返回：解码后的 Lua 值；JSON 文本非法时抛出错误。"
+      },
+      "params": {
+        "en": [
+          "text: JSON string to decode"
+        ],
+        "zh-CN": [
+          "text: 要解码的 JSON 字符串"
+        ]
+      },
+      "description": {
+        "en": "Decodes a JSON string through the optional lua-cjson compatible native module.",
+        "zh-CN": "通过可选的 lua-cjson 兼容原生模块解码 JSON 字符串。"
+      },
+      "example": {
+        "en": "local cjson = require('cjson')\nlocal value = cjson.decode('{\"name\":\"glua\"}')",
+        "zh-CN": "local cjson = require('cjson')\nlocal value = cjson.decode('{\"name\":\"glua\"}')"
+      }
+    },
+    "cjson.encode": {
+      "signature": {
+        "en": "cjson.encode(value)",
+        "zh-CN": "cjson.encode(value)"
+      },
+      "returns": {
+        "en": "returns: JSON string; throws an error when the value cannot be encoded.",
+        "zh-CN": "返回：JSON 字符串；值无法编码时抛出错误。"
+      },
+      "params": {
+        "en": [
+          "value: Lua value to encode as JSON"
+        ],
+        "zh-CN": [
+          "value: 要编码为 JSON 的 Lua 值"
+        ]
+      },
+      "description": {
+        "en": "Encodes a Lua value through the optional lua-cjson compatible native module.",
+        "zh-CN": "通过可选的 lua-cjson 兼容原生模块把 Lua 值编码为 JSON。"
+      },
+      "example": {
+        "en": "local cjson = require('cjson')\nlocal text = cjson.encode({name = 'glua'})",
+        "zh-CN": "local cjson = require('cjson')\nlocal text = cjson.encode({name = 'glua'})"
+      }
+    },
+    "cjson.new": {
+      "signature": {
+        "en": "cjson.new()",
+        "zh-CN": "cjson.new()"
+      },
+      "returns": {
+        "en": "returns: independent cjson module instance with its own settings.",
+        "zh-CN": "返回：拥有独立配置的 cjson 模块实例。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Creates an independent encoder/decoder instance when the loaded cjson module supports it.",
+        "zh-CN": "在已加载的 cjson 模块支持时创建独立的编码/解码实例。"
+      },
+      "example": {
+        "en": "local cjson = require('cjson')\nlocal localJson = cjson.new()",
+        "zh-CN": "local cjson = require('cjson')\nlocal localJson = cjson.new()"
+      }
+    },
+    "cjson.null": {
+      "signature": {
+        "en": "cjson.null",
+        "zh-CN": "cjson.null"
+      },
+      "returns": {
+        "en": "value: sentinel userdata used to represent JSON null.",
+        "zh-CN": "值：用于表示 JSON null 的哨兵 userdata。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Optional lua-cjson null sentinel returned by decoders and accepted by encoders.",
+        "zh-CN": "可选 lua-cjson 的 null 哨兵值，可由解码器返回，也可被编码器接受。"
+      },
+      "example": {
+        "en": "local cjson = require('cjson')\nlocal text = cjson.encode({value = cjson.null})",
+        "zh-CN": "local cjson = require('cjson')\nlocal text = cjson.encode({value = cjson.null})"
+      }
+    },
+    "cjson.safe": {
+      "signature": {
+        "en": "require('cjson.safe')",
+        "zh-CN": "require('cjson.safe')"
+      },
+      "returns": {
+        "en": "returns: safe cjson module variant whose encode/decode functions return nil plus an error instead of throwing.",
+        "zh-CN": "返回：安全版 cjson 模块，其 encode/decode 失败时返回 nil 和错误信息，而不是抛出异常。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Documents the optional cjson.safe native module alias when it is available through package.cpath.",
+        "zh-CN": "记录通过 package.cpath 可用时的可选 cjson.safe 原生模块别名。"
+      },
+      "example": {
+        "en": "local cjson = require('cjson.safe')\nlocal value, err = cjson.decode(text)",
+        "zh-CN": "local cjson = require('cjson.safe')\nlocal value, err = cjson.decode(text)"
+      }
+    },
+    "lpeg.C": {
+      "signature": {
+        "en": "lpeg.C(pattern)",
+        "zh-CN": "lpeg.C(pattern)"
+      },
+      "returns": {
+        "en": "returns: a simple capture pattern.",
+        "zh-CN": "返回：简单捕获模式。"
+      },
+      "params": {
+        "en": [
+          "pattern: LPeg pattern whose matched substring is captured"
+        ],
+        "zh-CN": [
+          "pattern: 要捕获匹配文本的 LPeg 模式"
+        ]
+      },
+      "description": {
+        "en": "Creates a capture that returns the substring matched by the nested pattern.",
+        "zh-CN": "创建捕获，返回内部模式匹配到的子串。"
+      },
+      "example": {
+        "en": "local lpeg = require('lpeg')\nlocal word = lpeg.C(lpeg.R('az')^1)",
+        "zh-CN": "local lpeg = require('lpeg')\nlocal word = lpeg.C(lpeg.R('az')^1)"
+      }
+    },
+    "lpeg.Cp": {
+      "signature": {
+        "en": "lpeg.Cp()",
+        "zh-CN": "lpeg.Cp()"
+      },
+      "returns": {
+        "en": "returns: a position capture pattern.",
+        "zh-CN": "返回：位置捕获模式。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Captures the current subject position without consuming characters.",
+        "zh-CN": "捕获当前输入位置，不消耗字符。"
+      },
+      "example": {
+        "en": "local lpeg = require('lpeg')\nlocal position = lpeg.Cp()",
+        "zh-CN": "local lpeg = require('lpeg')\nlocal position = lpeg.Cp()"
+      }
+    },
+    "lpeg.Cs": {
+      "signature": {
+        "en": "lpeg.Cs(pattern)",
+        "zh-CN": "lpeg.Cs(pattern)"
+      },
+      "returns": {
+        "en": "returns: a substitution capture pattern.",
+        "zh-CN": "返回：替换捕获模式。"
+      },
+      "params": {
+        "en": [
+          "pattern: LPeg pattern with nested captures used for substitution"
+        ],
+        "zh-CN": [
+          "pattern: 带内部捕获的 LPeg 替换模式"
+        ]
+      },
+      "description": {
+        "en": "Builds a substitution capture that reconstructs matched text with capture replacements.",
+        "zh-CN": "构建替换捕获，根据内部捕获结果重组匹配文本。"
+      },
+      "example": {
+        "en": "local lpeg = require('lpeg')\nlocal pattern = lpeg.Cs((lpeg.P(' ') / '_')^0)",
+        "zh-CN": "local lpeg = require('lpeg')\nlocal pattern = lpeg.Cs((lpeg.P(' ') / '_')^0)"
+      }
+    },
+    "lpeg.Ct": {
+      "signature": {
+        "en": "lpeg.Ct(pattern)",
+        "zh-CN": "lpeg.Ct(pattern)"
+      },
+      "returns": {
+        "en": "returns: a table capture pattern.",
+        "zh-CN": "返回：表捕获模式。"
+      },
+      "params": {
+        "en": [
+          "pattern: LPeg pattern whose captures are collected into a table"
+        ],
+        "zh-CN": [
+          "pattern: 捕获结果会收集到 table 的 LPeg 模式"
+        ]
+      },
+      "description": {
+        "en": "Collects captures produced by the nested pattern into a Lua table.",
+        "zh-CN": "把内部模式产生的捕获结果收集到 Lua table 中。"
+      },
+      "example": {
+        "en": "local lpeg = require('lpeg')\nlocal fields = lpeg.Ct(lpeg.C(lpeg.R('az')^1)^1)",
+        "zh-CN": "local lpeg = require('lpeg')\nlocal fields = lpeg.Ct(lpeg.C(lpeg.R('az')^1)^1)"
+      }
+    },
+    "lpeg.P": {
+      "signature": {
+        "en": "lpeg.P(value)",
+        "zh-CN": "lpeg.P(value)"
+      },
+      "returns": {
+        "en": "returns: an LPeg pattern converted from a string, number, boolean, table, function, or pattern.",
+        "zh-CN": "返回：由字符串、数字、布尔值、表、函数或已有模式转换出的 LPeg 模式。"
+      },
+      "params": {
+        "en": [
+          "value: value to convert to an LPeg pattern"
+        ],
+        "zh-CN": [
+          "value: 要转换为 LPeg 模式的值"
+        ]
+      },
+      "description": {
+        "en": "Converts a value into a basic LPeg pattern.",
+        "zh-CN": "把一个值转换为基础 LPeg 模式。"
+      },
+      "example": {
+        "en": "local lpeg = require('lpeg')\nlocal hello = lpeg.P('hello')",
+        "zh-CN": "local lpeg = require('lpeg')\nlocal hello = lpeg.P('hello')"
+      }
+    },
+    "lpeg.R": {
+      "signature": {
+        "en": "lpeg.R(range1 [, ...])",
+        "zh-CN": "lpeg.R(range1 [, ...])"
+      },
+      "returns": {
+        "en": "returns: a character-range pattern.",
+        "zh-CN": "返回：字符范围模式。"
+      },
+      "params": {
+        "en": [
+          "range1 ...: two-character strings whose endpoints define accepted byte ranges"
+        ],
+        "zh-CN": [
+          "range1 ...: 两字符字符串，用首尾字符定义可接受的字节范围"
+        ]
+      },
+      "description": {
+        "en": "Creates a pattern that matches one character inside any provided range.",
+        "zh-CN": "创建匹配任一给定范围内单个字符的模式。"
+      },
+      "example": {
+        "en": "local lpeg = require('lpeg')\nlocal digit = lpeg.R('09')",
+        "zh-CN": "local lpeg = require('lpeg')\nlocal digit = lpeg.R('09')"
+      }
+    },
+    "lpeg.S": {
+      "signature": {
+        "en": "lpeg.S(chars)",
+        "zh-CN": "lpeg.S(chars)"
+      },
+      "returns": {
+        "en": "returns: a character-set pattern.",
+        "zh-CN": "返回：字符集合模式。"
+      },
+      "params": {
+        "en": [
+          "chars: string whose bytes are accepted by the pattern"
+        ],
+        "zh-CN": [
+          "chars: 模式允许匹配的字符集合字符串"
+        ]
+      },
+      "description": {
+        "en": "Creates a pattern that matches one character from a fixed set.",
+        "zh-CN": "创建匹配固定集合中单个字符的模式。"
+      },
+      "example": {
+        "en": "local lpeg = require('lpeg')\nlocal whitespace = lpeg.S(' \\t\\n')^1",
+        "zh-CN": "local lpeg = require('lpeg')\nlocal whitespace = lpeg.S(' \\t\\n')^1"
+      }
+    },
+    "lpeg.V": {
+      "signature": {
+        "en": "lpeg.V(name)",
+        "zh-CN": "lpeg.V(name)"
+      },
+      "returns": {
+        "en": "returns: a grammar nonterminal reference pattern.",
+        "zh-CN": "返回：语法非终结符引用模式。"
+      },
+      "params": {
+        "en": [
+          "name: grammar rule name or numeric index"
+        ],
+        "zh-CN": [
+          "name: 语法规则名或数字索引"
+        ]
+      },
+      "description": {
+        "en": "References a rule inside an LPeg grammar table.",
+        "zh-CN": "引用 LPeg 语法表中的规则。"
+      },
+      "example": {
+        "en": "local lpeg = require('lpeg')\nlocal grammar = lpeg.P({'list', list = lpeg.V('item')^0, item = lpeg.R('az')})",
+        "zh-CN": "local lpeg = require('lpeg')\nlocal grammar = lpeg.P({'list', list = lpeg.V('item')^0, item = lpeg.R('az')})"
+      }
+    },
+    "lpeg.locale": {
+      "signature": {
+        "en": "lpeg.locale([table])",
+        "zh-CN": "lpeg.locale([table])"
+      },
+      "returns": {
+        "en": "returns: table populated with locale-dependent character classes.",
+        "zh-CN": "返回：填充了本地化字符分类模式的 table。"
+      },
+      "params": {
+        "en": [
+          "table (optional): table to receive character-class patterns"
+        ],
+        "zh-CN": [
+          "table (可选): 接收字符分类模式的 table"
+        ]
+      },
+      "description": {
+        "en": "Creates or fills a table with LPeg patterns such as alpha, digit, space, lower, and upper.",
+        "zh-CN": "创建或填充包含 alpha、digit、space、lower、upper 等 LPeg 模式的 table。"
+      },
+      "example": {
+        "en": "local lpeg = require('lpeg')\nlocal locale = lpeg.locale()",
+        "zh-CN": "local lpeg = require('lpeg')\nlocal locale = lpeg.locale()"
+      }
+    },
+    "lpeg.match": {
+      "signature": {
+        "en": "lpeg.match(pattern, subject [, init])",
+        "zh-CN": "lpeg.match(pattern, subject [, init])"
+      },
+      "returns": {
+        "en": "returns: captures from the match, or the ending position when there are no captures; returns nil when matching fails.",
+        "zh-CN": "返回：匹配产生的捕获；无捕获时返回结束位置；匹配失败时返回 nil。"
+      },
+      "params": {
+        "en": [
+          "pattern: LPeg pattern",
+          "subject: input string",
+          "init (optional): initial position"
+        ],
+        "zh-CN": [
+          "pattern: LPeg 模式",
+          "subject: 输入字符串",
+          "init (可选): 起始位置"
+        ]
+      },
+      "description": {
+        "en": "Matches an LPeg pattern against a subject string.",
+        "zh-CN": "把 LPeg 模式应用到输入字符串上进行匹配。"
+      },
+      "example": {
+        "en": "local lpeg = require('lpeg')\nlocal text = lpeg.match(lpeg.C(lpeg.R('az')^1), 'glua')",
+        "zh-CN": "local lpeg = require('lpeg')\nlocal text = lpeg.match(lpeg.C(lpeg.R('az')^1), 'glua')"
+      }
+    },
+    "lpeg.setmaxstack": {
+      "signature": {
+        "en": "lpeg.setmaxstack(max)",
+        "zh-CN": "lpeg.setmaxstack(max)"
+      },
+      "returns": {
+        "en": "returns: no documented result.",
+        "zh-CN": "返回：无固定返回值。"
+      },
+      "params": {
+        "en": [
+          "max: maximum size for the backtrack stack"
+        ],
+        "zh-CN": [
+          "max: 回溯栈最大大小"
+        ]
+      },
+      "description": {
+        "en": "Adjusts the maximum backtrack stack size used by LPeg.",
+        "zh-CN": "调整 LPeg 使用的回溯栈最大大小。"
+      },
+      "example": {
+        "en": "local lpeg = require('lpeg')\nlpeg.setmaxstack(1000)",
+        "zh-CN": "local lpeg = require('lpeg')\nlpeg.setmaxstack(1000)"
+      }
+    },
+    "lpeg.type": {
+      "signature": {
+        "en": "lpeg.type(value)",
+        "zh-CN": "lpeg.type(value)"
+      },
+      "returns": {
+        "en": "returns: \"pattern\" for LPeg patterns, otherwise nil.",
+        "zh-CN": "返回：LPeg 模式返回 \"pattern\"，否则返回 nil。"
+      },
+      "params": {
+        "en": [
+          "value: value to inspect"
+        ],
+        "zh-CN": [
+          "value: 要检查的值"
+        ]
+      },
+      "description": {
+        "en": "Checks whether a value is an LPeg pattern.",
+        "zh-CN": "检查一个值是否为 LPeg 模式。"
+      },
+      "example": {
+        "en": "local lpeg = require('lpeg')\nlocal kind = lpeg.type(lpeg.P('x'))",
+        "zh-CN": "local lpeg = require('lpeg')\nlocal kind = lpeg.type(lpeg.P('x'))"
+      }
+    },
+    "socket.bind": {
+      "signature": {
+        "en": "socket.bind(address, port [, backlog])",
+        "zh-CN": "socket.bind(address, port [, backlog])"
+      },
+      "returns": {
+        "en": "returns: server socket object, or nil plus an error message.",
+        "zh-CN": "返回：服务端 socket 对象；失败时返回 nil 和错误信息。"
+      },
+      "params": {
+        "en": [
+          "address: local address to bind",
+          "port: local port number or service name",
+          "backlog (optional): listen queue size"
+        ],
+        "zh-CN": [
+          "address: 要绑定的本地地址",
+          "port: 本地端口号或服务名",
+          "backlog (可选): 监听队列大小"
+        ]
+      },
+      "description": {
+        "en": "Creates and binds a TCP server socket through the optional LuaSocket module.",
+        "zh-CN": "通过可选 LuaSocket 模块创建并绑定 TCP 服务端 socket。"
+      },
+      "example": {
+        "en": "local socket = require('socket')\nlocal server = assert(socket.bind('*', 8080))",
+        "zh-CN": "local socket = require('socket')\nlocal server = assert(socket.bind('*', 8080))"
+      }
+    },
+    "socket.connect": {
+      "signature": {
+        "en": "socket.connect(address, port [, localAddress [, localPort]])",
+        "zh-CN": "socket.connect(address, port [, localAddress [, localPort]])"
+      },
+      "returns": {
+        "en": "returns: connected TCP client object, or nil plus an error message.",
+        "zh-CN": "返回：已连接的 TCP 客户端对象；失败时返回 nil 和错误信息。"
+      },
+      "params": {
+        "en": [
+          "address: remote host address or name",
+          "port: remote port number or service name",
+          "localAddress (optional): local address to bind before connecting",
+          "localPort (optional): local port to bind before connecting"
+        ],
+        "zh-CN": [
+          "address: 远端主机地址或名称",
+          "port: 远端端口号或服务名",
+          "localAddress (可选): 连接前绑定的本地地址",
+          "localPort (可选): 连接前绑定的本地端口"
+        ]
+      },
+      "description": {
+        "en": "Creates a TCP socket and connects it to a remote endpoint.",
+        "zh-CN": "创建 TCP socket 并连接到远端端点。"
+      },
+      "example": {
+        "en": "local socket = require('socket')\nlocal client = assert(socket.connect('127.0.0.1', 8080))",
+        "zh-CN": "local socket = require('socket')\nlocal client = assert(socket.connect('127.0.0.1', 8080))"
+      }
+    },
+    "socket.core": {
+      "signature": {
+        "en": "require('socket.core')",
+        "zh-CN": "require('socket.core')"
+      },
+      "returns": {
+        "en": "returns: native LuaSocket core module when package.cpath can load it.",
+        "zh-CN": "返回：package.cpath 可加载时的 LuaSocket 原生 core 模块。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Documents the optional native socket.core module used by LuaSocket's Lua layer.",
+        "zh-CN": "记录 LuaSocket Lua 层使用的可选原生 socket.core 模块。"
+      },
+      "example": {
+        "en": "package.cpath = './?.so;' .. package.cpath\nlocal core = require('socket.core')",
+        "zh-CN": "package.cpath = './?.so;' .. package.cpath\nlocal core = require('socket.core')"
+      }
+    },
+    "socket.dns.getaddrinfo": {
+      "signature": {
+        "en": "socket.dns.getaddrinfo(address)",
+        "zh-CN": "socket.dns.getaddrinfo(address)"
+      },
+      "returns": {
+        "en": "returns: address information table, or nil plus an error message.",
+        "zh-CN": "返回：地址信息 table；失败时返回 nil 和错误信息。"
+      },
+      "params": {
+        "en": [
+          "address: host name or address to resolve"
+        ],
+        "zh-CN": [
+          "address: 要解析的主机名或地址"
+        ]
+      },
+      "description": {
+        "en": "Resolves a host through LuaSocket DNS helpers and returns address records.",
+        "zh-CN": "通过 LuaSocket DNS 辅助函数解析主机并返回地址记录。"
+      },
+      "example": {
+        "en": "local socket = require('socket')\nlocal records = socket.dns.getaddrinfo('localhost')",
+        "zh-CN": "local socket = require('socket')\nlocal records = socket.dns.getaddrinfo('localhost')"
+      }
+    },
+    "socket.dns.gethostname": {
+      "signature": {
+        "en": "socket.dns.gethostname()",
+        "zh-CN": "socket.dns.gethostname()"
+      },
+      "returns": {
+        "en": "returns: local host name string.",
+        "zh-CN": "返回：本机主机名字符串。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Returns the local host name reported by LuaSocket.",
+        "zh-CN": "返回 LuaSocket 获取到的本机主机名。"
+      },
+      "example": {
+        "en": "local socket = require('socket')\nlocal host = socket.dns.gethostname()",
+        "zh-CN": "local socket = require('socket')\nlocal host = socket.dns.gethostname()"
+      }
+    },
+    "socket.dns.tohostname": {
+      "signature": {
+        "en": "socket.dns.tohostname(address)",
+        "zh-CN": "socket.dns.tohostname(address)"
+      },
+      "returns": {
+        "en": "returns: host name plus aliases, or nil plus an error message.",
+        "zh-CN": "返回：主机名和别名；失败时返回 nil 和错误信息。"
+      },
+      "params": {
+        "en": [
+          "address: IP address to resolve"
+        ],
+        "zh-CN": [
+          "address: 要反向解析的 IP 地址"
+        ]
+      },
+      "description": {
+        "en": "Performs reverse DNS lookup for an IP address.",
+        "zh-CN": "对 IP 地址执行反向 DNS 查询。"
+      },
+      "example": {
+        "en": "local socket = require('socket')\nlocal name = socket.dns.tohostname('127.0.0.1')",
+        "zh-CN": "local socket = require('socket')\nlocal name = socket.dns.tohostname('127.0.0.1')"
+      }
+    },
+    "socket.dns.toip": {
+      "signature": {
+        "en": "socket.dns.toip(address)",
+        "zh-CN": "socket.dns.toip(address)"
+      },
+      "returns": {
+        "en": "returns: IP address plus aliases, or nil plus an error message.",
+        "zh-CN": "返回：IP 地址和别名；失败时返回 nil 和错误信息。"
+      },
+      "params": {
+        "en": [
+          "address: host name to resolve"
+        ],
+        "zh-CN": [
+          "address: 要解析的主机名"
+        ]
+      },
+      "description": {
+        "en": "Resolves a host name to an IP address.",
+        "zh-CN": "把主机名解析为 IP 地址。"
+      },
+      "example": {
+        "en": "local socket = require('socket')\nlocal ip = socket.dns.toip('localhost')",
+        "zh-CN": "local socket = require('socket')\nlocal ip = socket.dns.toip('localhost')"
+      }
+    },
+    "socket.gettime": {
+      "signature": {
+        "en": "socket.gettime()",
+        "zh-CN": "socket.gettime()"
+      },
+      "returns": {
+        "en": "returns: current time in seconds as a number.",
+        "zh-CN": "返回：当前时间秒数，类型为 number。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Returns wall-clock time with sub-second precision when available.",
+        "zh-CN": "返回当前墙钟时间；平台支持时包含亚秒精度。"
+      },
+      "example": {
+        "en": "local socket = require('socket')\nlocal started = socket.gettime()",
+        "zh-CN": "local socket = require('socket')\nlocal started = socket.gettime()"
+      }
+    },
+    "socket.newtry": {
+      "signature": {
+        "en": "socket.newtry(finalizer)",
+        "zh-CN": "socket.newtry(finalizer)"
+      },
+      "returns": {
+        "en": "returns: helper function that raises protected socket errors and runs the finalizer on failure.",
+        "zh-CN": "返回：辅助函数，失败时运行 finalizer 并抛出受保护的 socket 错误。"
+      },
+      "params": {
+        "en": [
+          "finalizer: function called before raising an error"
+        ],
+        "zh-CN": [
+          "finalizer: 抛出错误前调用的清理函数"
+        ]
+      },
+      "description": {
+        "en": "Creates a LuaSocket try helper with cleanup behavior.",
+        "zh-CN": "创建带清理行为的 LuaSocket try 辅助函数。"
+      },
+      "example": {
+        "en": "local socket = require('socket')\nlocal try = socket.newtry(function() client:close() end)",
+        "zh-CN": "local socket = require('socket')\nlocal try = socket.newtry(function() client:close() end)"
+      }
+    },
+    "socket.protect": {
+      "signature": {
+        "en": "socket.protect(func)",
+        "zh-CN": "socket.protect(func)"
+      },
+      "returns": {
+        "en": "returns: protected function that converts socket exceptions to nil plus an error message.",
+        "zh-CN": "返回：受保护函数，会把 socket 异常转换为 nil 和错误信息。"
+      },
+      "params": {
+        "en": [
+          "func: function to execute with socket-style protected errors"
+        ],
+        "zh-CN": [
+          "func: 使用 socket 风格受保护错误执行的函数"
+        ]
+      },
+      "description": {
+        "en": "Wraps a function so LuaSocket errors are returned instead of escaping as exceptions.",
+        "zh-CN": "包装函数，使 LuaSocket 错误以返回值形式报告，而不是作为异常向外抛出。"
+      },
+      "example": {
+        "en": "local socket = require('socket')\nlocal safe = socket.protect(function() return socket.connect('127.0.0.1', 80) end)",
+        "zh-CN": "local socket = require('socket')\nlocal safe = socket.protect(function() return socket.connect('127.0.0.1', 80) end)"
+      }
+    },
+    "socket.select": {
+      "signature": {
+        "en": "socket.select(recvt, sendt [, timeout])",
+        "zh-CN": "socket.select(recvt, sendt [, timeout])"
+      },
+      "returns": {
+        "en": "returns: readable sockets, writable sockets, or nil plus an error message.",
+        "zh-CN": "返回：可读 socket 列表、可写 socket 列表；失败时返回 nil 和错误信息。"
+      },
+      "params": {
+        "en": [
+          "recvt: table of sockets to test for readability",
+          "sendt: table of sockets to test for writability",
+          "timeout (optional): maximum wait time in seconds"
+        ],
+        "zh-CN": [
+          "recvt: 要检测可读性的 socket table",
+          "sendt: 要检测可写性的 socket table",
+          "timeout (可选): 最大等待秒数"
+        ]
+      },
+      "description": {
+        "en": "Waits until sockets are ready for reading or writing.",
+        "zh-CN": "等待 socket 进入可读或可写状态。"
+      },
+      "example": {
+        "en": "local socket = require('socket')\nlocal readable = socket.select({client}, nil, 1.0)",
+        "zh-CN": "local socket = require('socket')\nlocal readable = socket.select({client}, nil, 1.0)"
+      }
+    },
+    "socket.sleep": {
+      "signature": {
+        "en": "socket.sleep(time)",
+        "zh-CN": "socket.sleep(time)"
+      },
+      "returns": {
+        "en": "returns: no documented result.",
+        "zh-CN": "返回：无固定返回值。"
+      },
+      "params": {
+        "en": [
+          "time: number of seconds to sleep"
+        ],
+        "zh-CN": [
+          "time: 休眠秒数"
+        ]
+      },
+      "description": {
+        "en": "Blocks the current thread for the requested number of seconds.",
+        "zh-CN": "阻塞当前线程指定秒数。"
+      },
+      "example": {
+        "en": "local socket = require('socket')\nsocket.sleep(0.1)",
+        "zh-CN": "local socket = require('socket')\nsocket.sleep(0.1)"
+      }
+    },
+    "socket.tcp": {
+      "signature": {
+        "en": "socket.tcp()",
+        "zh-CN": "socket.tcp()"
+      },
+      "returns": {
+        "en": "returns: TCP socket object, or nil plus an error message.",
+        "zh-CN": "返回：TCP socket 对象；失败时返回 nil 和错误信息。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Creates a TCP socket object for client or server workflows.",
+        "zh-CN": "创建用于客户端或服务端流程的 TCP socket 对象。"
+      },
+      "example": {
+        "en": "local socket = require('socket')\nlocal client = assert(socket.tcp())",
+        "zh-CN": "local socket = require('socket')\nlocal client = assert(socket.tcp())"
+      }
+    },
+    "socket.try": {
+      "signature": {
+        "en": "socket.try(value [, ...])",
+        "zh-CN": "socket.try(value [, ...])"
+      },
+      "returns": {
+        "en": "returns: all input values when the first value is truthy; raises a socket error otherwise.",
+        "zh-CN": "返回：首个值为真时返回全部输入值；否则抛出 socket 错误。"
+      },
+      "params": {
+        "en": [
+          "value: success value to test",
+          "...: values returned unchanged on success"
+        ],
+        "zh-CN": [
+          "value: 要检查的成功值",
+          "...: 成功时原样返回的后续值"
+        ]
+      },
+      "description": {
+        "en": "LuaSocket helper used to turn nil/error return pairs into protected socket exceptions.",
+        "zh-CN": "LuaSocket 辅助函数，用于把 nil/error 返回对转换为受保护的 socket 异常。"
+      },
+      "example": {
+        "en": "local socket = require('socket')\nlocal client = socket.try(socket.connect('127.0.0.1', 80))",
+        "zh-CN": "local socket = require('socket')\nlocal client = socket.try(socket.connect('127.0.0.1', 80))"
+      }
+    },
+    "socket.udp": {
+      "signature": {
+        "en": "socket.udp()",
+        "zh-CN": "socket.udp()"
+      },
+      "returns": {
+        "en": "returns: UDP socket object, or nil plus an error message.",
+        "zh-CN": "返回：UDP socket 对象；失败时返回 nil 和错误信息。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Creates a UDP socket object.",
+        "zh-CN": "创建 UDP socket 对象。"
+      },
+      "example": {
+        "en": "local socket = require('socket')\nlocal udp = assert(socket.udp())",
+        "zh-CN": "local socket = require('socket')\nlocal udp = assert(socket.udp())"
+      }
+    },
     "coroutine.create": {
       "signature": {
         "en": "coroutine.create(f)",
@@ -2267,6 +3083,28 @@
         "zh-CN": "local name = os.tmpname()\n-- name: 临时路径"
       }
     },
+    "package.cpath": {
+      "signature": {
+        "en": "package.cpath",
+        "zh-CN": "package.cpath"
+      },
+      "returns": {
+        "en": "value: C module search path templates.",
+        "zh-CN": "值：C 模块搜索路径模板。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Search templates for Lua C modules. In default no-CGO builds this path is inert; in native_modules builds it can resolve Lua 5.3 public C API modules ending in .so, .dylib, or .dll.",
+        "zh-CN": "Lua C 模块搜索模板。默认 no-CGO 构建中该路径不加载原生模块；native_modules 构建中可解析使用 Lua 5.3 public C API 的 .so、.dylib 或 .dll 模块。"
+      },
+      "example": {
+        "en": "package.cpath = './?.so;' .. package.cpath\nlocal cjson = require('cjson')",
+        "zh-CN": "package.cpath = './?.so;' .. package.cpath\nlocal cjson = require('cjson')"
+      }
+    },
     "package.loadlib": {
       "signature": {
         "en": "package.loadlib(libname, funcname)",
@@ -2287,8 +3125,8 @@
         ]
       },
       "description": {
-        "en": "Loads a dynamic library symbol through the host-provided loader when available.",
-        "zh-CN": "在宿主提供 loader 时加载动态库符号。"
+        "en": "Loads a dynamic library symbol through the host-provided loader when available. The native_modules build wires this to the GLua Lua 5.3 C API shim for Lua modules exporting luaopen_*.",
+        "zh-CN": "在宿主提供 loader 时加载动态库符号。native_modules 构建会把该入口接到 GLua Lua 5.3 C API shim，用于导出 luaopen_* 的 Lua C 模块。"
       },
       "example": {
         "en": "local loader, err, where = package.loadlib(path, \"luaopen_mod\")\n-- loader: callable module loader when available",
@@ -2537,8 +3375,8 @@
         ]
       },
       "description": {
-        "en": "Loads a module using package rules and returns the module result.",
-        "zh-CN": "按 package 加载规则加载模块并返回结果。"
+        "en": "Loads a module using package rules and returns the module result. With native_modules enabled, C searchers can also load Lua 5.3 public C API modules from package.cpath.",
+        "zh-CN": "按 package 加载规则加载模块并返回结果。启用 native_modules 后，C searcher 也可从 package.cpath 加载 Lua 5.3 public C API 模块。"
       },
       "example": {
         "en": "local mod = require('mymodule')\n-- mod: module return value or cached module value",

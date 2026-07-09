@@ -1,9 +1,13 @@
 {
-  "extension.displayName": "glua Language Server",
-  "extension.description": "Language server client for Lua/glua syntax highlighting, diagnostics, completion, documentation, formatting, and DAP attach debugging.",
+  "extension.displayName": "GLua 语言扩展",
+  "extension.description": "面向 go-lua-vm 的 GLua/Lua 编辑器扩展：语法高亮、诊断、智能补全、require 模块跳转、悬停文档、格式化、自定义函数文档，以及 GLua DAP Debug/Attach。",
   "glua.openBuiltinSignatureJson.title": "GLua: Open builtin signature JSON",
   "glua.showBuiltinDocStatus.title": "GLua: Show builtin doc status",
   "glua.showOutput.title": "GLua: Show language server output",
   "glua.createAttachConfig.title": "GLua: Create DAP attach configuration",
-  "glua.startAttachDebug.title": "GLua: Attach to DAP server"
+  "glua.startAttachDebug.title": "GLua: Attach to DAP server",
+  "glua.runCurrentFile.title": "GLua: Run current file",
+  "glua.debugCurrentFile.title": "GLua: Debug current file",
+  "glua.selectGluaExecutable.title": "GLua: Select glua executable",
+  "glua.selectGluacExecutable.title": "GLua: Select gluac executable"
 }

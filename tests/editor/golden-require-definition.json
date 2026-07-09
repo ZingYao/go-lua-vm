@@ -1,0 +1,146 @@
+{
+  "files": {
+    "app/localmod.lua": "local M = {}\nreturn M\n",
+    "shared/widget.lua": "local Widget = {}\nreturn Widget\n",
+    "pkg/init.lua": "local Pkg = {}\nreturn Pkg\n",
+    "lua/tools/log.lua": "local Log = {}\nreturn Log\n",
+    "src/services/init.lua": "local Services = {}\nreturn Services\n",
+    "app/module.lua": "local extensions = {}\nextensions.timesPrint = function(name, times)\n  for i = 1, times do\n    print('hello,' .. name)\n  end\nend\nfunction extensions:colonCall(value)\n  return value\nend\nextensions.unused = function()\nend\nreturn extensions\n",
+    "app/caller_one.lua": "local tools = require('module')\ntools.timesPrint('zing', 1)\ntools:colonCall('first')\n",
+    "app/caller_two.lua": "local mod = require('module')\nmod.colonCall(mod, 'second')\n",
+    "app/caller_three.glua": "tools = require 'module'\ntools.timesPrint('no-local', 2)\n",
+    "app/literal_module.lua": "local aaa = {['ccc'] = function () return true end}\nreturn aaa\n"
+  },
+  "cases": [
+    {
+      "name": "relative module file",
+      "document": "app/main.lua",
+      "source": "local localmod = require(\"localmod\")\n",
+      "marker": "\"localmod\"",
+      "target": "app/localmod.lua"
+    },
+    {
+      "name": "workspace dotted module",
+      "document": "app/main.lua",
+      "source": "local widget = require(\"shared.widget\")\n",
+      "marker": "\"shared.widget\"",
+      "target": "shared/widget.lua"
+    },
+    {
+      "name": "directory init module",
+      "document": "app/main.lua",
+      "source": "local pkg = require(\"pkg\")\n",
+      "marker": "\"pkg\"",
+      "target": "pkg/init.lua"
+    },
+    {
+      "name": "workspace lua directory module",
+      "document": "app/main.lua",
+      "source": "local log = require(\"tools.log\")\n",
+      "marker": "\"tools.log\"",
+      "target": "lua/tools/log.lua"
+    },
+    {
+      "name": "workspace src init module",
+      "document": "app/main.lua",
+      "source": "local services = require(\"services\")\n",
+      "marker": "\"services\"",
+      "target": "src/services/init.lua"
+    },
+    {
+      "name": "missing module has no target",
+      "document": "app/main.lua",
+      "source": "local missing = require(\"missing.module\")\n",
+      "marker": "\"missing.module\"",
+      "target": null
+    },
+    {
+      "name": "native-only module has no lua target",
+      "document": "app/main.lua",
+      "source": "package.cpath = \"./?.so;./?.dylib;./?.dll;\" .. package.cpath\nlocal cjson = require(\"cjson\")\n",
+      "marker": "\"cjson\"",
+      "target": null,
+      "nativeHint": "package.cpath"
+    },
+    {
+      "name": "dynamic require keeps local identifier target",
+      "document": "app/main.lua",
+      "source": "local name = \"localmod\"\nlocal mod = require(name)\n",
+      "marker": "name)",
+      "target": "app/main.lua"
+    },
+    {
+      "name": "required returned table member assignment",
+      "document": "app/main.lua",
+      "source": "local tools = require('module')\ntools.timesPrint('zing', 100000000)\n",
+      "marker": "timesPrint",
+      "target": "app/module.lua",
+      "targetMarker": "timesPrint"
+    },
+    {
+      "name": "required returned table colon member call",
+      "document": "app/main.lua",
+      "source": "local tools = require('module')\ntools:colonCall('zing')\n",
+      "marker": "colonCall",
+      "target": "app/module.lua",
+      "targetMarker": "colonCall"
+    },
+    {
+      "name": "required returned table dot call to colon definition",
+      "document": "app/main.lua",
+      "source": "local tools = require('module')\ntools.colonCall(tools, 'zing')\n",
+      "marker": "colonCall",
+      "target": "app/module.lua",
+      "targetMarker": "colonCall"
+    },
+    {
+      "name": "required returned table literal indexed function",
+      "document": "app/main.lua",
+      "source": "local tools = require('literal_module')\ntools.ccc()\n",
+      "marker": "ccc",
+      "target": "app/literal_module.lua"
+    },
+    {
+      "name": "member definition jumps to single caller",
+      "document": "app/module.lua",
+      "source": "local extensions = {}\nextensions.timesPrint = function(name, times)\n  for i = 1, times do\n    print('hello,' .. name)\n  end\nend\nfunction extensions:colonCall(value)\n  return value\nend\nextensions.unused = function()\nend\nreturn extensions\n",
+      "marker": "timesPrint =",
+      "target": null,
+      "targets": [
+        {
+          "path": "app/caller_one.lua",
+          "marker": "timesPrint"
+        },
+        {
+          "path": "app/caller_three.glua",
+          "marker": "timesPrint"
+        }
+      ]
+    },
+    {
+      "name": "colon member definition jumps to multiple callers",
+      "document": "app/module.lua",
+      "source": "local extensions = {}\nextensions.timesPrint = function(name, times)\n  for i = 1, times do\n    print('hello,' .. name)\n  end\nend\nfunction extensions:colonCall(value)\n  return value\nend\nextensions.unused = function()\nend\nreturn extensions\n",
+      "marker": "colonCall",
+      "target": null,
+      "targets": [
+        {
+          "path": "app/caller_one.lua",
+          "marker": "colonCall"
+        },
+        {
+          "path": "app/caller_two.lua",
+          "marker": "colonCall"
+        }
+      ]
+    },
+    {
+      "name": "unused member definition has no callers",
+      "document": "app/module.lua",
+      "source": "local extensions = {}\nextensions.timesPrint = function(name, times)\n  for i = 1, times do\n    print('hello,' .. name)\n  end\nend\nfunction extensions:colonCall(value)\n  return value\nend\nextensions.unused = function()\nend\nreturn extensions\n",
+      "marker": "unused =",
+      "target": null,
+      "targets": []
+    }
+  ]
+}

@@ -83,6 +83,43 @@ func TestParseArgsSyntaxOptions(t *testing.T) {
 	}
 }
 
+// TestParseArgsDAPListen 验证 GLua DAP 监听参数解析。
+//
+// 编辑器会使用该参数启动本机 DAP server；空地址必须在解析阶段失败，避免 Debug 静默启动空会话。
+func TestParseArgsDAPListen(t *testing.T) {
+	// 空格形式应保存 host:port，并继续允许后续脚本路径。
+	options, err := ParseArgs([]string{"--glua-dap-listen", "127.0.0.1:5678", "main.glua"})
+	if err != nil {
+		// 合法 DAP 参数不应解析失败。
+		t.Fatalf("ParseArgs DAP listen failed: %v", err)
+	}
+	if options.DAPListen != "127.0.0.1:5678" || options.ScriptPath != "main.glua" {
+		// DAP 地址和脚本路径必须分别保存。
+		t.Fatalf("DAP options = %#v", options)
+	}
+
+	// 等号形式用于编辑器配置拼接，行为应与空格形式一致。
+	options, err = ParseArgs([]string{"--glua-dap-listen=127.0.0.1:0", "-e", "print(1)"})
+	if err != nil {
+		// 合法等号形式不应解析失败。
+		t.Fatalf("ParseArgs DAP equals failed: %v", err)
+	}
+	if options.DAPListen != "127.0.0.1:0" || len(options.Expressions) != 1 {
+		// DAP 地址不能吞掉后续官方 CLI 参数。
+		t.Fatalf("DAP equals options = %#v", options)
+	}
+
+	for _, args := range [][]string{
+		{"--glua-dap-listen"},
+		{"--glua-dap-listen="},
+	} {
+		// 缺少地址必须失败，便于 IDE 展示明确配置错误。
+		if _, err := ParseArgs(args); err == nil {
+			t.Fatalf("ParseArgs(%#v) should fail", args)
+		}
+	}
+}
+
 // TestParseArgsRejectsInvalidInput 验证参数解析错误。
 //
 // 缺少 -e/-l 入参和未知选项必须返回明确错误。
@@ -514,9 +551,9 @@ func TestRunImplicitREPLForTerminalStdin(t *testing.T) {
 		// 裸终端启动进入 REPL，EOF 后应成功退出。
 		t.Fatalf("Run implicit REPL failed: %v", err)
 	}
-	if stdout.String() != VersionText+"\n> " {
-		// 裸交互启动必须先输出版本 banner，再输出主提示符。
-		t.Fatalf("stdout = %q, want prompt", stdout.String())
+	if !strings.HasPrefix(stdout.String(), VersionText+"\n") || !strings.Contains(stdout.String(), "GLua build features:\n") || !strings.HasSuffix(stdout.String(), "> ") {
+		// 裸交互启动必须先输出版本 banner、构建能力，再输出主提示符。
+		t.Fatalf("stdout = %q, want interactive banner and prompt", stdout.String())
 	}
 	if stderr.Len() != 0 {
 		// EOF 退出不应产生错误输出。
@@ -627,8 +664,8 @@ func TestMainInteractiveMode(t *testing.T) {
 		// -i 占位模式不应返回失败退出码。
 		t.Fatalf("exit code = %d stderr=%q", exitCode, stderr.String())
 	}
-	if stdout.String() != VersionText+"\n> > " {
-		// -i 必须先输出版本 banner，再输出每次读取前的主提示符。
+	if !strings.HasPrefix(stdout.String(), VersionText+"\n") || !strings.Contains(stdout.String(), "GLua build features:\n") || !strings.HasSuffix(stdout.String(), "> > ") {
+		// -i 必须先输出版本 banner 和构建能力，再输出每次读取前的主提示符。
 		t.Fatalf("stdout = %q", stdout.String())
 	}
 	if stderr.Len() != 0 {
@@ -653,7 +690,7 @@ func TestMainInteractiveOSExit(t *testing.T) {
 		// os.exit(7) 必须成为 CLI 退出码。
 		t.Fatalf("exit code = %d, want 7", exitCode)
 	}
-	if stdout.String() != VersionText+"\n> " {
+	if !strings.HasPrefix(stdout.String(), VersionText+"\n") || !strings.Contains(stdout.String(), "GLua build features:\n") || !strings.HasSuffix(stdout.String(), "> ") {
 		// os.exit 在第一条输入后结束，不应输出下一轮提示符。
 		t.Fatalf("stdout = %q", stdout.String())
 	}
@@ -689,6 +726,95 @@ func TestTerminalREPLLineReaderCursorInsert(t *testing.T) {
 	if !strings.Contains(stdout.String(), "\x1b[D") {
 		// 行编辑需要向终端发送左移控制序列。
 		t.Fatalf("stdout missing cursor control: %q", stdout.String())
+	}
+}
+
+// TestTerminalREPLLineReaderCompletesUniqueRoot 验证 Tab 可补全唯一根名称。
+//
+// 用户输入 `pri<Tab>` 时应补成 `print`，回车提交的源码也必须是补全后的文本。
+func TestTerminalREPLLineReaderCompletesUniqueRoot(t *testing.T) {
+	// 构造 Tab 输入，避免测试依赖真实终端补全能力。
+	var stdout bytes.Buffer
+	reader := &terminalREPLLineReader{
+		reader: bufio.NewReader(strings.NewReader("pri\t\n")),
+		stdout: &stdout,
+	}
+	line, ok, err := reader.readLine("> ")
+	if err != nil {
+		// 模拟输入不应产生底层读取错误。
+		t.Fatalf("readLine failed: %v", err)
+	}
+	if !ok {
+		// 回车前已有内容，不能被当成 EOF。
+		t.Fatalf("readLine returned EOF")
+	}
+	if line != "print" {
+		// 唯一候选必须直接补齐。
+		t.Fatalf("line = %q, want print", line)
+	}
+	if !strings.Contains(stdout.String(), "> print") {
+		// 终端输出应重绘为补全后的内容。
+		t.Fatalf("stdout = %q, want completed line", stdout.String())
+	}
+}
+
+// TestTerminalREPLLineReaderShowsMultipleCompletions 验证 Tab 对多候选展示列表。
+//
+// 用户输入 `p<Tab>` 时有 package、pairs、pcall、print 等多个候选，不能随意选择其中一个。
+func TestTerminalREPLLineReaderShowsMultipleCompletions(t *testing.T) {
+	// 构造多候选前缀和回车，确保列表展示后仍保留原输入。
+	var stdout bytes.Buffer
+	reader := &terminalREPLLineReader{
+		reader: bufio.NewReader(strings.NewReader("p\t\n")),
+		stdout: &stdout,
+	}
+	line, ok, err := reader.readLine("> ")
+	if err != nil {
+		// 模拟输入不应产生底层读取错误。
+		t.Fatalf("readLine failed: %v", err)
+	}
+	if !ok {
+		// 回车前已有内容，不能被当成 EOF。
+		t.Fatalf("readLine returned EOF")
+	}
+	if line != "p" {
+		// 多候选无法推进公共前缀时应保留用户原输入。
+		t.Fatalf("line = %q, want p", line)
+	}
+	for _, want := range []string{"package", "pairs", "pcall", "print"} {
+		// 候选列表必须包含常用全局名称。
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout = %q, missing %q", stdout.String(), want)
+		}
+	}
+}
+
+// TestTerminalREPLLineReaderCompletesTableMember 验证 Tab 可补全标准库表成员。
+//
+// 用户输入 `string.fo<Tab>` 时应只替换点号后的成员前缀，保留 `string.`。
+func TestTerminalREPLLineReaderCompletesTableMember(t *testing.T) {
+	// 构造标准库成员补全输入。
+	var stdout bytes.Buffer
+	reader := &terminalREPLLineReader{
+		reader: bufio.NewReader(strings.NewReader("string.fo\t\n")),
+		stdout: &stdout,
+	}
+	line, ok, err := reader.readLine("> ")
+	if err != nil {
+		// 模拟输入不应产生底层读取错误。
+		t.Fatalf("readLine failed: %v", err)
+	}
+	if !ok {
+		// 回车前已有内容，不能被当成 EOF。
+		t.Fatalf("readLine returned EOF")
+	}
+	if line != "string.format" {
+		// 成员补全必须补齐点号后的函数名。
+		t.Fatalf("line = %q, want string.format", line)
+	}
+	if !strings.Contains(stdout.String(), "string.format") {
+		// 终端输出应重绘为补全后的成员访问。
+		t.Fatalf("stdout = %q, want completed member", stdout.String())
 	}
 }
 
@@ -1182,6 +1308,28 @@ func TestMainVersionOutput(t *testing.T) {
 	}
 }
 
+// TestMainHelpOutput 验证 -h 输出 GLua 帮助和当前构建能力。
+func TestMainHelpOutput(t *testing.T) {
+	// 使用 stdout buffer 捕获帮助文本，确保帮助模式不会误写 stderr。
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := Main(context.Background(), []string{"-h"}, Streams{Stdout: &stdout, Stderr: &stderr})
+	if exitCode != ExitOK {
+		// 帮助输出应成功退出。
+		t.Fatalf("exit code = %d stderr=%q", exitCode, stderr.String())
+	}
+	for _, want := range []string{"Usage: glua", "--glua-dap-listen", "GLua build features:"} {
+		// 帮助文本必须包含关键入口和构建能力，方便区分 full build。
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout = %q, missing %q", stdout.String(), want)
+		}
+	}
+	if stderr.Len() != 0 {
+		// 成功路径不应写 stderr。
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
 // TestMainReturnsFailureOnParseError 验证 CLI 参数错误退出码。
 //
 // 未知选项应写入 stderr 并返回 ExitFailure。
@@ -1207,7 +1355,6 @@ func TestMainInvalidOptionMessagesMatchLua(t *testing.T) {
 		args []string
 		want string
 	}{
-		{args: []string{"-h"}, want: "unrecognized option '-h'"},
 		{args: []string{"---"}, want: "unrecognized option '---'"},
 		{args: []string{"-e"}, want: "'-e' needs argument"},
 		{args: []string{"-e", "a"}, want: "(string):1: syntax error near <eof>"},

@@ -5,7 +5,7 @@ import com.intellij.execution.configurations.ConfigurationTypeBase;
 
 public final class GluaDapRunConfigurationType extends ConfigurationTypeBase {
     public GluaDapRunConfigurationType() {
-        super("GLuaDapAttach", "GLua DAP Attach", "Attach to a running GLua Debug Adapter Protocol server", AllIcons.Empty);
+        super("GLua", "GLua", GluaUiText.text("Run or debug Lua/glua files with GLua", "使用 GLua 运行或调试 Lua/glua 文件"), AllIcons.Empty);
         addFactory(new GluaDapRunConfigurationFactory(this));
     }
 }

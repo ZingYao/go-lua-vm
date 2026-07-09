@@ -12,48 +12,57 @@ permissions:
 jobs:
   cli:
     name: cli (${{ matrix.target }})
-    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: linux-amd64
+            os: ubuntu-latest
             goos: linux
             goarch: amd64
           - target: linux-386
+            os: ubuntu-latest
             goos: linux
             goarch: "386"
           - target: linux-arm64
+            os: ubuntu-latest
             goos: linux
             goarch: arm64
           - target: linux-armv6
+            os: ubuntu-latest
             goos: linux
             goarch: arm
             goarm: "6"
           - target: linux-armv7
+            os: ubuntu-latest
             goos: linux
             goarch: arm
             goarm: "7"
           - target: windows-amd64
+            os: ubuntu-latest
             goos: windows
             goarch: amd64
           - target: windows-386
+            os: ubuntu-latest
             goos: windows
             goarch: "386"
           - target: windows-arm64
+            os: ubuntu-latest
             goos: windows
             goarch: arm64
           - target: darwin-amd64
+            os: macos-latest
             goos: darwin
             goarch: amd64
           - target: darwin-arm64
+            os: macos-latest
             goos: darwin
             goarch: arm64
           - target: android-arm64
+            os: ubuntu-latest
             goos: android
             goarch: arm64
-    env:
-      CGO_ENABLED: "0"
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -64,7 +73,37 @@ jobs:
           go-version: "1.26.4"
           cache: true
 
-      - name: Build
+      - name: Setup mise tools
+        uses: jdx/mise-action@v2
+        with:
+          install: true
+          cache: true
+
+      - name: Setup Android NDK
+        id: setup-ndk
+        if: matrix.goos == 'android'
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+
+      - name: Export Android NDK
+        if: matrix.goos == 'android'
+        run: echo "ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}" >> "${GITHUB_ENV}"
+
+      - name: Resolve native toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          native_target="${{ matrix.goos }}/${{ matrix.goarch }}"
+          if [[ -n "${{ matrix.goarm }}" ]]; then
+            native_target="${native_target}/${{ matrix.goarm }}"
+          fi
+          export NATIVE_CROSS_TARGETS="${native_target}"
+          ./scripts/bootstrap-native-toolchains.sh --install
+          ./scripts/bootstrap-native-toolchains.sh
+          ./scripts/bootstrap-native-toolchains.sh --emit-github-env >> "${GITHUB_ENV}"
+
+      - name: Build full-feature CLI
         shell: bash
         env:
           GOOS: ${{ matrix.goos }}
@@ -72,14 +111,7 @@ jobs:
           GOARM: ${{ matrix.goarm }}
         run: |
           set -euo pipefail
-          mkdir -p "dist/${{ matrix.target }}"
-          exe=""
-          if [ "${GOOS}" = "windows" ]; then
-            exe=".exe"
-          fi
-          for cmd in glua gluac gluals; do
-            go build -trimpath -ldflags="-s -w" -o "dist/${{ matrix.target }}/${cmd}${exe}" "./cmd/${cmd}"
-          done
+          ./scripts/build-release-cli-native.sh "${{ matrix.target }}" "${GOOS}" "${GOARCH}" "${GOARM:-}"
 
       - name: Archive
         shell: bash
@@ -226,6 +258,14 @@ jobs:
       - jetbrains-extension
     if: startsWith(github.ref, 'refs/tags/')
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate bilingual release notes
+        run: ./scripts/generate-release-notes.sh release-notes.md
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
@@ -236,3 +276,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: release-assets/*
+          body_path: release-notes.md

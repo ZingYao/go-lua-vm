@@ -92,6 +92,27 @@ func TestParseArgsSyntaxOptions(t *testing.T) {
 	}
 }
 
+// TestRunHelpOutput 验证 gluac -h 输出帮助和当前构建能力。
+func TestRunHelpOutput(t *testing.T) {
+	// 使用 stdout buffer 捕获帮助文本，帮助模式不应要求输入文件。
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if err := Run([]string{"-h"}, Streams{Stdout: &stdout, Stderr: &stderr}); err != nil {
+		// 合法帮助参数不应失败。
+		t.Fatalf("Run -h failed: %v", err)
+	}
+	for _, want := range []string{"Usage: gluac", "--gluac-syntax", "GLua build features:"} {
+		// 帮助文本必须展示命令入口和构建能力。
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout = %q, missing %q", stdout.String(), want)
+		}
+	}
+	if stderr.Len() != 0 {
+		// 帮助成功输出不应写 stderr。
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
 // TestCompileSourceWithSyntaxDisablesExtensions 验证 gluac 源码编译入口遵守语法开关。
 func TestCompileSourceWithSyntaxDisablesExtensions(t *testing.T) {
 	if _, err := CompileSourceWithSyntax("local continue = 1\nreturn continue\n", "@lua53.lua", extensions.None()); err != nil {

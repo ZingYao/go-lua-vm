@@ -14,15 +14,14 @@ public final class GluaDapRunConfigurationFactory extends ConfigurationFactory {
 
     @Override
     public @NotNull String getId() {
-        return "GLuaDapAttachFactory";
+        return "GLuaFileFactory";
     }
 
     @Override
     public @NotNull RunConfiguration createTemplateConfiguration(@NotNull Project project) {
         GluaSettings settings = ApplicationManager.getApplication().getService(GluaSettings.class);
-        GluaDapRunConfiguration configuration = new GluaDapRunConfiguration(project, this, "Attach to GLua DAP");
-        configuration.setHost(settings.dapHost());
-        configuration.setPort(settings.dapPort());
+        GluaDapRunConfiguration configuration = new GluaDapRunConfiguration(project, this, "GLua");
+        configuration.setGluaExecutable(settings.gluaExecutable());
         configuration.setAllowRunningInParallel(true);
         return configuration;
     }
