@@ -1027,6 +1027,10 @@ func SetUpvalue(args ...runtime.Value) ([]runtime.Value, error) {
 		// 超出 upvalue 数量时按 Lua setupvalue 语义返回 nil。
 		return []runtime.Value{runtime.NilValue()}, nil
 	}
+	if upvalueIndex < len(closure.Proto.Upvalues) && closure.Proto.Upvalues[upvalueIndex].Const {
+		// glua const 捕获为 upvalue 后仍保持只读，debug.setupvalue 不能绕过语言层约束。
+		return nil, runtime.RaiseError(runtime.StringValue("cannot assign to const upvalue '" + upvalueName(closure, upvalueIndex) + "'"))
+	}
 
 	setLuaClosureUpvalueValue(closure, upvalueIndex, args[2])
 	return []runtime.Value{runtime.StringValue(upvalueName(closure, upvalueIndex))}, nil

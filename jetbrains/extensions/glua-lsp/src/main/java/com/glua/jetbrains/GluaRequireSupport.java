@@ -282,7 +282,7 @@ final class GluaRequireSupport {
         return best;
     }
 
-    private static Map<String, Path> localRequireBindings(Path filePath, Path projectDir, List<GluaToken> tokens, Set<Path> knownFiles) {
+    static Map<String, Path> localRequireBindings(Path filePath, Path projectDir, List<GluaToken> tokens, Set<Path> knownFiles) {
         Map<String, Path> bindings = new LinkedHashMap<>();
         for (int i = 0; i < tokens.size(); i++) {
             int receiverIndex = tokens.get(i).text.equals("local") ? nextVisibleIndex(tokens, i) : i;
@@ -383,6 +383,10 @@ final class GluaRequireSupport {
         }
         List<ExportedMember> members = new ArrayList<>();
         Set<String> seen = new java.util.LinkedHashSet<>();
+        Set<String> constMembers = constExportMembers(tokens, exportedTables);
+        for (String constMember : constMembers) {
+            addExportedMember(members, seen, text, tokens, constMember, ".", "const", 0, Math.min(1, text.length()), sourcePath);
+        }
         for (int i = 0; i < tokens.size(); i++) {
             int separatorIndex = nextVisibleIndex(tokens, i);
             if (separatorIndex < 0) {
@@ -392,38 +396,163 @@ final class GluaRequireSupport {
             if (memberIndex >= 0 && exportedTables.contains(tokens.get(i).text) && tokens.get(memberIndex).isName()) {
                 String separator = tokens.get(separatorIndex).text;
                 if (separator.equals(":") && isFunctionStatementMember(tokens, i)) {
-                    addExportedMember(members, seen, text, tokens, tokens.get(memberIndex).text, ":", tokens.get(memberIndex).start, tokens.get(memberIndex).end, sourcePath);
+                    addExportedMember(members, seen, text, tokens, tokens.get(memberIndex).text, ":", "method", tokens.get(memberIndex).start, tokens.get(memberIndex).end, sourcePath);
                     continue;
                 }
                 if (separator.equals(".") && (isFunctionStatementMember(tokens, i) || memberDefinitionAt(text, tokens.get(memberIndex).start) != null)) {
-                    addExportedMember(members, seen, text, tokens, tokens.get(memberIndex).text, ".", tokens.get(memberIndex).start, tokens.get(memberIndex).end, sourcePath);
+                    addExportedMember(members, seen, text, tokens, tokens.get(memberIndex).text, ".", "function", tokens.get(memberIndex).start, tokens.get(memberIndex).end, sourcePath);
+                    continue;
+                }
+                if (separator.equals(".") && hasAssignmentAfter(tokens, memberIndex) && !tokens.get(memberIndex).text.equals("_glua_const")) {
+                    addExportedMember(members, seen, text, tokens, tokens.get(memberIndex).text, ".", "variable", tokens.get(memberIndex).start, tokens.get(memberIndex).end, sourcePath);
                     continue;
                 }
             }
             MemberDefinition indexedDefinition = indexedMemberFunctionDefinition(tokens, i, exportedTables, "");
             if (indexedDefinition != null) {
-                addExportedMember(members, seen, text, tokens, indexedDefinition.name(), ".", indexedDefinition.start(), indexedDefinition.end(), sourcePath);
+                addExportedMember(members, seen, text, tokens, indexedDefinition.name(), ".", "function", indexedDefinition.start(), indexedDefinition.end(), sourcePath);
+                continue;
+            }
+            MemberDefinition indexedValue = indexedMemberValueDefinition(tokens, i, exportedTables, "");
+            if (indexedValue != null && !indexedValue.name().equals("_glua_const")) {
+                addExportedMember(members, seen, text, tokens, indexedValue.name(), ".", "variable", indexedValue.start(), indexedValue.end(), sourcePath);
             }
         }
         for (String tableName : exportedTables) {
             for (TableRange range : tableConstructorRanges(tokens, tableName)) {
                 for (MemberDefinition definition : tableFieldFunctionDefinitions(tokens, range.openIndex + 1, range.closeIndex, "")) {
-                    addExportedMember(members, seen, text, tokens, definition.name(), ".", definition.start(), definition.end(), sourcePath);
+                    addExportedMember(members, seen, text, tokens, definition.name(), ".", "function", definition.start(), definition.end(), sourcePath);
+                }
+                for (MemberDefinition definition : tableFieldValueDefinitions(tokens, range.openIndex + 1, range.closeIndex, "")) {
+                    addExportedMember(members, seen, text, tokens, definition.name(), ".", "variable", definition.start(), definition.end(), sourcePath);
                 }
             }
         }
-        return new ModuleExportSnapshot(sourcePath, text, exportedTables, members);
+        return new ModuleExportSnapshot(sourcePath, text, exportedTables, members, constMembers);
     }
 
-    private static void addExportedMember(List<ExportedMember> members, Set<String> seen, String text, List<GluaToken> tokens, String name, String callStyle, int start, int end, Path sourcePath) {
+    private static Set<String> constExportMembers(List<GluaToken> tokens, Set<String> exportedTables) {
+        Set<String> members = new java.util.LinkedHashSet<>();
+        for (int i = 0; i < tokens.size(); i++) {
+            if (!exportedTables.contains(tokens.get(i).text)) {
+                continue;
+            }
+            int separatorIndex = nextVisibleIndex(tokens, i);
+            int memberIndex = nextVisibleIndex(tokens, separatorIndex);
+            if (separatorIndex < 0 || memberIndex < 0) {
+                continue;
+            }
+            int tableOpenIndex = -1;
+            if (tokens.get(separatorIndex).text.equals(".") && tokens.get(memberIndex).text.equals("_glua_const")) {
+                int equalsIndex = nextVisibleIndex(tokens, memberIndex);
+                tableOpenIndex = nextVisibleIndex(tokens, equalsIndex);
+            } else if (tokens.get(separatorIndex).text.equals("[")) {
+                int closeIndex = nextVisibleIndex(tokens, memberIndex);
+                String key = stringTokenValue(tokens.get(memberIndex));
+                if (closeIndex >= 0 && tokens.get(closeIndex).text.equals("]") && key.equals("_glua_const")) {
+                    int equalsIndex = nextVisibleIndex(tokens, closeIndex);
+                    tableOpenIndex = nextVisibleIndex(tokens, equalsIndex);
+                }
+            }
+            addConstMembersFromTable(tokens, tableOpenIndex, members);
+        }
+        for (String tableName : exportedTables) {
+            for (TableRange range : tableConstructorRanges(tokens, tableName)) {
+                int depth = 0;
+                for (int i = range.openIndex + 1; i < range.closeIndex; i++) {
+                    GluaToken token = tokens.get(i);
+                    if (depth == 0) {
+                        int tableOpenIndex = constTableFieldOpenIndex(tokens, i, range.closeIndex);
+                        if (tableOpenIndex > 0) {
+                            addConstMembersFromTable(tokens, tableOpenIndex, members);
+                        }
+                    }
+                    if (isOpenDelimiter(token.text)) {
+                        depth++;
+                        continue;
+                    }
+                    if (isCloseDelimiter(token.text) && depth > 0) {
+                        depth--;
+                    }
+                }
+            }
+        }
+        return members;
+    }
+
+    private static int constTableFieldOpenIndex(List<GluaToken> tokens, int keyIndex, int endIndex) {
+        GluaToken key = tokens.get(keyIndex);
+        if (key.text.equals("[")) {
+            int stringIndex = nextVisibleIndex(tokens, keyIndex);
+            int closeIndex = nextVisibleIndex(tokens, stringIndex);
+            int equalsIndex = nextVisibleIndex(tokens, closeIndex);
+            int openIndex = nextVisibleIndex(tokens, equalsIndex);
+            return stringIndex >= 0 && closeIndex >= 0 && equalsIndex >= 0 && openIndex >= 0 && closeIndex < endIndex && equalsIndex < endIndex && openIndex < endIndex && stringTokenValue(tokens.get(stringIndex)).equals("_glua_const") && tokens.get(closeIndex).text.equals("]") && tokens.get(equalsIndex).text.equals("=") && tokens.get(openIndex).text.equals("{")
+                ? openIndex
+                : -1;
+        }
+        int equalsIndex = nextVisibleIndex(tokens, keyIndex);
+        int openIndex = nextVisibleIndex(tokens, equalsIndex);
+        return equalsIndex >= 0 && openIndex >= 0 && key.text.equals("_glua_const") && equalsIndex < endIndex && openIndex < endIndex && tokens.get(equalsIndex).text.equals("=") && tokens.get(openIndex).text.equals("{")
+            ? openIndex
+            : -1;
+    }
+
+    private static void addConstMembersFromTable(List<GluaToken> tokens, int openIndex, Set<String> members) {
+        if (openIndex < 0 || openIndex >= tokens.size() || !tokens.get(openIndex).text.equals("{")) {
+            return;
+        }
+        int closeIndex = matchingDelimiterIndex(tokens, openIndex);
+        if (closeIndex <= openIndex) {
+            return;
+        }
+        int depth = 0;
+        for (int i = openIndex + 1; i < closeIndex; i++) {
+            GluaToken token = tokens.get(i);
+            if (depth == 0 && token.isName()) {
+                int equalsIndex = nextVisibleIndex(tokens, i);
+                if (equalsIndex < closeIndex && tokens.get(equalsIndex).text.equals("=")) {
+                    members.add(token.text);
+                }
+            }
+            if (depth == 0 && token.text.equals("[")) {
+                int keyIndex = nextVisibleIndex(tokens, i);
+                int closeBracketIndex = nextVisibleIndex(tokens, keyIndex);
+                int equalsIndex = nextVisibleIndex(tokens, closeBracketIndex);
+                String key = stringTokenValue(tokens.get(keyIndex));
+                if (!key.isBlank() && closeBracketIndex < closeIndex && equalsIndex < closeIndex && tokens.get(closeBracketIndex).text.equals("]") && tokens.get(equalsIndex).text.equals("=")) {
+                    members.add(key);
+                }
+            }
+            if (isOpenDelimiter(token.text)) {
+                depth++;
+                continue;
+            }
+            if (isCloseDelimiter(token.text) && depth > 0) {
+                depth--;
+            }
+        }
+    }
+
+    private static void addExportedMember(List<ExportedMember> members, Set<String> seen, String text, List<GluaToken> tokens, String name, String callStyle, String kind, int start, int end, Path sourcePath) {
         if (name == null || name.isBlank() || seen.contains(name)) {
             return;
         }
         seen.add(name);
         String signature = memberSignature(tokens, start, name);
-        String detail = callStyle.equals(":") ? signature + " method" : signature;
+        String detail = switch (kind) {
+            case "method" -> signature + " method";
+            case "const" -> "GLua const field";
+            case "variable" -> "GLua table field";
+            default -> signature;
+        };
         String documentation = GluaUserDocumentation.documentationAt(text, start, end, signature, "en").quickInfo();
-        members.add(new ExportedMember(name, callStyle, start, end, sourcePath, signature, detail, documentation));
+        members.add(new ExportedMember(name, callStyle, kind, start, end, sourcePath, signature, detail, documentation));
+    }
+
+    private static boolean hasAssignmentAfter(List<GluaToken> tokens, int memberIndex) {
+        int equalsIndex = nextVisibleIndex(tokens, memberIndex);
+        return equalsIndex >= 0 && tokens.get(equalsIndex).text.equals("=");
     }
 
     private static String memberSignature(List<GluaToken> tokens, int memberStart, String name) {
@@ -532,6 +661,24 @@ final class GluaRequireSupport {
             : null;
     }
 
+    private static MemberDefinition indexedMemberValueDefinition(List<GluaToken> tokens, int receiverIndex, Set<String> exportedTables, String member) {
+        if (!exportedTables.contains(tokens.get(receiverIndex).text)) {
+            return null;
+        }
+        int openIndex = nextVisibleIndex(tokens, receiverIndex);
+        int keyIndex = nextVisibleIndex(tokens, openIndex);
+        int closeIndex = nextVisibleIndex(tokens, keyIndex);
+        int equalsIndex = nextVisibleIndex(tokens, closeIndex);
+        if (openIndex < 0 || keyIndex < 0 || closeIndex < 0 || equalsIndex < 0 || !tokens.get(openIndex).text.equals("[") || !tokens.get(closeIndex).text.equals("]") || !tokens.get(equalsIndex).text.equals("=")) {
+            return null;
+        }
+        String name = stringTokenValue(tokens.get(keyIndex));
+        if (name.isBlank() || (!member.isBlank() && !name.equals(member)) || isIndexedFunctionDefinition(tokens, closeIndex)) {
+            return null;
+        }
+        return new MemberDefinition(name, tokens.get(keyIndex).start, tokens.get(keyIndex).end);
+    }
+
     private static MemberDefinition tableLiteralMemberFunctionDefinition(List<GluaToken> tokens, Set<String> exportedTables, String member) {
         for (String tableName : exportedTables) {
             for (TableRange range : tableConstructorRanges(tokens, tableName)) {
@@ -559,6 +706,33 @@ final class GluaRequireSupport {
             }
             if (token.isName() && (member.isBlank() || token.text.equals(member)) && isBareTableFieldFunctionDefinition(tokens, i, endIndex)) {
                 definitions.add(new MemberDefinition(token.text, token.start, token.end));
+            }
+        }
+        return definitions;
+    }
+
+    private static List<MemberDefinition> tableFieldValueDefinitions(List<GluaToken> tokens, int startIndex, int endIndex, String member) {
+        List<MemberDefinition> definitions = new ArrayList<>();
+        int depth = 0;
+        for (int i = startIndex; i < endIndex; i++) {
+            GluaToken token = tokens.get(i);
+            if (depth == 0 && token.text.equals("[")) {
+                int keyIndex = nextVisibleIndex(tokens, i);
+                int closeIndex = nextVisibleIndex(tokens, keyIndex);
+                int equalsIndex = nextVisibleIndex(tokens, closeIndex);
+                String name = keyIndex >= 0 ? stringTokenValue(tokens.get(keyIndex)) : "";
+                if (closeIndex < endIndex && equalsIndex < endIndex && tokens.get(closeIndex).text.equals("]") && tokens.get(equalsIndex).text.equals("=") && !name.isBlank() && !name.equals("_glua_const") && (member.isBlank() || name.equals(member)) && !isIndexedFunctionDefinition(tokens, closeIndex)) {
+                    definitions.add(new MemberDefinition(name, tokens.get(keyIndex).start, tokens.get(keyIndex).end));
+                }
+            } else if (depth == 0 && token.isName() && !token.text.equals("_glua_const") && (member.isBlank() || token.text.equals(member)) && isBareTableFieldValueDefinition(tokens, i, endIndex)) {
+                definitions.add(new MemberDefinition(token.text, token.start, token.end));
+            }
+            if (isOpenDelimiter(token.text)) {
+                depth++;
+                continue;
+            }
+            if (isCloseDelimiter(token.text) && depth > 0) {
+                depth--;
             }
         }
         return definitions;
@@ -617,6 +791,11 @@ final class GluaRequireSupport {
         return equalsIndex > keyIndex && functionIndex < endIndex && tokens.get(equalsIndex).text.equals("=") && tokens.get(functionIndex).text.equals("function");
     }
 
+    private static boolean isBareTableFieldValueDefinition(List<GluaToken> tokens, int keyIndex, int endIndex) {
+        int equalsIndex = nextVisibleIndex(tokens, keyIndex);
+        return equalsIndex > keyIndex && equalsIndex < endIndex && tokens.get(equalsIndex).text.equals("=") && !isBareTableFieldFunctionDefinition(tokens, keyIndex, endIndex);
+    }
+
     private static int matchingDelimiterIndex(List<GluaToken> tokens, int openIndex) {
         String open = tokens.get(openIndex).text;
         String close = open.equals("{") ? "}" : open.equals("[") ? "]" : open.equals("(") ? ")" : "";
@@ -644,6 +823,14 @@ final class GluaRequireSupport {
             return "";
         }
         return token.text.substring(1, token.text.length() - 1);
+    }
+
+    private static boolean isOpenDelimiter(String text) {
+        return text.equals("(") || text.equals("{") || text.equals("[");
+    }
+
+    private static boolean isCloseDelimiter(String text) {
+        return text.equals(")") || text.equals("}") || text.equals("]");
     }
 
     private static Path resolveModule(PsiFile file, String moduleName) {
@@ -803,10 +990,10 @@ final class GluaRequireSupport {
     record CallerTarget(Path path, int start, int end) {
     }
 
-    record ModuleExportSnapshot(Path sourcePath, String text, Set<String> exportedTables, List<ExportedMember> members) {
+    record ModuleExportSnapshot(Path sourcePath, String text, Set<String> exportedTables, List<ExportedMember> members, Set<String> constMembers) {
     }
 
-    record ExportedMember(String name, String callStyle, int start, int end, Path sourcePath, String signature, String detail, String documentation) {
+    record ExportedMember(String name, String callStyle, String kind, int start, int end, Path sourcePath, String signature, String detail, String documentation) {
     }
 
     private record TableRange(int openIndex, int closeIndex) {

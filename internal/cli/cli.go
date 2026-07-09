@@ -104,6 +104,8 @@ type Options struct {
 	SyntaxExtensionsSet bool
 	// DisabledSyntaxExtensions 保存命令行显式关闭的语法扩展集合。
 	DisabledSyntaxExtensions extensions.SyntaxSet
+	// DisableGluaEvents 表示运行脚本时不注册 glua 自定义事件 API。
+	DisableGluaEvents bool
 	// DAPListen 保存 GLua DAP server 的 TCP 监听地址；为空表示不启用调试端口。
 	DAPListen string
 }
@@ -379,6 +381,10 @@ func Run(ctx context.Context, args []string, streams Streams) error {
 	// 创建带 context 的 State，保证后续加载和调用可观察取消。
 	stateOptions := lua.DefaultOptions()
 	stateOptions = lua.WithSyntaxExtensions(stateOptions, syntaxForOptions(options))
+	if options.DisableGluaEvents {
+		// 事件能力是运行期扩展，命令行可在构建包含时按脚本需要关闭。
+		stateOptions = lua.WithGluaEvents(stateOptions, false)
+	}
 	if dapServer != nil {
 		// DAP server 同时作为 VM 调试观察器接收指令级源码行事件。
 		stateOptions.DebugObserver = dapServer
@@ -473,8 +479,9 @@ func HelpText() string {
 	builder.WriteString(localize.Text("  -                        execute stdin as a script\n\n", "  -                        将 stdin 作为脚本执行\n\n"))
 	builder.WriteString(localize.Text("GLua options:\n", "GLua 选项：\n"))
 	builder.WriteString(localize.Text("  -h, --help               show this help\n", "  -h, --help               显示帮助信息\n"))
-	builder.WriteString(localize.Text("  --glua-syntax value      select syntax mode: lua53, extended, all, continue,switch\n", "  --glua-syntax value      选择语法模式：lua53、extended、all、continue,switch\n"))
+	builder.WriteString(localize.Text("  --glua-syntax value      select syntax mode: lua53, extended, all, continue,switch,const\n", "  --glua-syntax value      选择语法模式：lua53、extended、all、continue,switch,const\n"))
 	builder.WriteString(localize.Text("  --glua-disable-syntax v  disable syntax sugar names from the selected mode\n", "  --glua-disable-syntax v  从当前语法模式中关闭指定语法糖\n"))
+	builder.WriteString(localize.Text("  --glua-disable-events    do not register glua event APIs in OpenLibs\n", "  --glua-disable-events    OpenLibs 时不注册 glua event API\n"))
 	builder.WriteString(localize.Text("  --glua-format [-w] file  format a Lua/GLua file, optionally writing back with -w\n", "  --glua-format [-w] file  格式化 Lua/GLua 文件，使用 -w 写回\n"))
 	builder.WriteString(localize.Text("  --glua-list-bytecode f   print bytecode listing for a source or binary chunk\n", "  --glua-list-bytecode f   输出源码或 binary chunk 的字节码列表\n"))
 	builder.WriteString(localize.Text("  --glua-dap-listen addr   start the built-in DAP server, for example 127.0.0.1:0\n\n", "  --glua-dap-listen addr   启动内置 DAP 服务，例如 127.0.0.1:0\n\n"))
@@ -710,6 +717,11 @@ func ParseArgs(args []string) (Options, error) {
 				// 禁用列表名称错误直接返回参数错误。
 				return Options{}, err
 			}
+			continue
+		}
+		if argument == "--glua-disable-events" {
+			// 关闭 glua 自定义事件全局 API，便于按运行环境收紧扩展能力。
+			options.DisableGluaEvents = true
 			continue
 		}
 		if argument == "-" {

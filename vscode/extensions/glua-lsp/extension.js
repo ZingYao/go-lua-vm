@@ -22,6 +22,7 @@ const COMMAND_RUN_CURRENT_FILE = "glua.runCurrentFile";
 const COMMAND_DEBUG_CURRENT_FILE = "glua.debugCurrentFile";
 const COMMAND_SELECT_GLUA_EXECUTABLE = "glua.selectGluaExecutable";
 const COMMAND_SELECT_GLUAC_EXECUTABLE = "glua.selectGluacExecutable";
+const COMMAND_SELECT_BUILTIN_DOCS = "glua.selectBuiltinDocs";
 const BUILTIN_SIG_FILE_NAME = "glua-builtin-docs.json";
 const DEBUG_TYPE = "glua";
 const DEFAULT_DEBUG_HOST = "127.0.0.1";
@@ -379,19 +380,55 @@ function defaultDebugAttachConfig() {
     type: DEBUG_TYPE,
     request: "attach",
     name: "Attach to GLua DAP",
+    host: dapHostConfig(),
+    port: dapPortConfig(),
+  };
+}
+
+function localLaunchExecutableMissingMessage() {
+  return localizeText({
+    en: "glua.executable is empty. Configure a glua executable for local launch, or enable glua.useRemoteDap for attach debugging.",
+    zh: "glua.executable 为空。请配置 glua 可执行文件以本地启动，或启用 glua.useRemoteDap 使用远程 attach 调试。",
+  });
+}
+
+function defaultDebugLaunchConfig(program = "${file}", cwd = undefined) {
+  return {
+    type: DEBUG_TYPE,
+    request: "launch",
+    name: localizeText({ en: "Debug current GLua file", zh: "调试当前 GLua 文件" }),
+    program,
+    gluaExecutable: gluaExecutableConfig(),
+    useRemoteDap: false,
+    args: [],
+    cwd,
     host: DEFAULT_DEBUG_HOST,
-    port: DEFAULT_DEBUG_PORT,
+    port: 0,
   };
 }
 
 function publicDebugConfig(config) {
-  const { host, port, ...rest } = config;
-  return rest;
+  return config;
 }
 
 function gluaExecutableConfig() {
   const config = vscode.workspace.getConfiguration("glua");
   return String(config.get("executable", "") || "").trim();
+}
+
+function dapHostConfig() {
+  const config = vscode.workspace.getConfiguration("glua");
+  return resolveDebugHost(config.get("dapHost", DEFAULT_DEBUG_HOST));
+}
+
+function dapPortConfig() {
+  const config = vscode.workspace.getConfiguration("glua");
+  return resolveDebugPort(config.get("dapPort", DEFAULT_DEBUG_PORT));
+}
+
+function useRemoteDapConfig() {
+  const config = vscode.workspace.getConfiguration("glua");
+  return config.get("useRemoteDap", false) === true;
 }
 
 async function selectExecutableSetting(settingKey, title, outputChannel) {
@@ -409,6 +446,35 @@ async function selectExecutableSetting(settingKey, title, outputChannel) {
   await vscode.workspace.getConfiguration("glua").update(settingKey, file, vscode.ConfigurationTarget.Workspace);
   if (outputChannel) {
     outputChannel.appendLine(`[glua-lsp] set glua.${settingKey}=${file}`);
+  }
+}
+
+async function selectBuiltinDocsSetting(outputChannel) {
+  const selected = await vscode.window.showOpenDialog({
+    title: localizeText({ en: "Select builtin docs JSON", zh: "选择内置文档 JSON 文件" }),
+    canSelectFiles: true,
+    canSelectFolders: false,
+    canSelectMany: true,
+    filters: {
+      JSON: ["json"],
+    },
+    openLabel: localizeText({ en: "Use JSON file", zh: "使用 JSON 文件" }),
+  });
+  if (!selected || selected.length === 0) {
+    return;
+  }
+  const config = vscode.workspace.getConfiguration("glua");
+  const currentDocs = config.get("builtinDocs", []);
+  const nextDocs = Array.isArray(currentDocs) ? [...currentDocs] : [];
+  for (const uri of selected) {
+    const file = uri && uri.fsPath ? uri.fsPath : "";
+    if (file && !nextDocs.includes(file)) {
+      nextDocs.push(file);
+    }
+  }
+  await config.update("builtinDocs", nextDocs, vscode.ConfigurationTarget.Workspace);
+  if (outputChannel) {
+    outputChannel.appendLine(`[glua-lsp] set glua.builtinDocs=${JSON.stringify(nextDocs)}`);
   }
 }
 
@@ -504,6 +570,115 @@ function parseGluaDapReadyLine(text) {
   return null;
 }
 
+function isManagedProcessControlLine(line) {
+  const trimmed = String(line || "").trim();
+  return trimmed.startsWith("GLua DAP ");
+}
+
+function appendDebugConsole(text) {
+  const debugConsole = vscode.debug && vscode.debug.activeDebugConsole;
+  if (!debugConsole || !text) {
+    return false;
+  }
+  if (typeof debugConsole.append === "function") {
+    debugConsole.append(text);
+    return true;
+  }
+  if (typeof debugConsole.appendLine === "function") {
+    debugConsole.appendLine(String(text).replace(/\r?\n$/, ""));
+    return true;
+  }
+  return false;
+}
+
+async function showDebugConsole() {
+  const commands = [
+    "workbench.panel.repl.view.focus",
+    "workbench.debug.action.focusRepl",
+    "workbench.debug.action.toggleRepl",
+  ];
+  for (const command of commands) {
+    try {
+      await vscode.commands.executeCommand(command);
+      return true;
+    } catch (error) {
+      // Older or embedded VS Code builds may not expose every command; try the next known command id.
+    }
+  }
+  return false;
+}
+
+function scheduleDebugConsoleFocus() {
+  void showDebugConsole();
+  const shortTimer = setTimeout(() => {
+    void showDebugConsole();
+  }, 250);
+  const longTimer = setTimeout(() => {
+    void showDebugConsole();
+  }, 800);
+  for (const timer of [shortTimer, longTimer]) {
+    if (timer && typeof timer.unref === "function") {
+      timer.unref();
+    }
+  }
+}
+
+function isGluaDebugSession(session) {
+  return !!(session && session.type === DEBUG_TYPE);
+}
+
+function focusDebugConsoleForSession(session) {
+  if (!isGluaDebugSession(session)) {
+    return;
+  }
+  scheduleDebugConsoleFocus();
+}
+
+function createManagedProcessOutputRouter(outputChannel) {
+  const pending = {
+    stdout: "",
+    stderr: "",
+  };
+  const appendOutput = (text) => {
+    if (outputChannel && text) {
+      outputChannel.append(text);
+    }
+  };
+  const routeCompleteLine = (lineText, debugStarted) => {
+    if (!debugStarted || isManagedProcessControlLine(lineText)) {
+      appendOutput(lineText);
+      return;
+    }
+    if (!appendDebugConsole(lineText)) {
+      appendOutput(lineText);
+    }
+  };
+  const route = (text, streamName, debugStarted) => {
+    const key = streamName === "stderr" ? "stderr" : "stdout";
+    pending[key] += String(text || "");
+    for (;;) {
+      const match = pending[key].match(/\r?\n/);
+      if (!match || match.index === undefined) {
+        return;
+      }
+      const endIndex = match.index + match[0].length;
+      const lineText = pending[key].slice(0, endIndex);
+      pending[key] = pending[key].slice(endIndex);
+      routeCompleteLine(lineText, debugStarted);
+    }
+  };
+  const flush = (debugStarted) => {
+    for (const key of Object.keys(pending)) {
+      if (!pending[key]) {
+        continue;
+      }
+      routeCompleteLine(pending[key], debugStarted);
+      pending[key] = "";
+    }
+  };
+  return { route, flush };
+}
+
 function managedDebugFailureMessage(launchConfig, details) {
   const stderrTail = tailText(details.stderr || "").trim();
   const stdoutTail = tailText(details.stdout || "").trim();
@@ -533,7 +708,10 @@ function normalizeLaunchArgs(args) {
 }
 
 function startManagedGluaDapProcess(launchConfig, outputChannel) {
-  const executable = String(launchConfig.gluaExecutable || gluaExecutableConfig() || "glua").trim() || "glua";
+  const executable = String(launchConfig.gluaExecutable || gluaExecutableConfig() || "").trim();
+  if (!executable) {
+    throw new Error(localLaunchExecutableMissingMessage());
+  }
   const program = String(launchConfig.program || "").trim();
   const cwd = String(launchConfig.cwd || (program ? path.dirname(program) : "") || process.cwd());
   const listen = `${DEFAULT_DEBUG_HOST}:0`;
@@ -547,8 +725,8 @@ function startManagedGluaDapProcess(launchConfig, outputChannel) {
   let stdout = "";
   let stderr = "";
   let settled = false;
+  const outputRouter = createManagedProcessOutputRouter(outputChannel);
   if (outputChannel) {
-    outputChannel.show(true);
     outputChannel.appendLine(`[glua-dap] launch command=${commandText}; cwd=${cwd}; listen=${listen}`);
   }
   return new Promise((resolve, reject) => {
@@ -564,14 +742,20 @@ function startManagedGluaDapProcess(launchConfig, outputChannel) {
       } catch (error) {
         // Ignore kill errors; the process may already have exited.
       }
-      reject(new Error(managedDebugFailureMessage(launchConfig, {
+      outputRouter.flush(false);
+      const message = managedDebugFailureMessage(launchConfig, {
         command: commandText,
         cwd,
         listen,
         stdout,
         stderr,
         ...details,
-      })));
+      });
+      if (outputChannel) {
+        outputChannel.appendLine(`[glua-dap] ${message}`);
+        outputChannel.show(true);
+      }
+      reject(new Error(message));
     };
     const timer = setTimeout(() => {
       fail({ error: new Error(`Timed out waiting for '${GLUA_DAP_READY_PREFIX}'`) });
@@ -583,9 +767,7 @@ function startManagedGluaDapProcess(launchConfig, outputChannel) {
       } else {
         stdout = tailText(stdout + text);
       }
-      if (outputChannel) {
-        outputChannel.append(text);
-      }
+      outputRouter.route(text, streamName, settled);
       const ready = parseGluaDapReadyLine(`${stdout}\n${stderr}`);
       if (!ready || settled) {
         return;
@@ -608,6 +790,7 @@ function startManagedGluaDapProcess(launchConfig, outputChannel) {
     child.on("error", (error) => fail({ error }));
     child.on("exit", (exitCode, signal) => {
       managedDebugProcesses.delete(processId);
+      outputRouter.flush(settled);
       if (settled) {
         if (outputChannel) {
           outputChannel.appendLine(`[glua-dap] process exited code=${exitCode === null ? "null" : exitCode}${signal ? ` signal=${signal}` : ""}`);
@@ -698,19 +881,24 @@ async function debugCurrentFile(outputChannel) {
     await document.save();
   }
   const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
-  const config = {
-    type: DEBUG_TYPE,
-    request: "launch",
-    name: localizeText({ en: "Debug current GLua file", zh: "调试当前 GLua 文件" }),
-    program: document.uri.fsPath,
-    gluaExecutable: configuredGluaExecutable(),
-    args: [],
-    cwd: workspaceFolder ? workspaceFolder.uri.fsPath : path.dirname(document.uri.fsPath),
-    host: DEFAULT_DEBUG_HOST,
-    port: 0,
-  };
+  const executable = gluaExecutableConfig();
+  const useRemoteDap = useRemoteDapConfig();
+  const config = useRemoteDap
+    ? {
+      ...defaultDebugAttachConfig(),
+      name: localizeText({ en: "Attach to GLua DAP", zh: "附加到 GLua DAP" }),
+      program: document.uri.fsPath,
+      gluaExecutable: "",
+      useRemoteDap: true,
+      args: [],
+      cwd: workspaceFolder ? workspaceFolder.uri.fsPath : path.dirname(document.uri.fsPath),
+    }
+    : {
+      ...defaultDebugLaunchConfig(document.uri.fsPath, workspaceFolder ? workspaceFolder.uri.fsPath : path.dirname(document.uri.fsPath)),
+      gluaExecutable: executable,
+    };
   if (outputChannel) {
-    outputChannel.appendLine(`[glua-dap] debug current file=${document.uri.fsPath}; glua=${config.gluaExecutable}`);
+    outputChannel.appendLine(`[glua-dap] debug current file=${document.uri.fsPath}; request=${config.request}; glua=${config.gluaExecutable || "(remote)"}`);
   }
   return startAttachDebugSession(config, outputChannel);
 }
@@ -790,6 +978,7 @@ async function startAttachDebugSession(attachConfig, outputChannel) {
   try {
     const started = await vscode.debug.startDebugging(undefined, attachConfig);
     if (started) {
+      scheduleDebugConsoleFocus();
       return true;
     }
     const message = debugAttachFailureMessage(attachConfig);
@@ -810,28 +999,57 @@ async function startAttachDebugSession(attachConfig, outputChannel) {
   }
 }
 
+function normalizeDebugConfiguration(folder, config, outputChannel) {
+  const hasExplicitConfig = config && Object.keys(config).length > 0;
+  if (!hasExplicitConfig) {
+    if (useRemoteDapConfig()) {
+      return defaultDebugAttachConfig();
+    }
+    return defaultDebugLaunchConfig("${file}", folder && folder.uri ? folder.uri.fsPath : undefined);
+  }
+
+  const defaults = config.request === "launch"
+    ? defaultDebugLaunchConfig("${file}", folder && folder.uri ? folder.uri.fsPath : undefined)
+    : defaultDebugAttachConfig();
+  const next = {
+    ...defaults,
+    ...(config || {}),
+  };
+  next.type = DEBUG_TYPE;
+  next.request = next.request === "launch" ? "launch" : "attach";
+  if (next.request === "launch") {
+    if (next.useRemoteDap === true) {
+      next.request = "attach";
+      next.host = resolveDebugHost(next.host || dapHostConfig());
+      next.port = resolveDebugPort(next.port || dapPortConfig());
+      return next;
+    }
+    next.gluaExecutable = String(next.gluaExecutable || gluaExecutableConfig() || "").trim();
+    if (!next.gluaExecutable) {
+      const message = localLaunchExecutableMissingMessage();
+      if (outputChannel) {
+        outputChannel.appendLine(`[glua-dap] ${message}`);
+        outputChannel.show(true);
+      }
+      vscode.window.showErrorMessage(message);
+      return undefined;
+    }
+    next.program = next.program || "${file}";
+    next.args = Array.isArray(next.args) ? next.args : [];
+    next.cwd = next.cwd || (folder && folder.uri ? folder.uri.fsPath : undefined);
+    next.host = DEFAULT_DEBUG_HOST;
+    next.port = 0;
+    return next;
+  }
+  next.host = resolveDebugHost(next.host || dapHostConfig());
+  next.port = resolveDebugPort(next.port || dapPortConfig());
+  return next;
+}
+
 function registerDebugSupport(context, outputChannel) {
   const configurationProvider = {
     resolveDebugConfiguration(folder, config) {
-      const defaults = defaultDebugAttachConfig();
-      const next = {
-        ...defaults,
-        ...(config || {}),
-      };
-      next.type = DEBUG_TYPE;
-      next.request = next.request === "launch" ? "launch" : "attach";
-      if (next.request === "launch") {
-        next.gluaExecutable = String(next.gluaExecutable || gluaExecutableConfig() || "").trim();
-        next.program = next.program || "${file}";
-        next.args = Array.isArray(next.args) ? next.args : [];
-        next.cwd = next.cwd || (folder && folder.uri ? folder.uri.fsPath : undefined);
-        next.host = DEFAULT_DEBUG_HOST;
-        next.port = 0;
-        return next;
-      }
-      next.host = DEFAULT_DEBUG_HOST;
-      next.port = DEFAULT_DEBUG_PORT;
-      return next;
+      return normalizeDebugConfiguration(folder, config, outputChannel);
     },
   };
 
@@ -852,13 +1070,22 @@ function registerDebugSupport(context, outputChannel) {
     },
   };
 
-  context.subscriptions.push(
+  const debugSubscriptions = [
     vscode.debug.registerDebugConfigurationProvider(DEBUG_TYPE, configurationProvider),
     vscode.debug.registerDebugAdapterDescriptorFactory(DEBUG_TYPE, descriptorFactory),
+    vscode.debug.onDidStartDebugSession((session) => {
+      focusDebugConsoleForSession(session);
+    }),
     vscode.debug.onDidTerminateDebugSession((session) => {
       stopManagedDebugProcess(session.configuration && session.configuration.__gluaManagedProcessId);
-    })
-  );
+    }),
+  ];
+  if (typeof vscode.debug.onDidChangeActiveDebugSession === "function") {
+    debugSubscriptions.push(vscode.debug.onDidChangeActiveDebugSession((session) => {
+      focusDebugConsoleForSession(session);
+    }));
+  }
+  context.subscriptions.push(...debugSubscriptions);
 }
 
 function registerBuiltinDocumentProvider(context) {
@@ -1051,6 +1278,11 @@ function activate(context) {
       selectExecutableSetting("gluacExecutable", "Select gluac executable", outputChannel)
     )
   );
+  context.subscriptions.push(
+    vscode.commands.registerCommand(COMMAND_SELECT_BUILTIN_DOCS, () =>
+      selectBuiltinDocsSetting(outputChannel)
+    )
+  );
   context.subscriptions.push(vscode.commands.registerCommand("type", handleTypeCommand));
 
   registerBuiltinDocumentProvider(context);
@@ -1073,6 +1305,7 @@ function activate(context) {
   lastDocConfig = docConfig;
   logResolvedDocLanguage(outputChannel, "activate", docConfig);
   const syntax = config.get("syntax", "extended");
+  const events = config.get("events", true);
   const bundledServerPath = path.join(__dirname, "server.js");
   const sourceServerPath = path.join(__dirname, "server", "index.js");
   const extensionServerPath = fs.existsSync(bundledServerPath) ? bundledServerPath : sourceServerPath;
@@ -1102,6 +1335,7 @@ function activate(context) {
     ],
     initializationOptions: {
       syntax,
+      events,
       locale: docConfig.language,
       resolvedLocale: docConfig.resolvedLanguage,
       builtinExtensions: docConfig.docs,
@@ -1168,6 +1402,14 @@ module.exports = {
     debugCurrentFile,
     parseGluaDapReadyLine,
     managedDebugFailureMessage,
+    isManagedProcessControlLine,
+    createManagedProcessOutputRouter,
+    showDebugConsole,
+    scheduleDebugConsoleFocus,
+    isGluaDebugSession,
+    focusDebugConsoleForSession,
+    normalizeDebugConfiguration,
     blockEnterExpansion,
+    useRemoteDapConfig,
   },
 };

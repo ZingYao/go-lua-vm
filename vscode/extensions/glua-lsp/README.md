@@ -33,6 +33,7 @@ unless the project owner publishes a separate license grant.
   "glua.docLanguage": "auto",
   "glua.executable": "/path/to/glua",
   "glua.gluacExecutable": "/path/to/gluac",
+  "glua.useRemoteDap": false,
   "glua.builtinDocs": [
     ".vscode/glua-builtin-docs.json"
   ]
@@ -74,6 +75,14 @@ The command can create or open a project-level or global-level JSON file. Projec
 ```
 
 Project files are usually easier to review and share with the repository.
+
+VS Code settings do not render native file picker controls for string or array settings. Use these commands from the Command Palette when you want a file chooser:
+
+```text
+GLua: Select glua executable
+GLua: Select gluac executable
+GLua: Select builtin docs JSON
+```
 
 You can also create the file manually and reference it from `glua.builtinDocs`.
 
@@ -279,6 +288,9 @@ GLua: Debug current file
 `Run current file` executes `glua <current-file>` in the file's workspace or directory.
 `Debug current file` starts a `glua` debug session. The DAP address is managed internally by the extension and is not a user-editable setting.
 
+Set `glua.useRemoteDap` to `true` to make `Debug current file` attach to
+`glua.dapHost` / `glua.dapPort` instead of launching the configured executable.
+
 You can still create a minimal `.vscode/launch.json` entry:
 
 ```json
@@ -286,6 +298,21 @@ You can still create a minimal `.vscode/launch.json` entry:
   "type": "glua",
   "request": "attach",
   "name": "Attach to GLua DAP"
+}
+```
+
+For a launch configuration that should use remote DAP while staying in the launch
+dropdown, add `useRemoteDap`:
+
+```json
+{
+  "type": "glua",
+  "request": "launch",
+  "name": "Debug via remote GLua DAP",
+  "program": "${file}",
+  "useRemoteDap": true,
+  "host": "${config:glua.dapHost}",
+  "port": "${config:glua.dapPort}"
 }
 ```
 

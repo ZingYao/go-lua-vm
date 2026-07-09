@@ -13,4 +13,14 @@ extensions.timesPrint = function(name,times)
   end
 end
 
+extensions['_glua_const'] = {
+    a = 1,
+    b = 2,
+    c = 'hello',
+    d = true,
+    e = nil
+}
+
+extensions['test'] = 1
+
 return extensions

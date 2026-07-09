@@ -22,6 +22,7 @@ public final class GluaDebugProcess extends XDebugProcess {
         this.dapHandler = processHandler;
         this.processHandler = processHandler;
         processHandler.setDebugProcess(this);
+        processHandler.setBreakpointsMuted(session.areBreakpointsMuted());
     }
 
     public GluaDebugProcess(@NotNull XDebugSession session, @NotNull GluaDapLaunchProcessHandler processHandler) {
@@ -29,6 +30,7 @@ public final class GluaDebugProcess extends XDebugProcess {
         this.dapHandler = processHandler;
         this.processHandler = processHandler;
         processHandler.setDebugProcess(this);
+        processHandler.setBreakpointsMuted(session.areBreakpointsMuted());
     }
 
     @Override
@@ -109,7 +111,7 @@ public final class GluaDebugProcess extends XDebugProcess {
     }
 
     void onStopped(@NotNull GluaDapStackFrame frame) {
-        getSession().positionReached(new GluaSuspendContext(frame, dapHandler));
+        getSession().positionReached(new GluaSuspendContext(getSession().getProject(), frame, dapHandler));
     }
 
     void refreshVariables() {
@@ -118,7 +120,13 @@ public final class GluaDebugProcess extends XDebugProcess {
 
     private void sendDebugCommand(@NotNull String command) {
         if (dapHandler != null) {
+            if (!"pause".equals(command)) {
+                dapHandler.setBreakpointsMuted(getSession().areBreakpointsMuted());
+            }
             dapHandler.sendControlCommand(command);
+            if (!"pause".equals(command)) {
+                getSession().sessionResumed();
+            }
         }
     }
 

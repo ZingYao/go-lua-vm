@@ -1583,6 +1583,29 @@ func TestDoStringLua53SyntaxDisablesExtensions(t *testing.T) {
 		// 关闭扩展后 switch 语句不能再通过解析。
 		t.Fatalf("DoString should reject disabled switch syntax")
 	}
+	if err := DoString(state, "const answer = 42"); err == nil {
+		// 关闭扩展后 const 语法糖不能再通过解析。
+		t.Fatalf("DoString should reject disabled const syntax")
+	}
+}
+
+// TestOpenLibsCanDisableGluaEvents 验证 State 选项可关闭 glua 自定义事件全局 API。
+func TestOpenLibsCanDisableGluaEvents(t *testing.T) {
+	// 创建显式关闭事件能力的 State。
+	state := NewStateWithOptions(WithGluaEvents(DefaultOptions(), false))
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库注册仍应成功。
+		t.Fatalf("OpenLibs with events disabled failed: %v", err)
+	}
+	if value := state.Globals().RawGetString("setFunctionEvent"); !value.IsNil() {
+		// 关闭事件能力后不应注册函数级事件入口。
+		t.Fatalf("setFunctionEvent should not be registered when events are disabled: %#v", value)
+	}
+	if value := state.Globals().RawGetString("events"); !value.IsNil() {
+		// 关闭事件能力后不应注册 events 常量表。
+		t.Fatalf("events table should not be registered when events are disabled: %#v", value)
+	}
 }
 
 // TestDoStringMathHugeBitwiseErrorKeepsFieldQuotes 验证 math.huge 位运算错误保留字段引号。
@@ -6560,5 +6583,270 @@ func TestTryExecuteLeafAddReturnInCaller(t *testing.T) {
 	if !ok || !value.RawEqual(runtime.IntegerValue(42)) {
 		// 快路径必须读取 upvalue cell 当前值并写回结果。
 		t.Fatalf("upvalue leaf add result mismatch: value=%#v ok=%v", value, ok)
+	}
+}
+
+// TestDoStringGluaFunctionEvents 验证 glua 函数级事件、自定义事件和局部变量快照。
+func TestDoStringGluaFunctionEvents(t *testing.T) {
+	if !DefaultOptions().GluaEventsEnabled {
+		// 当前构建未编译 glua events 时，正向事件用例不执行。
+		t.Skip("glua events are not compiled")
+	}
+	// 创建完整标准库 State，确保事件全局函数和 table/string 基础能力可用。
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库打开不应失败。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+
+	source := `
+local seen = {}
+local function f(x)
+  local inside = x + 1
+  setFunctionEvent(events.function_call, function(ctx)
+    seen[#seen + 1] = ctx.event .. ":" .. tostring(ctx.locals.x)
+  end)
+  setFunctionEvent(events.function_return, function(ctx)
+    seen[#seen + 1] = ctx.event .. ":" .. tostring(ctx.payload[1])
+  end)
+  setFunctionEvent("mark", function(ctx)
+    seen[#seen + 1] = ctx.event .. ":" .. tostring(ctx.locals.inside) .. ":" .. tostring(ctx.payload)
+  end)
+  callFunctionEvent("mark", "payload")
+  return inside
+end
+assert(f(2) == 3)
+assert(f(4) == 5)
+assert(seen[1] == "mark:3:payload", seen[1])
+assert(seen[2] == events.function_return .. ":3", seen[2])
+assert(seen[3] == events.function_call .. ":4", seen[3])
+assert(seen[4] == "mark:5:payload", seen[4])
+assert(seen[5] == events.function_return .. ":5", seen[5])
+`
+	if err := DoString(state, source); err != nil {
+		// 函数级事件必须按注册作用域触发并能读取当前 local 快照。
+		t.Fatalf("DoString glua function events failed: %v", err)
+	}
+}
+
+// TestDoStringGluaProgressEvents 验证 glua 文件级进度事件和异步自定义事件。
+func TestDoStringGluaProgressEvents(t *testing.T) {
+	if !DefaultOptions().GluaEventsEnabled {
+		// 当前构建未编译 glua events 时，正向事件用例不执行。
+		t.Skip("glua events are not compiled")
+	}
+	// 创建完整标准库 State，确保事件全局函数可用。
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库打开不应失败。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+
+	source := `
+local progressLines = 0
+local asyncPayload
+setProgressEvent(events.progress_line, function(ctx)
+  if ctx.event == events.progress_line and ctx.line then
+    progressLines = progressLines + 1
+  end
+end)
+setProgressEventAsync("custom.progress", function(ctx)
+  asyncPayload = ctx.payload
+end)
+callProgressEventAsync("custom.progress", "done")
+local afterAsync = true
+assert(afterAsync)
+assert(asyncPayload == "done", tostring(asyncPayload))
+assert(progressLines > 0, progressLines)
+`
+	if err := DoString(state, source); err != nil {
+		// 文件级事件必须覆盖当前 chunk，并在 VM 安全点执行异步回调。
+		t.Fatalf("DoString glua progress events failed: %v", err)
+	}
+}
+
+// TestDoStringConstSyntaxDefinesReadOnlyLocal 验证 const 语法糖声明只读绑定。
+func TestDoStringConstSyntaxDefinesReadOnlyLocal(t *testing.T) {
+	if !DefaultSyntaxExtensions().Has(SyntaxConst) {
+		// 当前构建未编译 const 语法糖时，正向 const 用例不执行。
+		t.Skip("const syntax extension is not compiled")
+	}
+	// 创建完整标准库 State，确保 assert 可用。
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库打开不应失败。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+
+	source := `
+const answer = 42
+assert(answer == 42)
+assert(_G.answer == 42)
+do
+  const answer = "inner"
+  assert(answer == "inner")
+  assert(_G.answer == 42)
+end
+assert(answer == 42)
+`
+	if err := DoString(state, source); err != nil {
+		// 顶层 const 应进入当前环境，内层 const 仍按块级绑定读取并允许遮蔽。
+		t.Fatalf("DoString const binding failed: %v", err)
+	}
+}
+
+// TestLoadStringConstSyntaxRejectsAssignment 验证 const 绑定不能被重新赋值。
+func TestLoadStringConstSyntaxRejectsAssignment(t *testing.T) {
+	if !DefaultSyntaxExtensions().Has(SyntaxConst) {
+		// 当前构建未编译 const 语法糖时，正向 const 用例不执行。
+		t.Skip("const syntax extension is not compiled")
+	}
+	// 创建完整标准库 State，用 LoadString 直接观察编译期错误。
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库打开不应失败。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+
+	err := LoadString(state, "const answer = 42\nanswer = 7\n", "=(const-test)")
+	if err == nil {
+		// 对 const 绑定赋值必须在编译期失败。
+		t.Fatalf("LoadString const assignment should fail")
+	}
+	if !strings.Contains(err.Error(), "cannot assign to const binding 'answer'") {
+		// 错误文本应明确指出 const 覆盖。
+		t.Fatalf("const assignment error mismatch: %v", err)
+	}
+}
+
+// TestLoadStringConstSyntaxRejectsTopLevelLocalShadow 验证顶层同名 local 不能遮蔽全局 const。
+func TestLoadStringConstSyntaxRejectsTopLevelLocalShadow(t *testing.T) {
+	if !DefaultSyntaxExtensions().Has(SyntaxConst) {
+		// 当前构建未编译 const 语法糖时，正向 const 用例不执行。
+		t.Skip("const syntax extension is not compiled")
+	}
+	// 创建带标准库的 State，编译顶层同名 local 遮蔽片段。
+	state := NewState()
+	OpenLibs(state)
+	err := LoadString(state, "const answer = 42\nlocal answer = 7\n", "=(const-shadow-test)")
+	if err == nil {
+		// 顶层 local 会重新定义 ROOT 名称，必须按 const 约束拒绝。
+		t.Fatalf("LoadString const top-level local shadow should fail")
+	}
+	if !strings.Contains(err.Error(), "cannot assign to const binding 'answer'") {
+		// 错误文本应明确指出 const 覆盖。
+		t.Fatalf("const top-level local shadow error mismatch: %v", err)
+	}
+}
+
+// TestDoStringConstSyntaxProtectsGlobalsAcrossChunks 验证顶层 const 会在当前 State 的全局表中持久只读。
+func TestDoStringConstSyntaxProtectsGlobalsAcrossChunks(t *testing.T) {
+	if !DefaultSyntaxExtensions().Has(SyntaxConst) {
+		// 当前构建未编译 const 语法糖时，正向 const 用例不执行。
+		t.Skip("const syntax extension is not compiled")
+	}
+	// 创建带标准库的 State，先声明全局 const，再用新 chunk 走运行期写保护。
+	state := NewState()
+	OpenLibs(state)
+	if err := DoString(state, "const answer = 42\nconst missing = nil\n"); err != nil {
+		// 顶层 const 声明应能投影到全局表，包括 nil 常量。
+		t.Fatalf("DoString top-level const declaration failed: %v", err)
+	}
+	err := DoString(state, `
+assert(answer == 42)
+assert(missing == nil)
+local okAnswer = pcall(function()
+  answer = 7
+end)
+assert(not okAnswer)
+local okMissing = pcall(function()
+  missing = "filled"
+end)
+assert(not okMissing)
+`)
+	if err != nil {
+		// 跨 chunk 写入应由 runtime table const key 拦截。
+		t.Fatalf("DoString cross-chunk const protection failed: %v", err)
+	}
+}
+
+// TestDoStringConstSyntaxSupportsMultipleNames 验证 const 支持 Lua 风格多名称声明。
+func TestDoStringConstSyntaxSupportsMultipleNames(t *testing.T) {
+	if !DefaultSyntaxExtensions().Has(SyntaxConst) {
+		// 当前构建未编译 const 语法糖时，正向 const 用例不执行。
+		t.Skip("const syntax extension is not compiled")
+	}
+	// 创建带标准库的 State，执行多 const 绑定求值片段。
+	state := NewState()
+	OpenLibs(state)
+	err := DoString(state, `
+const first, second = 11, 31
+assert(first + second == 42)
+assert(_G.first == 11)
+assert(_G.second == 31)
+`)
+	if err != nil {
+		// 顶层多名称 const 声明应按当前环境只读全局读取。
+		t.Fatalf("DoString const multi binding failed: %v", err)
+	}
+}
+
+// TestLoadStringConstSyntaxRejectsCapturedAssignment 验证 const 捕获为 upvalue 后仍不能赋值。
+func TestLoadStringConstSyntaxRejectsCapturedAssignment(t *testing.T) {
+	if !DefaultSyntaxExtensions().Has(SyntaxConst) {
+		// 当前构建未编译 const 语法糖时，正向 const 用例不执行。
+		t.Skip("const syntax extension is not compiled")
+	}
+	// 创建带标准库的 State，编译内层函数覆盖外层 const 的片段。
+	state := NewState()
+	OpenLibs(state)
+	err := LoadString(state, "const answer = 42\nlocal function rewrite()\n  answer = 7\nend\n", "=(const-upvalue-test)")
+	if err == nil {
+		// 对 const upvalue 赋值必须在编译期失败。
+		t.Fatalf("LoadString const upvalue assignment should fail")
+	}
+	if !strings.Contains(err.Error(), "cannot assign to const binding 'answer'") {
+		// 错误文本应明确指出 const 覆盖。
+		t.Fatalf("const upvalue assignment error mismatch: %v", err)
+	}
+}
+
+// TestDoStringGluaConstTableProjectsReadOnlyFields 验证 `_glua_const` 子表会投影为 ROOT 只读字段。
+func TestDoStringGluaConstTableProjectsReadOnlyFields(t *testing.T) {
+	// 创建带标准库的 State，执行 `_glua_const` 投影和写保护片段。
+	state := NewState()
+	OpenLibs(state)
+	err := DoString(state, `
+local ROOT = {
+  _glua_const = {
+    answer = 42,
+    [2] = "two",
+  },
+}
+assert(ROOT.answer == 42)
+assert(ROOT[2] == "two")
+local okField = pcall(function()
+  ROOT.answer = 7
+end)
+assert(not okField)
+local key = "answer"
+local okDynamic = pcall(function()
+  ROOT[key] = 8
+end)
+assert(not okDynamic)
+local okIndex = pcall(function()
+  ROOT[2] = "changed"
+end)
+assert(not okIndex)
+ROOT.mutable = "kept"
+assert(ROOT.mutable == "kept")
+`)
+	if err != nil {
+		// `_glua_const` 投影字段应可读且只读，普通字段仍可写。
+		t.Fatalf("DoString _glua_const table failed: %v", err)
 	}
 }

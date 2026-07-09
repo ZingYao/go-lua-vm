@@ -7,7 +7,7 @@ import java.util.Set;
 
 final class GluaLexerUtil {
     static final Set<String> KEYWORDS = Set.of(
-        "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if",
+        "and", "break", "const", "do", "else", "elseif", "end", "false", "for", "function", "if",
         "in", "local", "nil", "not", "or", "repeat", "return", "then", "true", "until",
         "while", "goto", "continue", "switch", "case", "default"
     );

@@ -301,10 +301,10 @@ func (analyzer *semanticAnalyzer) analyzeStatement(block *Block, scope *ScopeInf
 		analyzer.analyzeBlock(typedStatement.Body, scope, statementIndex, depth+1, nil, false, namespace)
 	case *LocalAssignmentStatement:
 		// local 变量从声明语句开始可见，生命周期延续到当前 block 结束。
-		analyzer.addLocalNames(scope, typedStatement.Names, statementIndex, typedStatement.Position)
+		analyzer.addLocalNames(scope, typedStatement.Names, typedStatement.Const, statementIndex, typedStatement.Position)
 	case *LocalFunctionStatement:
 		// local function 先在外层声明函数名，再用独立函数命名空间分析函数体。
-		analyzer.addLocalNames(scope, []string{typedStatement.Name}, statementIndex, typedStatement.Position)
+		analyzer.addLocalNames(scope, []string{typedStatement.Name}, false, statementIndex, typedStatement.Position)
 		analyzer.analyzeFunctionBody(typedStatement.Body)
 	case *FunctionStatement:
 		// 普通 function 语句不声明 local，但函数体内部需要独立作用域和 label/goto 命名空间。
@@ -386,7 +386,7 @@ func (analyzer *semanticAnalyzer) analyzeIfStatement(parent *ScopeInfo, depth in
 // addLocalNames 将名称列表登记为当前作用域局部变量。
 //
 // startStatement 是声明所在语句下标；局部变量结束位置统一为当前 block 的普通语句数量。
-func (analyzer *semanticAnalyzer) addLocalNames(scope *ScopeInfo, names []string, startStatement int, position lexer.Position) {
+func (analyzer *semanticAnalyzer) addLocalNames(scope *ScopeInfo, names []string, constDeclaration bool, startStatement int, position lexer.Position) {
 	for _, name := range names {
 		if len(scope.Locals) >= maxFunctionLocals {
 			// 超出 Lua 5.3 单函数局部变量上限时记录错误，并停止追加后续局部。
@@ -394,7 +394,7 @@ func (analyzer *semanticAnalyzer) addLocalNames(scope *ScopeInfo, names []string
 			return
 		}
 		// 同名 local 在 Lua 中允许遮蔽，因此这里不报重复错误。
-		appendScopeLocal(scope, LocalInfo{Name: name, StartStatement: startStatement, EndStatement: scope.StatementCount, Position: position})
+		appendScopeLocal(scope, LocalInfo{Name: name, Const: constDeclaration, StartStatement: startStatement, EndStatement: scope.StatementCount, Position: position})
 	}
 }
 

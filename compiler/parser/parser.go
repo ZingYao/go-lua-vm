@@ -449,6 +449,10 @@ func (parser *Parser) parseStatement() (Statement, error) {
 		return statement, err
 	}
 	if currentToken.Kind == lexer.TokenIdentifier {
+		if parser.syntax.Has(extensions.SyntaxConst) && currentToken.Text == "const" {
+			// const 语法糖声明当前作用域只读 local。
+			return parser.parseConstAssignmentStatement()
+		}
 		// 普通标识符开头可能是赋值语句，也可能是函数调用语句。
 		return parser.parseAssignmentOrCallStatement()
 	}
@@ -642,6 +646,39 @@ func (parser *Parser) parseLocalAssignmentStatement() (Statement, error) {
 
 	// 返回 local 赋值语句节点。
 	return &LocalAssignmentStatement{Names: names, Values: values, Position: startPosition}, nil
+}
+
+// parseConstAssignmentStatement 解析 const 语法糖声明。
+//
+// const 声明等价于 local 声明加编译期只读约束；必须带初始化表达式，避免创建不可写 nil 常量。
+func (parser *Parser) parseConstAssignmentStatement() (Statement, error) {
+	startPosition := parser.current.Position
+	if parser.current.Kind != lexer.TokenIdentifier || parser.current.Text != "const" {
+		// 调用方已经判断 const，该错误只作为防御。
+		return nil, parser.errorf(parser.current, "expected const")
+	}
+	parser.advance()
+	names, err := parser.parseNameList()
+	if err != nil {
+		// const 后必须存在至少一个常量名。
+		return nil, err
+	}
+	if len(names) > maxFunctionLocals {
+		// 过多局部变量应优先于后续表达式错误报告。
+		return nil, parser.tooManyLocalVariablesError(startPosition)
+	}
+	if err := parser.expectOperator("="); err != nil {
+		// const 必须显式初始化，避免不可写 nil 绑定造成误用。
+		return nil, err
+	}
+	values, err := parser.parseExpressionList()
+	if err != nil {
+		// 初始化表达式列表解析失败时返回错误。
+		return nil, err
+	}
+
+	// 返回带只读标记的 local 声明节点。
+	return &LocalAssignmentStatement{Names: names, Values: values, Const: true, Position: startPosition}, nil
 }
 
 // parseFunctionStatement 解析普通 function 语句。

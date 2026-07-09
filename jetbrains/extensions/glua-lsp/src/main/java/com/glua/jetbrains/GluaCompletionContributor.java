@@ -55,19 +55,25 @@ public final class GluaCompletionContributor extends CompletionContributor {
                         if (!method.startsWith(completion.prefix())) {
                             continue;
                         }
-                        result.addElement(LookupElementBuilder.create(method)
+                        LookupElementBuilder builder = LookupElementBuilder.create(method)
                             .withTypeText(builtin.signature, true)
-                            .withTailText(" " + builtin.description, true)
-                            .withInsertHandler(insertFunctionTemplate(method, builtin.signature)));
+                            .withTailText(" " + builtin.description, true);
+                        if (builtin.signature.contains("(")) {
+                            builder = builder.withInsertHandler(insertFunctionTemplate(method, builtin.signature));
+                        }
+                        result.addElement(builder);
                         continue;
                     }
                     if (name.contains(".") || !name.startsWith(completion.prefix())) {
                         continue;
                     }
-                    result.addElement(LookupElementBuilder.create(name)
+                    LookupElementBuilder builder = LookupElementBuilder.create(name)
                         .withTypeText(builtin.signature, true)
-                        .withTailText(" " + builtin.description, true)
-                        .withInsertHandler(insertFunctionTemplate(name, builtin.signature)));
+                        .withTailText(" " + builtin.description, true);
+                    if (builtin.signature.contains("(")) {
+                        builder = builder.withInsertHandler(insertFunctionTemplate(name, builtin.signature));
+                    }
+                    result.addElement(builder);
                 }
                 if (!completion.method()) {
                     for (GluaAnalysis.SymbolCompletion symbol : GluaAnalysis.symbolCompletions(parameters.getEditor().getDocument(), completion.prefix())) {
@@ -88,10 +94,13 @@ public final class GluaCompletionContributor extends CompletionContributor {
                     )) {
                         String typeText = member.detail();
                         String tailText = " from " + member.sourcePath().getFileName();
-                        result.addElement(LookupElementBuilder.create(member.name())
+                        LookupElementBuilder builder = LookupElementBuilder.create(member.name())
                             .withTypeText(typeText, true)
-                            .withTailText(tailText, true)
-                            .withInsertHandler(insertFunctionTemplate(member.name(), member.signature())));
+                            .withTailText(tailText, true);
+                        if (member.kind().equals("function") || member.kind().equals("method")) {
+                            builder = builder.withInsertHandler(insertFunctionTemplate(member.name(), member.signature()));
+                        }
+                        result.addElement(builder);
                     }
                 }
             }

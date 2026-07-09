@@ -36,15 +36,18 @@ public final class GluaDebugProgramRunner extends GenericProgramRunner<RunnerSet
         if (!(profile instanceof GluaDapRunConfiguration configuration)) {
             throw new ExecutionException(GluaUiText.text("GLua DAP configuration is required.", "需要 GLua DAP 调试配置。"));
         }
-        GluaDapLaunchProcessHandler handler = GluaDapLaunchProcessHandler.create(
-            environment.getProject(),
-            configuration.gluaExecutable(),
-            configuration.program()
-        );
+        GluaDapLaunchProcessHandler localHandler = configuration.useRemoteDap()
+            ? null
+            : GluaDapLaunchProcessHandler.create(environment.getProject(), configuration.gluaExecutable(), configuration.program());
+        GluaDapRemoteProcessHandler remoteHandler = configuration.useRemoteDap()
+            ? new GluaDapRemoteProcessHandler(environment.getProject(), configuration.host(), configuration.port(), configuration.program())
+            : null;
         XDebuggerManager.getInstance(environment.getProject()).startSessionAndShowTab(profile.getName(), new XDebugProcessStarter() {
             @Override
             public @NotNull GluaDebugProcess start(@NotNull XDebugSession session) {
-                return new GluaDebugProcess(session, handler);
+                return localHandler != null
+                    ? new GluaDebugProcess(session, localHandler)
+                    : new GluaDebugProcess(session, remoteHandler);
             }
         }, environment);
         return null;

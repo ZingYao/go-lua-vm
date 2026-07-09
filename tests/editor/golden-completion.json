@@ -2,6 +2,7 @@
   "files": {
     "app/completion_module.lua": "local M = {}\n-- description: print many times\n-- param: name string user name\n-- param: times number repeat count\nM.timesPrint = function(name, times) end\nfunction M.dotCall(value) end\n-- description: call with self\n-- param: value string payload\n-- return: string result\nfunction M:colonCall(value) end\nM['bracketCall'] = function() end\nreturn M\n",
     "app/literal_completion.lua": "local M = { literalCall = function() end, ['indexedLiteral'] = function() end, plainValue = true }\nreturn M\n",
+    "app/const_completion.lua": "local M = {}\nM._glua_const = { a = 1, b = 2 }\nM.mutable = 3\nreturn M\n",
     "app/non_function_completion.lua": "local M = { ccc = true, value = 1 }\nreturn M\n",
     "app/private_completion.lua": "local Private = {}\nPrivate.hidden = function() end\nlocal Public = {}\nPublic.visible = function() end\nreturn Public\n"
   },
@@ -113,9 +114,7 @@
       "cursor": "after-marker",
       "expected": [
         "literalCall",
-        "indexedLiteral"
-      ],
-      "notExpected": [
+        "indexedLiteral",
         "plainValue"
       ]
     },
@@ -126,11 +125,27 @@
       "source": "local tools = require('non_function_completion')\ntools.",
       "marker": "tools.",
       "cursor": "after-marker",
-      "expected": [],
-      "notExpected": [
+      "expected": [
         "ccc",
         "value"
       ]
+    },
+    {
+      "name": "required glua const and variable member completion",
+      "kind": "module-member",
+      "document": "app/main.lua",
+      "source": "local tools = require('const_completion')\ntools.",
+      "marker": "tools.",
+      "cursor": "after-marker",
+      "expected": [
+        "a",
+        "b",
+        "mutable"
+      ],
+      "detailContains": {
+        "a": "const",
+        "mutable": "table field"
+      }
     },
     {
       "name": "required non returned table guard",
@@ -160,6 +175,39 @@
       },
       "insertTextContains": {
         "match": "match(${1:s}, ${2:pattern}, ${3:init})"
+      }
+    },
+    {
+      "name": "event global function completion",
+      "kind": "builtin-global",
+      "source": "setFunction",
+      "marker": "setFunction",
+      "cursor": "after-marker",
+      "expected": [
+        "setFunctionEvent",
+        "setFunctionEventAsync"
+      ],
+      "detailContains": {
+        "setFunctionEvent": "setFunctionEvent(event, callback)"
+      },
+      "insertTextContains": {
+        "setFunctionEvent": "setFunctionEvent(${1:event}, ${2:callback})"
+      }
+    },
+    {
+      "name": "events table constant completion",
+      "kind": "builtin-member",
+      "source": "events.function_",
+      "marker": "events.function_",
+      "cursor": "after-marker",
+      "expected": [
+        "function_call",
+        "function_return",
+        "function_error",
+        "function_exit"
+      ],
+      "detailContains": {
+        "function_call": "events.function_call"
       }
     }
   ]

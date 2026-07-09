@@ -6,10 +6,10 @@ import java.net.ConnectException;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-final class GluaDapAttachProcessHandlerTest {
+final class GluaDapRemoteProcessHandlerTest {
     @Test
     void failureMessageIncludesTargetErrorAndRecoveryHint() {
-        String message = GluaDapAttachProcessHandler.failureMessage(
+        String message = GluaDapRemoteProcessHandler.failureMessage(
             "127.0.0.1",
             5678,
             new ConnectException("Connection refused")
@@ -17,7 +17,7 @@ final class GluaDapAttachProcessHandlerTest {
         assertTrue(message.contains("127.0.0.1:5678"), "message should include attach target");
         assertTrue(message.contains("Connection refused"), "message should include connection error");
         assertTrue(message.contains("No GLua DAP server is listening"), "message should explain missing DAP server");
-        assertTrue(message.contains("glua CLI"), "message should point users at the runtime capability gap");
-        assertTrue(message.contains("hit breakpoints"), "message should explain breakpoint impact");
+        assertTrue(message.contains("glua executable"), "message should point users at local launch");
+        assertTrue(message.contains("remote GLua DAP server"), "message should point users at remote attach");
     }
 }

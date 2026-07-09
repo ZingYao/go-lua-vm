@@ -23,6 +23,8 @@ var (
 	ErrMetamethodChainTooLong = errors.New("metamethod chain too long")
 	// ErrInvalidTableIterationKey 表示 next 使用了当前 table 中不存在的 key。
 	ErrInvalidTableIterationKey = errors.New("invalid key to next")
+	// ErrConstTableKey 表示尝试覆盖由 `_glua_const` 声明的只读 table 字段。
+	ErrConstTableKey = errors.New("cannot assign to const table field")
 )
 
 const (
@@ -41,6 +43,12 @@ const (
 	tableNewIndexMetamethodKey = "__newindex"
 	// tableWeakModeKey 表示 Lua 5.3 弱表元表中的 `__mode` 字段名。
 	tableWeakModeKey = "__mode"
+	// tableGluaConstKey 表示 glua 扩展中把子表字段投影为只读常量的声明字段。
+	tableGluaConstKey = "_glua_const"
+	// tableGluaConstMarkerKey 表示 const 语法糖生成的内部包装标记字段。
+	tableGluaConstMarkerKey = "_glua_const_marker"
+	// tableGluaConstValueKey 表示 const 语法糖生成的内部包装真实值字段。
+	tableGluaConstValueKey = "_glua_const_value"
 	// tableArrayDoublingLimit 表示数组区使用 2 倍扩容的上限；超过后改用 1.5 倍减少大表多余扫描。
 	tableArrayDoublingLimit = 1 << 16
 )
@@ -83,6 +91,8 @@ type Table struct {
 	staleIterationIndexCache map[tableKey]int
 	// staleIterationCacheValid 表示 staleIterationCache 可作为已删除当前 key 的续迭代兜底。
 	staleIterationCacheValid bool
+	// constKeys 保存 `_glua_const` 已投影到当前 table 的只读字段 key。
+	constKeys map[tableKey]struct{}
 }
 
 // tableKey 表示可放入 hash 区的 Lua key。
@@ -232,10 +242,137 @@ func (table *Table) ensureHashKeyStorage() {
 	table.hashKeys = make(map[tableKey]Value)
 }
 
+// checkConstKey 检查 key 是否命中 `_glua_const` 投影出的只读字段。
+//
+// key 必须是 Lua table 可接受的 key；nil、NaN 或暂不支持的 key 由 makeTableKey 返回原始错误。
+func (table *Table) checkConstKey(key Value) error {
+	// 没有只读字段时无需分配或编码 key。
+	if table.constKeys == nil {
+		return nil
+	}
+	lookupKey, err := makeTableKey(key)
+	if err != nil {
+		// key 本身非法时保留原有 table 错误语义。
+		return err
+	}
+	if _, ok := table.constKeys[lookupKey]; ok {
+		// 命中只读字段时拒绝 Lua 层写入。
+		return ErrConstTableKey
+	}
+	return nil
+}
+
+// CheckConstStringKey 检查 string key 是否命中 `_glua_const` 只读字段。
+//
+// 该入口供 VM string 常量 key 快路径使用，避免为热路径临时构造通用 Value。
+func (table *Table) CheckConstStringKey(key string) error {
+	// string key 可直接构造 tableKey；无 constKeys 时立即返回。
+	if table.constKeys == nil {
+		return nil
+	}
+	if _, ok := table.constKeys[tableKey{kind: KindString, stringValue: key}]; ok {
+		return ErrConstTableKey
+	}
+	return nil
+}
+
+// CheckConstIntegerKey 检查 integer key 是否命中 `_glua_const` 只读字段。
+//
+// 该入口供 VM 数组写入快路径使用，保持 const 保护不会被 SETTABLE 快路径绕过。
+func (table *Table) CheckConstIntegerKey(key int64) error {
+	// integer key 可直接构造 tableKey；无 constKeys 时立即返回。
+	if table.constKeys == nil {
+		return nil
+	}
+	if _, ok := table.constKeys[tableKey{kind: KindInteger, integerValue: key}]; ok {
+		return ErrConstTableKey
+	}
+	return nil
+}
+
+// markConstKey 把 key 登记为当前 table 的只读字段。
+//
+// 调用方必须已经完成字段投影写入；登记失败会返回 key 编码错误。
+func (table *Table) markConstKey(key Value) error {
+	// 只读 key 使用 tableKey 记录，保证 string、integer、引用 key 与普通 raw 存储一致。
+	lookupKey, err := makeTableKey(key)
+	if err != nil {
+		return err
+	}
+	if table.constKeys == nil {
+		table.constKeys = make(map[tableKey]struct{})
+	}
+	table.constKeys[lookupKey] = struct{}{}
+	return nil
+}
+
+// applyGluaConstTable 把 `_glua_const` 子表中的字段投影到当前 table 并标记为只读。
+//
+// value 非 table 时只保留 `_glua_const` 字段本身；table 字段会按 raw 迭代复制到当前 ROOT。
+func (table *Table) applyGluaConstTable(value Value) error {
+	// 只有 table 值参与 glua const 投影，其他值保持普通字段语义。
+	if value.Kind != KindTable {
+		return nil
+	}
+	constTable, ok := value.Ref.(*Table)
+	if !ok || constTable == nil {
+		// 损坏的 table 引用无法迭代，按当前 runtime 的 table 类型错误返回。
+		return ErrExpectedTable
+	}
+	for _, entry := range constTable.rawIterationEntries() {
+		// nil 值不参与 raw 迭代；这里仍保留防护，避免异常构造污染只读 key 集合。
+		if entry.value.IsNil() {
+			continue
+		}
+		projectedValue := entry.value
+		if markerTable, ok := gluaConstMarkerTable(entry.value); ok {
+			// const 语法糖会用包装表携带真实值；缺失 value 字段表示 nil 常量。
+			projectedValue = markerTable.RawGetString(tableGluaConstValueKey)
+		}
+		if err := table.rawSetUnchecked(entry.key, projectedValue); err != nil {
+			return err
+		}
+		if err := table.markConstKey(entry.key); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// gluaConstMarkerTable 识别 const 语法糖生成的 `_glua_const` 内部包装表。
+func gluaConstMarkerTable(value Value) (*Table, bool) {
+	// 只有 table 引用可能携带内部包装标记，普通 `_glua_const` 手写格式继续按原值投影。
+	if value.Kind != KindTable {
+		return nil, false
+	}
+	table, ok := value.Ref.(*Table)
+	if !ok || table == nil {
+		// 损坏引用不作为 marker 处理，交给外层保持原值路径。
+		return nil, false
+	}
+	marker := table.RawGetString(tableGluaConstMarkerKey)
+	if marker.Kind != KindBoolean || !marker.Bool {
+		// 没有显式 marker=true 时不是内部包装。
+		return nil, false
+	}
+	return table, true
+}
+
 // RawSet 使用任意 Lua key 写入 Lua 值。
 //
-// nil key 和 NaN key 会返回错误；value 为 nil 时删除 key。
+// nil key 和 NaN key 会返回错误；value 为 nil 时删除 key；命中 `_glua_const` 投影字段时拒绝覆盖。
 func (table *Table) RawSet(key Value, value Value) error {
+	// raw 写入也要保护 `_glua_const` 投影字段，避免元方法链落点绕过只读约束。
+	if err := table.checkConstKey(key); err != nil {
+		return err
+	}
+	return table.rawSetUnchecked(key, value)
+}
+
+// rawSetUnchecked 使用任意 Lua key 写入 Lua 值但不检查 const 保护。
+//
+// 该入口只供 `_glua_const` 投影自身使用；调用方必须确保不会暴露给普通 Lua 写入路径。
+func (table *Table) rawSetUnchecked(key Value, value Value) error {
 	// nil key 在 Lua 中非法，必须返回错误。
 	if key.IsNil() {
 		return ErrNilTableKey
@@ -275,6 +412,10 @@ func (table *Table) RawSet(key Value, value Value) error {
 	table.hashValues[hashKey] = value
 	table.hashKeys[hashKey] = key
 	table.noteMutation()
+	if key.Kind == KindString && key.String == tableGluaConstKey {
+		// `_glua_const` table 写入后立即把子表字段投影到当前 table。
+		return table.applyGluaConstTable(value)
+	}
 	return nil
 }
 
@@ -314,6 +455,25 @@ func (table *Table) RawGet(key Value) (Value, error) {
 //
 // value 为 nil 时删除 key，模拟 Lua table 中赋 nil 删除字段的基础行为。
 func (table *Table) RawSetString(key string, value Value) {
+	// 内部 raw string 写入保留旧 API 的无错误形态，并允许构建过程写入只读字段初始值。
+	table.rawSetStringUnchecked(key, value)
+}
+
+// RawSetStringWithConstCheck 使用 string key 写入 Lua 值并检查 const 保护。
+//
+// 该入口供 VM 快路径使用；命中 `_glua_const` 投影字段时返回 ErrConstTableKey。
+func (table *Table) RawSetStringWithConstCheck(key string, value Value) error {
+	// VM 写入必须保护 `_glua_const` 投影出的只读字段。
+	if err := table.CheckConstStringKey(key); err != nil {
+		return err
+	}
+	return table.rawSetStringUnchecked(key, value)
+}
+
+// rawSetStringUnchecked 使用 string key 写入 Lua 值但不检查 const 保护。
+//
+// 该入口服务内部构表和 `_glua_const` 投影，普通 Lua VM 写入应使用带检查的方法。
+func (table *Table) rawSetStringUnchecked(key string, value Value) error {
 	if table.hasDenseIntegerArray() {
 		// string key 属于 hash 区；无论写入或删除都先 materialize，保留 mutation/cache 语义。
 		table.materializeDenseIntegerArray()
@@ -324,13 +484,18 @@ func (table *Table) RawSetString(key string, value Value) {
 		delete(table.hashValues, tableKey{kind: KindString, stringValue: key})
 		delete(table.hashKeys, tableKey{kind: KindString, stringValue: key})
 		table.noteMutation()
-		return
+		return nil
 	}
 
 	// 非 nil 值直接写入 hash 区。
 	table.ensureHashStorage()
 	table.hashValues[tableKey{kind: KindString, stringValue: key}] = value
 	table.noteMutation()
+	if key == tableGluaConstKey {
+		// `_glua_const` 写入后立即把子表字段投影到当前 ROOT。
+		return table.applyGluaConstTable(value)
+	}
+	return nil
 }
 
 // RawGetString 使用 string key 读取 Lua 值。
@@ -350,6 +515,26 @@ func (table *Table) RawGetString(key string) Value {
 //
 // value 为 nil 时删除 key，模拟 Lua table 中赋 nil 删除字段的基础行为。
 func (table *Table) RawSetInteger(key int64, value Value) {
+	// 内部 raw integer 写入保留旧 API 的无错误形态，并允许构建过程写入只读字段初始值。
+	table.rawSetIntegerUnchecked(key, value)
+}
+
+// RawSetIntegerWithConstCheck 使用 integer key 写入 Lua 值并检查 const 保护。
+//
+// 该入口供 VM 快路径使用；命中 `_glua_const` 投影字段时返回 ErrConstTableKey。
+func (table *Table) RawSetIntegerWithConstCheck(key int64, value Value) error {
+	// VM 写入必须保护 `_glua_const` 投影出的只读字段。
+	if err := table.CheckConstIntegerKey(key); err != nil {
+		return err
+	}
+	table.rawSetIntegerUnchecked(key, value)
+	return nil
+}
+
+// rawSetIntegerUnchecked 使用 integer key 写入 Lua 值但不检查 const 保护。
+//
+// 该入口服务内部构表和 `_glua_const` 投影，普通 Lua VM 写入应使用带检查的方法。
+func (table *Table) rawSetIntegerUnchecked(key int64, value Value) {
 	if table.hasDenseIntegerArray() {
 		// 紧凑数组只覆盖连续正整数 key 写入 integer value；其他形态必须回退普通 table。
 		if table.tryRawSetDenseInteger(key, value) {
@@ -398,6 +583,26 @@ func (table *Table) RawSetInteger(key int64, value Value) {
 // key 必须大于 0，value 必须不是 nil；不满足时回退 RawSetInteger 保持语义。该入口服务
 // VM 中数值 for 数组写入热路径，避免重复执行 nil/delete 分支。
 func (table *Table) RawSetPositiveIntegerNonNil(key int64, value Value) {
+	// 内部正整数快写保留旧 API 的无错误形态，并允许构建过程写入只读字段初始值。
+	table.rawSetPositiveIntegerNonNilUnchecked(key, value)
+}
+
+// RawSetPositiveIntegerNonNilWithConstCheck 使用正整数 key 写入非 nil 值并检查 const 保护。
+//
+// key 必须大于 0 且 value 非 nil；条件不满足时回退完整整数写入检查路径。
+func (table *Table) RawSetPositiveIntegerNonNilWithConstCheck(key int64, value Value) error {
+	// VM 写入必须保护 `_glua_const` 投影出的只读字段。
+	if err := table.CheckConstIntegerKey(key); err != nil {
+		return err
+	}
+	table.rawSetPositiveIntegerNonNilUnchecked(key, value)
+	return nil
+}
+
+// rawSetPositiveIntegerNonNilUnchecked 使用正整数 key 写入非 nil 值但不检查 const 保护。
+//
+// 该入口服务内部构表和 `_glua_const` 投影，普通 Lua VM 写入应使用带检查的方法。
+func (table *Table) rawSetPositiveIntegerNonNilUnchecked(key int64, value Value) {
 	if table.hasDenseIntegerArray() {
 		// VM table write batch 的目标快路径；guard 失败时 materialize 后复用普通整数写入。
 		if table.tryRawSetDenseInteger(key, value) {

@@ -8,6 +8,7 @@ import (
 	"github.com/ZingYao/go-lua-vm/extensions"
 	"github.com/ZingYao/go-lua-vm/internal/localize"
 	"github.com/ZingYao/go-lua-vm/internal/native"
+	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
 // FeatureText 返回适合 CLI 版本、帮助和启动横幅展示的能力摘要。
@@ -16,6 +17,7 @@ func FeatureText(includeDAP bool) string {
 	var builder strings.Builder
 	builder.WriteString(localize.Text("GLua build features:\n", "GLua 构建能力：\n"))
 	builder.WriteString(fmt.Sprintf(localize.Text("  syntax sugar: %s\n", "  语法糖：%s\n"), syntaxFeatureText()))
+	builder.WriteString(fmt.Sprintf(localize.Text("  glua events: %s\n", "  glua events：%s\n"), eventFeatureText()))
 	builder.WriteString(fmt.Sprintf(localize.Text("  lua c modules/native_module: %s\n", "  Lua C 模块/native_module：%s\n"), nativeFeatureText()))
 	builder.WriteString("  package.loadlib: ")
 	if native.Enabled() {
@@ -34,6 +36,15 @@ func FeatureText(includeDAP bool) string {
 		builder.WriteString(localize.Text("not applicable for this command\n", "当前命令不适用\n"))
 	}
 	return builder.String()
+}
+
+// eventFeatureText 返回 glua 自定义事件能力的可读状态。
+func eventFeatureText() string {
+	// event 能力由 runtime 包的 build tags 决定，这里只读取最终编译状态。
+	if runtime.GluaEventsCompiled() {
+		return localize.Text("enabled", "已启用")
+	}
+	return localize.Text("disabled", "未启用")
 }
 
 // syntaxFeatureText 返回当前构建包含的语法糖名称列表。

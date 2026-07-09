@@ -10,18 +10,30 @@ import org.jetbrains.annotations.NotNull;
 public final class GluaDapRunProfileState extends CommandLineState {
     private final String gluaExecutable;
     private final String program;
+    private final String host;
+    private final int port;
+    private final boolean useRemoteDap;
 
     public GluaDapRunProfileState(@NotNull ExecutionEnvironment environment,
                                   @NotNull String gluaExecutable,
-                                  @NotNull String program) {
+                                  @NotNull String program,
+                                  @NotNull String host,
+                                  int port,
+                                  boolean useRemoteDap) {
         super(environment);
         this.gluaExecutable = gluaExecutable;
         this.program = program;
+        this.host = host;
+        this.port = port;
+        this.useRemoteDap = useRemoteDap;
         setConsoleBuilder(TextConsoleBuilderFactory.getInstance().createBuilder(environment.getProject()));
     }
 
     @Override
     protected @NotNull ProcessHandler startProcess() throws ExecutionException {
+        if (useRemoteDap) {
+            return new GluaDapRemoteProcessHandler(getEnvironment().getProject(), host, port, program);
+        }
         return GluaDapLaunchProcessHandler.create(getEnvironment().getProject(), gluaExecutable, program);
     }
 }

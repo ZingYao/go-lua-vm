@@ -1,4 +1,4 @@
-//go:build !lua53 && (with_all || (!with_switch && !with_continue && !with_all) || (with_continue && with_switch))
+//go:build !lua53 && (with_all || (!with_switch && !with_continue && !with_const && !with_events && !with_all) || (with_continue && with_switch))
 
 package parser
 

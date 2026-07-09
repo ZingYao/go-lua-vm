@@ -20,6 +20,8 @@ const (
 	SyntaxContinue SyntaxSet = 1 << iota
 	// SyntaxSwitch 表示启用 switch/case/default 语句语法糖。
 	SyntaxSwitch
+	// SyntaxConst 表示启用 const 只读局部变量语法糖。
+	SyntaxConst
 )
 
 const (
@@ -27,6 +29,8 @@ const (
 	SyntaxNameContinue = "continue"
 	// SyntaxNameSwitch 是 switch 扩展的用户可见名称。
 	SyntaxNameSwitch = "switch"
+	// SyntaxNameConst 是 const 扩展的用户可见名称。
+	SyntaxNameConst = "const"
 )
 
 // None 返回不启用任何扩展的 Lua 5.3 兼容语法集合。
@@ -62,7 +66,7 @@ func (set SyntaxSet) With(feature SyntaxSet) SyntaxSet {
 // Names 返回集合中已启用扩展的稳定名称列表。
 func (set SyntaxSet) Names() []string {
 	// 按固定顺序输出，避免文档、测试和 CLI 信息受 map 顺序影响。
-	names := make([]string, 0, 2)
+	names := make([]string, 0, 3)
 	if set.Has(SyntaxContinue) {
 		// continue 位启用时展示对应名称。
 		names = append(names, SyntaxNameContinue)
@@ -70,6 +74,10 @@ func (set SyntaxSet) Names() []string {
 	if set.Has(SyntaxSwitch) {
 		// switch 位启用时展示对应名称。
 		names = append(names, SyntaxNameSwitch)
+	}
+	if set.Has(SyntaxConst) {
+		// const 位启用时展示对应名称。
+		names = append(names, SyntaxNameConst)
 	}
 	return names
 }
@@ -152,6 +160,9 @@ func Lookup(name string) (SyntaxSet, error) {
 	case SyntaxNameSwitch:
 		// switch 名称对应 switch 语句扩展。
 		return SyntaxSwitch, nil
+	case SyntaxNameConst:
+		// const 名称对应 const 只读局部变量扩展。
+		return SyntaxConst, nil
 	default:
 		// 未知扩展返回带可用名称的错误，便于 CLI 直接展示。
 		return 0, fmt.Errorf("unknown syntax extension %q, available: %s", name, strings.Join(AvailableNames(), ","))

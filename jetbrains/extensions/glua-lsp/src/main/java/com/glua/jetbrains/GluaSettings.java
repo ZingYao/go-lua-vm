@@ -15,9 +15,13 @@ import java.util.List;
 public final class GluaSettings implements PersistentStateComponent<GluaSettings.StateData> {
     public static final class StateData {
         public String docLanguage = "auto";
+        public String syntax = "extended";
+        public boolean events = true;
         public List<String> builtinDocs = new ArrayList<>();
         public String dapHost = "127.0.0.1";
         public int dapPort = 5678;
+        public boolean useRemoteDap = false;
+        public boolean dapDebugLog = false;
         public String gluaExecutable = "";
         public String gluacExecutable = "";
     }
@@ -45,6 +49,22 @@ public final class GluaSettings implements PersistentStateComponent<GluaSettings
         state.docLanguage = docLanguage == null || docLanguage.isBlank() ? "auto" : docLanguage.trim();
     }
 
+    public String syntax() {
+        return state.syntax == null || state.syntax.isBlank() ? "extended" : state.syntax.trim();
+    }
+
+    public void setSyntax(String syntax) {
+        state.syntax = syntax == null || syntax.isBlank() ? "extended" : syntax.trim();
+    }
+
+    public boolean events() {
+        return state.events;
+    }
+
+    public void setEvents(boolean events) {
+        state.events = events;
+    }
+
     public List<String> builtinDocs() {
         return state.builtinDocs == null ? List.of() : List.copyOf(state.builtinDocs);
     }
@@ -67,6 +87,22 @@ public final class GluaSettings implements PersistentStateComponent<GluaSettings
 
     public void setDapPort(int dapPort) {
         state.dapPort = dapPort >= 1 && dapPort <= 65535 ? dapPort : 5678;
+    }
+
+    public boolean useRemoteDap() {
+        return state.useRemoteDap;
+    }
+
+    public void setUseRemoteDap(boolean useRemoteDap) {
+        state.useRemoteDap = useRemoteDap;
+    }
+
+    public boolean dapDebugLog() {
+        return state.dapDebugLog;
+    }
+
+    public void setDapDebugLog(boolean dapDebugLog) {
+        state.dapDebugLog = dapDebugLog;
     }
 
     public String gluaExecutable() {

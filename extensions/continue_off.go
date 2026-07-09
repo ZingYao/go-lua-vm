@@ -1,4 +1,4 @@
-//go:build lua53 || (!with_continue && !with_all && with_switch)
+//go:build lua53 || (!with_continue && !with_all && (with_switch || with_const || with_events))
 
 package extensions
 

@@ -90,6 +90,8 @@ type ScopeInfo struct {
 type LocalInfo struct {
 	// Name 保存局部变量名。
 	Name string
+	// Const 表示该局部变量由 const 语法糖声明，后续不允许普通赋值覆盖。
+	Const bool
 	// StartStatement 保存局部变量声明所在语句下标。
 	StartStatement int
 	// EndStatement 保存局部变量生命周期结束语句下标。
@@ -239,6 +241,8 @@ type LocalAssignmentStatement struct {
 	Names []string
 	// Values 保存 local 声明的初始化表达式。
 	Values []Expression
+	// Const 表示该声明来自 const 语法糖，编译期会禁止后续赋值覆盖。
+	Const bool
 	// Position 保存 local 关键字位置。
 	Position lexer.Position
 }

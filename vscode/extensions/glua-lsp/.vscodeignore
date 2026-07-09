@@ -3,6 +3,9 @@ test/**
 .vscodeignore
 .npmrc
 .DS_Store
+.vscode/**
+main.glua
+module.glua
 coverage/**
 extension.js
 server/**

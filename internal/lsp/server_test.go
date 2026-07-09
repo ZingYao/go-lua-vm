@@ -57,6 +57,55 @@ func TestAnalyzeDiagnosticsRejectsDisabledExtensions(t *testing.T) {
 	}
 }
 
+// TestAnalyzeDiagnosticsRejectsDisabledConst 验证关闭 const 语法糖后会产生诊断。
+func TestAnalyzeDiagnosticsRejectsDisabledConst(t *testing.T) {
+	diagnostics := analyzeDiagnostics("const answer = 42\n", extensions.None())
+	if len(diagnostics) == 0 {
+		// lua53 模式下 const 语法糖必须被诊断。
+		t.Fatalf("diagnostics should not be empty")
+	}
+	if !strings.Contains(diagnostics[0].Message, "syntax error") && !strings.Contains(diagnostics[0].Message, "expected") {
+		// 诊断消息应能指向语法错误。
+		t.Fatalf("diagnostic message = %q", diagnostics[0].Message)
+	}
+}
+
+// TestAnalyzeDiagnosticsRejectsConstAssignment 验证 PLS 会诊断 const 语义赋值错误。
+func TestAnalyzeDiagnosticsRejectsConstAssignment(t *testing.T) {
+	if !extensions.Default().Has(extensions.SyntaxConst) {
+		// 当前构建不包含 const 扩展时，正向 const 语义用例不执行。
+		t.Skip("const syntax extension is not compiled")
+	}
+	// const 重新赋值属于 codegen 语义错误，不能只依赖 parser 诊断。
+	diagnostics := analyzeDiagnostics("const answer = 42\nanswer = 7\n", extensions.Default())
+	if len(diagnostics) == 0 {
+		// const 覆盖必须通过 PLS 展示为错误。
+		t.Fatalf("diagnostics should not be empty")
+	}
+	if diagnostics[0].Range.Start.Line != 1 || !strings.Contains(diagnostics[0].Message, "cannot assign to const binding 'answer'") {
+		// 诊断应定位到赋值行，并说明 const 覆盖。
+		t.Fatalf("diagnostic = %#v", diagnostics[0])
+	}
+}
+
+// TestAnalyzeDiagnosticsRejectsConstTopLevelLocalShadow 验证 PLS 会诊断顶层 local 遮蔽全局 const。
+func TestAnalyzeDiagnosticsRejectsConstTopLevelLocalShadow(t *testing.T) {
+	if !extensions.Default().Has(extensions.SyntaxConst) {
+		// 当前构建不包含 const 扩展时，正向 const 语义用例不执行。
+		t.Skip("const syntax extension is not compiled")
+	}
+	// 顶层 local 同名声明会按 ROOT 重新定义处理，必须走 codegen 语义错误。
+	diagnostics := analyzeDiagnostics("const answer = 42\nlocal answer = 7\n", extensions.Default())
+	if len(diagnostics) == 0 {
+		// const 顶层遮蔽必须通过 PLS 展示为错误。
+		t.Fatalf("diagnostics should not be empty")
+	}
+	if diagnostics[0].Range.Start.Line != 1 || !strings.Contains(diagnostics[0].Message, "cannot assign to const binding 'answer'") {
+		// 诊断应定位到 local 遮蔽行，并说明 const 覆盖。
+		t.Fatalf("diagnostic = %#v", diagnostics[0])
+	}
+}
+
 // TestServerInitializeAndFormatting 验证 LSP 初始化、打开文档和格式化请求。
 func TestServerInitializeAndFormatting(t *testing.T) {
 	if !extensions.Default().Has(extensions.SyntaxSwitch) {

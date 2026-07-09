@@ -4351,6 +4351,340 @@
         "zh-CN": "local pos = utf8.offset(text, 2)\n-- pos: 第二个字符的字节位置"
       }
     },
+    "callFunctionEvent": {
+      "signature": {
+        "en": "callFunctionEvent(event, payload)",
+        "zh-CN": "callFunctionEvent(event, payload)"
+      },
+      "returns": {
+        "en": "returns: nil; invokes callbacks registered for the current function event.",
+        "zh-CN": "返回：nil；触发当前函数作用域内注册的事件回调。"
+      },
+      "params": {
+        "en": [
+          "event: event name, usually from events.*",
+          "payload (optional): value passed to callback ctx.payload"
+        ],
+        "zh-CN": [
+          "event: 事件名，通常使用 events.*",
+          "payload (可选): 传给回调 ctx.payload 的值"
+        ]
+      },
+      "description": {
+        "en": "Triggers a custom function-scoped GLua event synchronously.",
+        "zh-CN": "同步触发当前函数作用域的自定义 GLua 事件。"
+      },
+      "example": {
+        "en": "callFunctionEvent('mark', 'payload')",
+        "zh-CN": "callFunctionEvent('mark', 'payload')"
+      }
+    },
+    "callFunctionEventAsync": {
+      "signature": {
+        "en": "callFunctionEventAsync(event, payload)",
+        "zh-CN": "callFunctionEventAsync(event, payload)"
+      },
+      "returns": {
+        "en": "returns: nil; queues callbacks without blocking the current instruction path.",
+        "zh-CN": "返回：nil；异步排队回调，不阻塞当前执行路径。"
+      },
+      "params": {
+        "en": [
+          "event: event name",
+          "payload (optional): value passed to callback ctx.payload"
+        ],
+        "zh-CN": [
+          "event: 事件名",
+          "payload (可选): 传给回调 ctx.payload 的值"
+        ]
+      },
+      "description": {
+        "en": "Triggers a custom function-scoped GLua event asynchronously.",
+        "zh-CN": "异步触发当前函数作用域的自定义 GLua 事件。"
+      },
+      "example": {
+        "en": "callFunctionEventAsync('mark', 'payload')",
+        "zh-CN": "callFunctionEventAsync('mark', 'payload')"
+      }
+    },
+    "callProgressEvent": {
+      "signature": {
+        "en": "callProgressEvent(event, payload)",
+        "zh-CN": "callProgressEvent(event, payload)"
+      },
+      "returns": {
+        "en": "returns: nil; invokes callbacks registered for the current file event.",
+        "zh-CN": "返回：nil；触发当前文件作用域内注册的事件回调。"
+      },
+      "params": {
+        "en": [
+          "event: event name",
+          "payload (optional): value passed to callback ctx.payload"
+        ],
+        "zh-CN": [
+          "event: 事件名",
+          "payload (可选): 传给回调 ctx.payload 的值"
+        ]
+      },
+      "description": {
+        "en": "Triggers a custom file-scoped progress event synchronously.",
+        "zh-CN": "同步触发当前文件作用域的自定义进度事件。"
+      },
+      "example": {
+        "en": "callProgressEvent('custom.progress', 'done')",
+        "zh-CN": "callProgressEvent('custom.progress', 'done')"
+      }
+    },
+    "callProgressEventAsync": {
+      "signature": {
+        "en": "callProgressEventAsync(event, payload)",
+        "zh-CN": "callProgressEventAsync(event, payload)"
+      },
+      "returns": {
+        "en": "returns: nil; queues file-scoped callbacks asynchronously.",
+        "zh-CN": "返回：nil；异步排队当前文件作用域的事件回调。"
+      },
+      "params": {
+        "en": [
+          "event: event name",
+          "payload (optional): value passed to callback ctx.payload"
+        ],
+        "zh-CN": [
+          "event: 事件名",
+          "payload (可选): 传给回调 ctx.payload 的值"
+        ]
+      },
+      "description": {
+        "en": "Triggers a custom file-scoped progress event asynchronously.",
+        "zh-CN": "异步触发当前文件作用域的自定义进度事件。"
+      },
+      "example": {
+        "en": "callProgressEventAsync('custom.progress', 'done')",
+        "zh-CN": "callProgressEventAsync('custom.progress', 'done')"
+      }
+    },
+    "events.function_call": {
+      "signature": {
+        "en": "events.function_call",
+        "zh-CN": "events.function_call"
+      },
+      "returns": {
+        "en": "value: preset event name for Lua function call entry.",
+        "zh-CN": "值：Lua 函数进入时触发的预设事件名。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Preset GLua event constant for function call entry.",
+        "zh-CN": "函数调用进入事件的 GLua 预设常量。"
+      },
+      "example": {
+        "en": "setFunctionEvent(events.function_call, function(ctx) end)",
+        "zh-CN": "setFunctionEvent(events.function_call, function(ctx) end)"
+      }
+    },
+    "events.function_return": {
+      "signature": {
+        "en": "events.function_return",
+        "zh-CN": "events.function_return"
+      },
+      "returns": {
+        "en": "value: preset event name for normal Lua function return.",
+        "zh-CN": "值：Lua 函数正常返回时触发的预设事件名。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Preset GLua event constant for function return.",
+        "zh-CN": "函数正常返回事件的 GLua 预设常量。"
+      },
+      "example": {
+        "en": "setFunctionEvent(events.function_return, function(ctx) end)",
+        "zh-CN": "setFunctionEvent(events.function_return, function(ctx) end)"
+      }
+    },
+    "events.function_error": {
+      "signature": {
+        "en": "events.function_error",
+        "zh-CN": "events.function_error"
+      },
+      "returns": {
+        "en": "value: preset event name for Lua function error exit.",
+        "zh-CN": "值：Lua 函数错误退出时触发的预设事件名。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Preset GLua event constant for function error exit.",
+        "zh-CN": "函数错误退出事件的 GLua 预设常量。"
+      },
+      "example": {
+        "en": "setFunctionEvent(events.function_error, function(ctx) end)",
+        "zh-CN": "setFunctionEvent(events.function_error, function(ctx) end)"
+      }
+    },
+    "events.function_exit": {
+      "signature": {
+        "en": "events.function_exit",
+        "zh-CN": "events.function_exit"
+      },
+      "returns": {
+        "en": "value: preset event name fired when a Lua function leaves.",
+        "zh-CN": "值：Lua 函数离开时触发的预设事件名。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Preset GLua event constant for function exit, whether successful or failing.",
+        "zh-CN": "函数离开事件的 GLua 预设常量，成功或失败都会触发。"
+      },
+      "example": {
+        "en": "setFunctionEvent(events.function_exit, function(ctx) end)",
+        "zh-CN": "setFunctionEvent(events.function_exit, function(ctx) end)"
+      }
+    },
+    "events.progress_line": {
+      "signature": {
+        "en": "events.progress_line",
+        "zh-CN": "events.progress_line"
+      },
+      "returns": {
+        "en": "value: preset event name for source-line progress.",
+        "zh-CN": "值：源码行进度触发的预设事件名。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Preset GLua event constant for file progress by source line.",
+        "zh-CN": "按源码行触发文件进度事件的 GLua 预设常量。"
+      },
+      "example": {
+        "en": "setProgressEvent(events.progress_line, function(ctx) end)",
+        "zh-CN": "setProgressEvent(events.progress_line, function(ctx) end)"
+      }
+    },
+    "setFunctionEvent": {
+      "signature": {
+        "en": "setFunctionEvent(event, callback)",
+        "zh-CN": "setFunctionEvent(event, callback)"
+      },
+      "returns": {
+        "en": "returns: nil; registers a synchronous callback for the current function.",
+        "zh-CN": "返回：nil；为当前函数注册同步事件回调。"
+      },
+      "params": {
+        "en": [
+          "event: event name, usually events.function_call or events.function_return",
+          "callback: function(ctx) receiving event context"
+        ],
+        "zh-CN": [
+          "event: 事件名，通常是 events.function_call 或 events.function_return",
+          "callback: function(ctx)，接收事件上下文"
+        ]
+      },
+      "description": {
+        "en": "Registers a callback that only applies to the function where it is called.",
+        "zh-CN": "注册只作用于当前函数的事件回调。"
+      },
+      "example": {
+        "en": "setFunctionEvent(events.function_return, function(ctx) print(ctx.event) end)",
+        "zh-CN": "setFunctionEvent(events.function_return, function(ctx) print(ctx.event) end)"
+      }
+    },
+    "setFunctionEventAsync": {
+      "signature": {
+        "en": "setFunctionEventAsync(event, callback)",
+        "zh-CN": "setFunctionEventAsync(event, callback)"
+      },
+      "returns": {
+        "en": "returns: nil; registers an asynchronous function-scoped callback.",
+        "zh-CN": "返回：nil；为当前函数注册异步事件回调。"
+      },
+      "params": {
+        "en": [
+          "event: event name",
+          "callback: function(ctx) receiving event context"
+        ],
+        "zh-CN": [
+          "event: 事件名",
+          "callback: function(ctx)，接收事件上下文"
+        ]
+      },
+      "description": {
+        "en": "Registers a non-blocking callback for a function-scoped GLua event.",
+        "zh-CN": "注册非阻塞的函数作用域 GLua 事件回调。"
+      },
+      "example": {
+        "en": "setFunctionEventAsync('mark', function(ctx) end)",
+        "zh-CN": "setFunctionEventAsync('mark', function(ctx) end)"
+      }
+    },
+    "setProgressEvent": {
+      "signature": {
+        "en": "setProgressEvent(event, callback)",
+        "zh-CN": "setProgressEvent(event, callback)"
+      },
+      "returns": {
+        "en": "returns: nil; registers a synchronous callback for the current file.",
+        "zh-CN": "返回：nil；为当前文件注册同步进度事件回调。"
+      },
+      "params": {
+        "en": [
+          "event: event name, usually events.progress_line",
+          "callback: function(ctx) receiving event context"
+        ],
+        "zh-CN": [
+          "event: 事件名，通常是 events.progress_line",
+          "callback: function(ctx)，接收事件上下文"
+        ]
+      },
+      "description": {
+        "en": "Registers a callback that applies to progress events in the current file.",
+        "zh-CN": "注册作用于当前文件进度事件的回调。"
+      },
+      "example": {
+        "en": "setProgressEvent(events.progress_line, function(ctx) print(ctx.line) end)",
+        "zh-CN": "setProgressEvent(events.progress_line, function(ctx) print(ctx.line) end)"
+      }
+    },
+    "setProgressEventAsync": {
+      "signature": {
+        "en": "setProgressEventAsync(event, callback)",
+        "zh-CN": "setProgressEventAsync(event, callback)"
+      },
+      "returns": {
+        "en": "returns: nil; registers an asynchronous file-scoped callback.",
+        "zh-CN": "返回：nil；为当前文件注册异步进度事件回调。"
+      },
+      "params": {
+        "en": [
+          "event: event name",
+          "callback: function(ctx) receiving event context"
+        ],
+        "zh-CN": [
+          "event: 事件名",
+          "callback: function(ctx)，接收事件上下文"
+        ]
+      },
+      "description": {
+        "en": "Registers a non-blocking callback for a file-scoped progress event.",
+        "zh-CN": "注册非阻塞的文件作用域进度事件回调。"
+      },
+      "example": {
+        "en": "setProgressEventAsync('custom.progress', function(ctx) end)",
+        "zh-CN": "setProgressEventAsync('custom.progress', function(ctx) end)"
+      }
+    },
     "xpcall": {
       "signature": {
         "en": "xpcall(f, err, ...)",

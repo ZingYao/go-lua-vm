@@ -1,24 +1,16 @@
 package com.glua.jetbrains;
 
-import com.intellij.execution.ExecutionException;
-import com.intellij.execution.configurations.GeneralCommandLine;
-import com.intellij.execution.process.OSProcessHandler;
-import com.intellij.execution.process.ProcessAdapter;
-import com.intellij.execution.process.ProcessEvent;
-import com.intellij.execution.process.ProcessOutputType;
-import com.intellij.execution.process.ProcessOutputTypes;
-import com.intellij.openapi.application.ApplicationManager;
-import com.intellij.openapi.util.Key;
-import com.intellij.openapi.project.Project;
-import com.intellij.openapi.vfs.LocalFileSystem;
-import com.intellij.openapi.vfs.VirtualFile;
-import com.intellij.xdebugger.XDebuggerManager;
-import com.intellij.xdebugger.breakpoints.XBreakpoint;
-import com.intellij.xdebugger.breakpoints.XLineBreakpoint;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.intellij.execution.process.ProcessHandler;
+import com.intellij.execution.process.ProcessOutputTypes;
+import com.intellij.openapi.application.ApplicationManager;
+import com.intellij.openapi.project.Project;
+import com.intellij.xdebugger.XDebuggerManager;
+import com.intellij.xdebugger.breakpoints.XBreakpoint;
+import com.intellij.xdebugger.breakpoints.XLineBreakpoint;
 import org.jetbrains.annotations.NotNull;
 
 import java.io.BufferedInputStream;
@@ -26,40 +18,34 @@ import java.io.BufferedWriter;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.io.OutputStreamWriter;
+import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.time.Duration;
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
+import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.Collections;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-public final class GluaDapLaunchProcessHandler extends OSProcessHandler implements GluaDapClient {
-    static final String READY_PREFIX = "GLua DAP server listening on ";
+public final class GluaDapRemoteProcessHandler extends ProcessHandler implements GluaDapClient {
     private static final Pattern CONTENT_LENGTH_PATTERN = Pattern.compile("(?i)^Content-Length:\\s*(\\d+)\\s*$");
-    private final String commandText;
-    private final String workDirectory;
-    private final String listenAddress;
     private final Project project;
+    private final String host;
+    private final int port;
     private final String program;
-    private final CountDownLatch readyOrExit = new CountDownLatch(1);
-    private final AtomicBoolean clientStarted = new AtomicBoolean(false);
-    private final StringBuilder stdoutTail = new StringBuilder();
-    private final StringBuilder stderrTail = new StringBuilder();
-    private volatile ReadyTarget readyTarget;
-    private volatile Integer exitCode;
+    private final String workDirectory;
+    private final AtomicBoolean closed = new AtomicBoolean(false);
+    private final Set<String> syncedBreakpointSources = new LinkedHashSet<>();
     private volatile Socket dapSocket;
     private volatile BufferedWriter dapWriter;
     private volatile GluaDebugProcess debugProcess;
@@ -69,33 +55,25 @@ public final class GluaDapLaunchProcessHandler extends OSProcessHandler implemen
     private final Map<Integer, List<Consumer<List<GluaDapVariable>>>> variableCallbacks = new LinkedHashMap<>();
     private final Map<Integer, Integer> variablesRequestReferences = new LinkedHashMap<>();
     private final Map<Integer, Consumer<GluaDapSetVariableResult>> setVariableCallbacks = new LinkedHashMap<>();
-    private final Set<String> syncedBreakpointSources = new LinkedHashSet<>();
     private int nextClientSeq = 1;
 
-    private GluaDapLaunchProcessHandler(@NotNull Project project,
-                                        @NotNull String program,
-                                        @NotNull GeneralCommandLine commandLine,
-                                        @NotNull String listenAddress) throws ExecutionException {
-        super(commandLine);
+    public GluaDapRemoteProcessHandler(@NotNull Project project,
+                                       @NotNull String host,
+                                       int port,
+                                       @NotNull String program) {
         this.project = project;
+        this.host = host.isBlank() ? "127.0.0.1" : host.trim();
+        this.port = port >= 1 && port <= 65535 ? port : 5678;
         this.program = program;
-        this.commandText = commandLine.getCommandLineString();
-        this.workDirectory = commandLine.getWorkDirectory() == null ? "" : commandLine.getWorkDirectory().getAbsolutePath();
-        this.listenAddress = listenAddress;
-        addProcessListener(new ProcessAdapter() {
-            @Override
-            public void processTerminated(@NotNull ProcessEvent event) {
-                exitCode = event.getExitCode();
-                closeDapSocket();
-                readyOrExit.countDown();
-            }
-        });
+        this.workDirectory = workDirectory(program);
     }
 
+    @Override
     public void setDebugProcess(@NotNull GluaDebugProcess debugProcess) {
         this.debugProcess = debugProcess;
     }
 
+    @Override
     public void sendControlCommand(@NotNull String command) {
         BufferedWriter writer = dapWriter;
         if (writer == null) {
@@ -108,9 +86,9 @@ public final class GluaDapLaunchProcessHandler extends OSProcessHandler implemen
                 }
                 sendRequest(writer, command, "{}");
             } catch (IOException error) {
-                notifyTextAvailable("GLua Debug command failed: " + readableError(error) + "\n", ProcessOutputTypes.STDERR);
+                reportFailure("GLua Debug command failed: " + readableError(error));
             }
-        }, "glua-dap-" + command);
+        }, "glua-remote-dap-" + command);
         worker.setDaemon(true);
         worker.start();
     }
@@ -120,6 +98,7 @@ public final class GluaDapLaunchProcessHandler extends OSProcessHandler implemen
         breakpointsMuted = muted;
     }
 
+    @Override
     public void syncBreakpointsAsync() {
         BufferedWriter writer = dapWriter;
         if (writer == null) {
@@ -129,13 +108,14 @@ public final class GluaDapLaunchProcessHandler extends OSProcessHandler implemen
             try {
                 sendBreakpoints(writer);
             } catch (IOException error) {
-                notifyTextAvailable("GLua breakpoint sync failed: " + readableError(error) + "\n", ProcessOutputTypes.STDERR);
+                reportFailure("GLua breakpoint sync failed: " + readableError(error));
             }
-        }, "glua-dap-breakpoint-sync");
+        }, "glua-remote-dap-breakpoint-sync");
         worker.setDaemon(true);
         worker.start();
     }
 
+    @Override
     public @NotNull List<GluaDapVariable> currentVariables() {
         return latestVariables;
     }
@@ -163,10 +143,10 @@ public final class GluaDapLaunchProcessHandler extends OSProcessHandler implemen
             try {
                 sendVariablesRequest(writer, variablesReference, callback);
             } catch (IOException error) {
-                notifyTextAvailable("GLua variables request failed: " + readableError(error) + "\n", ProcessOutputTypes.STDERR);
+                reportFailure("GLua variables request failed: " + readableError(error));
                 callback.accept(List.of());
             }
-        }, "glua-dap-variables-" + variablesReference);
+        }, "glua-remote-dap-variables-" + variablesReference);
         worker.setDaemon(true);
         worker.start();
     }
@@ -185,133 +165,66 @@ public final class GluaDapLaunchProcessHandler extends OSProcessHandler implemen
             try {
                 sendSetVariableRequest(writer, variablesReference, name, value, callback);
             } catch (IOException error) {
-                notifyTextAvailable("GLua setVariable request failed: " + readableError(error) + "\n", ProcessOutputTypes.STDERR);
+                reportFailure("GLua setVariable request failed: " + readableError(error));
                 callback.accept(GluaDapSetVariableResult.failure(readableError(error)));
             }
-        }, "glua-dap-set-variable");
+        }, "glua-remote-dap-set-variable");
         worker.setDaemon(true);
         worker.start();
-    }
-
-    public static @NotNull GluaDapLaunchProcessHandler create(@NotNull Project project,
-                                                              @NotNull String gluaExecutable,
-                                                              @NotNull String program) throws ExecutionException {
-        String executable = gluaExecutable.isBlank() ? "glua" : gluaExecutable;
-        String listen = GluaDapRunConfiguration.INTERNAL_DAP_HOST + ":0";
-        GeneralCommandLine commandLine = new GeneralCommandLine(executable, "--glua-dap-listen=" + listen, program);
-        VirtualFile file = LocalFileSystem.getInstance().findFileByNioFile(Path.of(program));
-        if (file != null && file.getParent() != null) {
-            commandLine.withWorkDirectory(file.getParent().getPath());
-        }
-        return new GluaDapLaunchProcessHandler(project, program, commandLine, listen);
     }
 
     @Override
-    public void notifyTextAvailable(@NotNull String text, @NotNull Key outputType) {
-        captureOutput(text, outputType);
-        if (isQuietDapStatus(text, outputType)) {
-            return;
-        }
-        super.notifyTextAvailable(text, outputType);
-    }
-
-    public @NotNull ReadyTarget awaitReady(@NotNull Duration timeout) throws ExecutionException {
-        ReadyTarget current = readyTarget;
-        if (current != null) {
-            return current;
-        }
-        try {
-            if (!readyOrExit.await(timeout.toMillis(), TimeUnit.MILLISECONDS)) {
-                throw new ExecutionException(failureMessage(GluaUiText.text(
-                    "timeout waiting for GLua DAP ready marker",
-                    "等待 GLua DAP 启动标记超时"
-                )));
-            }
-        } catch (InterruptedException error) {
-            Thread.currentThread().interrupt();
-            throw new ExecutionException(failureMessage(GluaUiText.text(
-                "interrupted while waiting for GLua DAP ready marker",
-                "等待 GLua DAP 启动标记时被中断"
-            )), error);
-        }
-        current = readyTarget;
-        if (current != null) {
-            return current;
-        }
-        throw new ExecutionException(failureMessage(GluaUiText.text(
-            "glua exited before GLua DAP ready marker",
-            "glua 在输出 GLua DAP 启动标记前退出"
-        )));
-    }
-
-    public @NotNull String failureMessage(@NotNull String reason) {
-        StringBuilder builder = new StringBuilder();
-        builder.append(GluaUiText.text("GLua Debug launch failed: ", "GLua Debug 启动失败：")).append(reason)
-            .append(GluaUiText.text(" | command=", " | 命令=")).append(commandText)
-            .append(GluaUiText.text(" | cwd=", " | 工作目录=")).append(workDirectory)
-            .append(GluaUiText.text(" | listen=", " | 监听=")).append(listenAddress);
-        if (exitCode != null) {
-            builder.append(GluaUiText.text(" | exit=", " | 退出码=")).append(exitCode);
-        }
-        String stderr = stderrTail.toString().trim();
-        if (!stderr.isBlank()) {
-            builder.append(" | stderr=").append(stderr);
-        }
-        String stdout = stdoutTail.toString().trim();
-        if (!stdout.isBlank()) {
-            builder.append(" | stdout=").append(stdout);
-        }
-        return builder.toString();
-    }
-
-    private void captureOutput(@NotNull String text, @NotNull Key outputType) {
-        if (ProcessOutputType.isStderr(outputType) || outputType == ProcessOutputTypes.STDERR) {
-            appendTail(stderrTail, text);
-        } else {
-            appendTail(stdoutTail, text);
-        }
-        ReadyTarget parsed = parseReadyTarget(stdoutTail + "\n" + stderrTail);
-        if (parsed != null) {
-            readyTarget = parsed;
-            readyOrExit.countDown();
-            startDapClient(parsed);
-        }
-    }
-
-    private void startDapClient(@NotNull ReadyTarget target) {
-        if (!clientStarted.compareAndSet(false, true)) {
-            return;
-        }
-        Thread worker = new Thread(() -> runDapClient(target), "glua-idea-dap-client");
+    public void startNotify() {
+        super.startNotify();
+        Thread worker = new Thread(this::connectAndConfigure, "glua-remote-dap-client");
         worker.setDaemon(true);
         worker.start();
     }
 
-    private void runDapClient(@NotNull ReadyTarget target) {
+    @Override
+    protected void destroyProcessImpl() {
+        terminate(0);
+    }
+
+    @Override
+    protected void detachProcessImpl() {
+        terminate(0);
+    }
+
+    @Override
+    public boolean detachIsDefault() {
+        return false;
+    }
+
+    @Override
+    public @NotNull OutputStream getProcessInput() {
+        return new ByteArrayOutputStream();
+    }
+
+    private void connectAndConfigure() {
         try {
-            Socket socket = new Socket(target.host(), target.port());
+            Socket socket = new Socket();
+            socket.connect(new InetSocketAddress(host, port), 5000);
             dapSocket = socket;
             InputStream reader = new BufferedInputStream(socket.getInputStream());
             BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8));
             dapWriter = writer;
-            Thread readerThread = new Thread(() -> drainDapMessages(reader), "glua-idea-dap-reader");
+            Thread readerThread = new Thread(() -> drainDapMessages(reader), "glua-remote-dap-reader");
             readerThread.setDaemon(true);
             readerThread.start();
             sendRequest(writer, "initialize", "{\"adapterID\":\"glua\",\"clientID\":\"intellij\",\"clientName\":\"IntelliJ IDEA\",\"linesStartAt1\":true,\"columnsStartAt1\":true,\"pathFormat\":\"path\"}");
             sendBreakpoints(writer);
-            sendRequest(writer, "launch", "{\"program\":" + quoteJson(program) + ",\"noDebug\":false}");
+            sendRequest(writer, "attach", "{\"program\":" + quoteJson(program) + "}");
             sendRequest(writer, "configurationDone", "{}");
         } catch (IOException error) {
-            notifyTextAvailable("GLua Debug client failed: " + readableError(error) + "\n", ProcessOutputTypes.STDERR);
+            reportFailure(failureMessage(host, port, error).trim());
+            terminate(1);
         }
     }
 
     private void sendBreakpoints(@NotNull BufferedWriter writer) throws IOException {
         Map<String, List<Integer>> breakpointsByFile = collectBreakpoints();
         Set<String> sources = breakpointSourcesToSync(breakpointsByFile);
-        if (sources.isEmpty()) {
-            return;
-        }
         for (String source : sources) {
             List<Integer> lines = breakpointsByFile.getOrDefault(source, List.of());
             StringBuilder breakpointsJson = new StringBuilder("[");
@@ -322,8 +235,7 @@ public final class GluaDapLaunchProcessHandler extends OSProcessHandler implemen
                 breakpointsJson.append("{\"line\":").append(lines.get(index)).append('}');
             }
             breakpointsJson.append(']');
-            String arguments = "{\"source\":{\"path\":" + quoteJson(source) + "},\"breakpoints\":" + breakpointsJson + "}";
-            sendRequest(writer, "setBreakpoints", arguments);
+            sendRequest(writer, "setBreakpoints", "{\"source\":{\"path\":" + quoteJson(source) + "},\"breakpoints\":" + breakpointsJson + "}");
         }
         rememberSyncedBreakpointSources(breakpointsByFile.keySet());
     }
@@ -357,11 +269,7 @@ public final class GluaDapLaunchProcessHandler extends OSProcessHandler implemen
             if (!(lineBreakpoint.getType() instanceof GluaLineBreakpointType) || !lineBreakpoint.isEnabled()) {
                 continue;
             }
-            Set<String> paths = breakpointPathAliases(normalizeFileUrl(lineBreakpoint.getFileUrl()));
-            if (paths.isEmpty()) {
-                continue;
-            }
-            for (String path : paths) {
+            for (String path : breakpointPathAliases(normalizeFileUrl(lineBreakpoint.getFileUrl()))) {
                 result.computeIfAbsent(path, ignored -> new ArrayList<>()).add(lineBreakpoint.getLine() + 1);
             }
         }
@@ -370,17 +278,19 @@ public final class GluaDapLaunchProcessHandler extends OSProcessHandler implemen
 
     private void drainDapMessages(@NotNull InputStream reader) {
         try {
-            while (true) {
+            while (!closed.get()) {
                 String message = readDapMessage(reader);
                 if (message == null) {
+                    terminate(0);
                     return;
                 }
                 handleDapMessage(message);
                 logDapTraffic("<=", message);
             }
         } catch (IOException error) {
-            if (!isProcessTerminated()) {
-                notifyTextAvailable("GLua Debug client read failed: " + readableError(error) + "\n", ProcessOutputTypes.STDERR);
+            if (!closed.get()) {
+                reportFailure("GLua DAP read failed: " + readableError(error));
+                terminate(1);
             }
         }
     }
@@ -408,7 +318,7 @@ public final class GluaDapLaunchProcessHandler extends OSProcessHandler implemen
             return;
         }
         if ("response".equals(type) && "stackTrace".equals(stringMember(object, "command"))) {
-            GluaDapStackFrame frame = firstGluaDapStackFrame(object);
+            GluaDapStackFrame frame = firstStackFrame(object);
             GluaDebugProcess process = debugProcess;
             if (frame != null && process != null) {
                 process.onStopped(frame);
@@ -554,6 +464,90 @@ public final class GluaDapLaunchProcessHandler extends OSProcessHandler implemen
         }
     }
 
+    private void terminate(int exitCode) {
+        if (!closed.compareAndSet(false, true)) {
+            return;
+        }
+        BufferedWriter writer = dapWriter;
+        dapWriter = null;
+        if (writer != null) {
+            try {
+                writer.close();
+            } catch (IOException ignored) {
+                // 关闭远程 DAP 写入端失败时，仍然结束 IDE 侧进程。
+            }
+        }
+        Socket socket = dapSocket;
+        if (socket != null) {
+            try {
+                socket.close();
+            } catch (IOException ignored) {
+                // 关闭远程 DAP socket 失败不影响 IDE 侧进程结束。
+            }
+        }
+        notifyProcessTerminated(exitCode);
+    }
+
+    private void reportFailure(@NotNull String message) {
+        String fullMessage = message.endsWith("\n") ? message : message + "\n";
+        notifyTextAvailable(fullMessage, ProcessOutputTypes.STDERR);
+        GluaDebugProcess process = debugProcess;
+        if (process != null) {
+            process.getSession().reportError(message);
+        }
+    }
+
+    private @NotNull Set<String> breakpointPathAliases(@NotNull String path) {
+        Set<String> aliases = new LinkedHashSet<>();
+        if (path.isBlank()) {
+            return aliases;
+        }
+        addPathWithExtensionAliases(aliases, path);
+        try {
+            Path absolute = Paths.get(path).toAbsolutePath().normalize();
+            addPathWithExtensionAliases(aliases, absolute.toString());
+            if (!workDirectory.isBlank()) {
+                Path workDir = Paths.get(workDirectory).toAbsolutePath().normalize();
+                if (absolute.startsWith(workDir)) {
+                    addPathWithExtensionAliases(aliases, workDir.relativize(absolute).toString());
+                }
+            }
+        } catch (RuntimeException ignored) {
+            // 远程路径可能不是本机 Path，保留原始字符串即可。
+        }
+        aliases.remove("");
+        return aliases;
+    }
+
+    private static @NotNull String workDirectory(@NotNull String program) {
+        if (program.isBlank()) {
+            return "";
+        }
+        try {
+            Path parent = Path.of(program).toAbsolutePath().normalize().getParent();
+            return parent == null ? "" : parent.toString();
+        } catch (RuntimeException ignored) {
+            return "";
+        }
+    }
+
+    private static void addPathWithExtensionAliases(@NotNull Set<String> aliases, @NotNull String path) {
+        String normalized = path.replace('\\', '/');
+        aliases.add(normalized);
+        if (normalized.endsWith(".lua")) {
+            aliases.add(normalized.substring(0, normalized.length() - ".lua".length()) + ".glua");
+        } else if (normalized.endsWith(".glua")) {
+            aliases.add(normalized.substring(0, normalized.length() - ".glua".length()) + ".lua");
+        }
+    }
+
+    private static @NotNull String normalizeFileUrl(@NotNull String fileUrl) {
+        if (fileUrl.startsWith("file://")) {
+            return fileUrl.substring("file://".length());
+        }
+        return fileUrl;
+    }
+
     private static String readDapMessage(@NotNull InputStream reader) throws IOException {
         int contentLength = -1;
         while (true) {
@@ -601,16 +595,41 @@ public final class GluaDapLaunchProcessHandler extends OSProcessHandler implemen
         return line.toString(StandardCharsets.US_ASCII);
     }
 
-    private void closeDapSocket() {
-        dapWriter = null;
-        Socket socket = dapSocket;
-        if (socket != null) {
-            try {
-                socket.close();
-            } catch (IOException ignored) {
-                // 进程结束时关闭调试 socket，失败不影响进程退出。
+    private static GluaDapStackFrame firstStackFrame(@NotNull JsonObject response) {
+        JsonObject body = objectMember(response, "body");
+        if (body == null) {
+            return null;
+        }
+        JsonArray frames = arrayMember(body, "stackFrames");
+        if (frames == null || frames.isEmpty() || !frames.get(0).isJsonObject()) {
+            return null;
+        }
+        JsonObject frame = frames.get(0).getAsJsonObject();
+        JsonObject source = objectMember(frame, "source");
+        return new GluaDapStackFrame(source == null ? "" : stringMember(source, "path"), intMember(frame, "line"));
+    }
+
+    private static @NotNull List<GluaDapVariable> parseVariables(@NotNull JsonObject response) {
+        JsonObject body = objectMember(response, "body");
+        if (body == null) {
+            return List.of();
+        }
+        JsonArray variables = arrayMember(body, "variables");
+        if (variables == null || variables.isEmpty()) {
+            return List.of();
+        }
+        List<GluaDapVariable> result = new ArrayList<>();
+        for (JsonElement element : variables) {
+            if (!element.isJsonObject()) {
+                continue;
+            }
+            JsonObject variable = element.getAsJsonObject();
+            String name = stringMember(variable, "name");
+            if (!name.isBlank()) {
+                result.add(new GluaDapVariable(name, stringMember(variable, "value"), stringMember(variable, "type"), intMember(variable, "variablesReference")));
             }
         }
+        return Collections.unmodifiableList(result);
     }
 
     private static String quoteJson(@NotNull String text) {
@@ -635,98 +654,14 @@ public final class GluaDapLaunchProcessHandler extends OSProcessHandler implemen
             : error.getMessage();
     }
 
-    private static boolean isQuietDapStatus(@NotNull String text, @NotNull Key outputType) {
-        String trimmed = text.trim();
-        return trimmed.startsWith("GLua DAP server listening on ")
-            || trimmed.equals("GLua DAP waiting for client configuration...")
-            || trimmed.equals("GLua DAP client configured; starting script.")
-            || (!dapDebugLogEnabled() && trimmed.startsWith("GLua DAP => "))
-            || (!dapDebugLogEnabled() && trimmed.startsWith("GLua DAP <= "))
-            || trimmed.startsWith("GLua IDEA DAP client ");
-    }
-
-    private static @NotNull String normalizeFileUrl(@NotNull String fileUrl) {
-        if (fileUrl.startsWith("file://")) {
-            return fileUrl.substring("file://".length());
-        }
-        return fileUrl;
-    }
-
-    private @NotNull Set<String> breakpointPathAliases(@NotNull String path) {
-        Set<String> aliases = new LinkedHashSet<>();
-        if (path.isBlank()) {
-            return aliases;
-        }
-        addPathWithExtensionAliases(aliases, path);
-        try {
-            Path absolute = Paths.get(path).toAbsolutePath().normalize();
-            addPathWithExtensionAliases(aliases, absolute.toString());
-            if (!workDirectory.isBlank()) {
-                Path workDir = Paths.get(workDirectory).toAbsolutePath().normalize();
-                if (absolute.startsWith(workDir)) {
-                    addPathWithExtensionAliases(aliases, workDir.relativize(absolute).toString());
-                }
-            }
-        } catch (RuntimeException ignored) {
-            // 非本地文件 URL 不能转 Path 时保留原始 URL 即可。
-        }
-        aliases.remove("");
-        return aliases;
-    }
-
-    private static void addPathWithExtensionAliases(@NotNull Set<String> aliases, @NotNull String path) {
-        String normalized = path.replace('\\', '/');
-        aliases.add(normalized);
-        if (normalized.endsWith(".lua")) {
-            aliases.add(normalized.substring(0, normalized.length() - ".lua".length()) + ".glua");
-        } else if (normalized.endsWith(".glua")) {
-            aliases.add(normalized.substring(0, normalized.length() - ".glua".length()) + ".lua");
-        }
+    static @NotNull String failureMessage(@NotNull String host, int port, @NotNull Exception error) {
+        return "GLua DAP attach failed for " + host + ":" + port + ": " + readableError(error) + "\n"
+            + "No GLua DAP server is listening at that address. Configure a glua executable for local launch, or start a compatible remote GLua DAP server and set the remote host/port.";
     }
 
     private static @NotNull String stringMember(@NotNull JsonObject object, @NotNull String name) {
         JsonElement element = object.get(name);
         return element == null || element.isJsonNull() ? "" : element.getAsString();
-    }
-
-    private static GluaDapStackFrame firstGluaDapStackFrame(@NotNull JsonObject response) {
-        JsonObject body = objectMember(response, "body");
-        if (body == null) {
-            return null;
-        }
-        JsonArray frames = arrayMember(body, "stackFrames");
-        if (frames == null || frames.isEmpty() || !frames.get(0).isJsonObject()) {
-            return null;
-        }
-        JsonObject frame = frames.get(0).getAsJsonObject();
-        JsonObject source = objectMember(frame, "source");
-        String path = source == null ? "" : stringMember(source, "path");
-        int line = intMember(frame, "line");
-        return new GluaDapStackFrame(path, line);
-    }
-
-    private static @NotNull List<GluaDapVariable> parseVariables(@NotNull JsonObject response) {
-        JsonObject body = objectMember(response, "body");
-        if (body == null) {
-            return List.of();
-        }
-        JsonArray variables = arrayMember(body, "variables");
-        if (variables == null || variables.isEmpty()) {
-            return List.of();
-        }
-        List<GluaDapVariable> result = new ArrayList<>();
-        for (JsonElement element : variables) {
-            if (!element.isJsonObject()) {
-                continue;
-            }
-            JsonObject variable = element.getAsJsonObject();
-            String name = stringMember(variable, "name");
-            if (name.isBlank()) {
-                continue;
-            }
-            result.add(new GluaDapVariable(name, stringMember(variable, "value"), stringMember(variable, "type"), intMember(variable, "variablesReference")));
-        }
-        return Collections.unmodifiableList(result);
     }
 
     private static JsonObject objectMember(@NotNull JsonObject object, @NotNull String name) {
@@ -747,40 +682,5 @@ public final class GluaDapLaunchProcessHandler extends OSProcessHandler implemen
     private static boolean booleanMember(@NotNull JsonObject object, @NotNull String name) {
         JsonElement element = object.get(name);
         return element != null && element.isJsonPrimitive() && element.getAsBoolean();
-    }
-
-    private static void appendTail(StringBuilder builder, String text) {
-        builder.append(text);
-        int extra = builder.length() - 4000;
-        if (extra > 0) {
-            builder.delete(0, extra);
-        }
-    }
-
-    static ReadyTarget parseReadyTarget(@NotNull String text) {
-        String[] lines = text.split("\\R");
-        for (String line : lines) {
-            int index = line.indexOf(READY_PREFIX);
-            if (index < 0) {
-                continue;
-            }
-            String address = line.substring(index + READY_PREFIX.length()).trim();
-            int colon = address.lastIndexOf(':');
-            if (colon <= 0 || colon == address.length() - 1) {
-                continue;
-            }
-            try {
-                int port = Integer.parseInt(address.substring(colon + 1));
-                if (port >= 1 && port <= 65535) {
-                    return new ReadyTarget(address.substring(0, colon), port);
-                }
-            } catch (NumberFormatException ignored) {
-                // 非法端口不是 ready 标记，继续检查后续行。
-            }
-        }
-        return null;
-    }
-
-    public record ReadyTarget(@NotNull String host, int port) {
     }
 }

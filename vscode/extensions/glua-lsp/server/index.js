@@ -81,6 +81,7 @@ const baseKeywords = new Set([
   "if",
   "in",
   "local",
+  "const",
   "nil",
   "not",
   "or",
@@ -231,8 +232,9 @@ function createDefaultSyntax() {
   return {
     switch: true,
     continue: true,
+    const: true,
     lua53: false,
-    enabledExtensions: new Set(["switch", "continue"]),
+    enabledExtensions: new Set(["switch", "continue", "const"]),
     profile: "extended",
   };
 }
@@ -241,13 +243,19 @@ function parseSyntaxValue(raw) {
   if (!raw || raw.trim() === "") {
     return createDefaultSyntax();
   }
-  const next = createDefaultSyntax();
   const profile = String(raw).trim().toLowerCase();
-  next.profile = profile;
   const items = profile.split(",").map((item) => item.trim()).filter(Boolean);
   if (items.length === 0) {
-    return next;
+    return createDefaultSyntax();
   }
+  const next = {
+    switch: false,
+    continue: false,
+    const: false,
+    lua53: false,
+    enabledExtensions: new Set(),
+    profile,
+  };
 
   for (const item of items) {
     switch (item) {
@@ -255,13 +263,16 @@ function parseSyntaxValue(raw) {
         next.lua53 = true;
         next.switch = false;
         next.continue = false;
+        next.const = false;
         next.enabledExtensions.clear();
         break;
       case "extended":
+      case "all":
         next.lua53 = false;
         next.switch = true;
         next.continue = true;
-        next.enabledExtensions = new Set(["switch", "continue"]);
+        next.const = true;
+        next.enabledExtensions = new Set(["switch", "continue", "const"]);
         break;
       case "switch":
         next.switch = true;
@@ -271,11 +282,16 @@ function parseSyntaxValue(raw) {
         next.continue = true;
         next.enabledExtensions.add("continue");
         break;
+      case "const":
+        next.const = true;
+        next.enabledExtensions.add("const");
+        break;
       case "none":
       case "off":
       case "default":
         next.switch = false;
         next.continue = false;
+        next.const = false;
         next.enabledExtensions.clear();
         break;
       default:
@@ -340,6 +356,9 @@ function isContextKeyword(text, syntax) {
   }
   if (text === "continue") {
     return syntax.continue;
+  }
+  if (text === "const") {
+    return syntax.const;
   }
   return false;
 }
@@ -612,10 +631,10 @@ function scanTokens(source, syntax) {
       }
       const raw = source.slice(startIndex, index);
       let tokenType = "identifier";
-      if (baseKeywords.has(raw) && ((raw === "switch" || raw === "case" || raw === "default" || raw === "continue") ? isContextKeyword(raw, syntax) : true)) {
+      if (baseKeywords.has(raw) && ((raw === "switch" || raw === "case" || raw === "default" || raw === "continue" || raw === "const") ? isContextKeyword(raw, syntax) : true)) {
         tokenType = "keyword";
       }
-      if ((raw === "switch" || raw === "case" || raw === "default" || raw === "continue") && !isContextKeyword(raw, syntax)) {
+      if ((raw === "switch" || raw === "case" || raw === "default" || raw === "continue" || raw === "const") && !isContextKeyword(raw, syntax)) {
         tokenType = "identifier";
       }
       emit(tokenType, raw, raw, startLine, startColumn, line, column);
@@ -627,6 +646,9 @@ function scanTokens(source, syntax) {
       }
       if (raw === "continue" && !syntax.continue) {
         appendError("`continue` is enabled by extended syntax", startLine, startColumn);
+      }
+      if (raw === "const" && !syntax.const) {
+        appendError("`const` is enabled by extended syntax", startLine, startColumn);
       }
       continue;
     }
@@ -1197,7 +1219,13 @@ function nextVisibleIndex(tokens, index) {
   return -1;
 }
 
-function buildSymbolSnapshot(tokens) {
+function buildSymbolSnapshot(tokens, syntaxOptions = syntax) {
+  const declaredBuiltins = [
+    ...Array.from(baseBuiltinFunctions).filter((name) => !name.includes(".")),
+  ];
+  if (gluaEventsEnabled) {
+    declaredBuiltins.push("events", "setFunctionEvent", "setFunctionEventAsync", "setProgressEvent", "setProgressEventAsync", "callFunctionEvent", "callFunctionEventAsync", "callProgressEvent", "callProgressEventAsync");
+  }
   const snapshot = {
     declared: new Set([
       "_G",
@@ -1207,11 +1235,12 @@ function buildSymbolSnapshot(tokens) {
       "nil",
       "true",
       ...standardLibraries,
-      ...Array.from(baseBuiltinFunctions).filter((name) => !name.includes(".")),
+      ...declaredBuiltins,
     ]),
     definitions: new Map(),
     userSymbols: new Map(),
     functionSignatures: new Map(),
+    consts: new Map(),
   };
   for (let index = 0; index < tokens.length; index++) {
     const token = tokens[index];
@@ -1231,6 +1260,16 @@ function buildSymbolSnapshot(tokens) {
           break;
         }
         addSymbolToken(snapshot, current);
+      }
+      continue;
+    }
+    if (syntaxOptions && syntaxOptions.const && token.text === "const") {
+      for (let cursor = index + 1; cursor < tokens.length; cursor++) {
+        const current = tokens[cursor];
+        if (!current || current.text === "=" || current.range.start.line !== token.range.start.line) {
+          break;
+        }
+        addConstSymbol(snapshot, current);
       }
       continue;
     }
@@ -1278,6 +1317,16 @@ function addFunctionSymbol(snapshot, token, signature) {
   }
 }
 
+function addConstSymbol(snapshot, token) {
+  if (!isNameToken(token) || token.type === "keyword") {
+    return;
+  }
+  addSymbolToken(snapshot, token);
+  if (!snapshot.consts.has(token.text)) {
+    snapshot.consts.set(token.text, token.range);
+  }
+}
+
 function collectAssignmentTargets(tokens, snapshot) {
   for (let index = 0; index < tokens.length; index++) {
     const token = tokens[index];
@@ -1293,6 +1342,9 @@ function collectAssignmentTargets(tokens, snapshot) {
 }
 
 function collectSimpleAssignmentTargets(tokens, statementStart, equalsIndex, snapshot) {
+  if (tokens[statementStart] && tokens[statementStart].text === "const") {
+    return;
+  }
   let segmentStart = statementStart;
   let depth = 0;
   for (let cursor = statementStart; cursor <= equalsIndex; cursor++) {
@@ -1313,6 +1365,173 @@ function collectSimpleAssignmentTargets(tokens, statementStart, equalsIndex, sna
       depth--;
     }
   }
+}
+
+function collectConstAssignmentDiagnostics(tokens, snapshot) {
+  const diagnostics = [];
+  if (!snapshot || !snapshot.consts || snapshot.consts.size === 0) {
+    return diagnostics;
+  }
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (!token || token.text !== "=" || delimiterDepthBefore(tokens, index) !== 0) {
+      continue;
+    }
+    const statementStart = assignmentStatementStart(tokens, index);
+    if (tokens[statementStart] && tokens[statementStart].text === "const") {
+      continue;
+    }
+    const targets = simpleNameAssignmentTargets(tokens, statementStart, index);
+    for (const target of targets) {
+      if (!snapshot.consts.has(target.text)) {
+        continue;
+      }
+      diagnostics.push({
+        range: target.range,
+        severity: DiagnosticSeverity.Error,
+        source: "glua",
+        message: `cannot assign to const binding '${target.text}'`,
+      });
+    }
+  }
+  return diagnostics;
+}
+
+function collectConstTableAssignmentDiagnostics(tokens, documentUri) {
+  const diagnostics = [];
+  const constMembersByReceiver = constTableMembersByReceiver(tokens, documentUri);
+  for (const [receiver, members] of currentFileConstTableMembersByReceiver(tokens).entries()) {
+    if (!constMembersByReceiver.has(receiver)) {
+      constMembersByReceiver.set(receiver, members);
+    }
+  }
+  if (constMembersByReceiver.size === 0) {
+    return diagnostics;
+  }
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (!token || token.text !== "=" || delimiterDepthBefore(tokens, index) !== 0) {
+      continue;
+    }
+    const statementStart = assignmentStatementStart(tokens, index);
+    for (const target of memberAssignmentTargets(tokens, statementStart, index)) {
+      const members = constMembersByReceiver.get(target.receiver);
+      if (!members || !members.has(target.member)) {
+        continue;
+      }
+      diagnostics.push({
+        range: target.range,
+        severity: DiagnosticSeverity.Error,
+        source: "glua",
+        message: "cannot assign to const table field",
+      });
+    }
+  }
+  return diagnostics;
+}
+
+function currentFileConstTableMembersByReceiver(tokens) {
+  const membersByReceiver = new Map();
+  const exportedTables = returnedTableNames(tokens);
+  const constMembers = constExportMembers(tokens, exportedTables);
+  if (constMembers.size === 0) {
+    return membersByReceiver;
+  }
+  for (const tableName of exportedTables) {
+    membersByReceiver.set(tableName, constMembers);
+  }
+  return membersByReceiver;
+}
+
+function constTableMembersByReceiver(tokens, documentUri) {
+  const membersByReceiver = new Map();
+  if (!documentUri) {
+    return membersByReceiver;
+  }
+  const bindings = localRequireBindings(tokens, documentUri);
+  for (const [receiver, filePath] of bindings.entries()) {
+    let moduleText = "";
+    try {
+      moduleText = fs.readFileSync(filePath, "utf8");
+    } catch {
+      moduleText = "";
+    }
+    if (!moduleText) {
+      continue;
+    }
+    const snapshot = moduleExportSnapshot(filePath, receiver);
+    if (snapshot.constMembers && snapshot.constMembers.size > 0) {
+      membersByReceiver.set(receiver, snapshot.constMembers);
+    }
+  }
+  return membersByReceiver;
+}
+
+function memberAssignmentTargets(tokens, statementStart, equalsIndex) {
+  const targets = [];
+  let segmentStart = statementStart;
+  let depth = 0;
+  for (let cursor = statementStart; cursor <= equalsIndex; cursor++) {
+    const current = tokens[cursor];
+    if (!current) {
+      continue;
+    }
+    if (cursor === equalsIndex || (current.text === "," && depth === 0)) {
+      const target = memberAssignmentTarget(tokens.slice(segmentStart, cursor));
+      if (target) {
+        targets.push(target);
+      }
+      segmentStart = cursor + 1;
+      continue;
+    }
+    if (isOpenDelimiter(current.text)) {
+      depth++;
+      continue;
+    }
+    if (isCloseDelimiter(current.text) && depth > 0) {
+      depth--;
+    }
+  }
+  return targets;
+}
+
+function memberAssignmentTarget(segmentTokens) {
+  const visible = segmentTokens.filter((token) => token && token.type !== "space" && token.type !== "comment");
+  if (visible.length === 3 && isNameToken(visible[0]) && visible[1].text === "." && isNameToken(visible[2])) {
+    return { receiver: visible[0].text, member: visible[2].text, range: visible[2].range };
+  }
+  if (visible.length === 4 && isNameToken(visible[0]) && visible[1].text === "[" && visible[2].type === "string" && visible[3].text === "]") {
+    return { receiver: visible[0].text, member: stringTokenValue(visible[2]), range: visible[2].range };
+  }
+  return null;
+}
+
+function simpleNameAssignmentTargets(tokens, statementStart, equalsIndex) {
+  const targets = [];
+  let segmentStart = statementStart;
+  let depth = 0;
+  for (let cursor = statementStart; cursor <= equalsIndex; cursor++) {
+    const current = tokens[cursor];
+    if (!current) {
+      continue;
+    }
+    if (cursor === equalsIndex || (current.text === "," && depth === 0)) {
+      const visible = tokens.slice(segmentStart, cursor).filter((token) => token && !(token.type === "keyword" && token.text === "local"));
+      if (visible.length === 1 && isNameToken(visible[0]) && visible[0].type !== "keyword") {
+        targets.push(visible[0]);
+      }
+      segmentStart = cursor + 1;
+      continue;
+    }
+    if (isOpenDelimiter(current.text)) {
+      depth++;
+      continue;
+    }
+    if (isCloseDelimiter(current.text) && depth > 0) {
+      depth--;
+    }
+  }
+  return targets;
 }
 
 function addSimpleAssignmentTarget(segment, snapshot) {
@@ -1434,7 +1653,7 @@ function collectFunctionExpressionParameters(tokens, functionIndex, snapshot) {
   }
 }
 
-function collectUndeclaredIdentifierDiagnostics(tokens, snapshot = buildSymbolSnapshot(tokens)) {
+function collectUndeclaredIdentifierDiagnostics(tokens, snapshot = buildSymbolSnapshot(tokens, syntax)) {
   const declared = snapshot.declared;
   const diagnostics = [];
   const reported = new Set();
@@ -1494,9 +1713,10 @@ function buildCompletionCandidates(context, snapshot, tokens, documentUri) {
       items.push({
         name: methodName,
         fullName: name,
+        kind: String(builtin.signature || "").includes("(") ? CompletionItemKind.Function : CompletionItemKind.Constant,
         detail: builtin.signature || methodName,
         documentation: formatBuiltinMarkdown(name, builtin),
-        snippet: completionSnippet(methodName, builtin.signature || methodName),
+        snippet: String(builtin.signature || "").includes("(") ? completionSnippet(methodName, builtin.signature || methodName) : undefined,
       });
       seen.add(methodName);
       continue;
@@ -1510,9 +1730,10 @@ function buildCompletionCandidates(context, snapshot, tokens, documentUri) {
       items.push({
         name,
         fullName: name,
+        kind: String(builtin.signature || "").includes("(") ? CompletionItemKind.Function : CompletionItemKind.Constant,
         detail: builtin.signature || name,
         documentation: formatBuiltinMarkdown(name, builtin),
-        snippet: completionSnippet(name, builtin.signature || name),
+        snippet: String(builtin.signature || "").includes("(") ? completionSnippet(name, builtin.signature || name) : undefined,
       });
       seen.add(name);
     }
@@ -1531,10 +1752,10 @@ function buildCompletionCandidates(context, snapshot, tokens, documentUri) {
         }
         items.push({
           name: member.name,
-          kind: CompletionItemKind.Function,
+          kind: member.kind === "const" ? CompletionItemKind.Constant : member.kind === "variable" ? CompletionItemKind.Variable : CompletionItemKind.Function,
           detail: member.detail,
           documentation: member.documentation || `Exported from ${path.basename(moduleFile)}.`,
-          snippet: completionSnippet(member.name, member.signature),
+          snippet: member.kind === "function" || member.kind === "method" ? completionSnippet(member.name, member.signature) : undefined,
         });
         seen.add(member.name);
       }
@@ -1708,7 +1929,7 @@ function resolveBuiltinTarget(tokens, position) {
 
 function findDefinition(text, targetName, position, syntax) {
   const result = scanTokens(text, syntax);
-  const snapshot = buildSymbolSnapshot(result.tokens);
+  const snapshot = buildSymbolSnapshot(result.tokens, syntax);
   return definitionFromSnapshot(snapshot, targetName, position);
 }
 
@@ -1727,7 +1948,7 @@ function definitionFromSnapshot(snapshot, targetName, position) {
 }
 
 function isContextToken(text) {
-  return text === "switch" || text === "case" || text === "default" || text === "continue";
+  return text === "switch" || text === "case" || text === "default" || text === "continue" || text === "const";
 }
 
 function semanticTokenTypeForToken(tokens, index, syntax) {
@@ -1902,7 +2123,7 @@ function staticCaseValueKey(token) {
   return null;
 }
 
-function collectParseLikeErrors(text, syntax) {
+function collectParseLikeErrors(text, syntax, documentUri = "") {
   const scanned = scanTokens(text, syntax);
   const diagnostics = [];
   for (const error of scanned.errors) {
@@ -1992,8 +2213,10 @@ function collectParseLikeErrors(text, syntax) {
     });
   }
 
-  const snapshot = buildSymbolSnapshot(tokens);
+  const snapshot = buildSymbolSnapshot(tokens, syntax);
   diagnostics.push(...collectDuplicateSwitchCaseDiagnostics(tokens));
+  diagnostics.push(...collectConstAssignmentDiagnostics(tokens, snapshot));
+  diagnostics.push(...collectConstTableAssignmentDiagnostics(tokens, documentUri));
   diagnostics.push(...collectTypedMethodDiagnostics(tokens));
   diagnostics.push(...collectUndeclaredIdentifierDiagnostics(tokens, snapshot));
   return diagnostics;
@@ -2003,6 +2226,7 @@ const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments(TextDocument);
 
 let syntax = createDefaultSyntax();
+let gluaEventsEnabled = true;
 let builtinExtensionOptions = {
   locale: DEFAULT_DOC_LOCALE,
   resolvedLocale: "en",
@@ -2287,6 +2511,7 @@ function moduleExportSnapshot(filePath, receiverName) {
       tokens: [],
       exportedTables: new Set(),
       members: [],
+      constMembers: new Set(),
     };
   }
   const tokens = scanTokens(text, syntax).tokens;
@@ -2296,25 +2521,34 @@ function moduleExportSnapshot(filePath, receiverName) {
   }
   const members = [];
   const seen = new Set();
-  const addMember = (token, callStyle, functionIndex) => {
+  const constMembers = constExportMembers(tokens, exportedTables);
+  const addMember = (token, callStyle, functionIndex, kind = callStyle === ":" ? "method" : "function") => {
     const name = stringTokenValue(token) || (token ? token.text : "");
     if (!name || seen.has(name)) {
       return;
     }
     seen.add(name);
     const signature = memberSignature(tokens, functionIndex, name);
-    const documentation = hoverMarkdownForDefinition(signature, text, token.range);
+    const documentation = kind === "const"
+      ? `\`${name}\`\n\nGLua const field exported from \`${path.basename(filePath)}\`.`
+      : kind === "variable"
+        ? `\`${name}\`\n\nGLua table field exported from \`${path.basename(filePath)}\`.`
+        : hoverMarkdownForDefinition(signature, text, token.range);
     members.push({
       name,
-      range: token.range,
+      range: token.range || makeRange(0, 0, 0, 1),
       callStyle,
+      kind,
       signature,
-      detail: callStyle === ":" ? `${signature} method` : signature,
+      detail: kind === "method" ? `${signature} method` : kind === "const" ? "GLua const field" : kind === "variable" ? "GLua table field" : signature,
       documentation,
       sourcePath: filePath,
     });
   };
 
+  for (const constMember of constMembers) {
+    addMember({ text: constMember, range: makeRange(0, 0, 0, 1), type: "identifier" }, ".", -1, "const");
+  }
   for (let index = 0; index + 2 < tokens.length; index++) {
     const receiverMatches = exportedTables.has(tokens[index].text);
     const separator = tokens[index + 1];
@@ -2333,10 +2567,19 @@ function moduleExportSnapshot(filePath, receiverName) {
         addMember(member, ".", assignmentFunctionIndex);
         continue;
       }
+      if (separator.text === "." && member.text !== "_glua_const" && memberValueAssignmentIndex(tokens, index + 2) >= 0) {
+        addMember(member, ".", -1, "variable");
+        continue;
+      }
     }
     const indexedMember = indexedMemberFunctionDefinition(tokens, index, exportedTables, "");
     if (indexedMember) {
       addMember(indexedMember.token, ".", indexedMember.functionIndex);
+      continue;
+    }
+    const indexedValue = indexedMemberValueDefinition(tokens, index, exportedTables, "");
+    if (indexedValue && indexedValue.name !== "_glua_const") {
+      addMember(indexedValue.token, ".", -1, "variable");
     }
   }
 
@@ -2344,6 +2587,9 @@ function moduleExportSnapshot(filePath, receiverName) {
     for (const range of tableConstructorRanges(tokens, tableName)) {
       for (const field of tableFieldFunctionDefinitions(tokens, range.openIndex + 1, range.closeIndex)) {
         addMember(field.token, ".", field.functionIndex);
+      }
+      for (const field of tableFieldValueDefinitions(tokens, range.openIndex + 1, range.closeIndex)) {
+        addMember(field.token, ".", -1, "variable");
       }
     }
   }
@@ -2353,7 +2599,127 @@ function moduleExportSnapshot(filePath, receiverName) {
     tokens,
     exportedTables,
     members,
+    constMembers,
   };
+}
+
+function constExportMembers(tokens, exportedTables) {
+  const members = new Set();
+  for (let index = 0; index < tokens.length; index++) {
+    const receiver = tokens[index];
+    if (!receiver || !exportedTables.has(receiver.text)) {
+      continue;
+    }
+    const separatorIndex = nextVisibleIndex(tokens, index);
+    const memberIndex = nextVisibleIndex(tokens, separatorIndex);
+    if (separatorIndex < 0 || memberIndex < 0) {
+      continue;
+    }
+    let tableOpenIndex = -1;
+    if (tokens[separatorIndex].text === "." && tokens[memberIndex].text === "_glua_const") {
+      const equalsIndex = nextVisibleIndex(tokens, memberIndex);
+      tableOpenIndex = nextVisibleIndex(tokens, equalsIndex);
+    } else if (tokens[separatorIndex].text === "[") {
+      const closeIndex = nextVisibleIndex(tokens, memberIndex);
+      const key = stringTokenValue(tokens[memberIndex]);
+      if (closeIndex >= 0 && tokens[closeIndex].text === "]" && key === "_glua_const") {
+        const equalsIndex = nextVisibleIndex(tokens, closeIndex);
+        tableOpenIndex = nextVisibleIndex(tokens, equalsIndex);
+      }
+    }
+    addConstMembersFromTable(tokens, tableOpenIndex, members);
+  }
+  for (const tableName of exportedTables) {
+    for (const range of tableConstructorRanges(tokens, tableName)) {
+      let depth = 0;
+      for (let index = range.openIndex + 1; index < range.closeIndex; index++) {
+        const token = tokens[index];
+        if (!token) {
+          continue;
+        }
+        if (depth === 0) {
+          const tableOpenIndex = constTableFieldOpenIndex(tokens, index, range.closeIndex);
+          if (tableOpenIndex > 0) {
+            addConstMembersFromTable(tokens, tableOpenIndex, members);
+          }
+        }
+        if (isOpenDelimiter(token.text)) {
+          depth++;
+          continue;
+        }
+        if (isCloseDelimiter(token.text) && depth > 0) {
+          depth--;
+        }
+      }
+    }
+  }
+  return members;
+}
+
+function constTableFieldOpenIndex(tokens, keyIndex, endIndex) {
+  const key = tokens[keyIndex];
+  if (!key) {
+    return -1;
+  }
+  if (key.text === "[") {
+    const stringIndex = nextVisibleIndex(tokens, keyIndex);
+    const closeIndex = nextVisibleIndex(tokens, stringIndex);
+    const equalsIndex = nextVisibleIndex(tokens, closeIndex);
+    const openIndex = nextVisibleIndex(tokens, equalsIndex);
+    return stringIndex >= 0 && closeIndex >= 0 && equalsIndex >= 0 && openIndex >= 0
+      && closeIndex < endIndex && equalsIndex < endIndex && openIndex < endIndex
+      && stringTokenValue(tokens[stringIndex]) === "_glua_const"
+      && tokens[closeIndex].text === "]" && tokens[equalsIndex].text === "=" && tokens[openIndex].text === "{"
+      ? openIndex
+      : -1;
+  }
+  const equalsIndex = nextVisibleIndex(tokens, keyIndex);
+  const openIndex = nextVisibleIndex(tokens, equalsIndex);
+  return equalsIndex >= 0 && openIndex >= 0
+    && key.text === "_glua_const"
+    && equalsIndex < endIndex && openIndex < endIndex
+    && tokens[equalsIndex].text === "=" && tokens[openIndex].text === "{"
+    ? openIndex
+    : -1;
+}
+
+function addConstMembersFromTable(tokens, openIndex, members) {
+  if (openIndex < 0 || !tokens[openIndex] || tokens[openIndex].text !== "{") {
+    return;
+  }
+  const closeIndex = matchingDelimiterIndex(tokens, openIndex);
+  if (closeIndex <= openIndex) {
+    return;
+  }
+  let depth = 0;
+  for (let index = openIndex + 1; index < closeIndex; index++) {
+    const token = tokens[index];
+    if (!token) {
+      continue;
+    }
+    if (depth === 0 && isNameToken(token)) {
+      const equalsIndex = nextVisibleIndex(tokens, index);
+      if (equalsIndex < closeIndex && tokens[equalsIndex].text === "=") {
+        members.add(token.text);
+      }
+    }
+    if (depth === 0 && token.text === "[") {
+      const keyIndex = nextVisibleIndex(tokens, index);
+      const closeBracketIndex = nextVisibleIndex(tokens, keyIndex);
+      const equalsIndex = nextVisibleIndex(tokens, closeBracketIndex);
+      const key = stringTokenValue(tokens[keyIndex]);
+      if (key && closeBracketIndex < closeIndex && equalsIndex < closeIndex && tokens[closeBracketIndex].text === "]" && tokens[equalsIndex].text === "=") {
+        members.add(key);
+      }
+    }
+    if (isOpenDelimiter(token.text)) {
+      depth++;
+      continue;
+    }
+    if (isCloseDelimiter(token.text) && depth > 0) {
+      depth--;
+    }
+  }
 }
 
 function returnedTableNames(tokens) {
@@ -2389,6 +2755,12 @@ function memberFunctionAssignmentIndex(tokens, memberIndex) {
   return -1;
 }
 
+function memberValueAssignmentIndex(tokens, memberIndex) {
+  const equalsIndex = nextVisibleIndex(tokens, memberIndex);
+  const valueIndex = nextVisibleIndex(tokens, equalsIndex);
+  return equalsIndex >= 0 && valueIndex >= 0 && tokens[equalsIndex].text === "=" && tokens[valueIndex].text !== "function" ? valueIndex : -1;
+}
+
 function indexedMemberFunctionDefinition(tokens, receiverIndex, exportedTables, memberName) {
   if (!exportedTables.has(tokens[receiverIndex].text)) {
     return null;
@@ -2404,6 +2776,24 @@ function indexedMemberFunctionDefinition(tokens, receiverIndex, exportedTables, 
   }
   const functionIndex = indexedFunctionIndex(tokens, closeIndex);
   return functionIndex >= 0 ? { token: tokens[keyIndex], functionIndex } : null;
+}
+
+function indexedMemberValueDefinition(tokens, receiverIndex, exportedTables, memberName) {
+  if (!exportedTables.has(tokens[receiverIndex].text)) {
+    return null;
+  }
+  const openIndex = nextVisibleIndex(tokens, receiverIndex);
+  const keyIndex = nextVisibleIndex(tokens, openIndex);
+  const closeIndex = nextVisibleIndex(tokens, keyIndex);
+  const equalsIndex = nextVisibleIndex(tokens, closeIndex);
+  if (openIndex < 0 || keyIndex < 0 || closeIndex < 0 || equalsIndex < 0 || tokens[openIndex].text !== "[" || tokens[closeIndex].text !== "]" || tokens[equalsIndex].text !== "=") {
+    return null;
+  }
+  const name = stringTokenValue(tokens[keyIndex]);
+  if (!name || (memberName && name !== memberName) || isIndexedFunctionDefinition(tokens, closeIndex)) {
+    return null;
+  }
+  return { name, token: tokens[keyIndex] };
 }
 
 function tableLiteralMemberFunctionDefinition(tokens, exportedTables, memberName) {
@@ -2468,6 +2858,36 @@ function tableFieldFunctionDefinitions(tokens, startIndex, endIndex) {
   return fields;
 }
 
+function tableFieldValueDefinitions(tokens, startIndex, endIndex) {
+  const fields = [];
+  let depth = 0;
+  for (let index = startIndex; index < endIndex; index++) {
+    const token = tokens[index];
+    if (!token) {
+      continue;
+    }
+    if (depth === 0 && token.text === "[" && index + 2 < endIndex) {
+      const keyIndex = nextVisibleIndex(tokens, index);
+      const closeIndex = nextVisibleIndex(tokens, keyIndex);
+      const equalsIndex = nextVisibleIndex(tokens, closeIndex);
+      const name = stringTokenValue(tokens[keyIndex]);
+      if (closeIndex < endIndex && equalsIndex < endIndex && tokens[closeIndex].text === "]" && tokens[equalsIndex].text === "=" && name && name !== "_glua_const" && !isIndexedFunctionDefinition(tokens, closeIndex)) {
+        fields.push({ token: tokens[keyIndex] });
+      }
+    } else if (depth === 0 && isNameToken(token) && token.text !== "_glua_const" && isBareTableFieldValueDefinition(tokens, index, endIndex)) {
+      fields.push({ token });
+    }
+    if (isOpenDelimiter(token.text)) {
+      depth++;
+      continue;
+    }
+    if (isCloseDelimiter(token.text) && depth > 0) {
+      depth--;
+    }
+  }
+  return fields;
+}
+
 function isFunctionStatementMember(tokens, receiverIndex) {
   const previous = previousVisibleToken(tokens, receiverIndex);
   return previous && previous.text === "function";
@@ -2491,6 +2911,11 @@ function bareTableFieldFunctionIndex(tokens, keyIndex, endIndex) {
   const equalsIndex = nextVisibleIndex(tokens, keyIndex);
   const functionIndex = nextVisibleIndex(tokens, equalsIndex);
   return equalsIndex > keyIndex && functionIndex < endIndex && tokens[equalsIndex].text === "=" && tokens[functionIndex].text === "function" ? functionIndex : -1;
+}
+
+function isBareTableFieldValueDefinition(tokens, keyIndex, endIndex) {
+  const equalsIndex = nextVisibleIndex(tokens, keyIndex);
+  return equalsIndex > keyIndex && equalsIndex < endIndex && tokens[equalsIndex].text === "=" && !isBareTableFieldFunctionDefinition(tokens, keyIndex, endIndex);
 }
 
 function memberSignature(tokens, functionIndex, name) {
@@ -2898,6 +3323,9 @@ connection.onInitialize((params) => {
     syntax = parseSyntaxValue(params.initializationOptions.syntax);
   }
   if (params.initializationOptions) {
+    if (params.initializationOptions.events !== undefined) {
+      gluaEventsEnabled = params.initializationOptions.events !== false;
+    }
     builtinExtensionOptions = {
       locale: params.initializationOptions.locale || builtinExtensionOptions.locale,
       resolvedLocale: params.initializationOptions.resolvedLocale || params.initializationOptions.locale || builtinExtensionOptions.resolvedLocale,
@@ -2975,7 +3403,7 @@ connection.onDidChangeConfiguration((params) => {
 });
 
 function validateDocument(document) {
-  const diagnostics = collectParseLikeErrors(document.getText(), syntax);
+  const diagnostics = collectParseLikeErrors(document.getText(), syntax, document.uri);
   connection.sendDiagnostics({ uri: document.uri, diagnostics });
 }
 
@@ -3043,7 +3471,7 @@ connection.onCompletion((params) => {
   const tokens = scanTokens(text, syntax).tokens;
   const position = parsePositionOffset(text, params.position);
   const context = extractCompletionContext(text, tokens, position);
-  const snapshot = buildSymbolSnapshot(tokens);
+  const snapshot = buildSymbolSnapshot(tokens, syntax);
   const candidates = buildCompletionCandidates(context, snapshot, tokens, params.textDocument.uri);
   return candidates.map((item) => ({
     label: item.name,

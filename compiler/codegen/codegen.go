@@ -14,6 +14,12 @@ import (
 const (
 	// envUpvalueName 是 Lua 5.3 chunk 默认捕获的环境 upvalue 名称。
 	envUpvalueName = "_ENV"
+	// tableGluaConstName 是 GLua 用于把 table 字段投影为只读 ROOT 常量的保留字段。
+	tableGluaConstName = "_glua_const"
+	// tableGluaConstMarkerName 是顶层 const 包装表的内部标记字段。
+	tableGluaConstMarkerName = "_glua_const_marker"
+	// tableGluaConstValueName 是顶层 const 包装表的真实值字段。
+	tableGluaConstValueName = "_glua_const_value"
 	// maxProtoRegisters 是 Proto.MaxStackSize 可表达的最大寄存器数量。
 	maxProtoRegisters = 255
 	// initialCodeCapacity 是 codegen Proto 指令和行号表的最小预留容量。
@@ -92,6 +98,8 @@ type generator struct {
 	labelPCs map[string][]labelInfo
 	// pendingGotos 保存当前函数内尚未回填的 goto 占位跳转。
 	pendingGotos []pendingGoto
+	// globalConsts 保存顶层 chunk const 声明出的只读全局名称，用于编译期拦截同 chunk 后续写入。
+	globalConsts map[string]lexer.Position
 	// scopes 按 parser scope ID 保存当前函数内 block 作用域，供 goto/label 可见性解析。
 	scopes map[int]*parser.ScopeInfo
 	// inlineScopeStack 保存最常见的函数顶层 block 作用域，避免为 scopeStack 单独分配底层数组。
@@ -114,6 +122,8 @@ type localBinding struct {
 	localVarIndex int
 	// scopeID 保存声明该局部变量的 parser 作用域编号，用于区分同作用域重名和内层遮蔽。
 	scopeID int
+	// constLocal 表示该 local 由 const 语法糖声明，不允许后续赋值覆盖。
+	constLocal bool
 	// captured 表示该局部变量已被子函数捕获为 open upvalue。
 	captured bool
 }
@@ -687,6 +697,18 @@ func (generator *generator) compileGotoStatement(statement *parser.GotoStatement
 //
 // 未提供初始化表达式的变量按 Lua 语义生成 nil；多余表达式当前仍会求值并释放临时寄存器。
 func (generator *generator) compileLocalAssignment(statement *parser.LocalAssignmentStatement) error {
+	if statement.Const && generator.isTopLevelChunkScope() {
+		// 顶层 const 是当前 chunk 环境上的只读全局绑定，不分配 local 寄存器。
+		return generator.compileGlobalConstAssignment(statement)
+	}
+	if generator.isTopLevelChunkScope() {
+		for _, name := range statement.Names {
+			if _, exists := generator.lookupGlobalConst(name); exists {
+				// 顶层同名 local 会遮蔽只读全局常量，按 const 语义拒绝。
+				return constAssignmentError(name, statement.Position)
+			}
+		}
+	}
 	targetRegisters := make([]int, 0, len(statement.Names))
 	for range statement.Names {
 		// 每个 local 名称先占用一个长期寄存器，但暂不进入作用域，保证初始化 RHS 读取外层同名变量。
@@ -753,10 +775,79 @@ func (generator *generator) compileLocalAssignment(statement *parser.LocalAssign
 	}
 	for index, name := range statement.Names {
 		// 初始化表达式全部完成后再登记局部变量，匹配 Lua 5.3 local 作用域从声明之后开始。
-		generator.defineLocal(name, targetRegisters[index], statement.Position)
+		generator.defineLocalWithConst(name, targetRegisters[index], statement.Position, statement.Const)
 	}
 
 	// local 声明编译完成。
+	return nil
+}
+
+// compileGlobalConstAssignment 编译顶层 const 声明为当前环境上的只读全局字段。
+//
+// 顶层 chunk 的 const 不进入 local 寄存器表；它会构造 `_glua_const` table 并写入当前 `_ENV`，由
+// runtime table 投影为 ROOT 字段并登记只读 key。RHS 求值仍遵守 Lua 多赋值规则。
+func (generator *generator) compileGlobalConstAssignment(statement *parser.LocalAssignmentStatement) error {
+	firstTempRegister := generator.nextRegister
+	valueRegisters := make([]int, 0, len(statement.Names))
+	for range statement.Names {
+		// 每个 const 名称先占一个临时值寄存器，确保 RHS 全部求完后再统一写入环境表。
+		valueRegisters = append(valueRegisters, generator.allocateRegister())
+	}
+	if err := generator.compileAssignmentValues(statement.Values, len(statement.Names), valueRegisters); err != nil {
+		// RHS 编译失败时释放所有临时值寄存器。
+		generator.releaseRegistersFrom(firstTempRegister)
+		return err
+	}
+	tableRegister := generator.allocateRegister()
+	generator.emitABC(bytecode.OpNewTable, tableRegister, 0, 0)
+	for index, name := range statement.Names {
+		if _, exists := generator.lookupGlobalConst(name); exists {
+			// 同一顶层 chunk 内重复定义 const 会让只读绑定含义不稳定，直接拒绝。
+			generator.releaseRegistersFrom(firstTempRegister)
+			return constAssignmentError(name, statement.Position)
+		}
+		wrapperRegister := generator.allocateRegister()
+		generator.emitABC(bytecode.OpNewTable, wrapperRegister, 0, 0)
+		markerRegister := generator.allocateRegister()
+		generator.emitABC(bytecode.OpLoadBool, markerRegister, 1, 0)
+		if err := generator.emitSetTableStringKey(wrapperRegister, tableGluaConstMarkerName, markerRegister); err != nil {
+			// marker 字段写入失败时释放临时寄存器并返回。
+			generator.releaseRegistersFrom(firstTempRegister)
+			return err
+		}
+		generator.releaseRegister(markerRegister)
+		if err := generator.emitSetTableStringKey(wrapperRegister, tableGluaConstValueName, valueRegisters[index]); err != nil {
+			// value 字段写入失败时释放临时寄存器并返回。
+			generator.releaseRegistersFrom(firstTempRegister)
+			return err
+		}
+		if err := generator.emitSetTableStringKey(tableRegister, name, wrapperRegister); err != nil {
+			// const 名称无法编码时释放临时寄存器并返回。
+			generator.releaseRegistersFrom(firstTempRegister)
+			return err
+		}
+		generator.releaseRegister(wrapperRegister)
+		generator.defineGlobalConst(name, statement.Position)
+	}
+	if err := generator.emitSetGlobalNameOperand(tableGluaConstName, tableRegister); err != nil {
+		// `_glua_const` 写入失败时释放整段临时寄存器。
+		generator.releaseRegistersFrom(firstTempRegister)
+		return err
+	}
+	generator.releaseRegistersFrom(firstTempRegister)
+	return nil
+}
+
+// emitSetTableStringKey 生成 `table[stringKey] = valueOperand`。
+func (generator *generator) emitSetTableStringKey(tableRegister int, stringKey string, valueOperand int) error {
+	keyIndex := generator.addConstant(bytecode.StringConstant(stringKey))
+	keyOperand, keyRegister, err := generator.rkOperandForConstantIndex(keyIndex)
+	if err != nil {
+		// 字符串 key 无法进入 RK 操作数时返回错误，调用方负责释放值寄存器。
+		return err
+	}
+	generator.emitABC(bytecode.OpSetTable, tableRegister, keyOperand, valueOperand)
+	generator.releaseOptionalRegister(keyRegister)
 	return nil
 }
 
@@ -865,6 +956,10 @@ func (generator *generator) compileSingleGlobalSafeAssignment(statement *parser.
 		// 外层 local 捕获为 upvalue 时不能当作全局写入。
 		return false, nil
 	}
+	if _, exists := generator.lookupGlobalConst(targetName.Name); exists {
+		// 顶层 const 全局不允许通过全局写入快路径覆盖。
+		return true, constAssignmentError(targetName.Name, targetName.Position)
+	}
 	valueOperand, valueRegister, err := generator.safeRKOperandWithRegister(statement.Right[0])
 	if err != nil {
 		// RHS 常量装载失败时返回编译错误。
@@ -897,6 +992,10 @@ func (generator *generator) compileSingleLocalSafeAssignment(statement *parser.A
 	if !ok {
 		// upvalue/global 写回不进入该快路径。
 		return false, nil
+	}
+	if binding.constLocal {
+		// const 绑定不允许通过安全赋值快路径覆盖。
+		return true, constAssignmentError(targetName.Name, targetName.Position)
 	}
 	if !generator.isSafeDirectLocalAssignmentValue(statement.Right[0]) {
 		// 右侧可能有副作用或需要运行期查找时回退通用路径。
@@ -1100,6 +1199,10 @@ func (generator *generator) compileSingleLocalSelfBinaryAssignment(statement *pa
 	if !ok {
 		// upvalue/global 写回有额外语义，不能用当前 local 寄存器快路径。
 		return false, nil
+	}
+	if binding.constLocal {
+		// const 绑定不允许通过自二元赋值快路径覆盖。
+		return true, constAssignmentError(targetName.Name, targetName.Position)
 	}
 	binaryExpression, ok := statement.Right[0].(*parser.BinaryExpression)
 	if !ok || binaryExpression.Operator == ".." || binaryExpression.Operator == "and" || binaryExpression.Operator == "or" || isComparisonOperator(binaryExpression.Operator) {
@@ -1627,6 +1730,10 @@ func (generator *generator) compileSingleLocalBinaryAssignment(statement *parser
 		// upvalue/global 写回有额外语义，不能用当前 local 寄存器快路径。
 		return false, nil
 	}
+	if binding.constLocal {
+		// const 绑定不允许通过普通二元赋值快路径覆盖。
+		return true, constAssignmentError(targetName.Name, targetName.Position)
+	}
 	binaryExpression, ok := statement.Right[0].(*parser.BinaryExpression)
 	if !ok || binaryExpression.Operator == "and" || binaryExpression.Operator == "or" {
 		// and/or 会把短路左值先写入目标寄存器，可能提前覆盖同名 local。
@@ -1657,6 +1764,10 @@ func (generator *generator) compileSingleLocalSelfConcatAssignment(statement *pa
 	if !ok {
 		// upvalue/global 写回有额外语义，不能用当前 local 寄存器快路径。
 		return false, nil
+	}
+	if binding.constLocal {
+		// const 绑定不允许通过自拼接赋值快路径覆盖。
+		return true, constAssignmentError(targetName.Name, targetName.Position)
 	}
 	binaryExpression, ok := statement.Right[0].(*parser.BinaryExpression)
 	if !ok || binaryExpression.Operator != ".." {
@@ -2045,6 +2156,10 @@ func (generator *generator) emitAssignmentTarget(target assignmentTarget, valueR
 			return nil
 		}
 		if target.resolvedUpvalue >= 0 {
+			if generator.proto.Upvalues[target.resolvedUpvalue].Const {
+				// const upvalue 不允许通过预解析左值写回覆盖。
+				return constAssignmentError(target.name, target.position)
+			}
 			// 左值地址阶段已确认外层 upvalue，直接写回该 upvalue 下标。
 			generator.emitABC(bytecode.OpSetupVal, valueRegister, target.resolvedUpvalue, 0)
 			return nil
@@ -2065,6 +2180,10 @@ func (generator *generator) emitAssignmentTarget(target assignmentTarget, valueR
 func (generator *generator) compileNameAssignmentFromRegister(target *parser.NameExpression, valueRegister int) error {
 	targetBinding, ok := generator.lookupLocal(target.Name)
 	if ok {
+		if targetBinding.constLocal {
+			// const 绑定不允许通过通用寄存器写回覆盖。
+			return constAssignmentError(target.Name, target.Position)
+		}
 		// 当前作用域 local 直接 MOVE，避免 RHS 临时寄存器生命周期泄漏。
 		generator.emitABC(bytecode.OpMove, targetBinding.register, valueRegister, 0)
 		return nil
@@ -2078,9 +2197,17 @@ func (generator *generator) compileNameAssignmentFromRegister(target *parser.Nam
 		// upvalue 数量超过 Lua 5.3 上限时返回编译错误。
 		return err
 	} else if captured {
+		if generator.proto.Upvalues[upvalueIndex].Const {
+			// 外层 const 捕获为 upvalue 后仍保持只读语义。
+			return constAssignmentError(target.Name, target.Position)
+		}
 		// 外层变量通过 SETUPVAL 写回捕获 upvalue。
 		generator.emitABC(bytecode.OpSetupVal, valueRegister, upvalueIndex, 0)
 		return nil
+	}
+	if _, exists := generator.lookupGlobalConst(target.Name); exists {
+		// 当前 chunk 顶层 const 全局不允许通过通用寄存器写回覆盖。
+		return constAssignmentError(target.Name, target.Position)
 	}
 
 	// 未声明名称写入当前 `_ENV` 全局表。
@@ -2111,6 +2238,10 @@ func (generator *generator) compileNameAssignment(target *parser.NameExpression,
 			return err
 		}
 		if captured {
+			if generator.proto.Upvalues[upvalueIndex].Const {
+				// 外层 const 捕获为 upvalue 后仍保持只读语义。
+				return constAssignmentError(target.Name, target.Position)
+			}
 			// 未命中当前局部但命中外层局部/upvalue 时，赋值应写回捕获的 upvalue。
 			valueRegister := generator.allocateRegister()
 			if err := generator.compileAssignmentValueTo(rights, index, valueRegister); err != nil {
@@ -2123,7 +2254,15 @@ func (generator *generator) compileNameAssignment(target *parser.NameExpression,
 			return nil
 		}
 		// 未声明且外层也未命中时，按 Lua 5.3 普通赋值语义写入当前 `_ENV` 表。
+		if _, exists := generator.lookupGlobalConst(target.Name); exists {
+			// 当前 chunk 顶层 const 全局不允许通过普通名称赋值覆盖。
+			return constAssignmentError(target.Name, target.Position)
+		}
 		return generator.compileGlobalAssignment(target.Name, rights, index)
+	}
+	if targetBinding.constLocal {
+		// const 绑定不允许通过普通名称赋值覆盖。
+		return constAssignmentError(target.Name, target.Position)
 	}
 	if index < len(rights) {
 		// 有右侧表达式时先写入临时寄存器，避免 `a = f(a)` 覆盖 RHS 读取旧局部值。
@@ -2285,6 +2424,10 @@ func (generator *generator) compileFunctionStatement(statement *parser.FunctionS
 		generator.releaseRegister(valueRegister)
 		return nil
 	}
+	if targetBinding.constLocal {
+		// const 绑定不允许通过 function 语句覆盖。
+		return constAssignmentError(statement.Name, statement.Position)
+	}
 	generator.emitABx(bytecode.OpClosure, targetBinding.register, childIndex)
 
 	// 普通 function 编译完成。
@@ -2313,6 +2456,10 @@ func (generator *generator) compileCompactFunctionStatement(statement *parser.Co
 		}
 		generator.releaseRegister(valueRegister)
 		return nil
+	}
+	if targetBinding.constLocal {
+		// const 绑定不允许通过 compact function 语句覆盖。
+		return constAssignmentError(statement.Name, statement.Pos())
 	}
 	generator.emitABx(bytecode.OpClosure, targetBinding.register, childIndex)
 
@@ -3894,6 +4041,10 @@ func (generator *generator) compileGlobalNameTo(name string, targetRegister int)
 //
 // rights 是赋值语句完整右侧列表；index 是当前左值下标。缺少右值时按 Lua 语义写入 nil。
 func (generator *generator) compileGlobalAssignment(name string, rights []parser.Expression, index int) error {
+	if _, exists := generator.lookupGlobalConst(name); exists {
+		// 当前 chunk 顶层 const 全局不允许通过旧全局赋值辅助覆盖。
+		return constAssignmentError(name, lexer.Position{})
+	}
 	valueRegister := generator.allocateRegister()
 	if index < len(rights) {
 		// 有对应右值时先求值到临时寄存器，随后写入 `_ENV[name]`。
@@ -4606,15 +4757,72 @@ func (generator *generator) releaseCallArgumentsAfterFixedResult(targetRegister 
 //
 // name 是 Lua 局部变量名；register 是对应寄存器；position 当前保留给后续行号映射扩展。
 func (generator *generator) defineLocal(name string, register int, position lexer.Position) {
+	// 普通 local 默认不是 const。
+	generator.defineLocalWithConst(name, register, position, false)
+}
+
+// defineLocalWithConst 登记一个局部变量和调试生命周期，并记录 const 约束。
+//
+// name 是 Lua 局部变量名；register 是对应寄存器；constLocal 为 true 时后续当前函数内普通赋值会报错。
+func (generator *generator) defineLocalWithConst(name string, register int, position lexer.Position, constLocal bool) {
 	currentScopeID := generator.currentScopeID()
 	if previousBinding, exists := generator.lookupLocal(name); exists && previousBinding.scopeID == currentScopeID {
 		// 同一词法作用域内重新声明同名 local 时，旧 local 从新声明生效处开始不可见。
 		generator.proto.LocalVars[previousBinding.localVarIndex].EndPC = len(generator.proto.Code)
 	}
-	localVar := bytecode.LocalVar{Name: name, Register: register, StartPC: len(generator.proto.Code), EndPC: len(generator.proto.Code)}
+	localVar := bytecode.LocalVar{Name: name, Register: register, Const: constLocal, StartPC: len(generator.proto.Code), EndPC: len(generator.proto.Code)}
 	index := len(generator.proto.LocalVars)
 	generator.proto.LocalVars = append(generator.proto.LocalVars, localVar)
-	generator.setLocal(name, localBinding{register: register, localVarIndex: index, scopeID: currentScopeID})
+	generator.setLocal(name, localBinding{register: register, localVarIndex: index, scopeID: currentScopeID, constLocal: constLocal})
+}
+
+// constAssignmentError 构造 const 绑定被重新赋值的编译错误。
+func constAssignmentError(name string, position lexer.Position) error {
+	// 有效行号用于对齐现有编译错误的 line N 风格。
+	if position.Line > 0 {
+		// 返回包含 const 名称的错误，方便用户定位被覆盖的绑定。
+		return fmt.Errorf("line %d: cannot assign to const binding '%s'", position.Line, name)
+	}
+
+	// 缺少行号时仍保留核心错误文本。
+	return fmt.Errorf("cannot assign to const binding '%s'", name)
+}
+
+// isTopLevelChunkScope 判断当前生成位置是否处于 chunk 顶层 block。
+func (generator *generator) isTopLevelChunkScope() bool {
+	currentScope := generator.currentScope()
+	return generator.parent == nil && currentScope != nil && currentScope.Depth == 0
+}
+
+// defineGlobalConst 记录当前 chunk 顶层 const 声明出的只读全局名称。
+func (generator *generator) defineGlobalConst(name string, position lexer.Position) {
+	root := generator.rootGenerator()
+	if root.globalConsts == nil {
+		// 仅在首次顶层 const 出现时创建映射，普通 Lua chunk 不承担额外分配。
+		root.globalConsts = make(map[string]lexer.Position)
+	}
+	root.globalConsts[name] = position
+}
+
+// lookupGlobalConst 查找当前 chunk 顶层 const 声明出的只读全局名称。
+func (generator *generator) lookupGlobalConst(name string) (lexer.Position, bool) {
+	root := generator.rootGenerator()
+	if root == nil || root.globalConsts == nil {
+		// 没有顶层 const 时直接视为未命中。
+		return lexer.Position{}, false
+	}
+	position, ok := root.globalConsts[name]
+	return position, ok
+}
+
+// rootGenerator 返回当前嵌套函数所属 chunk 的顶层生成器。
+func (generator *generator) rootGenerator() *generator {
+	current := generator
+	for current != nil && current.parent != nil {
+		// 沿 parent 链回到 chunk 顶层，顶层 const 对同一 chunk 内嵌函数可见。
+		current = current.parent
+	}
+	return current
 }
 
 // currentScopeID 返回当前 parser 作用域编号。
@@ -4748,7 +4956,7 @@ func (generator *generator) resolveUpvalue(name string, position lexer.Position)
 		}
 		// 命中父函数 local 时，登记 InStack upvalue。
 		index := len(generator.proto.Upvalues)
-		generator.proto.Upvalues = append(generator.proto.Upvalues, bytecode.UpvalueDesc{Name: name, InStack: true, Index: uint8(binding.register)})
+		generator.proto.Upvalues = append(generator.proto.Upvalues, bytecode.UpvalueDesc{Name: name, InStack: true, Index: uint8(binding.register), Const: binding.constLocal})
 		generator.setUpvalue(name, index)
 		binding.captured = true
 		generator.parent.setLocal(name, binding)
@@ -4768,7 +4976,7 @@ func (generator *generator) resolveUpvalue(name string, position lexer.Position)
 		return 0, true, tooManyUpvaluesError(position)
 	}
 	index := len(generator.proto.Upvalues)
-	generator.proto.Upvalues = append(generator.proto.Upvalues, bytecode.UpvalueDesc{Name: name, InStack: false, Index: uint8(parentIndex)})
+	generator.proto.Upvalues = append(generator.proto.Upvalues, bytecode.UpvalueDesc{Name: name, InStack: false, Index: uint8(parentIndex), Const: generator.parent.proto.Upvalues[parentIndex].Const})
 	generator.setUpvalue(name, index)
 
 	// 返回间接捕获的 upvalue 下标。

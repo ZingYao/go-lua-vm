@@ -58,6 +58,28 @@
         "duplicate switch case value",
         "undefined identifier 'value'"
       ]
+    },
+    {
+      "name": "top level const local shadow is diagnosed",
+      "source": "const answer = 42\nlocal answer = 7\n",
+      "diagnostics": [
+        "cannot assign to const binding 'answer'"
+      ]
+    },
+    {
+      "name": "required glua const table member assignment is diagnosed",
+      "source": "local tools = require('const_export_module')\ntools.a = 66\ntools[\"b\"] = 77\n",
+      "diagnostics": [
+        "cannot assign to const table field",
+        "cannot assign to const table field"
+      ]
+    },
+    {
+      "name": "exported glua const table root assignment is diagnosed",
+      "source": "local M = {}\nM._glua_const = { a = 1 }\nM.a = 2\nreturn M\n",
+      "diagnostics": [
+        "cannot assign to const table field"
+      ]
     }
   ]
 }

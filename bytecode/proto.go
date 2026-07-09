@@ -88,6 +88,8 @@ type UpvalueDesc struct {
 	InStack bool
 	// Index 表示捕获位置；InStack 为 true 时是寄存器索引，否则是外层 upvalue 索引。
 	Index uint8
+	// Const 表示该 upvalue 捕获自 glua const 声明，编译期和调试写入都应拒绝覆盖。
+	Const bool
 }
 
 // LocalVar 描述 Lua 函数原型中的一个局部变量调试范围。
@@ -98,6 +100,8 @@ type LocalVar struct {
 	Name string
 	// Register 是当前 Go 编译器分配的寄存器索引；官方 binary chunk 不携带该字段，加载 chunk 时保持零值。
 	Register int
+	// Const 表示该局部变量来自 glua const 声明，调试写入必须拒绝覆盖。
+	Const bool
 	// StartPC 是变量开始生效的指令位置。
 	StartPC int
 	// EndPC 是变量停止生效的指令位置。

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -36,18 +37,25 @@ type Server struct {
 	closed   chan struct{}
 	once     sync.Once
 
-	mu             sync.Mutex
-	breakpoints    map[string]map[int]bool
-	activeSession  *connectionSession
-	continueCh     chan struct{}
-	configuredCh   chan struct{}
-	configOnce     sync.Once
-	stopped        bool
-	currentStop    *stoppedLocation
-	stepMode       bool
-	stepSource     string
-	stepLine       int
-	pauseRequested bool
+	mu                   sync.Mutex
+	breakpoints          map[string]map[int]bool
+	activeSession        *connectionSession
+	continueCh           chan struct{}
+	configuredCh         chan struct{}
+	configOnce           sync.Once
+	stopped              bool
+	currentStop          *stoppedLocation
+	nextVariableID       int
+	variableValues       map[int]runtime.Value
+	variableTables       map[*runtime.Table]int
+	variableTableKeys    map[int]runtime.Value
+	sourceRoot           string
+	stepMode             bool
+	stepSource           string
+	stepLine             int
+	pauseRequested       bool
+	skipBreakpointSource string
+	skipBreakpointLine   int
 }
 
 // NewServer 创建一个 GLua DAP server。
@@ -59,13 +67,23 @@ func NewServer(address string) (*Server, error) {
 		// 空地址无法表达监听目标，直接返回配置错误。
 		return nil, errors.New("glua DAP listen address is required")
 	}
+	workingDir, err := os.Getwd()
+	if err != nil {
+		// 工作目录不可读时仍允许 DAP 启动，只是相对源码路径会保留原样。
+		workingDir = ""
+	}
 	return &Server{
-		Address:      strings.TrimSpace(address),
-		Ready:        make(chan struct{}),
-		closed:       make(chan struct{}),
-		breakpoints:  make(map[string]map[int]bool),
-		continueCh:   make(chan struct{}),
-		configuredCh: make(chan struct{}),
+		Address:           strings.TrimSpace(address),
+		Ready:             make(chan struct{}),
+		closed:            make(chan struct{}),
+		breakpoints:       make(map[string]map[int]bool),
+		continueCh:        make(chan struct{}),
+		configuredCh:      make(chan struct{}),
+		nextVariableID:    2,
+		variableValues:    make(map[int]runtime.Value),
+		variableTables:    make(map[*runtime.Table]int),
+		variableTableKeys: make(map[int]runtime.Value),
+		sourceRoot:        workingDir,
 	}, nil
 }
 
@@ -187,6 +205,7 @@ type stoppedLocation struct {
 	PC        int
 	Reason    string
 	Variables []runtime.ActiveLocalSnapshot
+	VM        *runtime.VM
 }
 
 // protocolMessage 表示 DAP JSON 消息的通用字段。
@@ -282,6 +301,7 @@ func (server *Server) clearActiveSession(session *connectionSession) {
 		server.continueCh = make(chan struct{})
 		server.stopped = false
 		server.currentStop = nil
+		server.clearVariableReferencesLocked()
 	}
 }
 
@@ -299,6 +319,31 @@ type connectionSession struct {
 //
 // request 必须是 DAP request 消息；未知 command 会得到明确失败响应。
 func (session *connectionSession) respond(request protocolMessage) {
+	if request.Command == "setVariable" {
+		// setVariable 需要把写回错误体现在 DAP success=false，方便 IDE 展示修改失败。
+		body, err := session.server.setVariable(request.Arguments)
+		if err != nil {
+			session.write(responseMessage{
+				Seq:        session.nextSeq(),
+				Type:       "response",
+				RequestSeq: request.Seq,
+				Success:    false,
+				Command:    request.Command,
+				Message:    err.Error(),
+				Body:       map[string]any{"error": err.Error()},
+			})
+			return
+		}
+		session.write(responseMessage{
+			Seq:        session.nextSeq(),
+			Type:       "response",
+			RequestSeq: request.Seq,
+			Success:    true,
+			Command:    request.Command,
+			Body:       body,
+		})
+		return
+	}
 	body, ok := session.responseBody(request)
 	if !ok {
 		// 未实现命令要显式失败，避免 IDE 误以为空响应。
@@ -367,6 +412,7 @@ func (session *connectionSession) responseBody(request protocolMessage) (any, bo
 			"supportsConfigurationDoneRequest": true,
 			"supportsTerminateRequest":         true,
 			"supportsEvaluateForHovers":        false,
+			"supportsSetVariable":              true,
 		}, true
 	case "launch", "attach":
 		// 当前阶段 launch/attach 都只完成协议握手，脚本执行仍由 CLI 主流程承担。
@@ -389,19 +435,19 @@ func (session *connectionSession) responseBody(request protocolMessage) (any, bo
 		return session.server.scopes(), true
 	case "variables":
 		// 返回暂停点保存的局部变量快照。
-		return session.server.variables(), true
+		return session.server.variables(request.Arguments), true
 	case "continue":
 		// 继续请求释放 VM 暂停点。
-		session.server.resumeAll()
+		session.server.resumeAll(true)
 		return map[string]any{"allThreadsContinued": true}, true
 	case "disconnect", "terminate":
 		// 断开调试会话时释放暂停点，避免 CLI 永久等待。
-		session.server.resumeAll()
+		session.server.resumeAll(true)
 		return map[string]any{}, true
 	case "next", "stepIn", "stepOut":
 		// 当前先实现源码行级步进；三种步进都会在下一条不同源码行暂停。
 		session.server.prepareStep()
-		session.server.resumeAll()
+		session.server.resumeAll(false)
 		return map[string]any{}, true
 	case "pause":
 		// pause 会在下一条可见源码行暂停。
@@ -439,10 +485,10 @@ func (server *Server) setBreakpoints(arguments json.RawMessage) map[string]any {
 		// DAP 客户端通常发送 source.path 与 breakpoints；解析失败会走空断点响应。
 		_ = json.Unmarshal(arguments, &request)
 	}
-	source := normalizeSourcePath(request.Source.Path)
+	source := normalizeSourcePath(request.Source.Path, server.sourceRoot)
 	if source == "" {
 		// path 缺失时回退 name，兼容少量只传 name 的客户端。
-		source = normalizeSourcePath(request.Source.Name)
+		source = normalizeSourcePath(request.Source.Name, server.sourceRoot)
 	}
 	lineSet := make(map[int]bool)
 	breakpointResults := make([]map[string]any, 0, len(request.Breakpoints)+len(request.Lines))
@@ -514,14 +560,23 @@ func (server *Server) scopes() map[string]any {
 
 // variables 返回当前暂停点保存的局部变量快照。
 //
-// GLua 当前只使用 variablesReference=1 表示局部变量列表；未知 reference 返回空列表，保持 DAP 客户端
-// 请求幂等且不会 panic。
-func (server *Server) variables() map[string]any {
+// variablesReference=1 表示 Locals scope；table 值会分配独立 reference，客户端展开 table 时会用该
+// reference 再次请求子项。未知 reference 返回空列表，保持 DAP 客户端请求幂等且不会 panic。
+func (server *Server) variables(arguments json.RawMessage) map[string]any {
 	server.mu.Lock()
 	defer server.mu.Unlock()
 	if server.currentStop == nil {
 		// 未暂停时没有变量。
 		return map[string]any{"variables": []any{}}
+	}
+	reference := parseVariablesReference(arguments)
+	if reference <= 0 {
+		// 部分简化客户端不会携带 arguments；兼容为 Locals scope。
+		reference = 1
+	}
+	if reference != 1 {
+		// 非 Locals reference 表示展开 table 子项。
+		return map[string]any{"variables": server.tableVariablesLocked(reference)}
 	}
 	values := make([]map[string]any, 0, len(server.currentStop.Variables))
 	for index := range server.currentStop.Variables {
@@ -530,10 +585,292 @@ func (server *Server) variables() map[string]any {
 			"name":               local.Name,
 			"value":              local.Value.DebugString(),
 			"type":               valueTypeName(local.Value),
-			"variablesReference": 0,
+			"variablesReference": server.valueReferenceLocked(local.Value),
 		})
 	}
 	return map[string]any{"variables": values}
+}
+
+// parseVariablesReference 解析 DAP variables 请求的 variablesReference。
+//
+// arguments 缺失或非法时返回 0，让调用方按兼容策略处理；该函数不把坏客户端请求升级为连接错误。
+func parseVariablesReference(arguments json.RawMessage) int {
+	// 空 arguments 兼容旧测试和简化客户端。
+	if len(arguments) == 0 {
+		return 0
+	}
+	var request struct {
+		VariablesReference int `json:"variablesReference"`
+	}
+	if err := json.Unmarshal(arguments, &request); err != nil {
+		// 无法解析时返回 0，避免 DAP 客户端一条坏请求导致调试中断。
+		return 0
+	}
+	return request.VariablesReference
+}
+
+// tableVariablesLocked 返回指定 table reference 的子变量。
+//
+// 调用方必须持有 server.mu；table 内容按 runtime.RawNext 的稳定顺序展开，最多返回 200 项，避免大表在
+// IDE 变量树中一次性拉取过多数据。
+func (server *Server) tableVariablesLocked(reference int) []map[string]any {
+	// reference 不存在或不是 table 时返回空列表，保持 DAP variables 的幂等行为。
+	value, ok := server.variableValues[reference]
+	if !ok || value.Kind != runtime.KindTable {
+		return []map[string]any{}
+	}
+	table, ok := value.Ref.(*runtime.Table)
+	if !ok || table == nil {
+		// 损坏的 table 引用不能展开，返回空子项。
+		return []map[string]any{}
+	}
+	values := make([]map[string]any, 0)
+	key := runtime.NilValue()
+	for count := 0; count < 200; count++ {
+		// RawNext 使用 Lua raw 迭代语义，适合作为调试器的 table 展示基础。
+		nextKey, nextValue, ok, err := table.RawNext(key)
+		if err != nil || !ok {
+			// 迭代结束或异常时停止展开；调试展示不应影响 VM 执行。
+			break
+		}
+		values = append(values, map[string]any{
+			"name":               dapVariableKeyName(nextKey),
+			"value":              nextValue.DebugString(),
+			"type":               valueTypeName(nextValue),
+			"variablesReference": server.valueReferenceWithTableKeyLocked(nextValue, nextKey),
+		})
+		key = nextKey
+	}
+	return values
+}
+
+// setVariable 修改当前暂停点中的一个变量。
+//
+// variablesReference=1 表示 Locals scope，name 按局部变量名匹配；其它 reference 表示 table 子项。
+// value 只解析 nil、boolean、number 和 string 字面量；无法解析的文本按普通 string 写入。
+func (server *Server) setVariable(arguments json.RawMessage) (map[string]any, error) {
+	var request struct {
+		VariablesReference int    `json:"variablesReference"`
+		Name               string `json:"name"`
+		Value              string `json:"value"`
+	}
+	if len(arguments) == 0 {
+		// DAP setVariable 必须提供 arguments。
+		return nil, errors.New("setVariable arguments are required")
+	}
+	if err := json.Unmarshal(arguments, &request); err != nil {
+		// 参数结构错误时返回给客户端展示。
+		return nil, fmt.Errorf("invalid setVariable arguments: %w", err)
+	}
+	value, err := parseDAPVariableValue(request.Value)
+	if err != nil {
+		// 当前解析器理论上不会对普通文本报错，保留错误路径便于后续扩展。
+		return nil, err
+	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if server.currentStop == nil {
+		// 未暂停时没有可写变量目标。
+		return nil, errors.New("no stopped GLua frame is available")
+	}
+	reference := request.VariablesReference
+	if reference <= 0 {
+		// 少量客户端可能缺省 reference，按 Locals scope 兼容。
+		reference = 1
+	}
+	if reference == 1 {
+		// Locals scope 写回 VM 寄存器。
+		return server.setLocalVariableLocked(request.Name, value)
+	}
+	return server.setTableVariableLocked(reference, request.Name, value)
+}
+
+// setLocalVariableLocked 写回当前暂停帧中的局部变量。
+func (server *Server) setLocalVariableLocked(name string, value runtime.Value) (map[string]any, error) {
+	if server.currentStop.VM == nil {
+		// 缺少 VM 指针时只能展示快照，不能写回。
+		return nil, errors.New("current GLua frame is read-only")
+	}
+	for index := range server.currentStop.Variables {
+		local := server.currentStop.Variables[index]
+		if local.Name != name {
+			// 名称不匹配时继续查找。
+			continue
+		}
+		if local.Const {
+			// const local 不允许调试器绕过编译期只读约束。
+			return nil, fmt.Errorf("cannot assign to const binding '%s'", name)
+		}
+		if err := server.currentStop.VM.SetRegister(local.Register, value); err != nil {
+			// 寄存器写回失败说明调试信息或 VM 状态已失效。
+			return nil, err
+		}
+		server.currentStop.Variables[index].Value = value
+		return server.setVariableResponseLocked(value), nil
+	}
+	return nil, fmt.Errorf("variable %q is not available", name)
+}
+
+// setTableVariableLocked 写回 table 展开项。
+func (server *Server) setTableVariableLocked(reference int, name string, value runtime.Value) (map[string]any, error) {
+	tableValue, ok := server.variableValues[reference]
+	if !ok || tableValue.Kind != runtime.KindTable {
+		// 非 table reference 不支持写入。
+		return nil, errors.New("variablesReference does not point to a GLua table")
+	}
+	table, ok := tableValue.Ref.(*runtime.Table)
+	if !ok || table == nil {
+		// 损坏 table 引用不可写。
+		return nil, errors.New("variablesReference points to an invalid GLua table")
+	}
+	key, ok := server.variableTableKeys[reference]
+	if !ok {
+		parsedKey, parsedOK := parseDAPVariableKeyName(name)
+		if !parsedOK {
+			// 只能写回由变量树生成的 string/int key。
+			return nil, fmt.Errorf("table variable %q cannot be edited", name)
+		}
+		key = parsedKey
+	}
+	if err := table.RawSet(key, value); err != nil {
+		// RawSet 会保留 `_glua_const` 字段写保护和 key 合法性错误。
+		return nil, err
+	}
+	return server.setVariableResponseLocked(value), nil
+}
+
+// setVariableResponseLocked 构造 DAP setVariable 成功响应。
+func (server *Server) setVariableResponseLocked(value runtime.Value) map[string]any {
+	return map[string]any{
+		"value":              value.DebugString(),
+		"type":               valueTypeName(value),
+		"variablesReference": server.valueReferenceLocked(value),
+	}
+}
+
+// valueReferenceLocked 为可展开值分配 DAP variablesReference。
+//
+// 调用方必须持有 server.mu；当前只有 table 可展开，同一个 table 指针会复用同一 reference，避免循环 table
+// 每次展开都生成新节点。
+func (server *Server) valueReferenceLocked(value runtime.Value) int {
+	// 只有 table 拥有子项，其它值返回 0。
+	if value.Kind != runtime.KindTable {
+		return 0
+	}
+	table, ok := value.Ref.(*runtime.Table)
+	if !ok || table == nil {
+		// 损坏或 nil table 引用不可展开。
+		return 0
+	}
+	if reference, ok := server.variableTables[table]; ok {
+		// 已经注册过的 table 复用 reference，减少循环结构展开噪音。
+		return reference
+	}
+	reference := server.nextVariableID
+	server.nextVariableID++
+	server.variableTables[table] = reference
+	server.variableValues[reference] = value
+	return reference
+}
+
+// valueReferenceWithTableKeyLocked 为 table 子项分配 reference，并记录该子项对应的父 table key。
+func (server *Server) valueReferenceWithTableKeyLocked(value runtime.Value, key runtime.Value) int {
+	reference := server.valueReferenceLocked(value)
+	if reference > 0 {
+		// table 子项可展开时记录 key，便于 IDE 对展开节点发起 setVariable。
+		server.variableTableKeys[reference] = key
+	}
+	return reference
+}
+
+// clearVariableReferencesLocked 清空当前暂停点的 table 展开缓存。
+//
+// 调用方必须持有 server.mu；每次恢复或新暂停都会重建缓存，确保变量树反映最新 VM 状态。
+func (server *Server) clearVariableReferencesLocked() {
+	// reference=1 保留给 Locals scope，因此下一个 table reference 从 2 开始。
+	server.nextVariableID = 2
+	server.variableValues = make(map[int]runtime.Value)
+	server.variableTables = make(map[*runtime.Table]int)
+	server.variableTableKeys = make(map[int]runtime.Value)
+}
+
+// dapVariableKeyName 把 Lua table key 转成 IDE 变量树名称。
+//
+// 字符串 key 用 Lua 字段访问常见形态展示；integer key 使用数组下标；其它 key 回退 DebugString。
+func dapVariableKeyName(key runtime.Value) string {
+	// 按 Lua key 类型生成更直观的变量名。
+	switch key.Kind {
+	case runtime.KindString:
+		// 字符串 key 展示成 ["name"]，避免与局部变量名混淆。
+		return "[" + strconv.Quote(key.String) + "]"
+	case runtime.KindInteger:
+		// 整数 key 展示成数组下标。
+		return "[" + strconv.FormatInt(key.Integer, 10) + "]"
+	default:
+		// 其它合法 table key 使用稳定调试文本。
+		return "[" + key.DebugString() + "]"
+	}
+}
+
+// parseDAPVariableKeyName 把 IDE 变量树名称还原为 Lua table key。
+func parseDAPVariableKeyName(name string) (runtime.Value, bool) {
+	trimmed := strings.TrimSpace(name)
+	if len(trimmed) < 3 || !strings.HasPrefix(trimmed, "[") || !strings.HasSuffix(trimmed, "]") {
+		// 只接受 variables 响应中生成的 [key] 形态。
+		return runtime.NilValue(), false
+	}
+	inner := strings.TrimSpace(trimmed[1 : len(trimmed)-1])
+	if strings.HasPrefix(inner, "\"") && strings.HasSuffix(inner, "\"") {
+		value, err := strconv.Unquote(inner)
+		if err != nil {
+			// 字符串 key 反解析失败时拒绝写入，避免误写其它字段。
+			return runtime.NilValue(), false
+		}
+		return runtime.StringValue(value), true
+	}
+	integer, err := strconv.ParseInt(inner, 10, 64)
+	if err == nil {
+		// 整数 key 按 Lua integer 写回。
+		return runtime.IntegerValue(integer), true
+	}
+	return runtime.NilValue(), false
+}
+
+// parseDAPVariableValue 解析 DAP setVariable 的文本值。
+func parseDAPVariableValue(text string) (runtime.Value, error) {
+	trimmed := strings.TrimSpace(text)
+	switch trimmed {
+	case "nil":
+		// nil 表示删除 table 字段或把 local 置 nil。
+		return runtime.NilValue(), nil
+	case "true":
+		// true 映射为 Lua boolean。
+		return runtime.BooleanValue(true), nil
+	case "false":
+		// false 映射为 Lua boolean。
+		return runtime.BooleanValue(false), nil
+	}
+	if strings.HasPrefix(trimmed, "\"") && strings.HasSuffix(trimmed, "\"") {
+		value, err := strconv.Unquote(trimmed)
+		if err != nil {
+			// 双引号字符串必须符合 Go/Lua 常见转义边界。
+			return runtime.NilValue(), err
+		}
+		return runtime.StringValue(value), nil
+	}
+	if len(trimmed) >= 2 && strings.HasPrefix(trimmed, "'") && strings.HasSuffix(trimmed, "'") {
+		// 单引号文本作为普通字符串处理，暂不执行 Lua 表达式。
+		return runtime.StringValue(trimmed[1 : len(trimmed)-1]), nil
+	}
+	if integer, err := strconv.ParseInt(trimmed, 10, 64); err == nil {
+		// 十进制整数优先保留 Lua integer。
+		return runtime.IntegerValue(integer), nil
+	}
+	if number, err := strconv.ParseFloat(trimmed, 64); err == nil {
+		// 其它数字文本按 Lua number 写入。
+		return runtime.NumberValue(number), nil
+	}
+	return runtime.StringValue(text), nil
 }
 
 // prepareStep 设置一次源码行级步进请求。
@@ -564,9 +901,21 @@ func (server *Server) requestPause() {
 // resumeAll 释放当前暂停的 VM。
 //
 // 没有暂停态时保持无副作用；关闭旧 channel 后立即换新，供下一次断点暂停等待。
-func (server *Server) resumeAll() {
+func (server *Server) resumeAll(clearPendingStep bool) {
 	server.mu.Lock()
 	defer server.mu.Unlock()
+	if server.stopped && server.currentStop != nil {
+		// 继续执行时先跳过当前源码行上的同一个断点，避免同一行多条 VM 指令反复暂停。
+		server.skipBreakpointSource = server.currentStop.Source
+		server.skipBreakpointLine = server.currentStop.Line
+	}
+	if clearPendingStep {
+		// 用户选择普通继续或结束会话时，必须取消此前未消费的单步/暂停请求，避免恢复后又被旧 step 拉回下一行。
+		server.stepMode = false
+		server.stepSource = ""
+		server.stepLine = 0
+		server.pauseRequested = false
+	}
 	if !server.stopped {
 		// 当前没有 VM 等待 continue。
 		return
@@ -575,6 +924,7 @@ func (server *Server) resumeAll() {
 	server.continueCh = make(chan struct{})
 	server.stopped = false
 	server.currentStop = nil
+	server.clearVariableReferencesLocked()
 }
 
 // BeforeInstruction 在每条 Lua 指令执行前检查 DAP 断点。
@@ -591,7 +941,7 @@ func (server *Server) BeforeInstruction(state *runtime.State, vm *runtime.VM, pr
 		// 非正行号不是用户可见源码行。
 		return nil
 	}
-	source := normalizeSourcePath(proto.Source)
+	source := normalizeSourcePath(proto.Source, server.sourceRoot)
 	if source == "" {
 		// 缺少源码路径时不能匹配断点或步进。
 		return nil
@@ -613,7 +963,7 @@ func (server *Server) BeforeInstruction(state *runtime.State, vm *runtime.VM, pr
 		// 暂停前复制当前活动局部变量，供 DAP variables 请求读取。
 		variables = vm.ActiveLocalSnapshots()
 	}
-	return server.pauseAt(state, stoppedLocation{Source: source, Line: line, PC: pc, Reason: reason, Variables: variables})
+	return server.pauseAt(state, stoppedLocation{Source: source, Line: line, PC: pc, Reason: reason, Variables: variables, VM: vm})
 }
 
 // consumeStepStop 判断当前 source:line 是否满足步进或 pause 请求。
@@ -647,6 +997,15 @@ func (server *Server) consumeStepStop(source string, line int) bool {
 func (server *Server) hasBreakpoint(source string, line int) bool {
 	server.mu.Lock()
 	defer server.mu.Unlock()
+	if server.skipBreakpointSource != "" {
+		if server.skipBreakpointSource == source && server.skipBreakpointLine == line {
+			// 刚从同一源码行断点恢复，同一行后续指令不再重复暂停。
+			return false
+		}
+		// 已离开恢复行，重新允许后续断点命中。
+		server.skipBreakpointSource = ""
+		server.skipBreakpointLine = 0
+	}
 	for breakpointSource, lines := range server.breakpoints {
 		// 精确路径或后缀路径匹配都视为同一文件，兼容 CLI 相对路径与 IDE 绝对路径差异。
 		if breakpointSource == source || strings.HasSuffix(source, string(filepath.Separator)+breakpointSource) || strings.HasSuffix(breakpointSource, string(filepath.Separator)+source) {
@@ -668,6 +1027,7 @@ func (server *Server) pauseAt(state *runtime.State, location stoppedLocation) er
 		return nil
 	}
 	server.currentStop = &location
+	server.clearVariableReferencesLocked()
 	server.stopped = true
 	continueCh := server.continueCh
 	session.write(eventMessage{
@@ -694,14 +1054,34 @@ func (server *Server) pauseAt(state *runtime.State, location stoppedLocation) er
 
 // normalizeSourcePath 归一化 DAP 与 Lua Proto 中的源码路径。
 //
-// Lua chunk source 通常以 @ 开头；DAP source.path 通常为文件系统路径。空路径保持空字符串。
-func normalizeSourcePath(source string) string {
+// Lua chunk source 通常以 @ 开头；DAP source.path 通常为文件系统路径。baseDir 非空且 source 是相对文件时，
+// 会优先解析为可供编辑器跳转的绝对路径；空路径保持空字符串。
+func normalizeSourcePath(source string, baseDir string) string {
+	// 先移除 Lua 文件 chunk 的 @ 前缀，并清理首尾空白。
 	trimmed := strings.TrimSpace(strings.TrimPrefix(source, "@"))
 	if trimmed == "" {
 		// 空 source 无法匹配断点。
 		return ""
 	}
-	return filepath.Clean(trimmed)
+	cleaned := filepath.Clean(trimmed)
+	if filepath.IsAbs(cleaned) {
+		// 绝对路径已经足以让 IDE 定位源码，只需要标准化分隔符与冗余路径段。
+		return cleaned
+	}
+	if strings.TrimSpace(baseDir) == "" {
+		// 没有可用基准目录时只能保留相对路径，后续断点匹配仍可用后缀兜底。
+		return cleaned
+	}
+	absolute := filepath.Join(baseDir, cleaned)
+	if _, err := os.Stat(absolute); err == nil {
+		// 文件存在时返回绝对路径，VSCode 等直连 DAP 客户端才能自动打开正确文件。
+		return filepath.Clean(absolute)
+	}
+	if absolutePath, err := filepath.Abs(absolute); err == nil {
+		// 文件暂不存在时也尽量返回绝对路径，避免客户端把相对路径解析到错误目录。
+		return filepath.Clean(absolutePath)
+	}
+	return cleaned
 }
 
 // valueTypeName 返回 DAP 变量展示使用的 Lua 类型名称。

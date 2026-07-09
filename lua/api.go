@@ -342,6 +342,8 @@ const (
 	SyntaxContinue = extensions.SyntaxContinue
 	// SyntaxSwitch 表示 switch/case/default 语句语法糖扩展。
 	SyntaxSwitch = extensions.SyntaxSwitch
+	// SyntaxConst 表示 const 只读局部变量语法糖扩展。
+	SyntaxConst = extensions.SyntaxConst
 
 	// luaContextCheckInstructionInterval 表示普通 VM 热路径两次 context 检查之间允许跳过的指令数。
 	//
@@ -471,6 +473,14 @@ func WithoutSyntaxExtensions(options Options, disabled SyntaxSet) Options {
 	return options.WithoutSyntaxExtensions(disabled)
 }
 
+// WithGluaEvents 返回配置 glua 自定义事件运行能力后的 Options 副本。
+//
+// enabled 为 true 时仍受当前 build tag 裁剪；未编译事件能力的二进制会在 NormalizeOptions 中保持关闭。
+func WithGluaEvents(options Options, enabled bool) Options {
+	// 委托 runtime.Options 统一处理默认值与 build tag 裁剪。
+	return options.WithGluaEvents(enabled)
+}
+
 // DefaultSyntaxExtensions 返回当前构建产物默认启用的语法扩展集合。
 func DefaultSyntaxExtensions() SyntaxSet {
 	// 默认集合等于当前二进制已经编译的扩展集合。
@@ -507,6 +517,10 @@ func OpenLibs(state *State) error {
 		return err
 	}
 	registerProtectedCallGlobals(state)
+	if state.Options().GluaEventsEnabled {
+		// glua event 是运行期扩展能力，只有当前 State 显式开启且构建产物包含时才注册全局 API。
+		registerGluaEventGlobals(state)
+	}
 	if err := openPackageWithStateCaller(state); err != nil {
 		// package 库负责 require 和 package.loaded，失败时后续库无法登记模块缓存。
 		return err
@@ -2355,18 +2369,20 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 	debugEnvironment, hasDebugEnvironment := debuglib.EnvironmentForState(runtimeState)
 	debugObserver := runtimeState.Options().DebugObserver
 	hooksEnabled := hasDebugEnvironment && debugEnvironment.HasActiveHook()
+	gluaEventsEnabled := gluaHasAnyEvent(state)
 	coroutinesCreated := runtimeState.HasCreatedCoroutines()
-	preciseFrameSync := hooksEnabled || debugObserver != nil || continuation != nil || coroutinesCreated
+	preciseFrameSync := hooksEnabled || gluaEventsEnabled || debugObserver != nil || continuation != nil || coroutinesCreated
 	refreshHookState := func() {
 		coroutinesCreated = runtimeState.HasCreatedCoroutines()
+		gluaEventsEnabled = gluaHasAnyEvent(state)
 		if !hasDebugEnvironment {
 			// 未打开 debug 库时仍需刷新 coroutine 创建状态。
-			preciseFrameSync = debugObserver != nil || continuation != nil || coroutinesCreated
+			preciseFrameSync = gluaEventsEnabled || debugObserver != nil || continuation != nil || coroutinesCreated
 			vm.EnableBorrowedSelfRecursiveLocalFunctionClosure(!preciseFrameSync)
 			return
 		}
 		hooksEnabled = debugEnvironment.HasActiveHook()
-		preciseFrameSync = hooksEnabled || debugObserver != nil || continuation != nil || coroutinesCreated
+		preciseFrameSync = hooksEnabled || gluaEventsEnabled || debugObserver != nil || continuation != nil || coroutinesCreated
 		vm.EnableBorrowedSelfRecursiveLocalFunctionClosure(!preciseFrameSync && !hooksEnabled)
 	}
 	if hooksEnabled && continuation == nil {
@@ -2382,6 +2398,18 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 		if hookErr != nil {
 			// hook 错误必须中断当前调用，并保留帧交由 protected call 边界恢复。
 			return nil, hookErr
+		}
+	}
+	if gluaEventsEnabled && continuation == nil {
+		// glua 函数 call 事件在目标调用帧可见后触发，允许 callback 读取参数 local。
+		vm.SetCurrentPC(0)
+		if err := state.UpdateCurrentFramePC(0); err != nil {
+			// 当前帧缺失说明调用栈边界被破坏。
+			return nil, err
+		}
+		if err := triggerGluaFunctionLifecycleEvent(state, closure, GluaEventFunctionCall, runtime.NilValue()); err != nil {
+			// 同步事件回调错误会中断当前函数调用。
+			return nil, err
 		}
 	}
 	returnHookTriggered := false
@@ -2407,8 +2435,23 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 		return triggerLuaReturnHook(state, debugEnvironment)
 	}
 	defer func() {
+		shouldPopFrames := err == nil || errors.Is(err, runtime.ErrCoroutineYield)
+		if gluaEventsEnabled && !errors.Is(err, runtime.ErrCoroutineYield) {
+			// glua exit/error 事件在调用帧仍可见时触发，便于 callback 读取局部变量快照。
+			if err != nil {
+				// 错误路径先触发 function.error，并把错误对象作为 payload。
+				errorPayload := runtime.ErrorObject(err)
+				if eventErr := triggerGluaFunctionLifecycleEvent(state, closure, GluaEventFunctionError, errorPayload); eventErr != nil {
+					err = eventErr
+				}
+			}
+			if eventErr := triggerGluaFunctionLifecycleEvent(state, closure, GluaEventFunctionExit, runtime.NilValue()); eventErr != nil {
+				// exit 事件错误覆盖原结果，按同步回调失败处理。
+				err = eventErr
+			}
+		}
 		vm.EnableBorrowedSelfRecursiveLocalFunctionClosure(false)
-		if err == nil || errors.Is(err, runtime.ErrCoroutineYield) {
+		if shouldPopFrames {
 			// 成功路径和协程 yield 都弹出当前帧；普通错误路径保留帧到 protected call 边界统一恢复。
 			_, _ = state.PopCallFrame()
 			popContinuationOuterFrames(state, restoredOuterFrameCount)
@@ -2416,6 +2459,7 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 		state.PopActiveVM(vm)
 	}()
 	lastHookLine := int64(-1)
+	lastGluaProgressLine := int64(-1)
 	previousPC := -1
 	previousPreviousPC := -1
 	pc := 0
@@ -2518,6 +2562,15 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 	for pc >= 0 && pc < len(proto.Code) {
 		// 先同步当前 PC，供 collectgarbage 执行时按 local 生命周期裁剪活动寄存器根。
 		vm.SetCurrentPC(pc)
+		if gluaEventsEnabled {
+			// 异步 glua 事件只在 VM 安全点执行，避免触发点直接重入 Lua。
+			if err := drainGluaEventQueue(state); err != nil {
+				if syncErr := syncCurrentFrame(pc); syncErr != nil {
+					return nil, syncErr
+				}
+				return nil, err
+			}
+		}
 		if preciseFrameSync || hooksEnabled || contextCheckCountdown <= 0 {
 			// 需要精确调试语义的路径逐指令检查；普通热路径按固定窗口检查，降低 tight loop 固定开销。
 			if err := state.CheckContext(); err != nil {
@@ -2553,6 +2606,20 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 			if err := triggerLuaLineHook(state, debugEnvironment, proto, pc, previousPC, previousPreviousPC, &lastHookLine); err != nil {
 				// hook 内抛错必须中断当前 VM，交给 protected call 边界包装 traceback。
 				return nil, err
+			}
+		}
+		if gluaEventsEnabled && proto != nil && pc >= 0 && pc < len(proto.LineInfo) {
+			// progress.line 按源码行变化触发，复用精确帧同步路径提供当前 local 快照。
+			line := int64(proto.LineInfo[pc])
+			if line > 0 && line != lastGluaProgressLine {
+				// 同一连续源码行只触发一次，避免一行多指令产生噪声。
+				if err := syncCurrentFrame(pc); err != nil {
+					return nil, err
+				}
+				if err := triggerGluaProgressLineEvent(state, proto, line); err != nil {
+					return nil, err
+				}
+				lastGluaProgressLine = line
 			}
 		}
 		if tableWriteForLoopSuperInstructionEnabled && !preciseFrameSync && !hooksEnabled && contextCheckCountdown > 0 && vm.HasTableWriteForLoopAt(pc) {
@@ -2914,6 +2981,15 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 				// return hook 错误需要覆盖正常返回，保持 Lua hook 可中断调用。
 				return nil, err
 			}
+			if gluaEventsEnabled {
+				// function.return 在返回帧仍可见时触发，payload 携带返回值数组。
+				if err := triggerGluaFunctionLifecycleEvent(state, closure, GluaEventFunctionReturn, gluaValueListTable(returnValues)); err != nil {
+					return nil, err
+				}
+				if err := drainGluaEventQueue(state); err != nil {
+					return nil, err
+				}
+			}
 			return returnValues, nil
 		}
 		if callRequest := vm.LastCallRequest(); callRequest != nil {
@@ -3028,6 +3104,15 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 	if err := triggerReturnHook(); err != nil {
 		// 隐式返回同样需要允许 return hook 中断调用。
 		return nil, err
+	}
+	if gluaEventsEnabled {
+		// 隐式返回没有返回值，仍需要触发 function.return。
+		if err := triggerGluaFunctionLifecycleEvent(state, closure, GluaEventFunctionReturn, gluaValueListTable(nil)); err != nil {
+			return nil, err
+		}
+		if err := drainGluaEventQueue(state); err != nil {
+			return nil, err
+		}
 	}
 	return nil, nil
 }

@@ -33,13 +33,13 @@ build:
 	@mkdir -p "$(BIN_DIR)"
 	@for cmd in $(CLI_CMDS); do \
 		echo "building $$cmd"; \
-		CGO_ENABLED=0 "$(GO)" build -trimpath -ldflags="-s -w" -o "$(BIN_DIR)/$$cmd" "./cmd/$$cmd"; \
+		CGO_ENABLED=1 "$(GO)" build -tags native_modules -trimpath -ldflags="-s -w" -o "$(BIN_DIR)/$$cmd" "./cmd/$$cmd"; \
 	done
 
 build-ls:
 	@mkdir -p "$(BIN_DIR)"
 	@echo "building gluals"
-	@CGO_ENABLED=0 "$(GO)" build -trimpath -ldflags="-s -w" -o "$(BIN_DIR)/gluals" ./cmd/gluals
+	@CGO_ENABLED=1 "$(GO)" build -tags native_modules -trimpath -ldflags="-s -w" -o "$(BIN_DIR)/gluals" ./cmd/gluals
 
 dist: $(TARGETS)
 

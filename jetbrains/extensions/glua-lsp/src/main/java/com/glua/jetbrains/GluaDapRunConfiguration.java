@@ -17,11 +17,17 @@ import org.jetbrains.annotations.Nullable;
 public final class GluaDapRunConfiguration extends LocatableConfigurationBase<Object> {
     private static final String GLUA_EXECUTABLE_ATTR = "gluaExecutable";
     private static final String PROGRAM_ATTR = "program";
+    private static final String DAP_HOST_ATTR = "dapHost";
+    private static final String DAP_PORT_ATTR = "dapPort";
+    private static final String USE_REMOTE_DAP_ATTR = "useRemoteDap";
     static final String INTERNAL_DAP_HOST = "127.0.0.1";
     static final int INTERNAL_DAP_PORT = 5678;
 
     private String gluaExecutable = "";
     private String program = "";
+    private String dapHost = INTERNAL_DAP_HOST;
+    private int dapPort = INTERNAL_DAP_PORT;
+    private boolean useRemoteDap = false;
 
     public GluaDapRunConfiguration(@NotNull Project project,
                                    @NotNull ConfigurationFactory factory,
@@ -40,7 +46,7 @@ public final class GluaDapRunConfiguration extends LocatableConfigurationBase<Ob
         if (DefaultRunExecutor.EXECUTOR_ID.equals(executor.getId())) {
             return new GluaRunProfileState(environment, gluaExecutable(), program());
         }
-        return new GluaDapRunProfileState(environment, gluaExecutable(), program());
+        return new GluaDapRunProfileState(environment, gluaExecutable(), program(), host(), port(), useRemoteDap());
     }
 
     @Override
@@ -55,6 +61,9 @@ public final class GluaDapRunConfiguration extends LocatableConfigurationBase<Ob
         super.readExternal(element);
         gluaExecutable = normalizePath(element.getAttributeValue(GLUA_EXECUTABLE_ATTR));
         program = normalizePath(element.getAttributeValue(PROGRAM_ATTR));
+        dapHost = normalizeHost(element.getAttributeValue(DAP_HOST_ATTR));
+        dapPort = normalizePort(element.getAttributeValue(DAP_PORT_ATTR));
+        useRemoteDap = Boolean.parseBoolean(element.getAttributeValue(USE_REMOTE_DAP_ATTR));
     }
 
     @Override
@@ -62,14 +71,33 @@ public final class GluaDapRunConfiguration extends LocatableConfigurationBase<Ob
         super.writeExternal(element);
         element.setAttribute(GLUA_EXECUTABLE_ATTR, gluaExecutable());
         element.setAttribute(PROGRAM_ATTR, program());
+        element.setAttribute(DAP_HOST_ATTR, host());
+        element.setAttribute(DAP_PORT_ATTR, String.valueOf(port()));
+        element.setAttribute(USE_REMOTE_DAP_ATTR, String.valueOf(useRemoteDap()));
     }
 
     public String host() {
-        return INTERNAL_DAP_HOST;
+        return normalizeHost(dapHost);
     }
 
     public int port() {
-        return INTERNAL_DAP_PORT;
+        return normalizePort(dapPort);
+    }
+
+    public boolean useRemoteDap() {
+        return useRemoteDap;
+    }
+
+    public void setUseRemoteDap(boolean useRemoteDap) {
+        this.useRemoteDap = useRemoteDap;
+    }
+
+    public void setDapHost(String dapHost) {
+        this.dapHost = normalizeHost(dapHost);
+    }
+
+    public void setDapPort(int dapPort) {
+        this.dapPort = normalizePort(dapPort);
     }
 
     public String gluaExecutable() {
@@ -90,5 +118,24 @@ public final class GluaDapRunConfiguration extends LocatableConfigurationBase<Ob
 
     private static String normalizePath(String value) {
         return value == null ? "" : value.trim();
+    }
+
+    private static String normalizeHost(String value) {
+        return value == null || value.isBlank() ? INTERNAL_DAP_HOST : value.trim();
+    }
+
+    private static int normalizePort(String value) {
+        if (value == null || value.isBlank()) {
+            return INTERNAL_DAP_PORT;
+        }
+        try {
+            return normalizePort(Integer.parseInt(value.trim()));
+        } catch (NumberFormatException ignored) {
+            return INTERNAL_DAP_PORT;
+        }
+    }
+
+    private static int normalizePort(int value) {
+        return value >= 1 && value <= 65535 ? value : INTERNAL_DAP_PORT;
     }
 }

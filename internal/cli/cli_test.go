@@ -81,6 +81,32 @@ func TestParseArgsSyntaxOptions(t *testing.T) {
 		// lua53 模式必须关闭全部扩展。
 		t.Fatalf("lua53 syntax = %#v", syntaxForOptions(options))
 	}
+
+	if extensions.Compiled().Has(extensions.SyntaxConst) {
+		// 当前构建包含 const 时，显式 const 模式应只打开 const 扩展。
+		options, err = ParseArgs([]string{"--glua-syntax", "const", "-e", "const answer = 42"})
+		if err != nil {
+			// 合法 const 语法扩展参数不应失败。
+			t.Fatalf("ParseArgs const syntax failed: %v", err)
+		}
+		if finalSyntax := syntaxForOptions(options); finalSyntax != extensions.SyntaxConst {
+			// 显式 const 模式不应隐式打开 continue/switch。
+			t.Fatalf("const syntax = %#v", finalSyntax)
+		}
+	}
+}
+
+// TestParseArgsDisableGluaEvents 验证 glua events 运行期关闭参数解析。
+func TestParseArgsDisableGluaEvents(t *testing.T) {
+	options, err := ParseArgs([]string{"--glua-disable-events", "-e", "print(1)"})
+	if err != nil {
+		// 合法事件关闭参数不应失败。
+		t.Fatalf("ParseArgs disable events failed: %v", err)
+	}
+	if !options.DisableGluaEvents {
+		// 参数必须写入运行期关闭标记。
+		t.Fatalf("DisableGluaEvents should be true")
+	}
 }
 
 // TestParseArgsDAPListen 验证 GLua DAP 监听参数解析。

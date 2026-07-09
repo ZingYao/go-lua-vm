@@ -51,6 +51,10 @@ type Options struct {
 	SyntaxExtensions extensions.SyntaxSet
 	// SyntaxExtensionsSet 表示调用方是否显式设置过 SyntaxExtensions。
 	SyntaxExtensionsSet bool
+	// GluaEventsEnabled 表示 OpenLibs 是否注册 glua 自定义事件全局 API。
+	GluaEventsEnabled bool
+	// GluaEventsEnabledSet 表示调用方是否显式设置过 GluaEventsEnabled。
+	GluaEventsEnabledSet bool
 	// DebugObserver 保存可选 VM 调试观察器。
 	//
 	// nil 表示不启用外部调试能力；非 nil 时执行循环会在每条 Lua 指令前调用观察器，调用方可据此实现
@@ -89,8 +93,23 @@ func NormalizeOptions(options Options) Options {
 		// 显式配置时裁剪未编译扩展，保证 runtime 选项不会绕过 build tag。
 		options.SyntaxExtensions &= extensions.Compiled()
 	}
+	if !options.GluaEventsEnabledSet {
+		// 未显式配置事件能力时，默认跟随当前构建产物是否编译进 glua events。
+		options.GluaEventsEnabled = gluaEventsCompiled()
+	} else if options.GluaEventsEnabled {
+		// 显式开启时仍受 build tag 裁剪，避免未编译事件文件时暴露半能力。
+		options.GluaEventsEnabled = gluaEventsCompiled()
+	}
 
 	// 返回已经填充默认值的选项。
+	return options
+}
+
+// WithGluaEvents 返回配置 glua 自定义事件能力后的 Options 副本。
+func (options Options) WithGluaEvents(enabled bool) Options {
+	// 显式标记事件配置，NormalizeOptions 会继续按 build tag 裁剪不可用能力。
+	options.GluaEventsEnabled = enabled
+	options.GluaEventsEnabledSet = true
 	return options
 }
 

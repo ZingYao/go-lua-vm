@@ -29,7 +29,13 @@ final class GluaAnalysisGoldenTest {
         GoldenFile golden = new Gson().fromJson(Files.readString(goldenPath, StandardCharsets.UTF_8), GoldenFile.class);
         for (GoldenCase testCase : golden.cases) {
             List<String> diagnostics = new ArrayList<>();
-            GluaAnalysis.collectDiagnostics(testCase.source, (start, end, message) -> diagnostics.add(message));
+            if (testCase.source.contains("require(")) {
+                Path projectDir = goldenPath.getParent();
+                Path currentPath = projectDir.resolve(testCase.name.replaceAll("[^A-Za-z0-9_-]", "_") + ".lua").normalize();
+                GluaAnalysis.collectDiagnostics(testCase.source, currentPath, projectDir, Map.of(), "extended", true, (start, end, message) -> diagnostics.add(message));
+            } else {
+                GluaAnalysis.collectDiagnostics(testCase.source, (start, end, message) -> diagnostics.add(message));
+            }
             assertEquals(testCase.diagnostics, diagnostics, testCase.name);
         }
     }
@@ -161,6 +167,23 @@ final class GluaAnalysisGoldenTest {
             .findFirst()
             .orElseThrow();
         assertEquals("maker(arg)", makerCompletion.signature());
+    }
+
+    @Test
+    void requiredGluaConstTableMemberAssignmentIsDiagnosed() {
+        Path projectDir = Path.of("/fixture").normalize();
+        Path currentPath = projectDir.resolve("main.glua").normalize();
+        Path modulePath = projectDir.resolve("module.glua").normalize();
+        Map<Path, String> files = Map.of(
+            modulePath,
+            "local tools = {}\ntools['_glua_const'] = {\n  a = 1,\n  b = 2,\n}\nreturn tools\n"
+        );
+        String source = "local tools = require('module')\ntools.a = 66\ntools[\"b\"] = 77\n";
+        List<String> diagnostics = new ArrayList<>();
+
+        GluaAnalysis.collectDiagnostics(source, currentPath, projectDir, files, "extended", true, (start, end, message) -> diagnostics.add(message));
+
+        assertEquals(List.of("cannot assign to const table field", "cannot assign to const table field"), diagnostics);
     }
 
     @Test
@@ -340,6 +363,13 @@ final class GluaAnalysisGoldenTest {
                 }
             }
             return result;
+        }
+        if ("builtin-global".equals(testCase.kind)) {
+            String prefix = completionPrefix(testCase.source, testCase.marker);
+            return builtinNamesFromResource().stream()
+                .filter(name -> !name.contains("."))
+                .filter(name -> name.startsWith(prefix))
+                .toList();
         }
         Document document = new DocumentImpl(testCase.source);
         return GluaAnalysis.symbolCompletionNames(document, completionPrefix(testCase.source, testCase.marker));

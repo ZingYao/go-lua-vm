@@ -2186,11 +2186,15 @@ func (vm *VM) RegistersSnapshot() []Value {
 
 // ActiveLocalSnapshot 表示当前 PC 可见的单个局部变量快照。
 //
-// Name 保存调试信息中的局部变量名；Value 是对应寄存器的当前值副本。该结构用于 DAP 变量展示，
-// 不允许调用方借它写回 VM 寄存器。
+// Name 保存调试信息中的局部变量名；Value 是对应寄存器的当前值副本；Register/Const 提供 DAP 在
+// 暂停态写回变量时需要的最小目标信息。
 type ActiveLocalSnapshot struct {
 	// Name 是局部变量名称。
 	Name string
+	// Register 是局部变量所在 VM 寄存器索引。
+	Register int
+	// Const 表示该局部变量来自 glua const 声明，调试写入必须拒绝。
+	Const bool
 	// Value 是局部变量当前值。
 	Value Value
 }
@@ -6448,7 +6452,7 @@ func (vm *VM) ActiveLocalSnapshots() []ActiveLocalSnapshot {
 			// 同一寄存器只展示第一个活动名称，避免重复项。
 			continue
 		}
-		locals = append(locals, ActiveLocalSnapshot{Name: localVar.Name, Value: vm.registers[registerIndex]})
+		locals = append(locals, ActiveLocalSnapshot{Name: localVar.Name, Register: registerIndex, Const: localVar.Const, Value: vm.registers[registerIndex]})
 		seenRegisters[registerIndex] = true
 	}
 	return locals
@@ -7384,8 +7388,7 @@ func (vm *VM) executeSetTable(instruction bytecode.Instruction) error {
 						// value 寄存器越界时不能尝试写入 table。
 						return ErrRegisterOutOfRange
 					}
-					table.RawSetString(keyConstant.String, vm.registers[valueIndex])
-					return nil
+					return table.RawSetStringWithConstCheck(keyConstant.String, vm.registers[valueIndex])
 				}
 				// string key 写入不会触发元方法；value 仍按 RK 语义读取，保留常量越界错误边界。
 				value, err := vm.rkValue(instruction.C())
@@ -7393,8 +7396,7 @@ func (vm *VM) executeSetTable(instruction bytecode.Instruction) error {
 					// value 常量读取失败时不能尝试写入 table。
 					return err
 				}
-				table.RawSetString(keyConstant.String, value)
-				return nil
+				return table.RawSetStringWithConstCheck(keyConstant.String, value)
 			}
 		}
 		if !bytecode.IsK(instruction.B()) {
@@ -7416,12 +7418,10 @@ func (vm *VM) executeSetTable(instruction bytecode.Instruction) error {
 					value := vm.registers[valueIndex]
 					if keyValue.Integer > 0 && !value.IsNil() {
 						// 正整数非 nil 数组写入走更窄的 table 热路径，跳过删除语义分支。
-						table.RawSetPositiveIntegerNonNil(keyValue.Integer, value)
-						return nil
+						return table.RawSetPositiveIntegerNonNilWithConstCheck(keyValue.Integer, value)
 					}
 					// integer key raw set 不触发元方法；寄存器值已按 RK 语义读取完成。
-					table.RawSetInteger(keyValue.Integer, value)
-					return nil
+					return table.RawSetIntegerWithConstCheck(keyValue.Integer, value)
 				}
 				value, err := vm.rkValue(instruction.C())
 				if err != nil {
@@ -7429,8 +7429,7 @@ func (vm *VM) executeSetTable(instruction bytecode.Instruction) error {
 					return err
 				}
 				// integer key raw set 不触发元方法；value 已按 RK 语义读取完成。
-				table.RawSetInteger(keyValue.Integer, value)
-				return nil
+				return table.RawSetIntegerWithConstCheck(keyValue.Integer, value)
 			}
 		}
 		key, err := vm.rkValue(instruction.B())
@@ -7494,8 +7493,7 @@ func (vm *VM) executeSetTabUp(instruction bytecode.Instruction) error {
 						// value 寄存器越界时不能尝试写入 table。
 						return ErrRegisterOutOfRange
 					}
-					table.RawSetString(keyConstant.String, vm.registers[valueIndex])
-					return nil
+					return table.RawSetStringWithConstCheck(keyConstant.String, vm.registers[valueIndex])
 				}
 				// string key 写入不会触发元方法；value 仍按 RK 语义读取，保留常量越界错误边界。
 				value, err := vm.rkValue(instruction.C())
@@ -7503,8 +7501,7 @@ func (vm *VM) executeSetTabUp(instruction bytecode.Instruction) error {
 					// value 常量读取失败时不能尝试写入 table。
 					return err
 				}
-				table.RawSetString(keyConstant.String, value)
-				return nil
+				return table.RawSetStringWithConstCheck(keyConstant.String, value)
 			}
 		}
 		key, err := vm.rkValue(instruction.B())
@@ -10837,7 +10834,10 @@ func (vm *VM) writeSetList(tableIndex int, valueCount int, batchNumber int) erro
 	startArrayIndex := int64((batchNumber-1)*fieldsPerFlush + 1)
 	for valueOffset := 0; valueOffset < valueCount; valueOffset++ {
 		// 依次把 R(A+1)..R(A+B) 写入数组区连续整数 key。
-		table.RawSetInteger(startArrayIndex+int64(valueOffset), vm.registers[tableIndex+1+valueOffset])
+		if err := table.RawSetIntegerWithConstCheck(startArrayIndex+int64(valueOffset), vm.registers[tableIndex+1+valueOffset]); err != nil {
+			// 批量写入命中 `_glua_const` 只读数组字段时，停止当前 SETLIST 并向调用方报告错误。
+			return err
+		}
 	}
 	return nil
 }

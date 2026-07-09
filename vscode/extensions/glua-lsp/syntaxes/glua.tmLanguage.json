@@ -82,7 +82,7 @@
       "patterns": [
         {
           "name": "keyword.control.glua",
-          "match": "\\b(?:break|continue|do|else|elseif|end|for|function|goto|if|in|local|repeat|return|then|until|while|switch|case|default)\\b"
+          "match": "\\b(?:break|continue|const|do|else|elseif|end|for|function|goto|if|in|local|repeat|return|then|until|while|switch|case|default)\\b"
         }
       ]
     },
@@ -90,7 +90,7 @@
       "patterns": [
         {
           "name": "constant.language.glua",
-          "match": "\\b(?:false|nil|true|_ENV|_G|_VERSION)\\b"
+          "match": "\\b(?:false|nil|true|_ENV|_G|_VERSION|_glua_const)\\b"
         },
         {
           "name": "variable.language.self.glua",

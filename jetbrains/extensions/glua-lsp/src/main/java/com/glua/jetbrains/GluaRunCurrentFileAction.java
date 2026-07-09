@@ -71,6 +71,9 @@ public final class GluaRunCurrentFileAction extends AnAction {
         String prefix = DefaultDebugExecutor.EXECUTOR_ID.equals(executor.getId()) ? "Debug " : "Run ";
         GluaDapRunConfiguration configuration = new GluaDapRunConfiguration(project, factory, prefix + file.getName());
         configuration.setGluaExecutable(settings.gluaExecutable());
+        configuration.setUseRemoteDap(settings.useRemoteDap());
+        configuration.setDapHost(settings.dapHost());
+        configuration.setDapPort(settings.dapPort());
         configuration.setProgram(FileUtil.toSystemIndependentName(Path.of(file.getPath()).toString()));
         configuration.setAllowRunningInParallel(true);
         RunnerAndConfigurationSettings runSettings = RunManager.getInstance(project).createConfiguration(configuration, factory);

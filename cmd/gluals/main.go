@@ -90,7 +90,7 @@ func helpText() string {
 	builder.WriteString("Usage: gluals [options]\n\n")
 	builder.WriteString("Options:\n")
 	builder.WriteString("  -h, --help               show this help\n")
-	builder.WriteString("  --gluals-syntax value    select syntax mode: lua53, extended, all, continue,switch\n\n")
+	builder.WriteString("  --gluals-syntax value    select syntax mode: lua53, extended, all, continue,switch,const\n\n")
 	builder.WriteString(buildinfo.FeatureText(false))
 	return builder.String()
 }

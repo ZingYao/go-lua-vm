@@ -15,6 +15,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/ZingYao/go-lua-vm/compiler/codegen"
 	"github.com/ZingYao/go-lua-vm/compiler/formatter"
 	"github.com/ZingYao/go-lua-vm/compiler/lexer"
 	"github.com/ZingYao/go-lua-vm/compiler/parser"
@@ -475,7 +476,7 @@ func (server *Server) handleSemanticTokensFull(message requestMessage) error {
 	if !ok {
 		return server.writeError(message.ID, -32602, "document is not open")
 	}
-	return server.writeResponse(message.ID, semanticTokensResult{Data: semanticTokens(text)})
+	return server.writeResponse(message.ID, semanticTokensResult{Data: semanticTokens(text, server.syntax)})
 }
 
 // diagnostic 表示 LSP Diagnostic。
@@ -522,7 +523,8 @@ func (server *Server) publishDiagnostics(uri string, text string) error {
 // text 是完整文档内容；syntax 控制项目语法糖开关。返回值为空表示没有语法错误。
 func analyzeDiagnostics(text string, syntax extensions.SyntaxSet) []diagnostic {
 	// 空文档也需要经过 parser；空 chunk 合法时返回无诊断。
-	if _, err := parser.NewWithSyntax(text, syntax).ParseChunk(); err != nil {
+	chunk, err := parser.NewWithSyntax(text, syntax).ParseChunk()
+	if err != nil {
 		parseErrors := collectParseErrors(err)
 		diagnostics := make([]diagnostic, 0, len(parseErrors))
 		for _, parseError := range parseErrors {
@@ -530,7 +532,37 @@ func analyzeDiagnostics(text string, syntax extensions.SyntaxSet) []diagnostic {
 		}
 		return diagnostics
 	}
+	if _, err := codegen.CompileChunk(chunk, "lsp"); err != nil {
+		// parser 通过后继续执行 codegen 语义诊断，覆盖 const 重新赋值等非纯语法错误。
+		return []diagnostic{diagnosticFromCompileError(err)}
+	}
 	return nil
+}
+
+// diagnosticFromCompileError 将 codegen 语义错误转换为 LSP 诊断。
+func diagnosticFromCompileError(err error) diagnostic {
+	// codegen 错误当前采用 `line N: message` 文本，先从文本中恢复行号，后续可替换为结构化错误。
+	message := err.Error()
+	startLine := 0
+	if strings.HasPrefix(message, "line ") {
+		rest := strings.TrimPrefix(message, "line ")
+		colonIndex := strings.Index(rest, ":")
+		if colonIndex > 0 {
+			if parsedLine, parseErr := strconv.Atoi(rest[:colonIndex]); parseErr == nil && parsedLine > 0 {
+				startLine = parsedLine - 1
+				message = strings.TrimSpace(rest[colonIndex+1:])
+			}
+		}
+	}
+	return diagnostic{
+		Range: lspRange{
+			Start: lspPosition{Line: startLine, Character: 0},
+			End:   lspPosition{Line: startLine, Character: 1},
+		},
+		Severity: diagnosticSeverityError,
+		Source:   "glua",
+		Message:  message,
+	}
 }
 
 // collectParseErrors 从错误链中提取 parser 错误列表。
@@ -668,14 +700,14 @@ func isDefinitionAt(tokens []tokenInfo, index int, name string) bool {
 }
 
 // semanticTokens 生成 LSP semantic token delta 编码。
-func semanticTokens(text string) []int {
+func semanticTokens(text string, syntax extensions.SyntaxSet) []int {
 	// 逐 token 分类并按 LSP semantic token 5 元组 delta 编码输出。
 	tokens := scanTokens(text)
 	data := make([]int, 0, len(tokens)*5)
 	lastLine := 0
 	lastStart := 0
 	for _, token := range tokens {
-		tokenType, ok := semanticTypeForToken(token)
+		tokenType, ok := semanticTypeForToken(token, syntax)
 		if !ok {
 			continue
 		}
@@ -698,7 +730,7 @@ func semanticTokens(text string) []int {
 }
 
 // semanticTypeForToken 返回 token 的 semantic token 类型。
-func semanticTypeForToken(token tokenInfo) (int, bool) {
+func semanticTypeForToken(token tokenInfo, syntax extensions.SyntaxSet) (int, bool) {
 	// 按 glua 词法类型和关键字集合映射 VS Code 可识别的 token 类型。
 	switch token.Kind {
 	case lexer.TokenKeyword:
@@ -710,7 +742,7 @@ func semanticTypeForToken(token tokenInfo) (int, bool) {
 	case lexer.TokenOperator:
 		return semanticTypeOperator, true
 	case lexer.TokenIdentifier:
-		if isContextKeyword(token.Text) {
+		if isContextKeyword(token.Text, syntax) {
 			return semanticTypeKeyword, true
 		}
 		if isBuiltinFunction(token.Text) {
@@ -780,10 +812,25 @@ func rangeBeforeOrEqual(tokenRange lspRange, position lspPosition) bool {
 }
 
 // isContextKeyword 判断标识符是否是 glua 上下文关键字。
-func isContextKeyword(text string) bool {
-	// switch/case/default/continue 在 lexer 中可能仍是 identifier，需要语义高亮为关键字。
+func isContextKeyword(text string, syntax extensions.SyntaxSet) bool {
+	// glua 扩展关键字在 lexer 中可能仍是 identifier，需要语义高亮为关键字。
 	switch text {
-	case "switch", "case", "default", "continue":
+	case "switch", "case", "default":
+		return syntax.Has(extensions.SyntaxSwitch)
+	case "continue":
+		return syntax.Has(extensions.SyntaxContinue)
+	case "const":
+		return syntax.Has(extensions.SyntaxConst)
+	default:
+		return false
+	}
+}
+
+// isAnyContextKeyword 判断文本是否是 glua 已知上下文关键字。
+func isAnyContextKeyword(text string) bool {
+	// 不带 syntax 的场景只用于候选识别，不代表当前配置启用。
+	switch text {
+	case "switch", "case", "default", "continue", "const":
 		return true
 	default:
 		return false
