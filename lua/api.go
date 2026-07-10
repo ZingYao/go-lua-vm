@@ -2411,6 +2411,10 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 			// 同步事件回调错误会中断当前函数调用。
 			return nil, err
 		}
+		if err := triggerGluaProgressLifecycleEvent(state, proto, GluaEventProgressStart, runtime.NilValue()); err != nil {
+			// progress.start 同步事件错误会中断当前代码块。
+			return nil, err
+		}
 	}
 	returnHookTriggered := false
 	triggerReturnHook := func() error {
@@ -2438,15 +2442,24 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 		shouldPopFrames := err == nil || errors.Is(err, runtime.ErrCoroutineYield)
 		if gluaEventsEnabled && !errors.Is(err, runtime.ErrCoroutineYield) {
 			// glua exit/error 事件在调用帧仍可见时触发，便于 callback 读取局部变量快照。
+			originalErr := err
 			if err != nil {
-				// 错误路径先触发 function.error，并把错误对象作为 payload。
-				errorPayload := runtime.ErrorObject(err)
+				// 错误路径先触发 error 事件，并把原始错误对象作为 payload。
+				errorPayload := runtime.ErrorObject(originalErr)
 				if eventErr := triggerGluaFunctionLifecycleEvent(state, closure, GluaEventFunctionError, errorPayload); eventErr != nil {
+					err = eventErr
+				}
+				if eventErr := triggerGluaProgressLifecycleEvent(state, proto, GluaEventProgressError, errorPayload); eventErr != nil {
+					// progress.error 事件错误覆盖原结果，按同步回调失败处理。
 					err = eventErr
 				}
 			}
 			if eventErr := triggerGluaFunctionLifecycleEvent(state, closure, GluaEventFunctionExit, runtime.NilValue()); eventErr != nil {
 				// exit 事件错误覆盖原结果，按同步回调失败处理。
+				err = eventErr
+			}
+			if eventErr := triggerGluaProgressLifecycleEvent(state, proto, GluaEventProgressExit, runtime.NilValue()); eventErr != nil {
+				// progress.exit 事件错误覆盖原结果，按同步回调失败处理。
 				err = eventErr
 			}
 		}
@@ -2986,6 +2999,10 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 				if err := triggerGluaFunctionLifecycleEvent(state, closure, GluaEventFunctionReturn, gluaValueListTable(returnValues)); err != nil {
 					return nil, err
 				}
+				if err := triggerGluaProgressLifecycleEvent(state, proto, GluaEventProgressEnd, runtime.NilValue()); err != nil {
+					// progress.end 表示当前代码块正常完成，错误会覆盖返回路径。
+					return nil, err
+				}
 				if err := drainGluaEventQueue(state); err != nil {
 					return nil, err
 				}
@@ -3108,6 +3125,10 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 	if gluaEventsEnabled {
 		// 隐式返回没有返回值，仍需要触发 function.return。
 		if err := triggerGluaFunctionLifecycleEvent(state, closure, GluaEventFunctionReturn, gluaValueListTable(nil)); err != nil {
+			return nil, err
+		}
+		if err := triggerGluaProgressLifecycleEvent(state, proto, GluaEventProgressEnd, runtime.NilValue()); err != nil {
+			// progress.end 同样覆盖隐式返回路径。
 			return nil, err
 		}
 		if err := drainGluaEventQueue(state); err != nil {
@@ -3746,7 +3767,8 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 		// 函数寄存器缺失说明 codegen 或 VM 状态异常。
 		return runtime.ErrRegisterOutOfRange
 	}
-	directClosure, directCall := canExecuteLuaCallRequestDirect(state, functionValue, callRequest, coroutinesCreated)
+	gluaEventsEnabled := gluaHasAnyEvent(state)
+	directClosure, directCall := canExecuteLuaCallRequestDirect(state, functionValue, callRequest, coroutinesCreated, gluaEventsEnabled)
 	debugName := ""
 	debugNameWhat := ""
 	debugNameResolved := false
@@ -3771,7 +3793,7 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 		// 固定参数/固定返回的 Lua closure 走 direct CALL，避免构造参数切片。
 		results, directCallVM, directResultsWritten, err = executeLuaCallRequestDirect(state, vm, directClosure, debugName, debugNameWhat, callRequest)
 	} else {
-		if !hooksEnabled && !coroutinesCreated && functionValue.Kind == runtime.KindLuaClosure {
+		if !hooksEnabled && !coroutinesCreated && !gluaEventsEnabled && functionValue.Kind == runtime.KindLuaClosure {
 			// 无 hook、无 coroutine 的普通主线程路径可尝试固定签名自递归 fast path；不命中时回退完整 CALL。
 			if selfRecursiveClosure, ok := functionValue.Ref.(*runtime.LuaClosure); ok && selfRecursiveClosure.SelfRecursiveIntegerFib {
 				if contextErr := state.CheckContext(); contextErr != nil {
@@ -4082,9 +4104,13 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 // canExecuteLuaCallRequestDirect 判断 CALL 请求是否可使用 Lua closure direct 路径。
 //
 // direct 路径只覆盖固定参数、固定返回、非泛型 for 的普通 Lua closure；复杂开放调用仍走通用路径。
-func canExecuteLuaCallRequestDirect(state *State, functionValue Value, callRequest *runtime.CallRequest, coroutinesCreated bool) (*runtime.LuaClosure, bool) {
+func canExecuteLuaCallRequestDirect(state *State, functionValue Value, callRequest *runtime.CallRequest, coroutinesCreated bool, gluaEventsEnabled bool) (*runtime.LuaClosure, bool) {
 	if state == nil || callRequest == nil || callRequest.GenericFor || callRequest.ReturnCount < 0 || callRequest.ArgumentCount < 0 {
 		// 缺少 State 或调用请求时不能进入 direct CALL。
+		return nil, false
+	}
+	if gluaEventsEnabled {
+		// glua events 需要完整调用帧与生命周期事件，不能走隐藏 Lua closure 的 direct CALL。
 		return nil, false
 	}
 	if functionValue.Kind != runtime.KindLuaClosure {

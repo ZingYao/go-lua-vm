@@ -43,10 +43,12 @@ fi
   echo
   echo "### Highlights"
   echo
-  echo "- Improved execution efficiency across the compiler, VM, CLI, and release build paths."
+  echo "- Improved beyond stock Lua 5.3 as a pure-Go VM distribution: compatible Lua 5.3 behavior is paired with embeddable Go APIs, \`glua\`/\`gluac\`/\`gluals\` command-line tools, DAP debugging, editor integration, bytecode inspection, formatting, and native Lua C module loading in native_modules builds."
+  echo "- Improved execution efficiency across the compiler, VM, CLI, and release build paths, while keeping GLua event correctness by disabling Lua closure fast paths only when registered events must observe lifecycle frames."
   echo "- Added and refined editor extension support for VS Code and JetBrains, including completion, diagnostics, formatting, debugging, DAP variable editing, source navigation, settings, and localized UI text."
-  echo "- Added new GLua syntax sugar and language-server awareness for \`const\`, extended control-flow syntax, event APIs, and conditional extension modes."
-  echo "- Added multilingual CLI help and documentation output so command-line tools can present localized user-facing text."
+  echo "- Added new GLua syntax sugar and language-server awareness for \`const\`, \`continue\`, \`switch/case/default\`, and conditional extension modes selected by syntax sets such as \`lua53\`, \`extended\`, \`all\`, or comma-separated extension names."
+  echo "- Added GLua extension methods: \`setFunctionEvent\`, \`setFunctionEventAsync\`, \`callFunctionEvent\`, \`callFunctionEventAsync\`, \`setProgressEvent\`, \`setProgressEventAsync\`, \`callProgressEvent\`, and \`callProgressEventAsync\`, with preset \`events.function_*\` and \`events.progress_*\` constants including call/return/error/exit and line/start/end/error/exit."
+  echo "- Added multilingual CLI help and documentation output. Only English and Chinese are supported; choose output with \`GLUA_LANG=en\` or \`GLUA_LANG=zh-CN\` (the tools also follow \`LC_ALL\`, \`LC_MESSAGES\`, and \`LANG\` when \`GLUA_LANG\` is not set)."
   echo "- Release CLI artifacts are native_modules builds for Linux, Windows, and Android; macOS native_modules packages are produced from a local Mac build."
   echo
   echo "### Changes"
@@ -64,10 +66,12 @@ fi
   echo
   echo "### 更新重点"
   echo
-  echo "- 提升 compiler、VM、CLI 与发布构建链路的执行效率。"
+  echo "- 在官方 Lua 5.3 行为兼容基础上提供纯 Go VM 发行能力：同时包含可嵌入 Go API、\`glua\`/\`gluac\`/\`gluals\` 命令行工具、DAP 调试、编辑器集成、字节码查看、格式化，以及 native_modules 构建中的 Lua C 原生模块加载。"
+  echo "- 提升 compiler、VM、CLI 与发布构建链路的执行效率；同时在注册 GLua event 后只关闭会影响生命周期观测的 Lua closure 快路径，保证事件正确性。"
   echo "- 完善 VS Code 与 JetBrains 扩展支持，覆盖补全、诊断、格式化、调试、DAP 变量修改、源码跳转、设置项和界面多语言。"
-  echo "- 新增 GLua 语法糖与语言服务语义支持，包括 \`const\`、扩展控制流语法、event API 和条件扩展模式。"
-  echo "- 增加 CLI 工具的多语言帮助与文档输出，让命令行用户可看到本地化说明。"
+  echo "- 新增 GLua 语法糖与语言服务语义支持，包括 \`const\`、\`continue\`、\`switch/case/default\`，并支持通过 \`lua53\`、\`extended\`、\`all\` 或逗号分隔扩展名选择条件扩展模式。"
+  echo "- 新增 GLua 扩展方法：\`setFunctionEvent\`、\`setFunctionEventAsync\`、\`callFunctionEvent\`、\`callFunctionEventAsync\`、\`setProgressEvent\`、\`setProgressEventAsync\`、\`callProgressEvent\`、\`callProgressEventAsync\`；预设 \`events.function_*\` 和 \`events.progress_*\` 常量，覆盖 call/return/error/exit 与 line/start/end/error/exit。"
+  echo "- 增加 CLI 工具的多语言帮助与文档输出。目前仅支持英文和中文；可使用 \`GLUA_LANG=en\` 或 \`GLUA_LANG=zh-CN\` 选择输出语言，未设置 \`GLUA_LANG\` 时会读取 \`LC_ALL\`、\`LC_MESSAGES\` 和 \`LANG\`。"
   echo "- Linux、Windows 和 Android 的 CLI 发布产物均为 native_modules 构建；macOS native_modules 包由本机 Mac 构建补充。"
   echo
   echo "### 变更列表"

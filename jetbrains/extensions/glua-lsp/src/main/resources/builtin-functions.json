@@ -4573,6 +4573,94 @@
         "zh-CN": "setProgressEvent(events.progress_line, function(ctx) end)"
       }
     },
+    "events.progress_start": {
+      "signature": {
+        "en": "events.progress_start",
+        "zh-CN": "events.progress_start"
+      },
+      "returns": {
+        "en": "value: preset event name for file progress start.",
+        "zh-CN": "值：文件进度开始时触发的预设事件名。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Preset GLua event constant fired when a Lua code block in the current source starts.",
+        "zh-CN": "当前源码中的 Lua 代码块开始执行时触发的 GLua 预设常量。"
+      },
+      "example": {
+        "en": "setProgressEvent(events.progress_start, function(ctx) end)",
+        "zh-CN": "setProgressEvent(events.progress_start, function(ctx) end)"
+      }
+    },
+    "events.progress_end": {
+      "signature": {
+        "en": "events.progress_end",
+        "zh-CN": "events.progress_end"
+      },
+      "returns": {
+        "en": "value: preset event name for normal file progress completion.",
+        "zh-CN": "值：文件进度正常完成时触发的预设事件名。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Preset GLua event constant fired when a Lua code block in the current source completes normally.",
+        "zh-CN": "当前源码中的 Lua 代码块正常完成时触发的 GLua 预设常量。"
+      },
+      "example": {
+        "en": "setProgressEvent(events.progress_end, function(ctx) end)",
+        "zh-CN": "setProgressEvent(events.progress_end, function(ctx) end)"
+      }
+    },
+    "events.progress_error": {
+      "signature": {
+        "en": "events.progress_error",
+        "zh-CN": "events.progress_error"
+      },
+      "returns": {
+        "en": "value: preset event name for file progress error exit.",
+        "zh-CN": "值：文件进度错误退出时触发的预设事件名。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Preset GLua event constant fired when a Lua code block in the current source exits with an error.",
+        "zh-CN": "当前源码中的 Lua 代码块因错误退出时触发的 GLua 预设常量。"
+      },
+      "example": {
+        "en": "setProgressEvent(events.progress_error, function(ctx) end)",
+        "zh-CN": "setProgressEvent(events.progress_error, function(ctx) end)"
+      }
+    },
+    "events.progress_exit": {
+      "signature": {
+        "en": "events.progress_exit",
+        "zh-CN": "events.progress_exit"
+      },
+      "returns": {
+        "en": "value: preset event name fired when file progress leaves.",
+        "zh-CN": "值：文件进度离开时触发的预设事件名。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Preset GLua event constant for file progress exit, whether successful or failing.",
+        "zh-CN": "文件进度离开事件的 GLua 预设常量，成功或失败都会触发。"
+      },
+      "example": {
+        "en": "setProgressEvent(events.progress_exit, function(ctx) end)",
+        "zh-CN": "setProgressEvent(events.progress_exit, function(ctx) end)"
+      }
+    },
     "setFunctionEvent": {
       "signature": {
         "en": "setFunctionEvent(event, callback)",

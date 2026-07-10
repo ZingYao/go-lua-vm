@@ -6647,10 +6647,27 @@ func TestDoStringGluaProgressEvents(t *testing.T) {
 	source := `
 local progressLines = 0
 local asyncPayload
+local lifecycle = {}
+assert(events.progress_start == "progress.start")
+assert(events.progress_end == "progress.end")
+assert(events.progress_error == "progress.error")
+assert(events.progress_exit == "progress.exit")
 setProgressEvent(events.progress_line, function(ctx)
   if ctx.event == events.progress_line and ctx.line then
     progressLines = progressLines + 1
   end
+end)
+setProgressEvent(events.progress_start, function(ctx)
+  lifecycle[#lifecycle + 1] = ctx.event .. ":" .. tostring(ctx.kind) .. ":" .. tostring(ctx.source ~= nil)
+end)
+setProgressEvent(events.progress_end, function(ctx)
+  lifecycle[#lifecycle + 1] = ctx.event
+end)
+setProgressEvent(events.progress_error, function(ctx)
+  lifecycle[#lifecycle + 1] = ctx.event .. ":" .. tostring(ctx.payload ~= nil)
+end)
+setProgressEvent(events.progress_exit, function(ctx)
+  lifecycle[#lifecycle + 1] = ctx.event
 end)
 setProgressEventAsync("custom.progress", function(ctx)
   asyncPayload = ctx.payload
@@ -6660,9 +6677,28 @@ local afterAsync = true
 assert(afterAsync)
 assert(asyncPayload == "done", tostring(asyncPayload))
 assert(progressLines > 0, progressLines)
+local function observed(limit)
+  local value = 0
+  for index = 1, limit do
+    value = value + index
+  end
+  return value
+end
+assert(observed(2) == 3)
+assert(lifecycle[1] == events.progress_start .. ":progress:true", lifecycle[1])
+assert(lifecycle[2] == events.progress_end, lifecycle[2])
+assert(lifecycle[3] == events.progress_exit, lifecycle[3])
+local errorStart = #lifecycle + 1
+local ok = pcall(function()
+  error("boom")
+end)
+assert(not ok)
+assert(lifecycle[errorStart] == events.progress_start .. ":progress:true", lifecycle[errorStart])
+assert(lifecycle[errorStart + 1] == events.progress_error .. ":true", lifecycle[errorStart + 1])
+assert(lifecycle[errorStart + 2] == events.progress_exit, lifecycle[errorStart + 2])
 `
 	if err := DoString(state, source); err != nil {
-		// 文件级事件必须覆盖当前 chunk，并在 VM 安全点执行异步回调。
+		// 文件级事件必须覆盖当前 chunk、生命周期和 VM 安全点异步回调。
 		t.Fatalf("DoString glua progress events failed: %v", err)
 	}
 }

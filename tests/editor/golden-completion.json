@@ -209,6 +209,23 @@
       "detailContains": {
         "function_call": "events.function_call"
       }
+    },
+    {
+      "name": "events progress constant completion",
+      "kind": "builtin-member",
+      "source": "events.progress_",
+      "marker": "events.progress_",
+      "cursor": "after-marker",
+      "expected": [
+        "progress_line",
+        "progress_start",
+        "progress_end",
+        "progress_error",
+        "progress_exit"
+      ],
+      "detailContains": {
+        "progress_start": "events.progress_start"
+      }
     }
   ]
 }

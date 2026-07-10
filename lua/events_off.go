@@ -18,6 +18,14 @@ const (
 	GluaEventFunctionExit = "function.exit"
 	// GluaEventProgressLine 表示当前文件执行到新的源码行。
 	GluaEventProgressLine = "progress.line"
+	// GluaEventProgressStart 表示当前文件内的 Lua 代码块开始执行。
+	GluaEventProgressStart = "progress.start"
+	// GluaEventProgressEnd 表示当前文件内的 Lua 代码块正常执行完成。
+	GluaEventProgressEnd = "progress.end"
+	// GluaEventProgressError 表示当前文件内的 Lua 代码块因错误退出。
+	GluaEventProgressError = "progress.error"
+	// GluaEventProgressExit 表示当前文件内的 Lua 代码块离开，成功和失败都会触发。
+	GluaEventProgressExit = "progress.exit"
 )
 
 // registerGluaEventGlobals 在未编译事件能力时保持无操作。
@@ -52,5 +60,11 @@ func gluaHasAnyEvent(state *State) bool {
 // triggerGluaProgressLineEvent 在未编译事件能力时保持无操作。
 func triggerGluaProgressLineEvent(state *State, proto *bytecode.Proto, line int64) error {
 	// 当前构建不包含 glua events，进度事件直接跳过。
+	return nil
+}
+
+// triggerGluaProgressLifecycleEvent 在未编译事件能力时保持无操作。
+func triggerGluaProgressLifecycleEvent(state *State, proto *bytecode.Proto, eventName string, payload runtime.Value) error {
+	// 当前构建不包含 glua events，进度生命周期事件直接跳过。
 	return nil
 }

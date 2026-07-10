@@ -20,6 +20,14 @@ const (
 	GluaEventFunctionExit = "function.exit"
 	// GluaEventProgressLine 表示当前文件执行到新的源码行。
 	GluaEventProgressLine = "progress.line"
+	// GluaEventProgressStart 表示当前文件内的 Lua 代码块开始执行。
+	GluaEventProgressStart = "progress.start"
+	// GluaEventProgressEnd 表示当前文件内的 Lua 代码块正常执行完成。
+	GluaEventProgressEnd = "progress.end"
+	// GluaEventProgressError 表示当前文件内的 Lua 代码块因错误退出。
+	GluaEventProgressError = "progress.error"
+	// GluaEventProgressExit 表示当前文件内的 Lua 代码块离开，成功和失败都会触发。
+	GluaEventProgressExit = "progress.exit"
 )
 
 // gluaEventCallback 保存一个 Lua 侧事件回调。
@@ -71,6 +79,10 @@ func registerGluaEventGlobals(state *State) {
 	eventsTable.RawSetString("function_error", runtime.StringValue(GluaEventFunctionError))
 	eventsTable.RawSetString("function_exit", runtime.StringValue(GluaEventFunctionExit))
 	eventsTable.RawSetString("progress_line", runtime.StringValue(GluaEventProgressLine))
+	eventsTable.RawSetString("progress_start", runtime.StringValue(GluaEventProgressStart))
+	eventsTable.RawSetString("progress_end", runtime.StringValue(GluaEventProgressEnd))
+	eventsTable.RawSetString("progress_error", runtime.StringValue(GluaEventProgressError))
+	eventsTable.RawSetString("progress_exit", runtime.StringValue(GluaEventProgressExit))
 	globals.RawSetString("events", runtime.ReferenceValue(runtime.KindTable, eventsTable))
 	globals.RawSetString("setFunctionEvent", runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(func(args ...runtime.Value) ([]runtime.Value, error) {
 		// 同步函数事件注册到当前 Lua 调用帧。
@@ -635,6 +647,17 @@ func triggerGluaProgressLineEvent(state *State, proto *bytecode.Proto, line int6
 	payload := runtime.NewTable()
 	payload.RawSetString("line", runtime.IntegerValue(line))
 	_, err := dispatchGluaProgressEvent(state, proto.Source, GluaEventProgressLine, runtime.ReferenceValue(runtime.KindTable, payload), false)
+	return err
+}
+
+// triggerGluaProgressLifecycleEvent 按源码文件触发进度生命周期事件。
+func triggerGluaProgressLifecycleEvent(state *State, proto *bytecode.Proto, eventName string, payload runtime.Value) error {
+	// 进度生命周期事件与 progress.line 使用同一个源码文件作用域。
+	if proto == nil {
+		// 缺少 Proto 时没有可匹配的 Source。
+		return nil
+	}
+	_, err := dispatchGluaProgressEvent(state, proto.Source, eventName, payload, false)
 	return err
 }
 
