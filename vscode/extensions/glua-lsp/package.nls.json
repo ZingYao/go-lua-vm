@@ -28,6 +28,7 @@
   "glua.configuration.events.description": "Enable GLua event API symbols in the language server.",
   "glua.configuration.docLanguage.description": "Language tag used for builtin docs, hover text and signatures.",
   "glua.configuration.executable.description": "Path to the glua executable used by debug launch helpers. Use the command 'GLua: Select glua executable' to choose a file.",
+  "glua.configuration.languageServerExecutable.description": "Path to gluals. Required when the extension does not bundle your operating system and architecture.",
   "glua.configuration.gluacExecutable.description": "Path to the gluac executable used by compile helpers. Use the command 'GLua: Select gluac executable' to choose a file.",
   "glua.configuration.dapHost.description": "Remote GLua DAP host used by attach debugging and by Debug current file when glua.useRemoteDap is enabled.",
   "glua.configuration.dapPort.description": "Remote GLua DAP port used by attach debugging and by Debug current file when glua.useRemoteDap is enabled.",

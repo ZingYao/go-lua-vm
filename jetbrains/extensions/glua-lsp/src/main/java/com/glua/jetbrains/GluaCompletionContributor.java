@@ -52,6 +52,9 @@ public final class GluaCompletionContributor extends CompletionContributor {
                             continue;
                         }
                         String method = name.substring(prefix.length());
+                        if (method.contains(".")) {
+                            continue;
+                        }
                         if (!method.startsWith(completion.prefix())) {
                             continue;
                         }

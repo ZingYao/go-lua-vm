@@ -1,4 +1,4 @@
-# Lua 5.3.6 Public Headers
+# Lua 5.3.6 公共头文件
 
 本目录保存 `native_modules` 可选构建使用的 Lua 5.3.6 public C API 头文件。
 

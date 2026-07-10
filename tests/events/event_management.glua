@@ -1,0 +1,148 @@
+-- GLua event 监听器治理、函数上下文和只读快照回归。
+local event = glua.event
+
+-- priority 越大越先执行；相同优先级仍保持注册顺序。
+local order = {}
+local lowID = event.setProgress("test.priority", function()
+  order[#order + 1] = "low"
+end, { priority = 1, group = "priority" })
+local highID = event.setProgress("test.priority", function()
+  order[#order + 1] = "high"
+end, { priority = 10, group = "priority" })
+event.callProgress("test.priority")
+assert(order[1] == "high" and order[2] == "low")
+
+-- setCallback 应保留事件 ID、配置与排序位置，只替换下一次调用的函数。
+local replacementCount = 0
+assert(event.setCallback(highID, function(ctx)
+  assert(ctx.id == highID)
+  assert(ctx.group == "priority")
+  replacementCount = replacementCount + 1
+end))
+event.callProgress("test.priority")
+assert(replacementCount == 1)
+local highInfo = event.get(highID)
+assert(highInfo.id == highID)
+assert(highInfo.event == "test.priority")
+assert(highInfo.priority == 10)
+assert(highInfo.group == "priority")
+assert(type(highInfo.callback) == "function")
+assert(highInfo.dispatchCount == 2)
+
+-- once 监听器只能执行一次，执行后应从注册表自动删除。
+local onceCount = 0
+local onceID = event.setProgress("test.once", function()
+  onceCount = onceCount + 1
+end, { once = true })
+event.callProgress("test.once")
+event.callProgress("test.once")
+assert(onceCount == 1)
+assert(event.get(onceID) == nil)
+
+-- 分组静音和删除只能影响当前源码文件中的目标分组。
+assert(event.setGroupMuted("priority", true) == 2)
+event.callProgress("test.priority")
+assert(replacementCount == 1)
+assert(event.setGroupMuted("priority", false) == 2)
+assert(event.removeGroup("priority") == 2)
+assert(event.get(lowID) == nil and event.get(highID) == nil)
+
+-- clear(event) 只删除指定名称，clear() 删除当前文件剩余监听器。
+event.setProgress("test.clear.a", function() end)
+event.setProgress("test.clear.b", function() end)
+assert(event.clear("test.clear.a") == 1)
+assert(event.clear() == 1)
+
+-- 函数事件提供参数、结果、耗时、深度和单调序号；默认快照禁止修改嵌套 table。
+local callContext = nil
+local returnContext = nil
+local function observed(value, options)
+  return value + 1, options
+end
+local callID = event.setProgress(event.events.progress_function_call, function(ctx)
+  callContext = ctx
+  assert(ctx.args[1] == 41)
+  assert(ctx.args[2].name == "original")
+  local ok, err = pcall(function()
+    ctx.args[2].name = "changed"
+  end)
+  assert(not ok and tostring(err):find("read%-only"))
+end, { whitelist = { observed } })
+local returnID = event.setProgress(event.events.progress_function_return, function(ctx)
+  returnContext = ctx
+  assert(ctx.results[1] == 42)
+  assert(ctx.results[2].name == "original")
+end, { whitelist = { observed } })
+local options = { name = "original" }
+local answer, returnedOptions = observed(41, options)
+assert(answer == 42 and returnedOptions == options)
+assert(options.name == "original")
+assert(callContext.durationNs == 0)
+assert(returnContext.durationNs >= 0)
+assert(returnContext.sequence > callContext.sequence)
+assert(type(callContext.depth) == "number")
+assert(event.remove(callID) and event.remove(returnID))
+
+-- mutable=true 显式恢复可修改引用语义。
+local mutableID = event.setProgress(event.events.progress_function_call, function(ctx)
+  ctx.args[2].name = "mutable"
+end, { whitelist = { observed }, mutable = true })
+options.name = "original"
+observed(1, options)
+assert(options.name == "mutable")
+assert(event.remove(mutableID))
+
+-- pcall 捕获 Lua 错误时仍应产生 function_error，且 ctx.error 可读取。
+local caughtErrors = 0
+local function caughtFailure()
+  error("caught event failure")
+end
+local errorID = event.setProgress(event.events.progress_function_error, function(ctx)
+  assert(tostring(ctx.error):find("caught event failure"))
+  caughtErrors = caughtErrors + 1
+end, { whitelist = { caughtFailure } })
+local ok, err = pcall(caughtFailure)
+assert(not ok and tostring(err):find("caught event failure"))
+assert(caughtErrors == 1)
+assert(event.remove(errorID))
+
+-- pcall 内目标函数跨 coroutine.yield 时，return/exit 必须等最终恢复后触发。
+local yieldCalls = 0
+local yieldReturns = 0
+local yieldExits = 0
+local function yieldingProtected()
+  coroutine.yield("paused")
+  return "finished"
+end
+local yieldCallID = event.setProgress(event.events.progress_function_call, function()
+  yieldCalls = yieldCalls + 1
+end, { whitelist = { yieldingProtected } })
+local yieldReturnID = event.setProgress(event.events.progress_function_return, function(ctx)
+  assert(ctx.results[1] == "finished")
+  yieldReturns = yieldReturns + 1
+end, { whitelist = { yieldingProtected } })
+local yieldExitID = event.setProgress(event.events.progress_function_exit, function()
+  yieldExits = yieldExits + 1
+end, { whitelist = { yieldingProtected } })
+local thread = coroutine.create(function()
+  return pcall(yieldingProtected)
+end)
+local resumed, paused = coroutine.resume(thread)
+assert(resumed and paused == "paused")
+assert(yieldCalls == 1 and yieldReturns == 0 and yieldExits == 0)
+local finished, protectedOK, result = coroutine.resume(thread)
+assert(finished and protectedOK and result == "finished")
+assert(yieldReturns == 1 and yieldExits == 1)
+assert(event.remove(yieldCallID))
+assert(event.remove(yieldReturnID))
+assert(event.remove(yieldExitID))
+
+-- stats/eventList 应暴露队列与错误统计字段，flush 在空队列时返回 0。
+local stats = event.stats()
+assert(type(stats.queuedTasks) == "number")
+assert(type(stats.droppedTasks) == "number")
+assert(type(stats.callbackErrors) == "number")
+assert(type(stats.sequence) == "number")
+assert(event.flush() == 0)
+
+print("GLUA_EVENT_MANAGEMENT_OK")

@@ -1120,7 +1120,16 @@ function completionModule(tokens, separatorIndex, receiverIndex, position) {
       return inferred;
     }
   }
-  return tokens[receiverIndex] ? tokens[receiverIndex].text : "";
+  const segments = [];
+  let cursor = receiverIndex;
+  while (cursor >= 0 && tokens[cursor] && (tokens[cursor].type === "identifier" || tokens[cursor].type === "keyword")) {
+    segments.unshift(tokens[cursor].text);
+    if (cursor < 2 || !tokens[cursor - 1] || tokens[cursor - 1].text !== ".") {
+      break;
+    }
+    cursor -= 2;
+  }
+  return resolveBuiltinQualifiedAlias(tokens, segments.join("."), position, true);
 }
 
 function inferredReceiverType(tokens, receiverIndex, position) {
@@ -1224,7 +1233,7 @@ function buildSymbolSnapshot(tokens, syntaxOptions = syntax) {
     ...Array.from(baseBuiltinFunctions).filter((name) => !name.includes(".")),
   ];
   if (gluaEventsEnabled) {
-    declaredBuiltins.push("events", "setFunctionEvent", "setFunctionEventAsync", "setProgressEvent", "setProgressEventAsync", "callFunctionEvent", "callFunctionEventAsync", "callProgressEvent", "callProgressEventAsync");
+    declaredBuiltins.push("glua");
   }
   const snapshot = {
     declared: new Set([
@@ -1694,7 +1703,9 @@ function buildCompletionCandidates(context, snapshot, tokens, documentUri) {
   const names = builtinFunctionNames();
 
   for (const name of names) {
-    const [moduleName, methodName] = name.split(".");
+    const separatorIndex = name.lastIndexOf(".");
+    const moduleName = separatorIndex >= 0 ? name.slice(0, separatorIndex) : "";
+    const methodName = separatorIndex >= 0 ? name.slice(separatorIndex + 1) : name;
 
     if (context.mode === "method") {
       if (!methodName || context.module !== moduleName) {
@@ -1879,6 +1890,84 @@ function isNameToken(token) {
   return token && (token.type === "identifier" || token.type === "keyword");
 }
 
+function isBuiltinNamespaceName(name) {
+  if (!name) {
+    return false;
+  }
+  if (getBuiltinFunction(name)) {
+    return true;
+  }
+  const prefix = `${name}.`;
+  return builtinFunctionNames().some((builtinName) => builtinName.startsWith(prefix));
+}
+
+function builtinNamespaceAliases(tokens, position) {
+  const aliases = new Map();
+  for (let index = 0; index + 3 < tokens.length; index++) {
+    const declaration = tokens[index];
+    if (!isRangeBeforeOrEqual(declaration.range, position)) {
+      break;
+    }
+    if (declaration.text !== "local" && declaration.text !== "const") {
+      continue;
+    }
+    const alias = tokens[index + 1];
+    if (!isNameToken(alias) || tokens[index + 2].text !== "=") {
+      continue;
+    }
+    const rightStart = index + 3;
+    if (!isNameToken(tokens[rightStart])) {
+      aliases.delete(alias.text);
+      continue;
+    }
+    const rightParts = [tokens[rightStart].text];
+    let rightEnd = rightStart;
+    while (rightEnd + 2 < tokens.length && tokens[rightEnd + 1].text === "." && isNameToken(tokens[rightEnd + 2])) {
+      rightParts.push(".", tokens[rightEnd + 2].text);
+      rightEnd += 2;
+    }
+    let rightName = rightParts.join("");
+    const dotIndex = rightName.indexOf(".");
+    if (dotIndex > 0 && aliases.has(rightName.slice(0, dotIndex))) {
+      rightName = `${aliases.get(rightName.slice(0, dotIndex))}${rightName.slice(dotIndex)}`;
+    }
+    if (!isBuiltinNamespaceName(rightName)) {
+      aliases.delete(alias.text);
+      continue;
+    }
+    aliases.set(alias.text, rightName);
+    index = rightEnd;
+  }
+  return aliases;
+}
+
+function resolveBuiltinQualifiedAlias(tokens, qualifiedName, position, allowRootAlias = false) {
+  const separatorIndex = String(qualifiedName || "").search(/[.:]/);
+  if (separatorIndex <= 0) {
+    if (allowRootAlias) {
+      return builtinNamespaceAliases(tokens, position).get(qualifiedName) || qualifiedName;
+    }
+    return qualifiedName;
+  }
+  const rootName = qualifiedName.slice(0, separatorIndex);
+  const resolvedRoot = builtinNamespaceAliases(tokens, position).get(rootName);
+  if (!resolvedRoot) {
+    return qualifiedName;
+  }
+  return `${resolvedRoot}${qualifiedName.slice(separatorIndex)}`;
+}
+
+function qualifiedNameEndingAtToken(tokens, index) {
+  if (index < 0 || !isNameToken(tokens[index])) {
+    return "";
+  }
+  let start = index;
+  while (start >= 2 && tokens[start - 1].text === "." && isNameToken(tokens[start - 2])) {
+    start -= 2;
+  }
+  return tokens.slice(start, index + 1).map((token) => token.text).join("");
+}
+
 function resolveBuiltinTarget(tokens, position) {
   const index = findTokenIndexAtPosition(tokens, position);
   if (index < 0) {
@@ -1888,6 +1977,12 @@ function resolveBuiltinTarget(tokens, position) {
   const token = tokens[index];
   if (!isNameToken(token)) {
     return "";
+  }
+
+  const qualifiedName = qualifiedNameEndingAtToken(tokens, index);
+  const resolvedQualifiedName = resolveBuiltinQualifiedAlias(tokens, qualifiedName, position);
+  if (getBuiltinFunction(resolvedQualifiedName)) {
+    return resolvedQualifiedName;
   }
 
   const candidateWithSeparator = (separator) => {

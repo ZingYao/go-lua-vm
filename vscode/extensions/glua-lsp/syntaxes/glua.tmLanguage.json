@@ -22,6 +22,9 @@
       "include": "#functions"
     },
     {
+      "include": "#members"
+    },
+    {
       "include": "#operators"
     }
   ],
@@ -114,7 +117,7 @@
         },
         {
           "name": "entity.name.type.library.glua",
-          "match": "\\b(?:string|math|table|io|os|coroutine|debug|utf8)\\b(?=\\s*[.:])"
+          "match": "\\b(?:glua|string|math|table|io|os|coroutine|debug|utf8)\\b(?=\\s*[.:])"
         },
         {
           "name": "entity.name.function.glua",
@@ -127,6 +130,34 @@
         {
           "name": "entity.name.function.call.glua",
           "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b(?=\\s*\\()"
+        }
+      ]
+    },
+    "members": {
+      "patterns": [
+        {
+          "name": "meta.event.constant.access.glua",
+          "match": "([.:])\\s*(progress_(?:line|start|end|error|exit|function_call|function_return|function_error|function_exit))\\b",
+          "captures": {
+            "1": {
+              "name": "punctuation.accessor.glua"
+            },
+            "2": {
+              "name": "constant.other.event.glua"
+            }
+          }
+        },
+        {
+          "name": "meta.member.access.glua",
+          "match": "([.:])\\s*([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "punctuation.accessor.glua"
+            },
+            "2": {
+              "name": "variable.other.property.glua"
+            }
+          }
         }
       ]
     },

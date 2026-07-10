@@ -8,5 +8,5 @@ main.glua
 module.glua
 coverage/**
 extension.js
-server/**
 node_modules/**
+!bin/**

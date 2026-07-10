@@ -178,43 +178,139 @@
       }
     },
     {
-      "name": "event global function completion",
-      "kind": "builtin-global",
-      "source": "setFunction",
-      "marker": "setFunction",
+      "name": "glua serialization namespace completion",
+      "kind": "builtin-member",
+      "source": "glua.",
+      "marker": "glua.",
       "cursor": "after-marker",
       "expected": [
-        "setFunctionEvent",
-        "setFunctionEventAsync"
+        "null",
+        "array",
+        "object",
+        "json",
+        "yaml",
+        "xml",
+        "toml",
+        "codec",
+        "hash",
+        "regex",
+        "uuid",
+        "zip",
+        "schema",
+        "event"
       ],
       "detailContains": {
-        "setFunctionEvent": "setFunctionEvent(event, callback)"
+        "json": "glua.json",
+        "yaml": "glua.yaml",
+        "xml": "glua.xml",
+        "toml": "glua.toml",
+        "hash": "glua.hash",
+        "schema": "glua.schema"
+      }
+    },
+    {
+      "name": "glua json codec completion",
+      "kind": "builtin-member",
+      "source": "glua.json.",
+      "marker": "glua.json.",
+      "cursor": "after-marker",
+      "expected": [
+        "null",
+        "encode",
+        "decode"
+      ],
+      "detailContains": {
+        "encode": "glua.json.encode(value [, prettyOrOptions])",
+        "decode": "glua.json.decode(text [, options])"
       },
       "insertTextContains": {
-        "setFunctionEvent": "setFunctionEvent(${1:event}, ${2:callback})"
+        "encode": "encode(${1:value}, ${2:prettyOrOptions})",
+        "decode": "decode(${1:text}, ${2:options})"
       }
     },
     {
-      "name": "events table constant completion",
+      "name": "glua hash completion",
       "kind": "builtin-member",
-      "source": "events.function_",
-      "marker": "events.function_",
+      "source": "glua.hash.",
+      "marker": "glua.hash.",
       "cursor": "after-marker",
       "expected": [
-        "function_call",
-        "function_return",
-        "function_error",
-        "function_exit"
+        "md5",
+        "sha1",
+        "sha256",
+        "sha512",
+        "hmac"
       ],
       "detailContains": {
-        "function_call": "events.function_call"
+        "md5": "glua.hash.md5(data)",
+        "sha256": "glua.hash.sha256(data)",
+        "hmac": "glua.hash.hmac(algorithm, key, data)"
       }
     },
     {
-      "name": "events progress constant completion",
+      "name": "glua zip completion",
       "kind": "builtin-member",
-      "source": "events.progress_",
-      "marker": "events.progress_",
+      "source": "glua.zip.",
+      "marker": "glua.zip.",
+      "cursor": "after-marker",
+      "expected": [
+        "compress",
+        "decompress"
+      ],
+      "detailContains": {
+        "compress": "glua.zip.compress(entries [, options])",
+        "decompress": "glua.zip.decompress(archive [, options])"
+      }
+    },
+    {
+      "name": "glua event namespace completion",
+      "kind": "builtin-member",
+      "source": "glua.event.",
+      "marker": "glua.event.",
+      "cursor": "after-marker",
+      "expected": [
+        "setProgress",
+        "setProgressAsync",
+        "setCallback",
+        "eventList",
+        "get",
+        "clear",
+        "setGroupMuted",
+        "removeGroup",
+        "flush",
+        "stats"
+      ],
+      "detailContains": {
+        "setProgress": "glua.event.setProgress(event, callback [, config])",
+        "eventList": "glua.event.eventList()",
+        "setCallback": "glua.event.setCallback(id, callback)",
+        "stats": "glua.event.stats()"
+      },
+      "insertTextContains": {
+        "setProgress": "setProgress(${1:event}, ${2:callback}, ${3:config})"
+      }
+    },
+    {
+      "name": "glua event constants completion",
+      "kind": "builtin-member",
+      "source": "glua.event.events.progress_function_",
+      "marker": "glua.event.events.progress_function_",
+      "cursor": "after-marker",
+      "expected": [
+        "progress_function_call",
+        "progress_function_return",
+        "progress_function_error",
+        "progress_function_exit"
+      ],
+      "detailContains": {
+        "progress_function_call": "glua.event.events.progress_function_call"
+      }
+    },
+    {
+      "name": "glua file progress constant completion",
+      "kind": "builtin-member",
+      "source": "glua.event.events.progress_",
+      "marker": "glua.event.events.progress_",
       "cursor": "after-marker",
       "expected": [
         "progress_line",
@@ -224,7 +320,22 @@
         "progress_exit"
       ],
       "detailContains": {
-        "progress_start": "events.progress_start"
+        "progress_start": "glua.event.events.progress_start"
+      }
+    },
+    {
+      "name": "glua event alias constant completion",
+      "kind": "builtin-member",
+      "source": "local event = glua.event\nlocal events = event.events\nevents.progress_",
+      "marker": "events.progress_",
+      "cursor": "after-marker",
+      "expected": [
+        "progress_line",
+        "progress_end",
+        "progress_function_call"
+      ],
+      "detailContains": {
+        "progress_end": "glua.event.events.progress_end"
       }
     }
   ]

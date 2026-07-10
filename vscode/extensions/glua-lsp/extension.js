@@ -2,6 +2,7 @@ const path = require("path");
 const fs = require("fs");
 const { spawn } = require("child_process");
 const vscode = require("vscode");
+const { resolveGlualsExecutable } = require("./gluals-resolver");
 const {
   getBuiltinFunction,
   makeBuiltinStubContent,
@@ -1298,7 +1299,7 @@ function activate(context) {
     vscode.window.showErrorMessage(message);
     return;
   }
-  const { LanguageClient, TransportKind } = languageClientApi;
+  const { LanguageClient } = languageClientApi;
 
   const config = vscode.workspace.getConfiguration("glua");
   const docConfig = applyBuiltinDocsFromConfig(config);
@@ -1306,24 +1307,25 @@ function activate(context) {
   logResolvedDocLanguage(outputChannel, "activate", docConfig);
   const syntax = config.get("syntax", "extended");
   const events = config.get("events", true);
-  const bundledServerPath = path.join(__dirname, "server.js");
-  const sourceServerPath = path.join(__dirname, "server", "index.js");
-  const extensionServerPath = fs.existsSync(bundledServerPath) ? bundledServerPath : sourceServerPath;
+  let gluals;
+  try {
+    gluals = resolveGlualsExecutable(context.extensionPath, config.get("languageServerExecutable", ""));
+  } catch (error) {
+    const message = `glua-lsp: ${error && error.message ? error.message : error}`;
+    outputChannel.appendLine(`[glua-lsp] ${message}`);
+    outputChannel.show(true);
+    vscode.window.showErrorMessage(message);
+    return;
+  }
 
   const serverOptions = {
-    run: {
-      module: extensionServerPath,
-      transport: TransportKind.ipc,
-      options: { cwd: context.extensionPath },
-    },
-    debug: {
-      module: extensionServerPath,
-      transport: TransportKind.ipc,
-      options: {
-        cwd: context.extensionPath,
-        execArgv: ["--inspect=6009"],
-      },
-    },
+    command: gluals.path,
+    args: [
+      "--gluals-syntax", syntax,
+      "--gluals-builtin-docs", path.join(context.extensionPath, "server", "builtin-functions.json"),
+      ...docConfig.docs.flatMap((file) => ["--gluals-builtin-docs", file]),
+    ],
+    options: { cwd: context.extensionPath },
   };
 
   const clientOptions = {
@@ -1352,7 +1354,7 @@ function activate(context) {
   );
 
   context.subscriptions.push(client);
-  outputChannel.appendLine(`[glua-lsp] starting server=${extensionServerPath}; syntax=${syntax}`);
+  outputChannel.appendLine(`[glua-lsp] starting gluals=${gluals.path}; bundled=${gluals.bundled}; syntax=${syntax}`);
   client.start().then(
     () => outputChannel.appendLine("[glua-lsp] language client started"),
     (error) => {

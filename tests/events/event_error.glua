@@ -1,0 +1,45 @@
+-- GLua 文件错误生命周期验证：该脚本必须以非零状态退出。
+local event = glua.event
+local errorCount = 0
+local exitCount = 0
+local functionErrorCount = 0
+local functionExitCount = 0
+
+-- 使用未捕获的 Lua 函数错误验证函数 error/exit 生命周期。
+local function fails()
+  error("expected file event failure")
+end
+
+event.setProgress(event.events.progress_function_error, function(ctx)
+  assert(ctx.event == event.events.progress_function_error)
+  print("EVENT_CALLBACK", ctx.event, "function", ctx.functionName, "line", ctx.line)
+  functionErrorCount = functionErrorCount + 1
+  print("GLUA_EVENT_FUNCTION_ERROR_OK")
+end, { whitelist = { fails } })
+
+event.setProgress(event.events.progress_function_exit, function(ctx)
+  assert(ctx.event == event.events.progress_function_exit)
+  print("EVENT_CALLBACK", ctx.event, "function", ctx.functionName, "line", ctx.line)
+  functionExitCount = functionExitCount + 1
+  print("GLUA_EVENT_FUNCTION_EXIT_OK")
+end, { whitelist = { fails } })
+
+-- 未捕获错误应先触发文件错误事件，并提供毫秒时间戳。
+event.setProgress(event.events.progress_error, function(ctx)
+  assert(ctx.event == event.events.progress_error)
+  assert(type(ctx.timestamp) == "number" and ctx.timestamp > 0)
+  print("EVENT_CALLBACK", ctx.event, "source", ctx.source, "line", ctx.line)
+  errorCount = errorCount + 1
+  print("GLUA_EVENT_FILE_ERROR_OK")
+end)
+
+-- 文件无论成功还是失败都会触发退出事件；本用例验证失败分支。
+event.setProgress(event.events.progress_exit, function(ctx)
+  assert(ctx.event == event.events.progress_exit)
+  print("EVENT_CALLBACK", ctx.event, "source", ctx.source, "line", ctx.line)
+  exitCount = exitCount + 1
+  print("GLUA_EVENT_FILE_EXIT_OK")
+end)
+
+-- 故意调用会失败的 Lua 函数，shell 运行器会检查非零退出码和四个完成标记。
+fails()

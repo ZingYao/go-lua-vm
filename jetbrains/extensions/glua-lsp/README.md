@@ -1,75 +1,78 @@
-# GLua 语言扩展 for JetBrains IDEs
+# JetBrains IDE 的 GLua 语言扩展
 
 这是面向 `go-lua-vm` / `glua` 的 JetBrains IntelliJ Platform 插件，提供 GLua/Lua 编码、模块导航、文档提示、格式化和 DAP 调试连接能力。
 
-## Overview
+## 概述
 
 GLua 语言扩展覆盖日常开发中的核心链路：`.lua` / `.glua` 文件识别、语法高亮、扩展语法诊断、作用域补全、`require` 模块成员补全、冒号方法跳转、快速文档、自定义函数文档和 GLua DAP Debug/Attach。
 
-It is implemented as a pure IntelliJ Platform plugin, so it can run in JetBrains IDEs built on the IntelliJ Platform, including IntelliJ IDEA, GoLand, WebStorm, PyCharm, PhpStorm, RubyMine, CLion, DataGrip, Rider, and Android Studio versions compatible with the plugin build range.
+该扩展采用纯 IntelliJ Platform 插件实现，可以运行在基于 IntelliJ Platform 构建且版本处于插件兼容范围内的 JetBrains IDE 中，包括 IntelliJ IDEA、GoLand、WebStorm、PyCharm、PhpStorm、RubyMine、CLion、DataGrip、Rider 和 Android Studio。
 
-## Features
+## 功能
 
-- `.glua` and `.lua` file type support
-- Syntax highlighting for Lua and glua syntax extensions
-- Diagnostics for extended syntax such as `switch`, `case`, `default`, and `continue`
-- Completion for default and custom functions
-- Quick documentation for default and custom functions
-- Cmd/Ctrl click navigation for local definitions and builtin function docs
-- `Code -> Format GLua File` action
-- Multi-language builtin/function documentation
-- User JSON files that extend or override function signatures
-- Quick run/debug actions for the current `.lua` or `.glua` file
-- Native JetBrains DAP support with the DAP address managed by the plugin
+- 支持 `.glua` 和 `.lua` 文件类型。
+- 支持 Lua 与 glua 扩展语法高亮。
+- 支持 `switch`、`case`、`default` 和 `continue` 等扩展语法诊断。
+- 提供默认函数和自定义函数补全。
+- 提供默认函数和自定义函数快速文档。
+- 提供 `glua.event`、JSON/YAML/XML/TOML 序列化、codec、hash、regex、UUID、ZIP 和 schema API 的补全、定义跳转及中英文快速文档。
+- 支持通过 Cmd/Ctrl 单击跳转到局部定义和内置函数文档。
+- 提供 `Code -> Format GLua File` 操作。
+- 支持多语言内置函数/函数文档。
+- 支持通过用户 JSON 文件扩展或覆盖函数签名。
+- 提供当前 `.lua` 或 `.glua` 文件的快速运行和调试操作。
+- 提供原生 JetBrains DAP 支持，DAP 地址由插件管理。
 
-## Settings
+## 设置
 
-Open:
+打开：
 
 ```text
 Settings / Preferences -> GLua
 ```
 
-Available settings:
+可用设置：
 
-- `Documentation language`: `auto`, `en`, `zh-CN`
-- `glua executable`: path to the `glua` executable used by quick run/debug helpers
-- `gluac executable`: path to the `gluac` executable used by compile helpers
-- `Builtin docs JSON files`: one JSON file path per line
+- `Documentation language`：`auto`、`en`、`zh-CN`。
+- `glua executable`：快速运行/调试功能使用的 `glua` 可执行文件路径。
+- `gluac executable`：编译辅助功能使用的 `gluac` 可执行文件路径。
+- `Builtin docs JSON files`：每行填写一个 JSON 文件路径。
 
-`auto` uses the IDE/JVM default locale and normalizes it to a language tag. For example, `zh-cn` becomes `zh-CN`, and `ja-jp` becomes `ja-JP`.
+`glua.json`、`glua.yaml` 和 `glua.xml` 由完整运行时的 `OpenLibs` 注册，不依赖 Event 开关；插件内置目录会为这些命名空间提供成员补全和定义目标。
 
-The plugin writes the effective builtin docs language to the IDE log:
+`auto` 使用 IDE/JVM 的默认区域设置，并将其规范为语言标签。例如，`zh-cn` 会转换为 `zh-CN`，`ja-jp` 会转换为 `ja-JP`。
+
+插件会把实际使用的内置文档语言写入 IDE 日志：
 
 ```text
 glua builtin docs locale=zh-CN, entries=56, files=1
 ```
 
-Use this locale value as the language key in your custom JSON.
+请使用该 locale 值作为自定义 JSON 的语言键。
 
-## Where To Configure Custom Method Signatures
+## 配置自定义方法签名
 
-JetBrains uses its own plugin settings, separate from VS Code.
+JetBrains 使用独立的插件设置，与 VS Code 配置互不影响。
 
-Add custom method signature JSON files here:
+在以下位置添加自定义方法签名 JSON 文件：
 
 ```text
 Settings / Preferences -> GLua -> Builtin docs JSON files
 ```
 
-Put one file path per line.
+每行填写一个文件路径。
 
-Recommended project-level path:
+推荐的项目级路径：
 
 ```text
 ./glua-builtin-docs.json
 ```
 
-If a relative path is used, resolve it from the IDE working directory. For stable team usage, prefer an absolute path or a project path copied from the file context menu.
+使用相对路径时，会从 IDE 工作目录开始解析。团队使用时，建议使用绝对路径，或从文件上下文菜单复制项目路径。
 
-## Custom JSON Format
+## 自定义 JSON 格式
 
-The JetBrains plugin uses the same JSON shape as the VS Code extension:
+JetBrains 插件与 VS Code 扩展使用相同的 JSON 结构：
 
 ```json
 {
@@ -111,9 +114,9 @@ The JetBrains plugin uses the same JSON shape as the VS Code extension:
 }
 ```
 
-Function names can be global functions or qualified library functions:
+函数名可以是全局函数，也可以是带库名称的限定函数。
 
-`example` is optional. Like `description`, `params`, and `returns`, it supports language-keyed values and is shown in documentation when present.
+`example` 为可选字段。它与 `description`、`params` 和 `returns` 一样支持按语言设置内容；存在时会显示在文档中。
 
 ```json
 {
@@ -167,39 +170,39 @@ Function names can be global functions or qualified library functions:
 }
 ```
 
-After adding the JSON file to settings, completion and documentation include these functions.
+把 JSON 文件加入设置后，补全和文档中会包含这些函数。
 
-## Run And Debug
+## 运行与调试
 
-After setting `glua executable`, open a `.lua` or `.glua` file and use the editor context menu or Tools menu:
+设置 `glua executable` 后，打开 `.lua` 或 `.glua` 文件，并使用编辑器上下文菜单或 Tools 菜单：
 
 ```text
 Run Current GLua File
 Debug Current GLua File
 ```
 
-`Run Current GLua File` starts `glua <current-file>`.
-`Debug Current GLua File` creates and selects a GLua Debug configuration for the current file. The DAP address is managed internally by the plugin and is not shown as an editable host/port field.
+`Run Current GLua File` 会启动 `glua <current-file>`。
+`Debug Current GLua File` 会为当前文件创建并选中 GLua Debug 配置。DAP 地址由插件内部管理，不显示为可编辑的主机/端口字段。
 
-You can also create a native JetBrains Run/Debug configuration:
+也可以创建原生 JetBrains 运行/调试配置：
 
 ```text
 Run -> Edit Configurations -> Add New Configuration -> GLua DAP Attach
 ```
 
-The configuration asks for the `glua` executable and program file only.
+该配置只要求填写 `glua` 可执行文件和程序文件。
 
-If Debug fails:
+如果调试失败：
 
-- Check that the configured `glua` executable is correct.
-- Check that the GLua runtime you use has DAP support enabled.
-- Open the Run/Debug console to see the failure reason.
+- 检查配置的 `glua` 可执行文件是否正确。
+- 检查使用的 GLua 运行时是否已启用 DAP 支持。
+- 打开运行/调试控制台查看失败原因。
 
-## Override Default Builtins
+## 覆盖默认内置文档
 
-If your JSON defines the same function as the default builtin catalog, your JSON wins.
+如果自定义 JSON 定义了与默认内置目录相同的函数，以自定义 JSON 为准。
 
-Example:
+示例：
 
 ```json
 {
@@ -232,11 +235,11 @@ Example:
 }
 ```
 
-Only fields present in custom JSON are overridden. Missing fields fall back to default builtin docs.
+只会覆盖自定义 JSON 中存在的字段；缺失字段会回退到默认内置文档。
 
-## Single-language Shortcut
+## 单语言简写
 
-For one-language files, use file-level `locale`:
+对于只面向一种语言的文件，可以使用文件级 `locale`：
 
 ```json
 {
@@ -255,46 +258,46 @@ For one-language files, use file-level `locale`:
 }
 ```
 
-The plugin normalizes this into the multi-language structure internally.
+插件会在内部将该格式规范为多语言结构。
 
-## Build
+## 构建
 
-Use JDK 21 as the Gradle JVM for IDE sync and plugin builds.
+IDE 同步和插件构建应使用 JDK 21 作为 Gradle JVM。
 
-In JetBrains IDEs, open:
+在 JetBrains IDE 中打开：
 
 ```text
 Settings / Preferences -> Build, Execution, Deployment -> Build Tools -> Gradle -> Gradle JVM
 ```
 
-Select a JDK 21 installation. On macOS with Homebrew, common paths are:
+选择 JDK 21 安装目录。在使用 Homebrew 的 macOS 上，常见路径为：
 
 ```text
 /opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
 /usr/local/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
 ```
 
-If JDK 21 is missing:
+如果尚未安装 JDK 21：
 
 ```bash
 brew install openjdk@21
 ```
 
-Java 26 can fail IDE sync with Gradle 9.0.0 because the IDE-supported Gradle JVM ceiling is lower than Java 26. The command-line wrapper may still run on newer Java in some environments, but JDK 21 is the supported local baseline for this plugin.
+Java 26 可能导致 Gradle 9.0.0 的 IDE 同步失败，因为 IDE 支持的 Gradle JVM 上限低于 Java 26。某些环境中的命令行 wrapper 仍可能在较新 Java 上运行，但该插件支持的本地基线是 JDK 21。
 
-From this directory, run tests:
+在当前目录中运行测试：
 
 ```bash
 ./gradlew --no-daemon --no-configuration-cache test
 ```
 
-Build the installable plugin zip:
+构建可安装的插件 zip：
 
 ```bash
 ./gradlew --no-daemon --no-configuration-cache buildPlugin
 ```
 
-The plugin package is written to:
+插件包输出到：
 
 ```text
 build/distributions/glua-jetbrains-0.0.1.zip

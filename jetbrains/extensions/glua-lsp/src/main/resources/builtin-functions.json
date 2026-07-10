@@ -4351,428 +4351,6 @@
         "zh-CN": "local pos = utf8.offset(text, 2)\n-- pos: 第二个字符的字节位置"
       }
     },
-    "callFunctionEvent": {
-      "signature": {
-        "en": "callFunctionEvent(event, payload)",
-        "zh-CN": "callFunctionEvent(event, payload)"
-      },
-      "returns": {
-        "en": "returns: nil; invokes callbacks registered for the current function event.",
-        "zh-CN": "返回：nil；触发当前函数作用域内注册的事件回调。"
-      },
-      "params": {
-        "en": [
-          "event: event name, usually from events.*",
-          "payload (optional): value passed to callback ctx.payload"
-        ],
-        "zh-CN": [
-          "event: 事件名，通常使用 events.*",
-          "payload (可选): 传给回调 ctx.payload 的值"
-        ]
-      },
-      "description": {
-        "en": "Triggers a custom function-scoped GLua event synchronously.",
-        "zh-CN": "同步触发当前函数作用域的自定义 GLua 事件。"
-      },
-      "example": {
-        "en": "callFunctionEvent('mark', 'payload')",
-        "zh-CN": "callFunctionEvent('mark', 'payload')"
-      }
-    },
-    "callFunctionEventAsync": {
-      "signature": {
-        "en": "callFunctionEventAsync(event, payload)",
-        "zh-CN": "callFunctionEventAsync(event, payload)"
-      },
-      "returns": {
-        "en": "returns: nil; queues callbacks without blocking the current instruction path.",
-        "zh-CN": "返回：nil；异步排队回调，不阻塞当前执行路径。"
-      },
-      "params": {
-        "en": [
-          "event: event name",
-          "payload (optional): value passed to callback ctx.payload"
-        ],
-        "zh-CN": [
-          "event: 事件名",
-          "payload (可选): 传给回调 ctx.payload 的值"
-        ]
-      },
-      "description": {
-        "en": "Triggers a custom function-scoped GLua event asynchronously.",
-        "zh-CN": "异步触发当前函数作用域的自定义 GLua 事件。"
-      },
-      "example": {
-        "en": "callFunctionEventAsync('mark', 'payload')",
-        "zh-CN": "callFunctionEventAsync('mark', 'payload')"
-      }
-    },
-    "callProgressEvent": {
-      "signature": {
-        "en": "callProgressEvent(event, payload)",
-        "zh-CN": "callProgressEvent(event, payload)"
-      },
-      "returns": {
-        "en": "returns: nil; invokes callbacks registered for the current file event.",
-        "zh-CN": "返回：nil；触发当前文件作用域内注册的事件回调。"
-      },
-      "params": {
-        "en": [
-          "event: event name",
-          "payload (optional): value passed to callback ctx.payload"
-        ],
-        "zh-CN": [
-          "event: 事件名",
-          "payload (可选): 传给回调 ctx.payload 的值"
-        ]
-      },
-      "description": {
-        "en": "Triggers a custom file-scoped progress event synchronously.",
-        "zh-CN": "同步触发当前文件作用域的自定义进度事件。"
-      },
-      "example": {
-        "en": "callProgressEvent('custom.progress', 'done')",
-        "zh-CN": "callProgressEvent('custom.progress', 'done')"
-      }
-    },
-    "callProgressEventAsync": {
-      "signature": {
-        "en": "callProgressEventAsync(event, payload)",
-        "zh-CN": "callProgressEventAsync(event, payload)"
-      },
-      "returns": {
-        "en": "returns: nil; queues file-scoped callbacks asynchronously.",
-        "zh-CN": "返回：nil；异步排队当前文件作用域的事件回调。"
-      },
-      "params": {
-        "en": [
-          "event: event name",
-          "payload (optional): value passed to callback ctx.payload"
-        ],
-        "zh-CN": [
-          "event: 事件名",
-          "payload (可选): 传给回调 ctx.payload 的值"
-        ]
-      },
-      "description": {
-        "en": "Triggers a custom file-scoped progress event asynchronously.",
-        "zh-CN": "异步触发当前文件作用域的自定义进度事件。"
-      },
-      "example": {
-        "en": "callProgressEventAsync('custom.progress', 'done')",
-        "zh-CN": "callProgressEventAsync('custom.progress', 'done')"
-      }
-    },
-    "events.function_call": {
-      "signature": {
-        "en": "events.function_call",
-        "zh-CN": "events.function_call"
-      },
-      "returns": {
-        "en": "value: preset event name for Lua function call entry.",
-        "zh-CN": "值：Lua 函数进入时触发的预设事件名。"
-      },
-      "params": {
-        "en": [],
-        "zh-CN": []
-      },
-      "description": {
-        "en": "Preset GLua event constant for function call entry.",
-        "zh-CN": "函数调用进入事件的 GLua 预设常量。"
-      },
-      "example": {
-        "en": "setFunctionEvent(events.function_call, function(ctx) end)",
-        "zh-CN": "setFunctionEvent(events.function_call, function(ctx) end)"
-      }
-    },
-    "events.function_return": {
-      "signature": {
-        "en": "events.function_return",
-        "zh-CN": "events.function_return"
-      },
-      "returns": {
-        "en": "value: preset event name for normal Lua function return.",
-        "zh-CN": "值：Lua 函数正常返回时触发的预设事件名。"
-      },
-      "params": {
-        "en": [],
-        "zh-CN": []
-      },
-      "description": {
-        "en": "Preset GLua event constant for function return.",
-        "zh-CN": "函数正常返回事件的 GLua 预设常量。"
-      },
-      "example": {
-        "en": "setFunctionEvent(events.function_return, function(ctx) end)",
-        "zh-CN": "setFunctionEvent(events.function_return, function(ctx) end)"
-      }
-    },
-    "events.function_error": {
-      "signature": {
-        "en": "events.function_error",
-        "zh-CN": "events.function_error"
-      },
-      "returns": {
-        "en": "value: preset event name for Lua function error exit.",
-        "zh-CN": "值：Lua 函数错误退出时触发的预设事件名。"
-      },
-      "params": {
-        "en": [],
-        "zh-CN": []
-      },
-      "description": {
-        "en": "Preset GLua event constant for function error exit.",
-        "zh-CN": "函数错误退出事件的 GLua 预设常量。"
-      },
-      "example": {
-        "en": "setFunctionEvent(events.function_error, function(ctx) end)",
-        "zh-CN": "setFunctionEvent(events.function_error, function(ctx) end)"
-      }
-    },
-    "events.function_exit": {
-      "signature": {
-        "en": "events.function_exit",
-        "zh-CN": "events.function_exit"
-      },
-      "returns": {
-        "en": "value: preset event name fired when a Lua function leaves.",
-        "zh-CN": "值：Lua 函数离开时触发的预设事件名。"
-      },
-      "params": {
-        "en": [],
-        "zh-CN": []
-      },
-      "description": {
-        "en": "Preset GLua event constant for function exit, whether successful or failing.",
-        "zh-CN": "函数离开事件的 GLua 预设常量，成功或失败都会触发。"
-      },
-      "example": {
-        "en": "setFunctionEvent(events.function_exit, function(ctx) end)",
-        "zh-CN": "setFunctionEvent(events.function_exit, function(ctx) end)"
-      }
-    },
-    "events.progress_line": {
-      "signature": {
-        "en": "events.progress_line",
-        "zh-CN": "events.progress_line"
-      },
-      "returns": {
-        "en": "value: preset event name for source-line progress.",
-        "zh-CN": "值：源码行进度触发的预设事件名。"
-      },
-      "params": {
-        "en": [],
-        "zh-CN": []
-      },
-      "description": {
-        "en": "Preset GLua event constant for file progress by source line.",
-        "zh-CN": "按源码行触发文件进度事件的 GLua 预设常量。"
-      },
-      "example": {
-        "en": "setProgressEvent(events.progress_line, function(ctx) end)",
-        "zh-CN": "setProgressEvent(events.progress_line, function(ctx) end)"
-      }
-    },
-    "events.progress_start": {
-      "signature": {
-        "en": "events.progress_start",
-        "zh-CN": "events.progress_start"
-      },
-      "returns": {
-        "en": "value: preset event name for file progress start.",
-        "zh-CN": "值：文件进度开始时触发的预设事件名。"
-      },
-      "params": {
-        "en": [],
-        "zh-CN": []
-      },
-      "description": {
-        "en": "Preset GLua event constant fired when a Lua code block in the current source starts.",
-        "zh-CN": "当前源码中的 Lua 代码块开始执行时触发的 GLua 预设常量。"
-      },
-      "example": {
-        "en": "setProgressEvent(events.progress_start, function(ctx) end)",
-        "zh-CN": "setProgressEvent(events.progress_start, function(ctx) end)"
-      }
-    },
-    "events.progress_end": {
-      "signature": {
-        "en": "events.progress_end",
-        "zh-CN": "events.progress_end"
-      },
-      "returns": {
-        "en": "value: preset event name for normal file progress completion.",
-        "zh-CN": "值：文件进度正常完成时触发的预设事件名。"
-      },
-      "params": {
-        "en": [],
-        "zh-CN": []
-      },
-      "description": {
-        "en": "Preset GLua event constant fired when a Lua code block in the current source completes normally.",
-        "zh-CN": "当前源码中的 Lua 代码块正常完成时触发的 GLua 预设常量。"
-      },
-      "example": {
-        "en": "setProgressEvent(events.progress_end, function(ctx) end)",
-        "zh-CN": "setProgressEvent(events.progress_end, function(ctx) end)"
-      }
-    },
-    "events.progress_error": {
-      "signature": {
-        "en": "events.progress_error",
-        "zh-CN": "events.progress_error"
-      },
-      "returns": {
-        "en": "value: preset event name for file progress error exit.",
-        "zh-CN": "值：文件进度错误退出时触发的预设事件名。"
-      },
-      "params": {
-        "en": [],
-        "zh-CN": []
-      },
-      "description": {
-        "en": "Preset GLua event constant fired when a Lua code block in the current source exits with an error.",
-        "zh-CN": "当前源码中的 Lua 代码块因错误退出时触发的 GLua 预设常量。"
-      },
-      "example": {
-        "en": "setProgressEvent(events.progress_error, function(ctx) end)",
-        "zh-CN": "setProgressEvent(events.progress_error, function(ctx) end)"
-      }
-    },
-    "events.progress_exit": {
-      "signature": {
-        "en": "events.progress_exit",
-        "zh-CN": "events.progress_exit"
-      },
-      "returns": {
-        "en": "value: preset event name fired when file progress leaves.",
-        "zh-CN": "值：文件进度离开时触发的预设事件名。"
-      },
-      "params": {
-        "en": [],
-        "zh-CN": []
-      },
-      "description": {
-        "en": "Preset GLua event constant for file progress exit, whether successful or failing.",
-        "zh-CN": "文件进度离开事件的 GLua 预设常量，成功或失败都会触发。"
-      },
-      "example": {
-        "en": "setProgressEvent(events.progress_exit, function(ctx) end)",
-        "zh-CN": "setProgressEvent(events.progress_exit, function(ctx) end)"
-      }
-    },
-    "setFunctionEvent": {
-      "signature": {
-        "en": "setFunctionEvent(event, callback)",
-        "zh-CN": "setFunctionEvent(event, callback)"
-      },
-      "returns": {
-        "en": "returns: nil; registers a synchronous callback for the current function.",
-        "zh-CN": "返回：nil；为当前函数注册同步事件回调。"
-      },
-      "params": {
-        "en": [
-          "event: event name, usually events.function_call or events.function_return",
-          "callback: function(ctx) receiving event context"
-        ],
-        "zh-CN": [
-          "event: 事件名，通常是 events.function_call 或 events.function_return",
-          "callback: function(ctx)，接收事件上下文"
-        ]
-      },
-      "description": {
-        "en": "Registers a callback that only applies to the function where it is called.",
-        "zh-CN": "注册只作用于当前函数的事件回调。"
-      },
-      "example": {
-        "en": "setFunctionEvent(events.function_return, function(ctx) print(ctx.event) end)",
-        "zh-CN": "setFunctionEvent(events.function_return, function(ctx) print(ctx.event) end)"
-      }
-    },
-    "setFunctionEventAsync": {
-      "signature": {
-        "en": "setFunctionEventAsync(event, callback)",
-        "zh-CN": "setFunctionEventAsync(event, callback)"
-      },
-      "returns": {
-        "en": "returns: nil; registers an asynchronous function-scoped callback.",
-        "zh-CN": "返回：nil；为当前函数注册异步事件回调。"
-      },
-      "params": {
-        "en": [
-          "event: event name",
-          "callback: function(ctx) receiving event context"
-        ],
-        "zh-CN": [
-          "event: 事件名",
-          "callback: function(ctx)，接收事件上下文"
-        ]
-      },
-      "description": {
-        "en": "Registers a non-blocking callback for a function-scoped GLua event.",
-        "zh-CN": "注册非阻塞的函数作用域 GLua 事件回调。"
-      },
-      "example": {
-        "en": "setFunctionEventAsync('mark', function(ctx) end)",
-        "zh-CN": "setFunctionEventAsync('mark', function(ctx) end)"
-      }
-    },
-    "setProgressEvent": {
-      "signature": {
-        "en": "setProgressEvent(event, callback)",
-        "zh-CN": "setProgressEvent(event, callback)"
-      },
-      "returns": {
-        "en": "returns: nil; registers a synchronous callback for the current file.",
-        "zh-CN": "返回：nil；为当前文件注册同步进度事件回调。"
-      },
-      "params": {
-        "en": [
-          "event: event name, usually events.progress_line",
-          "callback: function(ctx) receiving event context"
-        ],
-        "zh-CN": [
-          "event: 事件名，通常是 events.progress_line",
-          "callback: function(ctx)，接收事件上下文"
-        ]
-      },
-      "description": {
-        "en": "Registers a callback that applies to progress events in the current file.",
-        "zh-CN": "注册作用于当前文件进度事件的回调。"
-      },
-      "example": {
-        "en": "setProgressEvent(events.progress_line, function(ctx) print(ctx.line) end)",
-        "zh-CN": "setProgressEvent(events.progress_line, function(ctx) print(ctx.line) end)"
-      }
-    },
-    "setProgressEventAsync": {
-      "signature": {
-        "en": "setProgressEventAsync(event, callback)",
-        "zh-CN": "setProgressEventAsync(event, callback)"
-      },
-      "returns": {
-        "en": "returns: nil; registers an asynchronous file-scoped callback.",
-        "zh-CN": "返回：nil；为当前文件注册异步进度事件回调。"
-      },
-      "params": {
-        "en": [
-          "event: event name",
-          "callback: function(ctx) receiving event context"
-        ],
-        "zh-CN": [
-          "event: 事件名",
-          "callback: function(ctx)，接收事件上下文"
-        ]
-      },
-      "description": {
-        "en": "Registers a non-blocking callback for a file-scoped progress event.",
-        "zh-CN": "注册非阻塞的文件作用域进度事件回调。"
-      },
-      "example": {
-        "en": "setProgressEventAsync('custom.progress', function(ctx) end)",
-        "zh-CN": "setProgressEventAsync('custom.progress', function(ctx) end)"
-      }
-    },
     "xpcall": {
       "signature": {
         "en": "xpcall(f, err, ...)",
@@ -4801,6 +4379,1908 @@
       "example": {
         "en": "local ok, result = xpcall(function() return 1 end, debug.traceback)\n-- ok: true when call succeeds\n-- result: function return value or error handler result",
         "zh-CN": "local ok, result = xpcall(function() return 1 end, debug.traceback)\n-- ok: 调用成功时为 true\n-- result: 函数返回值或错误处理器返回值"
+      }
+    },
+    "glua.event": {
+      "signature": {
+        "en": "glua.event",
+        "zh-CN": "glua.event"
+      },
+      "returns": {
+        "en": "value: GLua event namespace.",
+        "zh-CN": "值：GLua 事件命名空间。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Provides file-scoped event registration and lifecycle controls.",
+        "zh-CN": "提供文件作用域事件注册和生命周期控制。"
+      },
+      "example": {
+        "en": "glua.event.setProgress(glua.event.events.progress_line, function(ctx) end)",
+        "zh-CN": "glua.event.setProgress(glua.event.events.progress_line, function(ctx) end)"
+      }
+    },
+    "glua.event.events": {
+      "signature": {
+        "en": "glua.event.events",
+        "zh-CN": "glua.event.events"
+      },
+      "returns": {
+        "en": "value: preset event names.",
+        "zh-CN": "值：预设事件名常量表。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Contains lifecycle and function-progress event constants.",
+        "zh-CN": "包含生命周期和函数进度事件常量。"
+      },
+      "example": {
+        "en": "glua.event.events.progress_function_call",
+        "zh-CN": "glua.event.events.progress_function_call"
+      }
+    },
+    "glua.event.setProgress": {
+      "signature": {
+        "en": "glua.event.setProgress(event, callback [, config])",
+        "zh-CN": "glua.event.setProgress(event, callback [, config])"
+      },
+      "returns": {
+        "en": "returns: event id.",
+        "zh-CN": "返回：事件 ID。"
+      },
+      "params": {
+        "en": [
+          "event: preset or custom event name",
+          "callback: function(ctx); ctx includes event, timestamp, sequence, source, line, payload, id, config, and function-event args/results/error/durationNs metadata",
+          "config (optional): whitelist/blacklist, once, priority, group, queueLimit, overflow, onError, and mutable options"
+        ],
+        "zh-CN": [
+          "event：预设或自定义事件名",
+          "callback：function(ctx)；ctx 包含 event、timestamp、sequence、source、line、payload、id、config，函数事件还包含 args/results/error/durationNs",
+          "config（可选）：支持 whitelist/blacklist、once、priority、group、queueLimit、overflow、onError 和 mutable"
+        ]
+      },
+      "description": {
+        "en": "Registers a synchronous listener scoped to the source file that calls this API. Preset timing: progress.line before a new source line; progress.start when the chunk starts; progress.end after normal completion; progress.error on failure; progress.exit on either completion path; progress.function_call immediately before a Lua closure runs; progress.function_return after a normal return; progress.function_error before an error is caught by pcall/xpcall; and progress.function_exit after either function outcome. Custom names run only when callProgress/callProgressAsync is invoked. The callback executes at the trigger point and blocks the program; callback errors interrupt the current execution path.",
+        "zh-CN": "为调用本 API 的当前源码文件注册同步监听器。预设事件的触发时机：progress.line 在即将执行新的源码行时触发；progress.start 在代码块开始执行时触发；progress.end 在代码块正常完成后触发；progress.error 在代码块因错误退出时触发；progress.exit 在代码块正常或异常离开时都会触发；progress.function_call 在 Lua 闭包开始执行前触发；progress.function_return 在函数正常返回后触发；progress.function_error 在函数错误被 pcall/xpcall 捕获前触发；progress.function_exit 在函数正常或异常离开后触发。自定义事件名只会由 callProgress/callProgressAsync 主动触发。同步 callback 会在事件触发点立即执行并阻塞当前程序，callback 抛错会中断当前执行路径。"
+      },
+      "example": {
+        "en": "local id = glua.event.setProgress(glua.event.events.progress_function_call, function(ctx)\n  print(ctx.sequence, ctx.calleeName, ctx.line)\nend, { whitelist = { work }, priority = 10, group = \"trace\" })",
+        "zh-CN": "local id = glua.event.setProgress(glua.event.events.progress_function_call, function(ctx)\n  print(ctx.sequence, ctx.calleeName, ctx.line)\nend, { whitelist = { work }, priority = 10, group = \"trace\" })"
+      }
+    },
+    "glua.event.setProgressAsync": {
+      "signature": {
+        "en": "glua.event.setProgressAsync(event, callback [, config])",
+        "zh-CN": "glua.event.setProgressAsync(event, callback [, config])"
+      },
+      "returns": {
+        "en": "returns: event id.",
+        "zh-CN": "返回：事件 ID。"
+      },
+      "params": {
+        "en": [
+          "event: preset or custom event name",
+          "callback: function(ctx) receiving an immutable context snapshot by default",
+          "config (optional): listener filters, lifecycle, queue, error, and mutability options"
+        ],
+        "zh-CN": [
+          "event：预设或自定义事件名",
+          "callback：function(ctx)，默认接收不可变上下文快照",
+          "config（可选）：监听器过滤、生命周期、队列、错误和可变性选项"
+        ]
+      },
+      "description": {
+        "en": "Registers an asynchronous listener with the same source scope and preset trigger timing as setProgress. Triggering only enqueues a context snapshot; the callback runs at a later VM safe point or during flush(), so it does not block the original trigger instruction. queueLimit and overflow control backpressure. onError=propagate reports callback errors at the consuming safe point; onError=ignore records and suppresses them.",
+        "zh-CN": "注册异步监听器，其文件作用域和预设事件触发时机与 setProgress 完全相同。事件触发时只把上下文快照加入队列，callback 会在后续 VM 安全点或 flush() 中执行，因此不会阻塞原始触发指令。queueLimit 与 overflow 控制队列背压；onError=propagate 会在消费队列的安全点传播错误，onError=ignore 会记录并忽略错误。"
+      },
+      "example": {
+        "en": "glua.event.setProgressAsync(\"task.done\", function(ctx) print(ctx.payload) end)",
+        "zh-CN": "glua.event.setProgressAsync(\"task.done\", function(ctx) print(ctx.payload) end)"
+      }
+    },
+    "glua.event.callProgress": {
+      "signature": {
+        "en": "glua.event.callProgress(event [, payload])",
+        "zh-CN": "glua.event.callProgress(event [, payload])"
+      },
+      "returns": {
+        "en": "returns: nil.",
+        "zh-CN": "返回：nil。"
+      },
+      "params": {
+        "en": [
+          "event: custom event name",
+          "payload (optional): callback payload"
+        ],
+        "zh-CN": [
+          "event：自定义事件名",
+          "payload（可选）：回调负载"
+        ]
+      },
+      "description": {
+        "en": "Synchronously triggers a custom event in the current source file.",
+        "zh-CN": "同步触发当前源码文件内的自定义事件。"
+      },
+      "example": {
+        "en": "glua.event.callProgress(\"task.done\", result)",
+        "zh-CN": "glua.event.callProgress(\"task.done\", result)"
+      }
+    },
+    "glua.event.callProgressAsync": {
+      "signature": {
+        "en": "glua.event.callProgressAsync(event [, payload])",
+        "zh-CN": "glua.event.callProgressAsync(event [, payload])"
+      },
+      "returns": {
+        "en": "returns: nil.",
+        "zh-CN": "返回：nil。"
+      },
+      "params": {
+        "en": [
+          "event: custom event name",
+          "payload (optional): callback payload"
+        ],
+        "zh-CN": [
+          "event：自定义事件名",
+          "payload（可选）：回调负载"
+        ]
+      },
+      "description": {
+        "en": "Queues a custom event without running its callback at the current instruction.",
+        "zh-CN": "异步排队自定义事件，不在当前指令执行回调。"
+      },
+      "example": {
+        "en": "glua.event.callProgressAsync(\"task.done\", result)",
+        "zh-CN": "glua.event.callProgressAsync(\"task.done\", result)"
+      }
+    },
+    "glua.event.remove": {
+      "signature": {
+        "en": "glua.event.remove(id)",
+        "zh-CN": "glua.event.remove(id)"
+      },
+      "returns": {
+        "en": "returns: true when removed.",
+        "zh-CN": "返回：删除成功时为 true。"
+      },
+      "params": {
+        "en": [
+          "id: event id"
+        ],
+        "zh-CN": [
+          "id：事件 ID"
+        ]
+      },
+      "description": {
+        "en": "Removes an event registration.",
+        "zh-CN": "删除事件注册。"
+      },
+      "example": {
+        "en": "glua.event.remove(id)",
+        "zh-CN": "glua.event.remove(id)"
+      }
+    },
+    "glua.event.setMuted": {
+      "signature": {
+        "en": "glua.event.setMuted(id, muted)",
+        "zh-CN": "glua.event.setMuted(id, muted)"
+      },
+      "returns": {
+        "en": "returns: true when updated.",
+        "zh-CN": "返回：更新成功时为 true。"
+      },
+      "params": {
+        "en": [
+          "id: event id",
+          "muted: boolean"
+        ],
+        "zh-CN": [
+          "id：事件 ID",
+          "muted：布尔值"
+        ]
+      },
+      "description": {
+        "en": "Temporarily enables or disables a registration.",
+        "zh-CN": "临时启用或静音事件注册。"
+      },
+      "example": {
+        "en": "glua.event.setMuted(id, true)",
+        "zh-CN": "glua.event.setMuted(id, true)"
+      }
+    },
+    "glua.event.setConfig": {
+      "signature": {
+        "en": "glua.event.setConfig(id, config)",
+        "zh-CN": "glua.event.setConfig(id, config)"
+      },
+      "returns": {
+        "en": "returns: true when updated.",
+        "zh-CN": "返回：更新成功时为 true。"
+      },
+      "params": {
+        "en": [
+          "id: event id",
+          "config: filter table"
+        ],
+        "zh-CN": [
+          "id：事件 ID",
+          "config：过滤表"
+        ]
+      },
+      "description": {
+        "en": "Replaces the function filter configuration for an event.",
+        "zh-CN": "替换事件的函数过滤配置。"
+      },
+      "example": {
+        "en": "glua.event.setConfig(id, { blacklist = { \"print\" } })",
+        "zh-CN": "glua.event.setConfig(id, { blacklist = { \"print\" } })"
+      }
+    },
+    "glua.event.getConfig": {
+      "signature": {
+        "en": "glua.event.getConfig(id)",
+        "zh-CN": "glua.event.getConfig(id)"
+      },
+      "returns": {
+        "en": "returns: current config table or nil.",
+        "zh-CN": "返回：当前配置表或 nil。"
+      },
+      "params": {
+        "en": [
+          "id: event id"
+        ],
+        "zh-CN": [
+          "id：事件 ID"
+        ]
+      },
+      "description": {
+        "en": "Returns the configuration table associated with an event id.",
+        "zh-CN": "返回事件 ID 关联的配置表。"
+      },
+      "example": {
+        "en": "local config = glua.event.getConfig(id)",
+        "zh-CN": "local config = glua.event.getConfig(id)"
+      }
+    },
+    "glua.event.setCallback": {
+      "signature": {
+        "en": "glua.event.setCallback(id, callback)",
+        "zh-CN": "glua.event.setCallback(id, callback)"
+      },
+      "returns": {
+        "en": "returns: true when updated.",
+        "zh-CN": "返回：更新成功时为 true。"
+      },
+      "params": {
+        "en": [
+          "id: event id",
+          "callback: replacement function(ctx)"
+        ],
+        "zh-CN": [
+          "id：事件 ID",
+          "callback：新的 function(ctx)"
+        ]
+      },
+      "description": {
+        "en": "Replaces a listener callback while preserving its id, config, and statistics.",
+        "zh-CN": "替换监听器回调函数，同时保留事件 ID、配置和统计。"
+      },
+      "example": {
+        "en": "glua.event.setCallback(id, function(ctx) print(ctx.event) end)",
+        "zh-CN": "glua.event.setCallback(id, function(ctx) print(ctx.event) end)"
+      }
+    },
+    "glua.event.get": {
+      "signature": {
+        "en": "glua.event.get(id)",
+        "zh-CN": "glua.event.get(id)"
+      },
+      "returns": {
+        "en": "returns: listener snapshot or nil.",
+        "zh-CN": "返回：监听器快照或 nil。"
+      },
+      "params": {
+        "en": [
+          "id: event id"
+        ],
+        "zh-CN": [
+          "id：事件 ID"
+        ]
+      },
+      "description": {
+        "en": "Returns callback, config, state, and accumulated statistics for one listener.",
+        "zh-CN": "返回单个监听器的回调、配置、状态和累计统计。"
+      },
+      "example": {
+        "en": "local listener = glua.event.get(id)",
+        "zh-CN": "local listener = glua.event.get(id)"
+      }
+    },
+    "glua.event.clear": {
+      "signature": {
+        "en": "glua.event.clear([event])",
+        "zh-CN": "glua.event.clear([event])"
+      },
+      "returns": {
+        "en": "returns: removed listener count.",
+        "zh-CN": "返回：删除的监听器数量。"
+      },
+      "params": {
+        "en": [
+          "event (optional): event name"
+        ],
+        "zh-CN": [
+          "event（可选）：事件名"
+        ]
+      },
+      "description": {
+        "en": "Removes all listeners or listeners for one event in the current source file.",
+        "zh-CN": "删除当前源码文件的全部监听器或指定事件监听器。"
+      },
+      "example": {
+        "en": "glua.event.clear(\"task.done\")",
+        "zh-CN": "glua.event.clear(\"task.done\")"
+      }
+    },
+    "glua.event.setGroupMuted": {
+      "signature": {
+        "en": "glua.event.setGroupMuted(group, muted)",
+        "zh-CN": "glua.event.setGroupMuted(group, muted)"
+      },
+      "returns": {
+        "en": "returns: updated listener count.",
+        "zh-CN": "返回：更新的监听器数量。"
+      },
+      "params": {
+        "en": [
+          "group: listener group",
+          "muted: boolean"
+        ],
+        "zh-CN": [
+          "group：监听器分组",
+          "muted：布尔值"
+        ]
+      },
+      "description": {
+        "en": "Mutes or enables a listener group in the current source file.",
+        "zh-CN": "批量静音或启用当前源码文件中的监听器分组。"
+      },
+      "example": {
+        "en": "glua.event.setGroupMuted(\"trace\", true)",
+        "zh-CN": "glua.event.setGroupMuted(\"trace\", true)"
+      }
+    },
+    "glua.event.removeGroup": {
+      "signature": {
+        "en": "glua.event.removeGroup(group)",
+        "zh-CN": "glua.event.removeGroup(group)"
+      },
+      "returns": {
+        "en": "returns: removed listener count.",
+        "zh-CN": "返回：删除的监听器数量。"
+      },
+      "params": {
+        "en": [
+          "group: listener group"
+        ],
+        "zh-CN": [
+          "group：监听器分组"
+        ]
+      },
+      "description": {
+        "en": "Removes a listener group from the current source file.",
+        "zh-CN": "删除当前源码文件指定分组的监听器。"
+      },
+      "example": {
+        "en": "glua.event.removeGroup(\"trace\")",
+        "zh-CN": "glua.event.removeGroup(\"trace\")"
+      }
+    },
+    "glua.event.flush": {
+      "signature": {
+        "en": "glua.event.flush()",
+        "zh-CN": "glua.event.flush()"
+      },
+      "returns": {
+        "en": "returns: executed async task count.",
+        "zh-CN": "返回：实际执行的异步任务数量。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Immediately drains the current State asynchronous event queue.",
+        "zh-CN": "立即消费当前 State 的异步事件队列。"
+      },
+      "example": {
+        "en": "local count = glua.event.flush()",
+        "zh-CN": "local count = glua.event.flush()"
+      }
+    },
+    "glua.event.stats": {
+      "signature": {
+        "en": "glua.event.stats()",
+        "zh-CN": "glua.event.stats()"
+      },
+      "returns": {
+        "en": "returns: listener and queue statistics.",
+        "zh-CN": "返回：监听器与异步队列统计。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Returns listener, queue, dropped task, callback error, and sequence statistics.",
+        "zh-CN": "返回监听器、队列、丢弃任务、回调错误和事件序号统计。"
+      },
+      "example": {
+        "en": "local stats = glua.event.stats()",
+        "zh-CN": "local stats = glua.event.stats()"
+      }
+    },
+    "glua.event.eventList": {
+      "signature": {
+        "en": "glua.event.eventList()",
+        "zh-CN": "glua.event.eventList()"
+      },
+      "returns": {
+        "en": "returns: current source event listener summary table.",
+        "zh-CN": "返回：当前源码文件的事件监听器统计表。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Lists registered events and active, muted, synchronous, and asynchronous listener counts for the current source file.",
+        "zh-CN": "列出当前源码文件已注册事件，以及活跃、静音、同步和异步监听器数量。"
+      },
+      "example": {
+        "en": "local summary = glua.event.eventList()",
+        "zh-CN": "local summary = glua.event.eventList()"
+      }
+    },
+    "glua.event.events.progress_line": {
+      "signature": {
+        "en": "glua.event.events.progress_line",
+        "zh-CN": "glua.event.events.progress_line"
+      },
+      "returns": {
+        "en": "value: preset event name.",
+        "zh-CN": "值：预设事件名。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Fires immediately before the VM executes a source line that differs from the previously reported line; loop control can report the same source line again on a later iteration.",
+        "zh-CN": "在 VM 即将执行新的源码行时触发；当循环进入下一轮时，同一源码行可能再次触发。"
+      },
+      "example": {
+        "en": "glua.event.events.progress_line",
+        "zh-CN": "glua.event.events.progress_line"
+      }
+    },
+    "glua.event.events.progress_start": {
+      "signature": {
+        "en": "glua.event.events.progress_start",
+        "zh-CN": "glua.event.events.progress_start"
+      },
+      "returns": {
+        "en": "value: preset event name.",
+        "zh-CN": "值：预设事件名。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Fires when execution enters the source file chunk, before its first user instruction.",
+        "zh-CN": "进入当前源码文件的代码块、执行第一条用户指令前触发。"
+      },
+      "example": {
+        "en": "glua.event.events.progress_start",
+        "zh-CN": "glua.event.events.progress_start"
+      }
+    },
+    "glua.event.events.progress_end": {
+      "signature": {
+        "en": "glua.event.events.progress_end",
+        "zh-CN": "glua.event.events.progress_end"
+      },
+      "returns": {
+        "en": "value: preset event name.",
+        "zh-CN": "值：预设事件名。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Fires after the source file chunk completes normally; it does not fire on an error path.",
+        "zh-CN": "当前源码文件的代码块正常执行完成后触发；错误退出时不会触发。"
+      },
+      "example": {
+        "en": "glua.event.events.progress_end",
+        "zh-CN": "glua.event.events.progress_end"
+      }
+    },
+    "glua.event.events.progress_error": {
+      "signature": {
+        "en": "glua.event.events.progress_error",
+        "zh-CN": "glua.event.events.progress_error"
+      },
+      "returns": {
+        "en": "value: preset event name.",
+        "zh-CN": "值：预设事件名。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Fires when the source file chunk exits with an unhandled error, before the error is returned to its caller.",
+        "zh-CN": "当前源码文件的代码块因未处理错误退出时触发，发生在错误返回给调用方之前。"
+      },
+      "example": {
+        "en": "glua.event.events.progress_error",
+        "zh-CN": "glua.event.events.progress_error"
+      }
+    },
+    "glua.event.events.progress_exit": {
+      "signature": {
+        "en": "glua.event.events.progress_exit",
+        "zh-CN": "glua.event.events.progress_exit"
+      },
+      "returns": {
+        "en": "value: preset event name.",
+        "zh-CN": "值：预设事件名。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Fires when the source file chunk leaves on either normal completion or error, after progress.end or progress.error for that path.",
+        "zh-CN": "当前源码文件的代码块离开时触发；正常和错误路径都会触发，并位于对应 progress.end 或 progress.error 之后。"
+      },
+      "example": {
+        "en": "glua.event.events.progress_exit",
+        "zh-CN": "glua.event.events.progress_exit"
+      }
+    },
+    "glua.event.events.progress_function_call": {
+      "signature": {
+        "en": "glua.event.events.progress_function_call",
+        "zh-CN": "glua.event.events.progress_function_call"
+      },
+      "returns": {
+        "en": "value: preset event name.",
+        "zh-CN": "值：预设事件名。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Fires immediately before a Lua closure called from the current source file starts running. ctx.args contains the argument snapshot.",
+        "zh-CN": "当前源码文件即将调用 Lua 闭包、被调函数开始执行前触发；ctx.args 提供参数快照。"
+      },
+      "example": {
+        "en": "glua.event.events.progress_function_call",
+        "zh-CN": "glua.event.events.progress_function_call"
+      }
+    },
+    "glua.event.events.progress_function_return": {
+      "signature": {
+        "en": "glua.event.events.progress_function_return",
+        "zh-CN": "glua.event.events.progress_function_return"
+      },
+      "returns": {
+        "en": "value: preset event name.",
+        "zh-CN": "值：预设事件名。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Fires after an observed Lua closure returns normally. ctx.results contains return values and ctx.durationNs contains elapsed time.",
+        "zh-CN": "被观察的 Lua 闭包正常返回后触发；ctx.results 提供返回值，ctx.durationNs 提供调用耗时。"
+      },
+      "example": {
+        "en": "glua.event.events.progress_function_return",
+        "zh-CN": "glua.event.events.progress_function_return"
+      }
+    },
+    "glua.event.events.progress_function_error": {
+      "signature": {
+        "en": "glua.event.events.progress_function_error",
+        "zh-CN": "glua.event.events.progress_function_error"
+      },
+      "returns": {
+        "en": "value: preset event name.",
+        "zh-CN": "值：预设事件名。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Fires after an observed Lua closure fails and before pcall/xpcall can convert the failure into a return value. ctx.error contains the error object.",
+        "zh-CN": "被观察的 Lua 闭包执行失败后、pcall/xpcall 把错误转换成返回值之前触发；ctx.error 提供错误对象。"
+      },
+      "example": {
+        "en": "glua.event.events.progress_function_error",
+        "zh-CN": "glua.event.events.progress_function_error"
+      }
+    },
+    "glua.event.events.progress_function_exit": {
+      "signature": {
+        "en": "glua.event.events.progress_function_exit",
+        "zh-CN": "glua.event.events.progress_function_exit"
+      },
+      "returns": {
+        "en": "value: preset event name.",
+        "zh-CN": "值：预设事件名。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Fires after an observed Lua closure leaves on either return or error, after the matching function_return or function_error event.",
+        "zh-CN": "被观察的 Lua 闭包正常或异常离开时都会触发，并位于对应 function_return 或 function_error 事件之后。"
+      },
+      "example": {
+        "en": "glua.event.events.progress_function_exit",
+        "zh-CN": "glua.event.events.progress_function_exit"
+      }
+    },
+    "glua.null": {
+      "signature": {
+        "en": "glua.null",
+        "zh-CN": "glua.null"
+      },
+      "returns": {
+        "en": "value: read-only null sentinel.",
+        "zh-CN": "值：只读 null 哨兵。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Represents JSON/YAML null without deleting a Lua table field or array slot. The same singleton is also exposed as glua.json.null, glua.yaml.null, and glua.xml.null.",
+        "zh-CN": "表示 JSON/YAML 的 null，避免 Lua nil 删除 table 字段或数组槽位；同一单例也通过 glua.json.null、glua.yaml.null 和 glua.xml.null 提供。"
+      },
+      "example": {
+        "en": "local value = { glua.null }",
+        "zh-CN": "local value = { glua.null }"
+      }
+    },
+    "glua.json": {
+      "signature": {
+        "en": "glua.json",
+        "zh-CN": "glua.json"
+      },
+      "returns": {
+        "en": "value: JSON codec namespace.",
+        "zh-CN": "值：JSON 编解码命名空间。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Pure-Go JSON codec for GLua values.",
+        "zh-CN": "用于 GLua 值的纯 Go JSON 编解码器。"
+      },
+      "example": {
+        "en": "glua.json.encode({ ok = true })",
+        "zh-CN": "glua.json.encode({ ok = true })"
+      }
+    },
+    "glua.json.null": {
+      "signature": {
+        "en": "glua.json.null",
+        "zh-CN": "glua.json.null"
+      },
+      "returns": {
+        "en": "value: glua.null alias.",
+        "zh-CN": "值：glua.null 的别名。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "JSON null singleton shared with glua.null.",
+        "zh-CN": "与 glua.null 共用同一引用的 JSON null 单例。"
+      },
+      "example": {
+        "en": "assert(glua.json.null == glua.null)",
+        "zh-CN": "assert(glua.json.null == glua.null)"
+      }
+    },
+    "glua.json.encode": {
+      "signature": {
+        "en": "glua.json.encode(value [, prettyOrOptions])",
+        "zh-CN": "glua.json.encode(value [, prettyOrOptions])"
+      },
+      "returns": {
+        "en": "returns: JSON string.",
+        "zh-CN": "返回：JSON 字符串。"
+      },
+      "params": {
+        "en": [
+          "value: serializable value",
+          "prettyOrOptions (optional): boolean or options table"
+        ],
+        "zh-CN": [
+          "value：可序列化值",
+          "prettyOrOptions（可选）：boolean 或 options table"
+        ]
+      },
+      "description": {
+        "en": "Encodes JSON. The second argument accepts the compatible boolean pretty flag or an options table with limits. Cyclic, sparse, mixed-key tables raise an error.",
+        "zh-CN": "编码 JSON；第二参数兼容 boolean pretty，也可传入包含 pretty、maxDepth、maxNodes、maxOutputBytes 的 options。循环、稀疏和混合键 table 会抛出错误。"
+      },
+      "example": {
+        "en": "glua.json.encode(value [, prettyOrOptions])",
+        "zh-CN": "glua.json.encode(value [, prettyOrOptions])"
+      }
+    },
+    "glua.json.decode": {
+      "signature": {
+        "en": "glua.json.decode(text [, options])",
+        "zh-CN": "glua.json.decode(text [, options])"
+      },
+      "returns": {
+        "en": "returns: Lua value.",
+        "zh-CN": "返回：Lua 值。"
+      },
+      "params": {
+        "en": [
+          "text: JSON string",
+          "options (optional): limits and numberMode"
+        ],
+        "zh-CN": [
+          "text：JSON 字符串",
+          "options（可选）：资源限制和 numberMode"
+        ]
+      },
+      "description": {
+        "en": "Decodes one JSON value with input/structure budgets and auto, integer, number, or string number modes.",
+        "zh-CN": "解码单个 JSON 值；支持输入/结构预算和 auto、integer、number、string 数字策略。"
+      },
+      "example": {
+        "en": "glua.json.decode(text [, options])",
+        "zh-CN": "glua.json.decode(text [, options])"
+      }
+    },
+    "glua.yaml": {
+      "signature": {
+        "en": "glua.yaml",
+        "zh-CN": "glua.yaml"
+      },
+      "returns": {
+        "en": "value: YAML codec namespace.",
+        "zh-CN": "值：YAML 编解码命名空间。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Pure-Go single-document YAML codec for GLua values.",
+        "zh-CN": "用于 GLua 值的纯 Go 单文档 YAML 编解码器。"
+      },
+      "example": {
+        "en": "glua.yaml.decode('name: GLua')",
+        "zh-CN": "glua.yaml.decode('name: GLua')"
+      }
+    },
+    "glua.yaml.null": {
+      "signature": {
+        "en": "glua.yaml.null",
+        "zh-CN": "glua.yaml.null"
+      },
+      "returns": {
+        "en": "value: glua.null alias.",
+        "zh-CN": "值：glua.null 的别名。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "YAML null singleton shared with glua.null.",
+        "zh-CN": "与 glua.null 共用同一引用的 YAML null 单例。"
+      },
+      "example": {
+        "en": "assert(glua.yaml.null == glua.null)",
+        "zh-CN": "assert(glua.yaml.null == glua.null)"
+      }
+    },
+    "glua.yaml.encode": {
+      "signature": {
+        "en": "glua.yaml.encode(value [, options])",
+        "zh-CN": "glua.yaml.encode(value [, options])"
+      },
+      "returns": {
+        "en": "returns: YAML string.",
+        "zh-CN": "返回：YAML 字符串。"
+      },
+      "params": {
+        "en": [
+          "value: serializable value",
+          "options (optional): limits"
+        ],
+        "zh-CN": [
+          "value：可序列化值",
+          "options（可选）：资源限制"
+        ]
+      },
+      "description": {
+        "en": "Encodes one YAML document with depth, node, and output limits.",
+        "zh-CN": "编码单个 YAML 文档并执行深度、节点和输出限制。"
+      },
+      "example": {
+        "en": "glua.yaml.encode(value [, options])",
+        "zh-CN": "glua.yaml.encode(value [, options])"
+      }
+    },
+    "glua.yaml.decode": {
+      "signature": {
+        "en": "glua.yaml.decode(text [, options])",
+        "zh-CN": "glua.yaml.decode(text [, options])"
+      },
+      "returns": {
+        "en": "returns: Lua value.",
+        "zh-CN": "返回：Lua 值。"
+      },
+      "params": {
+        "en": [
+          "text: YAML string",
+          "options (optional): limits and numberMode"
+        ],
+        "zh-CN": [
+          "text：YAML 字符串",
+          "options（可选）：资源限制和 numberMode"
+        ]
+      },
+      "description": {
+        "en": "Decodes one YAML document with input/structure budgets and numberMode.",
+        "zh-CN": "解码单个 YAML 文档；支持输入/结构预算和 numberMode。"
+      },
+      "example": {
+        "en": "glua.yaml.decode(text [, options])",
+        "zh-CN": "glua.yaml.decode(text [, options])"
+      }
+    },
+    "glua.xml": {
+      "signature": {
+        "en": "glua.xml",
+        "zh-CN": "glua.xml"
+      },
+      "returns": {
+        "en": "value: XML codec namespace.",
+        "zh-CN": "值：XML 编解码命名空间。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Pure-Go XML codec using GLua's documented table mapping.",
+        "zh-CN": "使用 GLua 约定 table 映射规则的纯 Go XML 编解码器。"
+      },
+      "example": {
+        "en": "glua.xml.decode('<root><name>GLua</name></root>')",
+        "zh-CN": "glua.xml.decode('<root><name>GLua</name></root>')"
+      }
+    },
+    "glua.xml.null": {
+      "signature": {
+        "en": "glua.xml.null",
+        "zh-CN": "glua.xml.null"
+      },
+      "returns": {
+        "en": "value: glua.null alias.",
+        "zh-CN": "值：glua.null 的别名。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Shared null sentinel; XML empty elements remain textually ambiguous.",
+        "zh-CN": "共享的 null 哨兵；XML 空元素本身仍存在空文本与 null 的表达歧义。"
+      },
+      "example": {
+        "en": "assert(glua.xml.null == glua.null)",
+        "zh-CN": "assert(glua.xml.null == glua.null)"
+      }
+    },
+    "glua.xml.encode": {
+      "signature": {
+        "en": "glua.xml.encode(value [, options])",
+        "zh-CN": "glua.xml.encode(value [, options])"
+      },
+      "returns": {
+        "en": "returns: XML string.",
+        "zh-CN": "返回：XML 字符串。"
+      },
+      "params": {
+        "en": [
+          "value: serializable value",
+          "options (optional): XML and limit settings"
+        ],
+        "zh-CN": [
+          "value：可序列化值",
+          "options（可选）：XML 与资源配置"
+        ]
+      },
+      "description": {
+        "en": "Encodes XML with root, pretty, namespace, typed markers, CDATA, and shared limits. _attr, _text, _cdata, and _namespace are reserved mapping fields.",
+        "zh-CN": "编码 XML；支持 root、pretty、namespace、typed、CDATA 和统一资源限制。_attr、_text、_cdata、_namespace 是保留映射字段。"
+      },
+      "example": {
+        "en": "glua.xml.encode(value [, options])",
+        "zh-CN": "glua.xml.encode(value [, options])"
+      }
+    },
+    "glua.xml.decode": {
+      "signature": {
+        "en": "glua.xml.decode(text [, options])",
+        "zh-CN": "glua.xml.decode(text [, options])"
+      },
+      "returns": {
+        "en": "returns: Lua value.",
+        "zh-CN": "返回：Lua 值。"
+      },
+      "params": {
+        "en": [
+          "text: XML string",
+          "options (optional): inferTypes, typed, and limits"
+        ],
+        "zh-CN": [
+          "text：XML 字符串",
+          "options（可选）：inferTypes、typed 和资源限制"
+        ]
+      },
+      "description": {
+        "en": "Decodes XML; item-only and repeated children become arrays, typed=true reads lossless _glua_type markers, and namespace URIs are exposed as _namespace.",
+        "zh-CN": "解码 XML；纯 item 子节点和重复同名节点恢复为数组，typed=true 识别 _glua_type 无损类型标记，namespace URI 写入 _namespace。"
+      },
+      "example": {
+        "en": "glua.xml.decode(text [, options])",
+        "zh-CN": "glua.xml.decode(text [, options])"
+      }
+    },
+    "glua": {
+      "signature": {
+        "en": "glua",
+        "zh-CN": "glua"
+      },
+      "returns": {
+        "en": "value: GLua namespace.",
+        "zh-CN": "值：GLua 命名空间。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Namespace for GLua extension APIs.",
+        "zh-CN": "GLua 扩展 API 命名空间。"
+      },
+      "example": {
+        "en": "glua.json.encode({ ok = true })",
+        "zh-CN": "glua.json.encode({ ok = true })"
+      }
+    },
+    "glua.array": {
+      "signature": {
+        "en": "glua.array([table])",
+        "zh-CN": "glua.array([table])"
+      },
+      "returns": {
+        "en": "returns: the new or original table.",
+        "zh-CN": "返回：新建或原始 table。"
+      },
+      "params": {
+        "en": [
+          "table (optional): table to mark in place"
+        ],
+        "zh-CN": [
+          "table（可选）：需要原地标记的 table"
+        ]
+      },
+      "description": {
+        "en": "Creates an empty table or marks an existing table as a structured array without changing fields or its metatable.",
+        "zh-CN": "创建空 table 或把已有 table 标记为结构化数组，不修改字段和业务元表；用于稳定编码空数组。"
+      },
+      "example": {
+        "en": "local values = glua.array()",
+        "zh-CN": "local values = glua.array()"
+      }
+    },
+    "glua.object": {
+      "signature": {
+        "en": "glua.object([table])",
+        "zh-CN": "glua.object([table])"
+      },
+      "returns": {
+        "en": "returns: the new or original table.",
+        "zh-CN": "返回：新建或原始 table。"
+      },
+      "params": {
+        "en": [
+          "table (optional): table to mark in place"
+        ],
+        "zh-CN": [
+          "table（可选）：需要原地标记的 table"
+        ]
+      },
+      "description": {
+        "en": "Creates an empty table or marks an existing table as a structured object without changing fields or its metatable.",
+        "zh-CN": "创建空 table 或把已有 table 标记为结构化对象，不修改字段和业务元表；用于稳定编码空对象。"
+      },
+      "example": {
+        "en": "local object = glua.object()",
+        "zh-CN": "local object = glua.object()"
+      }
+    },
+    "glua.toml": {
+      "signature": {
+        "en": "glua.toml",
+        "zh-CN": "glua.toml"
+      },
+      "returns": {
+        "en": "value: GLua extension object.",
+        "zh-CN": "值：GLua 扩展对象。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Pure-Go TOML codec namespace.",
+        "zh-CN": "纯 Go TOML 编解码命名空间。"
+      },
+      "example": {
+        "en": "glua.toml",
+        "zh-CN": "glua.toml"
+      }
+    },
+    "glua.toml.encode": {
+      "signature": {
+        "en": "glua.toml.encode(value [, options])",
+        "zh-CN": "glua.toml.encode(value [, options])"
+      },
+      "returns": {
+        "en": "returns: TOML string.",
+        "zh-CN": "返回：TOML 字符串。"
+      },
+      "params": {
+        "en": [
+          "value: object table",
+          "options (optional): resource limits"
+        ],
+        "zh-CN": [
+          "value：对象 table",
+          "options（可选）：资源限制"
+        ]
+      },
+      "description": {
+        "en": "Encodes TOML with shared depth, node, and output limits. TOML does not support glua.null.",
+        "zh-CN": "编码 TOML 文本，使用统一的深度、节点和输出限制；TOML 不支持 glua.null。"
+      },
+      "example": {
+        "en": "local text = glua.toml.encode({ author = 'zing' })",
+        "zh-CN": "local text = glua.toml.encode({ author = 'zing' })"
+      }
+    },
+    "glua.toml.decode": {
+      "signature": {
+        "en": "glua.toml.decode(text [, options])",
+        "zh-CN": "glua.toml.decode(text [, options])"
+      },
+      "returns": {
+        "en": "returns: object table.",
+        "zh-CN": "返回：对象 table。"
+      },
+      "params": {
+        "en": [
+          "text: TOML string",
+          "options (optional): limits and numberMode"
+        ],
+        "zh-CN": [
+          "text：TOML 字符串",
+          "options（可选）：资源限制和 numberMode"
+        ]
+      },
+      "description": {
+        "en": "Decodes TOML; date/time values become canonical strings and numbers follow numberMode.",
+        "zh-CN": "解码 TOML 文本；日期时间恢复为规范字符串，数字遵守 numberMode。"
+      },
+      "example": {
+        "en": "local value = glua.toml.decode('author = \"zing\"')",
+        "zh-CN": "local value = glua.toml.decode('author = \"zing\"')"
+      }
+    },
+    "glua.codec": {
+      "signature": {
+        "en": "glua.codec",
+        "zh-CN": "glua.codec"
+      },
+      "returns": {
+        "en": "value: GLua extension object.",
+        "zh-CN": "值：GLua 扩展对象。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Base64, Hex, and URL codec namespace.",
+        "zh-CN": "Base64、Hex 和 URL 编解码命名空间。"
+      },
+      "example": {
+        "en": "glua.codec",
+        "zh-CN": "glua.codec"
+      }
+    },
+    "glua.codec.base64Encode": {
+      "signature": {
+        "en": "glua.codec.base64Encode(data [, urlSafe])",
+        "zh-CN": "glua.codec.base64Encode(data [, urlSafe])"
+      },
+      "returns": {
+        "en": "returns: Base64 string.",
+        "zh-CN": "返回：Base64 字符串。"
+      },
+      "params": {
+        "en": [
+          "data: binary string",
+          "urlSafe (optional): boolean"
+        ],
+        "zh-CN": [
+          "data：二进制字符串",
+          "urlSafe（可选）：boolean"
+        ]
+      },
+      "description": {
+        "en": "Encodes a binary Lua string as padded Base64; urlSafe selects the URL alphabet.",
+        "zh-CN": "把二进制 Lua string 编码为带填充 Base64；urlSafe=true 使用 URL 字符表。"
+      },
+      "example": {
+        "en": "glua.codec.base64Encode('zing')",
+        "zh-CN": "glua.codec.base64Encode('zing')"
+      }
+    },
+    "glua.codec.base64Decode": {
+      "signature": {
+        "en": "glua.codec.base64Decode(text [, urlSafe])",
+        "zh-CN": "glua.codec.base64Decode(text [, urlSafe])"
+      },
+      "returns": {
+        "en": "returns: binary string.",
+        "zh-CN": "返回：二进制字符串。"
+      },
+      "params": {
+        "en": [
+          "text: Base64 string",
+          "urlSafe (optional): boolean"
+        ],
+        "zh-CN": [
+          "text：Base64 字符串",
+          "urlSafe（可选）：boolean"
+        ]
+      },
+      "description": {
+        "en": "Decodes padded Base64 and raises on malformed input.",
+        "zh-CN": "解码带填充 Base64，非法文本抛出错误。"
+      },
+      "example": {
+        "en": "glua.codec.base64Decode('emluZw==')",
+        "zh-CN": "glua.codec.base64Decode('emluZw==')"
+      }
+    },
+    "glua.codec.hexEncode": {
+      "signature": {
+        "en": "glua.codec.hexEncode(data)",
+        "zh-CN": "glua.codec.hexEncode(data)"
+      },
+      "returns": {
+        "en": "returns: hexadecimal string.",
+        "zh-CN": "返回：十六进制字符串。"
+      },
+      "params": {
+        "en": [
+          "data: binary string"
+        ],
+        "zh-CN": [
+          "data：二进制字符串"
+        ]
+      },
+      "description": {
+        "en": "Encodes a binary string as lowercase hexadecimal.",
+        "zh-CN": "把二进制字符串编码为小写十六进制。"
+      },
+      "example": {
+        "en": "glua.codec.hexEncode(data)",
+        "zh-CN": "glua.codec.hexEncode(data)"
+      }
+    },
+    "glua.codec.hexDecode": {
+      "signature": {
+        "en": "glua.codec.hexDecode(text)",
+        "zh-CN": "glua.codec.hexDecode(text)"
+      },
+      "returns": {
+        "en": "returns: binary string.",
+        "zh-CN": "返回：二进制字符串。"
+      },
+      "params": {
+        "en": [
+          "text: hexadecimal string"
+        ],
+        "zh-CN": [
+          "text：十六进制字符串"
+        ]
+      },
+      "description": {
+        "en": "Decodes hexadecimal and raises on odd length or invalid characters.",
+        "zh-CN": "解码大小写十六进制，奇数长度或非法字符抛出错误。"
+      },
+      "example": {
+        "en": "glua.codec.hexDecode(text)",
+        "zh-CN": "glua.codec.hexDecode(text)"
+      }
+    },
+    "glua.codec.urlEncode": {
+      "signature": {
+        "en": "glua.codec.urlEncode(text)",
+        "zh-CN": "glua.codec.urlEncode(text)"
+      },
+      "returns": {
+        "en": "returns: URL-encoded string.",
+        "zh-CN": "返回：URL 编码字符串。"
+      },
+      "params": {
+        "en": [
+          "text: string"
+        ],
+        "zh-CN": [
+          "text：字符串"
+        ]
+      },
+      "description": {
+        "en": "Query-escapes text and encodes spaces as plus signs.",
+        "zh-CN": "按查询参数规则编码文本，空格编码为加号。"
+      },
+      "example": {
+        "en": "glua.codec.urlEncode(text)",
+        "zh-CN": "glua.codec.urlEncode(text)"
+      }
+    },
+    "glua.codec.urlDecode": {
+      "signature": {
+        "en": "glua.codec.urlDecode(text)",
+        "zh-CN": "glua.codec.urlDecode(text)"
+      },
+      "returns": {
+        "en": "returns: decoded string.",
+        "zh-CN": "返回：解码字符串。"
+      },
+      "params": {
+        "en": [
+          "text: URL-encoded string"
+        ],
+        "zh-CN": [
+          "text：URL 编码字符串"
+        ]
+      },
+      "description": {
+        "en": "Decodes query-escaped text and raises on invalid percent escapes.",
+        "zh-CN": "解码查询参数文本，非法百分号转义抛出错误。"
+      },
+      "example": {
+        "en": "glua.codec.urlDecode(text)",
+        "zh-CN": "glua.codec.urlDecode(text)"
+      }
+    },
+    "glua.hash": {
+      "signature": {
+        "en": "glua.hash",
+        "zh-CN": "glua.hash"
+      },
+      "returns": {
+        "en": "value: GLua extension object.",
+        "zh-CN": "值：GLua 扩展对象。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "MD5, SHA, and HMAC namespace. MD5/SHA-1 are provided only for legacy compatibility.",
+        "zh-CN": "MD5、SHA 和 HMAC 摘要命名空间；MD5/SHA-1 仅用于旧协议兼容。"
+      },
+      "example": {
+        "en": "glua.hash",
+        "zh-CN": "glua.hash"
+      }
+    },
+    "glua.hash.md5": {
+      "signature": {
+        "en": "glua.hash.md5(data)",
+        "zh-CN": "glua.hash.md5(data)"
+      },
+      "returns": {
+        "en": "returns: 32-character digest.",
+        "zh-CN": "返回：32 字符摘要。"
+      },
+      "params": {
+        "en": [
+          "data: binary string"
+        ],
+        "zh-CN": [
+          "data：二进制字符串"
+        ]
+      },
+      "description": {
+        "en": "Returns a lowercase MD5 hex digest for compatibility only.",
+        "zh-CN": "返回 MD5 小写十六进制摘要，仅用于兼容校验。"
+      },
+      "example": {
+        "en": "glua.hash.md5(data)",
+        "zh-CN": "glua.hash.md5(data)"
+      }
+    },
+    "glua.hash.sha1": {
+      "signature": {
+        "en": "glua.hash.sha1(data)",
+        "zh-CN": "glua.hash.sha1(data)"
+      },
+      "returns": {
+        "en": "returns: 40-character digest.",
+        "zh-CN": "返回：40 字符摘要。"
+      },
+      "params": {
+        "en": [
+          "data: binary string"
+        ],
+        "zh-CN": [
+          "data：二进制字符串"
+        ]
+      },
+      "description": {
+        "en": "Returns a lowercase SHA-1 hex digest for compatibility only.",
+        "zh-CN": "返回 SHA-1 小写十六进制摘要，仅用于兼容校验。"
+      },
+      "example": {
+        "en": "glua.hash.sha1(data)",
+        "zh-CN": "glua.hash.sha1(data)"
+      }
+    },
+    "glua.hash.sha256": {
+      "signature": {
+        "en": "glua.hash.sha256(data)",
+        "zh-CN": "glua.hash.sha256(data)"
+      },
+      "returns": {
+        "en": "returns: 64-character digest.",
+        "zh-CN": "返回：64 字符摘要。"
+      },
+      "params": {
+        "en": [
+          "data: binary string"
+        ],
+        "zh-CN": [
+          "data：二进制字符串"
+        ]
+      },
+      "description": {
+        "en": "Returns a lowercase SHA-256 hex digest.",
+        "zh-CN": "返回 SHA-256 小写十六进制摘要。"
+      },
+      "example": {
+        "en": "glua.hash.sha256(data)",
+        "zh-CN": "glua.hash.sha256(data)"
+      }
+    },
+    "glua.hash.sha512": {
+      "signature": {
+        "en": "glua.hash.sha512(data)",
+        "zh-CN": "glua.hash.sha512(data)"
+      },
+      "returns": {
+        "en": "returns: 128-character digest.",
+        "zh-CN": "返回：128 字符摘要。"
+      },
+      "params": {
+        "en": [
+          "data: binary string"
+        ],
+        "zh-CN": [
+          "data：二进制字符串"
+        ]
+      },
+      "description": {
+        "en": "Returns a lowercase SHA-512 hex digest.",
+        "zh-CN": "返回 SHA-512 小写十六进制摘要。"
+      },
+      "example": {
+        "en": "glua.hash.sha512(data)",
+        "zh-CN": "glua.hash.sha512(data)"
+      }
+    },
+    "glua.hash.hmac": {
+      "signature": {
+        "en": "glua.hash.hmac(algorithm, key, data)",
+        "zh-CN": "glua.hash.hmac(algorithm, key, data)"
+      },
+      "returns": {
+        "en": "returns: lowercase hexadecimal HMAC.",
+        "zh-CN": "返回：小写十六进制 HMAC。"
+      },
+      "params": {
+        "en": [
+          "algorithm: digest name",
+          "key: binary key",
+          "data: binary data"
+        ],
+        "zh-CN": [
+          "algorithm：算法名",
+          "key：二进制密钥",
+          "data：二进制数据"
+        ]
+      },
+      "description": {
+        "en": "Computes HMAC using md5, sha1, sha256, or sha512; prefer sha256/sha512 for new designs.",
+        "zh-CN": "计算 HMAC，algorithm 支持 md5、sha1、sha256、sha512；新设计推荐 sha256 或 sha512。"
+      },
+      "example": {
+        "en": "glua.hash.hmac(algorithm, key, data)",
+        "zh-CN": "glua.hash.hmac(algorithm, key, data)"
+      }
+    },
+    "glua.regex": {
+      "signature": {
+        "en": "glua.regex",
+        "zh-CN": "glua.regex"
+      },
+      "returns": {
+        "en": "value: GLua extension object.",
+        "zh-CN": "值：GLua 扩展对象。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Safe regular-expression namespace backed by Go RE2; backtracking and backreferences are unsupported.",
+        "zh-CN": "基于 Go RE2 的安全正则命名空间，不支持回溯和反向引用。"
+      },
+      "example": {
+        "en": "glua.regex",
+        "zh-CN": "glua.regex"
+      }
+    },
+    "glua.regex.match": {
+      "signature": {
+        "en": "glua.regex.match(pattern, text)",
+        "zh-CN": "glua.regex.match(pattern, text)"
+      },
+      "returns": {
+        "en": "returns: boolean.",
+        "zh-CN": "返回：boolean。"
+      },
+      "params": {
+        "en": [
+          "pattern: RE2 expression",
+          "text: text"
+        ],
+        "zh-CN": [
+          "pattern：RE2 表达式",
+          "text：文本"
+        ]
+      },
+      "description": {
+        "en": "Reports whether an RE2 pattern matches anywhere in text.",
+        "zh-CN": "判断 RE2 pattern 是否匹配文本任意位置。"
+      },
+      "example": {
+        "en": "glua.regex.match(pattern, text)",
+        "zh-CN": "glua.regex.match(pattern, text)"
+      }
+    },
+    "glua.regex.find": {
+      "signature": {
+        "en": "glua.regex.find(pattern, text [, init])",
+        "zh-CN": "glua.regex.find(pattern, text [, init])"
+      },
+      "returns": {
+        "en": "returns: start, end, or nil.",
+        "zh-CN": "返回：start、end 或 nil。"
+      },
+      "params": {
+        "en": [
+          "pattern: RE2 expression",
+          "text: text",
+          "init (optional): starting byte position"
+        ],
+        "zh-CN": [
+          "pattern：RE2 表达式",
+          "text：文本",
+          "init（可选）：起始字节位置"
+        ]
+      },
+      "description": {
+        "en": "Returns 1-based byte start/end for the first match, or nil.",
+        "zh-CN": "返回首个匹配的 1-based 字节 start/end；未匹配返回 nil。"
+      },
+      "example": {
+        "en": "glua.regex.find(pattern, text [, init])",
+        "zh-CN": "glua.regex.find(pattern, text [, init])"
+      }
+    },
+    "glua.regex.findAll": {
+      "signature": {
+        "en": "glua.regex.findAll(pattern, text [, limit])",
+        "zh-CN": "glua.regex.findAll(pattern, text [, limit])"
+      },
+      "returns": {
+        "en": "returns: match array.",
+        "zh-CN": "返回：匹配数组。"
+      },
+      "params": {
+        "en": [
+          "pattern: RE2 expression",
+          "text: text",
+          "limit (optional): -1 or non-negative integer"
+        ],
+        "zh-CN": [
+          "pattern：RE2 表达式",
+          "text：文本",
+          "limit（可选）：-1 或非负整数"
+        ]
+      },
+      "description": {
+        "en": "Returns match objects containing text, start, end, and groups.",
+        "zh-CN": "返回匹配对象数组，每项包含 text、start、end、groups。"
+      },
+      "example": {
+        "en": "glua.regex.findAll(pattern, text [, limit])",
+        "zh-CN": "glua.regex.findAll(pattern, text [, limit])"
+      }
+    },
+    "glua.regex.replace": {
+      "signature": {
+        "en": "glua.regex.replace(pattern, text, replacement [, limit])",
+        "zh-CN": "glua.regex.replace(pattern, text, replacement [, limit])"
+      },
+      "returns": {
+        "en": "returns: replaced text.",
+        "zh-CN": "返回：替换文本。"
+      },
+      "params": {
+        "en": [
+          "pattern: RE2 expression",
+          "text: text",
+          "replacement: template",
+          "limit (optional): count"
+        ],
+        "zh-CN": [
+          "pattern：RE2 表达式",
+          "text：文本",
+          "replacement：替换模板",
+          "limit（可选）：次数"
+        ]
+      },
+      "description": {
+        "en": "Replaces matches using RE2 `$1`/`${name}` expansion with an optional limit.",
+        "zh-CN": "按 RE2 `$1`/`${name}` 语法替换匹配，可限制替换次数。"
+      },
+      "example": {
+        "en": "glua.regex.replace(pattern, text, replacement [, limit])",
+        "zh-CN": "glua.regex.replace(pattern, text, replacement [, limit])"
+      }
+    },
+    "glua.regex.split": {
+      "signature": {
+        "en": "glua.regex.split(pattern, text [, limit])",
+        "zh-CN": "glua.regex.split(pattern, text [, limit])"
+      },
+      "returns": {
+        "en": "returns: string array.",
+        "zh-CN": "返回：字符串数组。"
+      },
+      "params": {
+        "en": [
+          "pattern: RE2 expression",
+          "text: text",
+          "limit (optional): result count"
+        ],
+        "zh-CN": [
+          "pattern：RE2 表达式",
+          "text：文本",
+          "limit（可选）：结果数量"
+        ]
+      },
+      "description": {
+        "en": "Splits text by an RE2 pattern and returns an explicit array.",
+        "zh-CN": "按 RE2 pattern 分割文本并返回显式数组。"
+      },
+      "example": {
+        "en": "glua.regex.split(pattern, text [, limit])",
+        "zh-CN": "glua.regex.split(pattern, text [, limit])"
+      }
+    },
+    "glua.uuid": {
+      "signature": {
+        "en": "glua.uuid",
+        "zh-CN": "glua.uuid"
+      },
+      "returns": {
+        "en": "value: GLua extension object.",
+        "zh-CN": "值：GLua 扩展对象。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "UUID v4 generation, validation, and normalization namespace.",
+        "zh-CN": "UUID v4 生成、校验和规范化命名空间。"
+      },
+      "example": {
+        "en": "glua.uuid",
+        "zh-CN": "glua.uuid"
+      }
+    },
+    "glua.uuid.v4": {
+      "signature": {
+        "en": "glua.uuid.v4()",
+        "zh-CN": "glua.uuid.v4()"
+      },
+      "returns": {
+        "en": "returns: canonical UUID string.",
+        "zh-CN": "返回：canonical UUID 字符串。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Generates an RFC 4122 UUID v4 using the system cryptographic random source.",
+        "zh-CN": "使用系统安全随机源生成 RFC 4122 UUID v4。"
+      },
+      "example": {
+        "en": "glua.uuid.v4()",
+        "zh-CN": "glua.uuid.v4()"
+      }
+    },
+    "glua.uuid.validate": {
+      "signature": {
+        "en": "glua.uuid.validate(text)",
+        "zh-CN": "glua.uuid.validate(text)"
+      },
+      "returns": {
+        "en": "returns: boolean.",
+        "zh-CN": "返回：boolean。"
+      },
+      "params": {
+        "en": [
+          "text: UUID text"
+        ],
+        "zh-CN": [
+          "text：UUID 文本"
+        ]
+      },
+      "description": {
+        "en": "Validates canonical 36-character or compact 32-character UUID text.",
+        "zh-CN": "校验 36 字符 canonical 或 32 字符无连字符 UUID。"
+      },
+      "example": {
+        "en": "glua.uuid.validate(text)",
+        "zh-CN": "glua.uuid.validate(text)"
+      }
+    },
+    "glua.uuid.parse": {
+      "signature": {
+        "en": "glua.uuid.parse(text)",
+        "zh-CN": "glua.uuid.parse(text)"
+      },
+      "returns": {
+        "en": "returns: UUID string or nil.",
+        "zh-CN": "返回：UUID 字符串或 nil。"
+      },
+      "params": {
+        "en": [
+          "text: UUID text"
+        ],
+        "zh-CN": [
+          "text：UUID 文本"
+        ]
+      },
+      "description": {
+        "en": "Normalizes valid UUID text to lowercase canonical form, or returns nil.",
+        "zh-CN": "把合法 UUID 规范为小写 canonical 文本，非法时返回 nil。"
+      },
+      "example": {
+        "en": "glua.uuid.parse(text)",
+        "zh-CN": "glua.uuid.parse(text)"
+      }
+    },
+    "glua.zip": {
+      "signature": {
+        "en": "glua.zip",
+        "zh-CN": "glua.zip"
+      },
+      "returns": {
+        "en": "value: GLua extension object.",
+        "zh-CN": "值：GLua 扩展对象。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Resource-limited in-memory ZIP namespace with no host filesystem access.",
+        "zh-CN": "受资源限制的内存 ZIP 压缩/解压命名空间，不访问宿主文件系统。"
+      },
+      "example": {
+        "en": "glua.zip",
+        "zh-CN": "glua.zip"
+      }
+    },
+    "glua.zip.compress": {
+      "signature": {
+        "en": "glua.zip.compress(entries [, options])",
+        "zh-CN": "glua.zip.compress(entries [, options])"
+      },
+      "returns": {
+        "en": "returns: ZIP binary string.",
+        "zh-CN": "返回：ZIP 二进制字符串。"
+      },
+      "params": {
+        "en": [
+          "entries: file map table",
+          "options (optional): method, level, and limits"
+        ],
+        "zh-CN": [
+          "entries：文件映射 table",
+          "options（可选）：method、level 和资源限制"
+        ]
+      },
+      "description": {
+        "en": "Compresses a filename-to-binary-string object into ZIP, rejecting unsafe paths and enforcing size limits.",
+        "zh-CN": "把文件名到二进制字符串的对象压缩为 ZIP；拒绝危险路径并限制条目、文件、总输入和归档大小。"
+      },
+      "example": {
+        "en": "glua.zip.compress(entries [, options])",
+        "zh-CN": "glua.zip.compress(entries [, options])"
+      }
+    },
+    "glua.zip.decompress": {
+      "signature": {
+        "en": "glua.zip.decompress(archive [, options])",
+        "zh-CN": "glua.zip.decompress(archive [, options])"
+      },
+      "returns": {
+        "en": "returns: file map table.",
+        "zh-CN": "返回：文件映射 table。"
+      },
+      "params": {
+        "en": [
+          "archive: ZIP binary string",
+          "options (optional): limits"
+        ],
+        "zh-CN": [
+          "archive：ZIP 二进制字符串",
+          "options（可选）：资源限制"
+        ]
+      },
+      "description": {
+        "en": "Decompresses ZIP into a file map, rejecting traversal, duplicate names, and oversized content.",
+        "zh-CN": "把 ZIP 二进制解压为文件映射；拒绝路径穿越、重复名称和超限内容。"
+      },
+      "example": {
+        "en": "glua.zip.decompress(archive [, options])",
+        "zh-CN": "glua.zip.decompress(archive [, options])"
+      }
+    },
+    "glua.schema": {
+      "signature": {
+        "en": "glua.schema",
+        "zh-CN": "glua.schema"
+      },
+      "returns": {
+        "en": "value: GLua extension object.",
+        "zh-CN": "值：GLua 扩展对象。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Deterministic lightweight table-schema namespace without remote references.",
+        "zh-CN": "确定性的轻量 table schema 校验命名空间，不支持远程引用。"
+      },
+      "example": {
+        "en": "glua.schema",
+        "zh-CN": "glua.schema"
+      }
+    },
+    "glua.schema.validate": {
+      "signature": {
+        "en": "glua.schema.validate(value, schema)",
+        "zh-CN": "glua.schema.validate(value, schema)"
+      },
+      "returns": {
+        "en": "returns: true, or false, message, path.",
+        "zh-CN": "返回：true，或 false、message、path。"
+      },
+      "params": {
+        "en": [
+          "value: value to validate",
+          "schema: lightweight schema table"
+        ],
+        "zh-CN": [
+          "value：待校验值",
+          "schema：轻量 schema table"
+        ]
+      },
+      "description": {
+        "en": "Validates type, enum, properties, required, additionalProperties, items, lengths, ranges, and RE2 patterns. Data mismatches return false/message/path; invalid schemas raise.",
+        "zh-CN": "校验 type、enum、properties、required、additionalProperties、items、长度、范围和 RE2 pattern。数据失败返回 false、message、path，非法 schema 抛错。"
+      },
+      "example": {
+        "en": "glua.schema.validate(value, schema)",
+        "zh-CN": "glua.schema.validate(value, schema)"
+      }
+    },
+    "glua.schema.assert": {
+      "signature": {
+        "en": "glua.schema.assert(value, schema)",
+        "zh-CN": "glua.schema.assert(value, schema)"
+      },
+      "returns": {
+        "en": "returns: original value.",
+        "zh-CN": "返回：原 value。"
+      },
+      "params": {
+        "en": [
+          "value: value to validate",
+          "schema: lightweight schema table"
+        ],
+        "zh-CN": [
+          "value：待校验值",
+          "schema：轻量 schema table"
+        ]
+      },
+      "description": {
+        "en": "Returns the original value on success and raises a Lua error with a `$` data path on failure.",
+        "zh-CN": "校验成功返回原值，失败抛出带 `$` 数据路径的 Lua error。"
+      },
+      "example": {
+        "en": "glua.schema.assert(value, schema)",
+        "zh-CN": "glua.schema.assert(value, schema)"
       }
     }
   }

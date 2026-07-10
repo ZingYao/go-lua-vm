@@ -170,6 +170,25 @@ final class GluaAnalysisGoldenTest {
     }
 
     @Test
+    void eventNamespaceAliasesResolveBuiltinDefinition() {
+        String source = String.join("\n",
+            "local event = glua.event",
+            "local events = event.events",
+            "assert(event.events.progress_end == 'progress.end')",
+            "assert(events.progress_end == 'progress.end')"
+        );
+
+        assertEquals(
+            "glua.event.events.progress_end",
+            GluaAnalysis.builtinTargetAt(source, source.indexOf("progress_end"))
+        );
+        assertEquals(
+            "glua.event.events.progress_end",
+            GluaAnalysis.builtinTargetAt(source, source.lastIndexOf("progress_end"))
+        );
+    }
+
+    @Test
     void requiredGluaConstTableMemberAssignmentIsDiagnosed() {
         Path projectDir = Path.of("/fixture").normalize();
         Path currentPath = projectDir.resolve("main.glua").normalize();

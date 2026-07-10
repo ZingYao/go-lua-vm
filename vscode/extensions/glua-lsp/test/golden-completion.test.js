@@ -165,7 +165,7 @@ async function main() {
     const items = completion.result || [];
     const labels = items.map((item) => item.label);
     for (const expected of testCase.expected) {
-      assert(labels.includes(expected), `${testCase.name} should include ${expected}`);
+      assert(labels.includes(expected), `${testCase.name} should include ${expected}; labels=${JSON.stringify(labels)}`);
     }
     for (const unexpected of testCase.notExpected || []) {
       assert(!labels.includes(unexpected), `${testCase.name} should not include ${unexpected}`);

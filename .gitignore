@@ -7,6 +7,7 @@ tmp/
 dist/
 build/
 bin/
+jetbrains/extensions/glua-lsp/src/main/resources/gluals/
 node_modules/
 .gradle/
 .intellijPlatform/

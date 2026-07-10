@@ -333,6 +333,10 @@ type State struct {
 	ctxCanCancel bool
 	// interruptCount 保存宿主请求的 Lua 级中断次数；每次 CheckContext 消费一次。
 	interruptCount atomic.Int64
+	// closeHooks 保存上层模块注册的资源释放回调，避免 runtime 反向依赖具体扩展包。
+	closeHooks []func()
+	// closing 标记 State 正在执行关闭流程，用于阻止关闭钩子或 finalizer 重入 Close。
+	closing bool
 	// closed 标记 State 是否已经关闭。
 	closed bool
 }
@@ -476,9 +480,22 @@ func (state *State) BorrowCallArgumentScratch(count int) []Value {
 // 然后清空 registry/globals 引用并设置 closed 标记。重复调用允许且无副作用，
 // 后续 GC 和 coroutine 关闭路径会在此衔接。
 func (state *State) Close() {
-	if state.closed {
-		// 已关闭 State 再次关闭不产生副作用，方便 defer state.Close() 重入。
+	if state.closed || state.closing {
+		// 已关闭或正在关闭的 State 再次关闭不产生副作用，避免钩子与 finalizer 重入。
 		return
+	}
+
+	// 先标记正在关闭并取出钩子，保持 finalizer 期间 closed 的既有可观察语义。
+	state.closing = true
+	closeHooks := state.closeHooks
+	state.closeHooks = nil
+	for _, closeHook := range closeHooks {
+		// nil 钩子不执行；有效钩子负责释放上层模块持有的 State 强引用。
+		if closeHook == nil {
+			// 跳过 nil 不影响其他关闭钩子。
+			continue
+		}
+		closeHook()
 	}
 
 	// 先执行 userdata finalizer，保证 Go 侧资源可在 State 生命周期结束时回收。
@@ -501,7 +518,26 @@ func (state *State) Close() {
 	state.debugEnvironment = nil
 	state.runningThread = nil
 	state.ctx = nil
+	state.closing = false
 	state.closed = true
+}
+
+// AddCloseHook 注册 State 关闭时执行的资源释放回调。
+//
+// closeHook 不得为 nil；State 尚未关闭时按注册顺序在 userdata finalizer 前执行，已关闭时立即
+// 执行一次。回调没有返回值，必须自行完成幂等清理，并且不得依赖 Close 已清空的 registry/globals。
+func (state *State) AddCloseHook(closeHook func()) {
+	// 上层模块通过钩子释放以 State 为键的缓存和异步队列，runtime 不感知具体资源类型。
+	if state == nil || closeHook == nil {
+		// nil State 或 nil 回调没有可登记的关闭行为。
+		return
+	}
+	if state.closed || state.closing {
+		// 已关闭或正在关闭的 State 不能保留新引用，立即执行回调完成调用方清理。
+		closeHook()
+		return
+	}
+	state.closeHooks = append(state.closeHooks, closeHook)
 }
 
 // IsClosed 返回当前 State 是否已经关闭。

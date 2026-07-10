@@ -16,6 +16,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/ZingYao/go-lua-vm/bytecode"
 	"github.com/ZingYao/go-lua-vm/compiler/codegen"
@@ -517,6 +518,8 @@ func OpenLibs(state *State) error {
 		return err
 	}
 	registerProtectedCallGlobals(state)
+	registerGluaSerializationGlobals(state)
+	registerGluaUtilityGlobals(state)
 	if state.Options().GluaEventsEnabled {
 		// glua event 是运行期扩展能力，只有当前 State 显式开启且构建产物包含时才注册全局 API。
 		registerGluaEventGlobals(state)
@@ -592,11 +595,26 @@ func pCallWithContinuation(state *State, args ...runtime.Value) ([]runtime.Value
 		return []runtime.Value{runtime.BooleanValue(false), runtime.StringValue(runtime.ErrExpectedCallable.Error())}, nil
 	}
 	baseCallDepth := state.CallDepth()
+	finishEvent, eventErr := beginProtectedGluaFunctionEvent(state, args[0], args[1:])
+	if eventErr != nil {
+		// call 事件错误属于 protected target 调用失败，由 pcall 转换为 false/error。
+		return finishPCallContinuation(nil, eventErr), nil
+	}
 	callResults, err := callWithDebugName(state, args[0], "", "", args[1:]...)
 	if errors.Is(err, runtime.ErrCoroutineYield) {
 		// yield 不是 pcall 捕获的 Lua 错误；保存外层包装现场并交给 coroutine.resume 返回 yield 值。
-		saveProtectedCallContinuation(state, resumePCallContinuation)
+		saveProtectedCallContinuation(state, func(resumeArgs []Value, callErr error) ([]Value, error) {
+			// target 最终恢复后补齐 function_return/error/exit，再生成 pcall 布局。
+			if finishErr := finishEvent(resumeArgs, callErr); finishErr != nil {
+				callErr = finishErr
+			}
+			return resumePCallContinuation(resumeArgs, callErr)
+		})
 		return nil, err
+	}
+	if finishErr := finishEvent(callResults, err); finishErr != nil {
+		// 生命周期回调错误与普通 target 错误一样由 pcall 捕获。
+		err = finishErr
 	}
 	if err != nil {
 		// 普通错误由 pcall 捕获；被调函数留下的错误帧必须裁剪到 pcall 入口边界。
@@ -637,13 +655,26 @@ func xPCallWithContinuation(state *State, args ...runtime.Value) ([]runtime.Valu
 	}
 	handler := args[1]
 	baseCallDepth := state.CallDepth()
+	finishEvent, eventErr := beginProtectedGluaFunctionEvent(state, args[0], args[2:])
+	if eventErr != nil {
+		// call 事件错误进入 xpcall 的 handler 流程。
+		return finishXPCallCall(state, handler, nil, eventErr, baseCallDepth)
+	}
 	callResults, err := callWithDebugName(state, args[0], "", "", args[2:]...)
 	if errors.Is(err, runtime.ErrCoroutineYield) {
 		// 被调函数 yield 时先保存 xpcall 的 call 阶段现场，待其恢复后再决定是否调用 handler。
 		saveProtectedCallContinuation(state, func(resumeArgs []Value, callErr error) ([]Value, error) {
+			// target 最终恢复后先补齐事件，再执行 xpcall 收尾。
+			if finishErr := finishEvent(resumeArgs, callErr); finishErr != nil {
+				callErr = finishErr
+			}
 			return resumeXPCallCallContinuation(state, handler, resumeArgs, callErr, baseCallDepth)
 		})
 		return nil, err
+	}
+	if finishErr := finishEvent(callResults, err); finishErr != nil {
+		// 生命周期回调错误由 xpcall handler 处理。
+		err = finishErr
 	}
 	return finishXPCallCall(state, handler, callResults, err, baseCallDepth)
 }
@@ -2370,11 +2401,13 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 	debugObserver := runtimeState.Options().DebugObserver
 	hooksEnabled := hasDebugEnvironment && debugEnvironment.HasActiveHook()
 	gluaEventsEnabled := gluaHasAnyEvent(state)
+	vm.SetStringTableReadCacheDisabled(gluaEventsEnabled)
 	coroutinesCreated := runtimeState.HasCreatedCoroutines()
 	preciseFrameSync := hooksEnabled || gluaEventsEnabled || debugObserver != nil || continuation != nil || coroutinesCreated
 	refreshHookState := func() {
 		coroutinesCreated = runtimeState.HasCreatedCoroutines()
 		gluaEventsEnabled = gluaHasAnyEvent(state)
+		vm.SetStringTableReadCacheDisabled(gluaEventsEnabled)
 		if !hasDebugEnvironment {
 			// 未打开 debug 库时仍需刷新 coroutine 创建状态。
 			preciseFrameSync = gluaEventsEnabled || debugObserver != nil || continuation != nil || coroutinesCreated
@@ -2401,14 +2434,10 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 		}
 	}
 	if gluaEventsEnabled && continuation == nil {
-		// glua 函数 call 事件在目标调用帧可见后触发，允许 callback 读取参数 local。
+		// glua 文件进度开始事件在目标调用帧可见后触发，允许 callback 读取参数 local。
 		vm.SetCurrentPC(0)
 		if err := state.UpdateCurrentFramePC(0); err != nil {
 			// 当前帧缺失说明调用栈边界被破坏。
-			return nil, err
-		}
-		if err := triggerGluaFunctionLifecycleEvent(state, closure, GluaEventFunctionCall, runtime.NilValue()); err != nil {
-			// 同步事件回调错误会中断当前函数调用。
 			return nil, err
 		}
 		if err := triggerGluaProgressLifecycleEvent(state, proto, GluaEventProgressStart, runtime.NilValue()); err != nil {
@@ -2441,22 +2470,15 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 	defer func() {
 		shouldPopFrames := err == nil || errors.Is(err, runtime.ErrCoroutineYield)
 		if gluaEventsEnabled && !errors.Is(err, runtime.ErrCoroutineYield) {
-			// glua exit/error 事件在调用帧仍可见时触发，便于 callback 读取局部变量快照。
+			// glua 文件进度 exit/error 在调用帧仍可见时触发，便于 callback 读取局部变量快照。
 			originalErr := err
 			if err != nil {
 				// 错误路径先触发 error 事件，并把原始错误对象作为 payload。
 				errorPayload := runtime.ErrorObject(originalErr)
-				if eventErr := triggerGluaFunctionLifecycleEvent(state, closure, GluaEventFunctionError, errorPayload); eventErr != nil {
-					err = eventErr
-				}
 				if eventErr := triggerGluaProgressLifecycleEvent(state, proto, GluaEventProgressError, errorPayload); eventErr != nil {
 					// progress.error 事件错误覆盖原结果，按同步回调失败处理。
 					err = eventErr
 				}
-			}
-			if eventErr := triggerGluaFunctionLifecycleEvent(state, closure, GluaEventFunctionExit, runtime.NilValue()); eventErr != nil {
-				// exit 事件错误覆盖原结果，按同步回调失败处理。
-				err = eventErr
 			}
 			if eventErr := triggerGluaProgressLifecycleEvent(state, proto, GluaEventProgressExit, runtime.NilValue()); eventErr != nil {
 				// progress.exit 事件错误覆盖原结果，按同步回调失败处理。
@@ -2995,10 +3017,6 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 				return nil, err
 			}
 			if gluaEventsEnabled {
-				// function.return 在返回帧仍可见时触发，payload 携带返回值数组。
-				if err := triggerGluaFunctionLifecycleEvent(state, closure, GluaEventFunctionReturn, gluaValueListTable(returnValues)); err != nil {
-					return nil, err
-				}
 				if err := triggerGluaProgressLifecycleEvent(state, proto, GluaEventProgressEnd, runtime.NilValue()); err != nil {
 					// progress.end 表示当前代码块正常完成，错误会覆盖返回路径。
 					return nil, err
@@ -3123,10 +3141,6 @@ func executePreparedLuaClosureWithDebugNameTailFromArgs(state *State, function V
 		return nil, err
 	}
 	if gluaEventsEnabled {
-		// 隐式返回没有返回值，仍需要触发 function.return。
-		if err := triggerGluaFunctionLifecycleEvent(state, closure, GluaEventFunctionReturn, gluaValueListTable(nil)); err != nil {
-			return nil, err
-		}
 		if err := triggerGluaProgressLifecycleEvent(state, proto, GluaEventProgressEnd, runtime.NilValue()); err != nil {
 			// progress.end 同样覆盖隐式返回路径。
 			return nil, err
@@ -3754,10 +3768,32 @@ func isSameLuaClosure(function Value, current *runtime.LuaClosure) bool {
 	return nextClosure == current
 }
 
+// gluaCallRequestArguments 复制 CALL 请求的实参数值。
+//
+// vm 和 callRequest 必须来自同一调用点；寄存器缺失时停止复制，事件只用于观察而不改变原 CALL 错误。
+func gluaCallRequestArguments(vm *runtime.VM, callRequest *runtime.CallRequest) []Value {
+	// 固定参数从函数寄存器后的连续窗口读取。
+	if vm == nil || callRequest == nil || callRequest.ArgumentCount <= 0 {
+		// 无参数或损坏请求返回空快照。
+		return nil
+	}
+	arguments := make([]Value, 0, callRequest.ArgumentCount)
+	for index := 0; index < callRequest.ArgumentCount; index++ {
+		// CALL 参数从 FunctionIndex+1 开始排列。
+		argument, ok := vm.Register(callRequest.FunctionIndex + 1 + index)
+		if !ok {
+			// 原调用路径会报告寄存器错误，观察快照不抢先改变错误类型。
+			break
+		}
+		arguments = append(arguments, argument)
+	}
+	return arguments
+}
+
 // executeLuaCallRequest 消费 VM 执行中产生的调用请求。
 //
 // callRequest 必须来自同一个 vm 最近一次 Step；调用结果会按请求写回 vm 寄存器窗口。
-func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, callPC int, callRequest *runtime.CallRequest, hooksEnabled bool, coroutinesCreated bool) error {
+func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, callPC int, callRequest *runtime.CallRequest, hooksEnabled bool, coroutinesCreated bool) (err error) {
 	if callRequest.ArgumentCount < 0 {
 		// 开放参数需要真实栈顶，当前执行循环暂不支持。
 		return runtime.ErrUnsupportedInstruction
@@ -3768,6 +3804,9 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 		return runtime.ErrRegisterOutOfRange
 	}
 	gluaEventsEnabled := gluaHasAnyEvent(state)
+	var results []Value
+	var directCallVM *runtime.VM
+	directResultsWritten := false
 	directClosure, directCall := canExecuteLuaCallRequestDirect(state, functionValue, callRequest, coroutinesCreated, gluaEventsEnabled)
 	debugName := ""
 	debugNameWhat := ""
@@ -3785,10 +3824,48 @@ func executeLuaCallRequest(state *State, vm *runtime.VM, proto *bytecode.Proto, 
 		// 可被 hook 观察的 direct 调用需要提前推断调试名称；普通 direct 叶子调用跳过该成本。
 		ensureDebugName()
 	}
-	var results []Value
-	var directCallVM *runtime.VM
-	directResultsWritten := false
-	var err error
+	functionEventStarted := false
+	eventDebugName := ""
+	eventDebugNameWhat := ""
+	observeFunctionCall := gluaEventsEnabled && functionValue.Kind == runtime.KindLuaClosure
+	var eventArguments []Value
+	eventStartedAt := time.Time{}
+	if observeFunctionCall {
+		// 函数进度事件只观察 Lua closure，避免 Go helper 的临时寄存器复用造成不可靠的函数名过滤。
+		ensureDebugName()
+		eventArguments = gluaCallRequestArguments(vm, callRequest)
+		eventDebugName, eventDebugNameWhat = gluaEventCallDebugName(state, functionValue, callRequest.GenericFor, proto, vm, callPC)
+		eventStartedAt = time.Now()
+		callDetails := newGluaFunctionEventDetails(eventArguments, nil, nil, 0)
+		if eventErr := triggerGluaProgressFunctionEvent(state, proto, GluaEventProgressFunctionCall, runtime.NilValue(), callDetails, functionValue, eventDebugName, eventDebugNameWhat, callPC); eventErr != nil {
+			// 同步 call 事件失败会阻止该 CALL 真正执行。
+			return eventErr
+		}
+		functionEventStarted = true
+		defer func() {
+			// Lua closure call 已完成后始终派发 return/error 之一与 exit，异步注册仅在安全点运行 callback。
+			if !functionEventStarted {
+				// 未成功进入 call 事件路径时不虚构对应的结束事件。
+				return
+			}
+			durationNs := time.Since(eventStartedAt).Nanoseconds()
+			if err != nil {
+				// 原始错误通过 payload 暴露，事件回调失败可按既有同步语义覆盖它。
+				details := newGluaFunctionEventDetails(eventArguments, nil, err, durationNs)
+				if eventErr := triggerGluaProgressFunctionEvent(state, proto, GluaEventProgressFunctionError, runtime.ErrorObject(err), details, functionValue, eventDebugName, eventDebugNameWhat, callPC); eventErr != nil {
+					err = eventErr
+				}
+			} else if eventErr := triggerGluaProgressFunctionEvent(state, proto, GluaEventProgressFunctionReturn, runtime.NilValue(), newGluaFunctionEventDetails(eventArguments, results, nil, durationNs), functionValue, eventDebugName, eventDebugNameWhat, callPC); eventErr != nil {
+				// return 事件失败会把成功调用变成 Lua 错误。
+				err = eventErr
+			}
+			exitDetails := newGluaFunctionEventDetails(eventArguments, results, err, durationNs)
+			if eventErr := triggerGluaProgressFunctionEvent(state, proto, GluaEventProgressFunctionExit, runtime.NilValue(), exitDetails, functionValue, eventDebugName, eventDebugNameWhat, callPC); eventErr != nil {
+				// exit 事件错误最后覆盖前序结果，保持生命周期回调的确定性。
+				err = eventErr
+			}
+		}()
+	}
 	if directCall {
 		// 固定参数/固定返回的 Lua closure 走 direct CALL，避免构造参数切片。
 		results, directCallVM, directResultsWritten, err = executeLuaCallRequestDirect(state, vm, directClosure, debugName, debugNameWhat, callRequest)
@@ -4579,6 +4656,43 @@ func luaCallDebugNameAtCall(state *State, function Value, genericFor bool, proto
 		return name, nameWhat
 	}
 	// 字节码无法推断时保留既有全局函数名缓存逻辑。
+	return inferFunctionDebugName(state, function)
+}
+
+// gluaEventCallDebugName 为函数进度事件推断经过值身份校验的调用名称。
+//
+// 普通 debug 名称推断会为错误文本保留同寄存器的 local 降级名称；事件白名单需要更严格的
+// 身份语义，因此仅接受与当前 Lua closure 匹配的 local 名称，避免寄存器复用把 Go 方法误报为旧 local。
+func gluaEventCallDebugName(state *State, function Value, genericFor bool, proto *bytecode.Proto, vm *runtime.VM, callPC int) (string, string) {
+	// 泛型 for 使用固定名称，和普通 debug hook 的可观测语义一致。
+	if genericFor {
+		// 迭代器调用不依赖寄存器来源推断。
+		return "for iterator", "for iterator"
+	}
+	name, nameWhat := luaCallDebugNameAtCall(state, function, false, proto, vm, callPC)
+	if nameWhat != "local" {
+		// global/field/method 名称由直接取值指令产生，不存在 local 寄存器复用歧义。
+		return name, nameWhat
+	}
+	if function.Kind != runtime.KindLuaClosure {
+		// Go closure 不能使用 local closure 的降级名称，回退到身份匹配的全局扫描。
+		return inferFunctionDebugName(state, function)
+	}
+	callInstruction := bytecode.Instruction(0)
+	if proto == nil || vm == nil || callPC < 0 || callPC >= len(proto.Code) {
+		// 缺少 CALL 上下文时只保留全局 identity 回退，避免输出错误的 local 名称。
+		return inferFunctionDebugName(state, function)
+	}
+	callInstruction = proto.Code[callPC]
+	writer, _, writerOK := previousRegisterWriterAt(proto, callPC, callInstruction.A())
+	if !writerOK || writer.OpCode() != bytecode.OpMove {
+		// local 调用应由 MOVE 把 closure 放入函数槽，其他来源不接受 local 降级结果。
+		return inferFunctionDebugName(state, function)
+	}
+	if localName, localNameWhat := recentClosureLocalDebugName(proto, writer.B(), callPC, function); localName != "" {
+		// CLOSURE Proto 与当前被调值匹配时，名称可安全用于事件过滤。
+		return localName, localNameWhat
+	}
 	return inferFunctionDebugName(state, function)
 }
 

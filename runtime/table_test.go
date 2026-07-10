@@ -6,6 +6,36 @@ import (
 	"testing"
 )
 
+// TestTableStructuredShape 验证结构化形状标记不依赖 table 元表和字段。
+//
+// 测试依次设置数组、对象和非法枚举；返回值必须对应设置结果，table 原有字段和元表保持不变。
+func TestTableStructuredShape(t *testing.T) {
+	// 构造带字段和元表的 table，确保形状标记没有可观察副作用。
+	table := NewTable()
+	table.RawSetString("name", StringValue("zing"))
+	metatable := NewTable()
+	table.SetMetatable(metatable)
+	table.SetStructuredShape(TableShapeArray)
+	if table.StructuredShape() != TableShapeArray {
+		// 显式数组形状必须可读回。
+		t.Fatalf("array shape mismatch: %v", table.StructuredShape())
+	}
+	table.SetStructuredShape(TableShapeObject)
+	if table.StructuredShape() != TableShapeObject {
+		// 显式对象形状必须覆盖旧标记。
+		t.Fatalf("object shape mismatch: %v", table.StructuredShape())
+	}
+	table.SetStructuredShape(TableShape(255))
+	if table.StructuredShape() != TableShapeAuto {
+		// 未知枚举必须归一为自动形状。
+		t.Fatalf("invalid shape should reset to auto: %v", table.StructuredShape())
+	}
+	if table.RawGetString("name").String != "zing" || table.GetMetatable() != metatable {
+		// 形状操作不能修改字段和元表。
+		t.Fatalf("shape marker changed table semantics")
+	}
+}
+
 // TestTableArrayPart 验证正整数 key 会进入数组区。
 //
 // Lua table 的数组区使用从 1 开始的正整数 key，本测试覆盖基础扩展和读取。
@@ -1296,5 +1326,35 @@ func TestTableRawIPairsNextStopsAtMaxIndex(t *testing.T) {
 	if index != 0 || !value.IsNil() || ok {
 		// 超过可递增范围时必须直接结束。
 		t.Fatalf("ipairs max index mismatch: index=%d value=%#v ok=%v", index, value, ok)
+	}
+}
+
+// TestTableFreezeRejectsCheckedWrites 验证整体冻结 table 会拒绝全部 Lua 写入入口。
+func TestTableFreezeRejectsCheckedWrites(t *testing.T) {
+	// 先完成构造再冻结，读取仍应保留原始值。
+	table := NewTable()
+	table.RawSetString("name", StringValue("before"))
+	table.RawSetInteger(1, IntegerValue(1))
+	table.Freeze()
+
+	if !table.ReadOnly() {
+		// Freeze 后必须公开只读状态。
+		t.Fatalf("frozen table should report read-only")
+	}
+	if err := table.RawSet(StringValue("name"), StringValue("after")); !errors.Is(err, ErrReadOnlyTable) {
+		// 通用 rawset 不能绕过冻结保护。
+		t.Fatalf("frozen RawSet error = %v", err)
+	}
+	if err := table.RawSetStringWithConstCheck("name", StringValue("after")); !errors.Is(err, ErrReadOnlyTable) {
+		// string VM 快路径必须返回同一只读错误。
+		t.Fatalf("frozen string write error = %v", err)
+	}
+	if err := table.RawSetIntegerWithConstCheck(1, IntegerValue(2)); !errors.Is(err, ErrReadOnlyTable) {
+		// integer VM 快路径必须返回同一只读错误。
+		t.Fatalf("frozen integer write error = %v", err)
+	}
+	if value := table.RawGetString("name"); value.Kind != KindString || value.String != "before" {
+		// 失败写入不能改变原内容。
+		t.Fatalf("frozen table value = %#v", value)
 	}
 }

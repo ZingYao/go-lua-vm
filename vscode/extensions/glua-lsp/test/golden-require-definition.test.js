@@ -252,6 +252,62 @@ async function main() {
   assert(completionLabels.includes("value"), "shared symbol completion contains assignment target");
   assert(completionLabels.includes("maker"), "shared symbol completion contains local function");
 
+  const eventAliasDocumentPath = path.join(fixtureRoot, "app", "event-alias.glua");
+  const eventAliasSource = [
+    "local event = glua.event",
+    "local events = event.events",
+    "assert(event.events.progress_end == 'progress.end')",
+    "assert(events.progress_end == 'progress.end')",
+  ].join("\n");
+  fs.writeFileSync(eventAliasDocumentPath, eventAliasSource, "utf8");
+  const eventAliasUri = `file://${eventAliasDocumentPath}`;
+  send({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: {
+      textDocument: {
+        uri: eventAliasUri,
+        languageId: "glua",
+        version: 1,
+        text: eventAliasSource,
+      },
+    },
+  });
+  for (const eventAliasCase of [
+    { label: "event.events", position: { line: 2, character: 20 } },
+    { label: "events", position: { line: 3, character: 14 } },
+  ]) {
+    const definitionId = requestId++;
+    send({
+      jsonrpc: "2.0",
+      id: definitionId,
+      method: "textDocument/definition",
+      params: {
+        textDocument: { uri: eventAliasUri },
+        position: eventAliasCase.position,
+      },
+    });
+    const definition = await waitFor((message) => message.id === definitionId, messages, 5000, `event alias definition for ${eventAliasCase.label}`);
+    const locations = Array.isArray(definition.result) ? definition.result : [];
+    assert.strictEqual(locations.length, 1, `event alias definition count for ${eventAliasCase.label}`);
+    assert.strictEqual(locations[0].uri, "glua-builtin:///glua.event.events.progress_end.lua", `event alias definition uri for ${eventAliasCase.label}`);
+  }
+  const eventAliasHoverId = requestId++;
+  send({
+    jsonrpc: "2.0",
+    id: eventAliasHoverId,
+    method: "textDocument/hover",
+    params: {
+      textDocument: { uri: eventAliasUri },
+      position: { line: 3, character: 14 },
+    },
+  });
+  const eventAliasHover = await waitFor((message) => message.id === eventAliasHoverId, messages, 5000, "event alias hover");
+  const eventAliasHoverText = eventAliasHover.result && eventAliasHover.result.contents
+    ? eventAliasHover.result.contents.value || eventAliasHover.result.contents
+    : "";
+  assert(String(eventAliasHoverText).includes("glua.event.events.progress_end"), "event alias hover contains full builtin name");
+
   const formatDocumentPath = path.join(fixtureRoot, "app", "format.lua");
   const formatSource = [
     "extensions = {}",

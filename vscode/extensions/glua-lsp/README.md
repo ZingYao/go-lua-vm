@@ -2,30 +2,29 @@
 
 面向 `go-lua-vm` / `glua` 的 VS Code 编辑器扩展，提供 GLua/Lua 编码、模块导航、文档提示、格式化和 DAP 调试连接能力。
 
-## Overview
+## 概述
 
 GLua 语言扩展面向日常开发场景设计：写 Lua/glua 文件时能获得语法高亮、扩展语法诊断、作用域补全、`require` 模块成员补全、冒号方法跳转和悬停文档；配置 `glua` 可执行文件后，可以在 VS Code 内快速运行或 Debug 当前文件。
 
-## Features
+## 功能
 
-- Syntax highlighting for `.lua` and `.glua`
-- Diagnostics for glua extended syntax
-- Hover documentation for builtin and custom functions
-- Cmd/Ctrl click go to definition for local functions and builtin docs
-- Formatting for glua syntax extensions
-- Completion for builtin and custom functions
-- User-defined builtin/function signature JSON
-- Multi-language function documentation
-- Quick run/debug commands for the current `.lua` or `.glua` file
-- Native VS Code debug attach with DAP address managed by the extension
+- 支持 `.lua` 和 `.glua` 文件的语法高亮。
+- 支持 glua 扩展语法诊断。
+- 提供内置函数和自定义函数的悬停文档。
+- 支持通过 Cmd/Ctrl 单击跳转到局部函数定义和内置函数文档。
+- 支持 glua 扩展语法格式化。
+- 提供内置函数和自定义函数补全。
+- 提供 `glua.event`、JSON/YAML/XML/TOML 序列化、codec、hash、regex、UUID、ZIP 和 schema API 的补全、定义跳转及中英文悬停文档。
+- 支持用户定义的内置函数/函数签名 JSON。
+- 支持多语言函数文档。
+- 提供当前 `.lua` 或 `.glua` 文件的快速运行和调试命令。
+- 提供原生 VS Code DAP 调试连接，DAP 地址由扩展管理。
 
-## License
+## 许可证
 
-This extension is currently marked `UNLICENSED`. The VSIX includes a `LICENSE`
-file that records this publishing constraint; do not redistribute it publicly
-unless the project owner publishes a separate license grant.
+该扩展当前标记为 `UNLICENSED`。VSIX 中包含记录此发布限制的 `LICENSE` 文件；除非项目所有者另行发布许可证授权，否则不得公开再分发。
 
-## Settings
+## 设置
 
 ```json
 {
@@ -40,43 +39,45 @@ unless the project owner publishes a separate license grant.
 }
 ```
 
-`glua.syntax` controls syntax support:
+`glua.syntax` 控制语法支持范围：
 
-- `extended`: enable glua extensions, currently including `switch` and `continue`
-- `lua53`: Lua 5.3 compatible syntax only
-- `switch`, `continue`: enable selected extensions
-- comma-separated values are supported, for example `switch,continue`
+- `extended`：启用 glua 扩展，目前包括 `switch`、`continue`、`const` 和 Event 能力。
+- `lua53`：只启用与 Lua 5.3 兼容的语法。
+- `switch`、`continue`：启用指定扩展。
+- 支持逗号分隔的配置值，例如 `switch,continue`。
 
-`glua.docLanguage` controls hover, completion documentation, and builtin stub language:
+`glua.json`、`glua.yaml` 和 `glua.xml` 属于运行时扩展方法，不依赖语法糖开关。完整数据规则参见仓库中的 `docs/glua-serialization.md`。
 
-- `auto`: follow VS Code UI language
+`glua.docLanguage` 控制悬停提示、补全文档和内置 stub 的语言：
+
+- `auto`：跟随 VS Code 界面语言。
 - `en`, `zh-CN`, `ja-JP`, `ko`, `fr-FR`, etc.
 
-The extension writes the detected language to `Output -> glua Language Server`:
+扩展会把检测到的语言写入 `输出 -> glua Language Server`：
 
 ```text
 [glua-lsp] activate: vscode.env.language=zh-cn; glua.docLanguage=auto; requested doc language=zh-cn; resolved doc language=zh-CN; builtin docs=1
 ```
 
-Use the `resolved doc language` value as the language key in your custom JSON.
+请使用日志中的 `resolved doc language` 值作为自定义 JSON 的语言键。
 
-## Create Custom Function Docs
+## 创建自定义函数文档
 
-Open the Command Palette and run:
+打开命令面板并执行：
 
 ```text
 glua: Open Builtin Signature JSON
 ```
 
-The command can create or open a project-level or global-level JSON file. Project-level files are stored at:
+该命令可以创建或打开项目级、全局级 JSON 文件。项目级文件保存在：
 
 ```text
 <project_root>/.vscode/glua-builtin-docs.json
 ```
 
-Project files are usually easier to review and share with the repository.
+项目级文件通常更便于审查并随仓库共享。
 
-VS Code settings do not render native file picker controls for string or array settings. Use these commands from the Command Palette when you want a file chooser:
+VS Code 设置页面不会为字符串或数组配置显示原生文件选择控件。如需选择文件，请在命令面板中使用以下命令：
 
 ```text
 GLua: Select glua executable
@@ -84,11 +85,11 @@ GLua: Select gluac executable
 GLua: Select builtin docs JSON
 ```
 
-You can also create the file manually and reference it from `glua.builtinDocs`.
+也可以手动创建文件，并在 `glua.builtinDocs` 中引用它。
 
-## Custom JSON Format
+## 自定义 JSON 格式
 
-The recommended format is:
+推荐格式如下：
 
 ```json
 {
@@ -130,9 +131,9 @@ The recommended format is:
 }
 ```
 
-Function names can be global names or qualified library names:
+函数名可以是全局名称，也可以是带库名称的限定名称。
 
-`example` is optional. Like `description`, `params`, and `returns`, it supports language-keyed values and is shown in hover/completion docs when present.
+`example` 为可选字段。它与 `description`、`params` 和 `returns` 一样支持按语言设置内容；存在时会显示在悬停和补全文档中。
 
 ```json
 {
@@ -186,13 +187,13 @@ Function names can be global names or qualified library names:
 }
 ```
 
-After configuring this file, completion and hover will include `myGlobalFunc` and `string.slug`.
+配置该文件后，补全和悬停提示中会包含 `myGlobalFunc` 与 `string.slug`。
 
-## Override Builtin Docs
+## 覆盖内置文档
 
-When a custom JSON function name conflicts with a default builtin, the custom JSON wins.
+自定义 JSON 中的函数名与默认内置函数冲突时，以自定义 JSON 为准。
 
-For example, this overrides the built-in `string.match` documentation:
+例如，以下配置会覆盖内置的 `string.match` 文档：
 
 ```json
 {
@@ -225,11 +226,11 @@ For example, this overrides the built-in `string.match` documentation:
 }
 ```
 
-You only need to provide fields you want to override. Missing fields fall back to the default builtin docs.
+只需提供需要覆盖的字段；缺失字段会回退到默认内置文档。
 
-## Multi-language Rules
+## 多语言规则
 
-Language keys use standard language tags:
+语言键使用标准语言标签：
 
 - `en`
 - `zh-CN`
@@ -238,13 +239,13 @@ Language keys use standard language tags:
 - `fr-FR`
 - `pt-BR`
 
-`zh-cn`, `zh_CN`, and `zh-hans` are normalized to `zh-CN`. Tags such as `ja-jp` are normalized to `ja-JP`.
+`zh-cn`、`zh_CN` 和 `zh-hans` 会统一规范为 `zh-CN`，`ja-jp` 等标签会规范为 `ja-JP`。
 
-If the selected language is missing, glua-lsp falls back to `en`, then to another available language in the entry.
+如果缺少所选语言，glua-lsp 会先回退到 `en`，再回退到该条目中其他可用语言。
 
-## Single-language Shortcut
+## 单语言简写
 
-For a file that only targets one language, you can use a file-level `locale`:
+如果文件只面向一种语言，可以使用文件级 `locale`：
 
 ```json
 {
@@ -263,35 +264,35 @@ For a file that only targets one language, you can use a file-level `locale`:
 }
 ```
 
-This is normalized internally to the multi-language shape.
+该格式会在内部规范为多语言结构。
 
-## Reloading Changes
+## 重新加载变更
 
-After editing `glua.builtinDocs` or a builtin JSON file, reload the VS Code window if hover/completion does not refresh immediately.
+编辑 `glua.builtinDocs` 或内置 JSON 文件后，如果悬停或补全没有立即刷新，请重新加载 VS Code 窗口。
 
-Use:
+执行：
 
 ```text
 Developer: Reload Window
 ```
 
-## Run And Debug
+## 运行与调试
 
-The extension contributes a native VS Code debugger type named `glua`.
-After setting `glua.executable`, use the editor context menu or Command Palette:
+扩展提供名为 `glua` 的原生 VS Code 调试器类型。
+设置 `glua.executable` 后，可以通过编辑器上下文菜单或命令面板执行：
 
 ```text
 GLua: Run current file
 GLua: Debug current file
 ```
 
-`Run current file` executes `glua <current-file>` in the file's workspace or directory.
-`Debug current file` starts a `glua` debug session. The DAP address is managed internally by the extension and is not a user-editable setting.
+`Run current file` 会在文件所属工作区或目录中执行 `glua <current-file>`。
+`Debug current file` 会启动 `glua` 调试会话。DAP 地址由扩展内部管理，不作为用户可编辑设置公开。
 
-Set `glua.useRemoteDap` to `true` to make `Debug current file` attach to
-`glua.dapHost` / `glua.dapPort` instead of launching the configured executable.
+将 `glua.useRemoteDap` 设为 `true` 后，`Debug current file` 会连接到
+`glua.dapHost` / `glua.dapPort`，而不是启动已配置的可执行文件。
 
-You can still create a minimal `.vscode/launch.json` entry:
+也可以创建最小化的 `.vscode/launch.json` 配置：
 
 ```json
 {
@@ -301,8 +302,7 @@ You can still create a minimal `.vscode/launch.json` entry:
 }
 ```
 
-For a launch configuration that should use remote DAP while staying in the launch
-dropdown, add `useRemoteDap`:
+如果希望启动下拉列表中的配置使用远程 DAP，请添加 `useRemoteDap`：
 
 ```json
 {
@@ -316,8 +316,8 @@ dropdown, add `useRemoteDap`:
 }
 ```
 
-If Debug fails:
+如果调试失败：
 
-- Check that `glua.executable` points to the expected executable.
-- Check that the GLua runtime you use has DAP support enabled.
-- Open `Output -> glua Language Server` for the failure reason.
+- 检查 `glua.executable` 是否指向预期的可执行文件。
+- 检查使用的 GLua 运行时是否已启用 DAP 支持。
+- 打开 `输出 -> glua Language Server` 查看失败原因。

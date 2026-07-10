@@ -6,9 +6,12 @@ import (
 	"math"
 	"reflect"
 	"sort"
+	"sync/atomic"
 )
 
 var (
+	// nextTableCacheIdentity 为每个 Table 分配不可复用的 VM 缓存身份。
+	nextTableCacheIdentity uint64
 	// ErrNilTableKey 表示尝试使用 nil 作为 table key。
 	ErrNilTableKey = errors.New("table index is nil")
 	// ErrNaNTableKey 表示尝试使用 NaN 作为 table key。
@@ -25,6 +28,8 @@ var (
 	ErrInvalidTableIterationKey = errors.New("invalid key to next")
 	// ErrConstTableKey 表示尝试覆盖由 `_glua_const` 声明的只读 table 字段。
 	ErrConstTableKey = errors.New("cannot assign to const table field")
+	// ErrReadOnlyTable 表示尝试修改整体冻结的只读 table。
+	ErrReadOnlyTable = errors.New("cannot assign to read-only table")
 )
 
 const (
@@ -53,11 +58,27 @@ const (
 	tableArrayDoublingLimit = 1 << 16
 )
 
+// TableShape 表示 table 在结构化数据编解码中的显式形状。
+//
+// 该标记不参与 Lua table 相等、长度、迭代和元表语义，只供上层序列化扩展区分空数组与空对象。
+type TableShape uint8
+
+const (
+	// TableShapeAuto 表示按当前键集合自动判断数组或对象。
+	TableShapeAuto TableShape = iota
+	// TableShapeArray 表示 table 必须按从 1 开始的连续数组处理。
+	TableShapeArray
+	// TableShapeObject 表示 table 必须按字符串键对象处理。
+	TableShapeObject
+)
+
 // Table 表示 Lua table 的第一阶段实现。
 //
 // 当前结构提供数组区和 hash 区的 raw get/set 能力；元表、next 迭代和弱表语义会在
 // 后续 Table 阶段补齐。
 type Table struct {
+	// cacheIdentity 保存 table 创建时分配的稳定身份，避免 Go GC 地址复用命中 VM 旧缓存。
+	cacheIdentity uint64
 	// arrayValues 保存正整数 key 的数组区，Lua key 从 1 开始映射到 index 0。
 	arrayValues []Value
 	// denseIntegerValues 保存 VM 已证明的连续正整数 key 到 integer value 的紧凑数组区。
@@ -93,6 +114,10 @@ type Table struct {
 	staleIterationCacheValid bool
 	// constKeys 保存 `_glua_const` 已投影到当前 table 的只读字段 key。
 	constKeys map[tableKey]struct{}
+	// readOnly 表示整个 table 已冻结，Lua 写入路径必须拒绝所有 key。
+	readOnly bool
+	// structuredShape 保存 glua.array/glua.object 设置的结构化数据形状，不影响普通 Lua 行为。
+	structuredShape TableShape
 }
 
 // tableKey 表示可放入 hash 区的 Lua key。
@@ -128,7 +153,7 @@ type tableEntry struct {
 // 返回的 table 不设置元表，数组区与 hash 区都按写入需求延迟分配。
 func NewTable() *Table {
 	// 空表延迟分配数组区和 hash 区，纯数组表可避免无用 map 分配。
-	return &Table{}
+	return &Table{cacheIdentity: nextRuntimeTableCacheIdentity()}
 }
 
 // newTableWithArrayCapacity 创建带数组区预留容量的空 Lua table。
@@ -143,7 +168,34 @@ func newTableWithArrayCapacity(arrayCapacity int) *Table {
 
 	// len 保持 0，只预留 cap，避免预留槽位被 RawNext、ArraySize 或长度边界误认为可见数组区。
 	// 使用无指针 integer backing store，只有 VM 证明后续是连续 integer 写入时才会逐步填充。
-	return &Table{denseIntegerValues: make([]int64, 0, arrayCapacity)}
+	return &Table{cacheIdentity: nextRuntimeTableCacheIdentity(), denseIntegerValues: make([]int64, 0, arrayCapacity)}
+}
+
+// CacheIdentity 返回 table 用于 VM inline cache 的稳定唯一身份。
+//
+// 返回值不属于 Lua 可观察语义；仅用于防止 Go GC 回收后复用相同内存地址的 table 误命中旧缓存。
+func (table *Table) CacheIdentity() uint64 {
+	// 正常 table 均由构造函数分配身份；零值 table 仅作为内部测试或兼容路径的兜底。
+	if table == nil {
+		// nil table 没有可缓存身份。
+		return 0
+	}
+	if table.cacheIdentity == 0 {
+		// 零值 table 第一次进入缓存路径时补发身份，保持历史内部构造兼容。
+		table.cacheIdentity = nextRuntimeTableCacheIdentity()
+	}
+	return table.cacheIdentity
+}
+
+// nextRuntimeTableCacheIdentity 分配一个非零且进程内不重复的 table 缓存身份。
+func nextRuntimeTableCacheIdentity() uint64 {
+	// 原子递增覆盖宿主并发创建 table 的场景，0 保留给 nil/未初始化占位。
+	nextIdentity := atomic.AddUint64(&nextTableCacheIdentity, 1)
+	if nextIdentity == 0 {
+		// uint64 极端回绕时跳过 0，避免和未初始化身份混淆。
+		nextIdentity = atomic.AddUint64(&nextTableCacheIdentity, 1)
+	}
+	return nextIdentity
 }
 
 // hasDenseIntegerArray 判断当前 table 是否仍处于 VM 专用紧凑整数数组表示。
@@ -246,6 +298,10 @@ func (table *Table) ensureHashKeyStorage() {
 //
 // key 必须是 Lua table 可接受的 key；nil、NaN 或暂不支持的 key 由 makeTableKey 返回原始错误。
 func (table *Table) checkConstKey(key Value) error {
+	if table != nil && table.readOnly {
+		// 整体冻结优先于单字段 const 检查。
+		return ErrReadOnlyTable
+	}
 	// 没有只读字段时无需分配或编码 key。
 	if table.constKeys == nil {
 		return nil
@@ -266,6 +322,10 @@ func (table *Table) checkConstKey(key Value) error {
 //
 // 该入口供 VM string 常量 key 快路径使用，避免为热路径临时构造通用 Value。
 func (table *Table) CheckConstStringKey(key string) error {
+	if table != nil && table.readOnly {
+		// 冻结 table 的 string 快路径同样拒绝写入。
+		return ErrReadOnlyTable
+	}
 	// string key 可直接构造 tableKey；无 constKeys 时立即返回。
 	if table.constKeys == nil {
 		return nil
@@ -280,6 +340,10 @@ func (table *Table) CheckConstStringKey(key string) error {
 //
 // 该入口供 VM 数组写入快路径使用，保持 const 保护不会被 SETTABLE 快路径绕过。
 func (table *Table) CheckConstIntegerKey(key int64) error {
+	if table != nil && table.readOnly {
+		// 冻结 table 的 integer 快路径同样拒绝写入。
+		return ErrReadOnlyTable
+	}
 	// integer key 可直接构造 tableKey；无 constKeys 时立即返回。
 	if table.constKeys == nil {
 		return nil
@@ -288,6 +352,24 @@ func (table *Table) CheckConstIntegerKey(key int64) error {
 		return ErrConstTableKey
 	}
 	return nil
+}
+
+// Freeze 把当前 table 标记为整体只读。
+//
+// 调用方必须先完成 table 构造；冻结后 Lua VM、rawset 和带检查的宿主写入都会返回 ErrReadOnlyTable。
+func (table *Table) Freeze() {
+	// nil table 无需冻结，正常 table 只进行单向状态切换。
+	if table == nil {
+		// nil 接收者保持无操作语义。
+		return
+	}
+	table.readOnly = true
+}
+
+// ReadOnly 报告当前 table 是否已经整体冻结。
+func (table *Table) ReadOnly() bool {
+	// nil table 不是可用只读对象。
+	return table != nil && table.readOnly
 }
 
 // markConstKey 把 key 登记为当前 table 的只读字段。
@@ -1286,6 +1368,38 @@ func (table *Table) SetMetatable(metatable *Table) {
 func (table *Table) GetMetatable() *Table {
 	// 直接返回内部 raw 元表，后续公开 API 会包装受保护元表语义。
 	return table.metatable
+}
+
+// SetStructuredShape 设置 table 的结构化数据形状。
+//
+// shape 允许 Auto、Array 或 Object；其他值归一为 Auto。该方法没有错误返回，也不会修改 table
+// 元表、字段或只读状态，因此可安全用于已有业务 table。
+func (table *Table) SetStructuredShape(shape TableShape) {
+	// nil table 没有可记录的形状。
+	if table == nil {
+		// 调用方可对可选 table 直接调用而无需额外分支。
+		return
+	}
+	switch shape {
+	case TableShapeArray, TableShapeObject:
+		// 有效显式形状直接保存。
+		table.structuredShape = shape
+	default:
+		// Auto 和未知枚举都恢复自动判断。
+		table.structuredShape = TableShapeAuto
+	}
+}
+
+// StructuredShape 返回 table 当前的结构化数据形状。
+//
+// nil table 返回 TableShapeAuto；返回值只影响序列化扩展，不代表 Lua `#table` 或 pairs 的形状。
+func (table *Table) StructuredShape() TableShape {
+	// nil table 没有显式形状。
+	if table == nil {
+		// 自动形状是 nil 接收者的安全默认值。
+		return TableShapeAuto
+	}
+	return table.structuredShape
 }
 
 // MetatableValue 返回当前 table 对外可见的元表值。

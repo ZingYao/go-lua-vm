@@ -90,6 +90,16 @@ func TestStateGlobals(t *testing.T) {
 // 当前阶段 Close 只负责生命周期标记和 root 清理，后续 GC/userdata 会继续扩展关闭流程。
 func TestStateCloseReleasesRoots(t *testing.T) {
 	state := NewState()
+	closeHookCalls := 0
+	state.AddCloseHook(func() {
+		// 关闭钩子执行期间保持既有的未正式关闭语义，同时必须防止 Close 重入。
+		if state.IsClosed() {
+			// closed 只能在 finalizer 和根引用清理完成后可见。
+			t.Fatalf("state should not be marked closed while close hook is running")
+		}
+		state.Close()
+		closeHookCalls++
+	})
 	if state.IsClosed() {
 		// 新建 State 必须处于可用状态。
 		t.Fatalf("new state should be open")
@@ -108,11 +118,37 @@ func TestStateCloseReleasesRoots(t *testing.T) {
 		// Close 后 globals root 必须释放。
 		t.Fatalf("closed state globals should be nil")
 	}
+	if closeHookCalls != 1 {
+		// 首次 Close 必须执行已登记的资源释放钩子。
+		t.Fatalf("close hook calls mismatch: got %d want 1", closeHookCalls)
+	}
 
 	state.Close()
 	if !state.IsClosed() {
 		// 重复 Close 必须保持已关闭状态且无副作用。
 		t.Fatalf("state should remain closed after second close")
+	}
+	if closeHookCalls != 1 {
+		// 重复 Close 不得重复执行关闭钩子。
+		t.Fatalf("close hook should remain single-shot: got %d", closeHookCalls)
+	}
+}
+
+// TestStateAddCloseHookAfterClose 验证已关闭 State 不会继续持有新钩子。
+//
+// 入参由测试构造；AddCloseHook 没有返回值，已关闭状态下必须立即执行回调且不影响重复 Close。
+func TestStateAddCloseHookAfterClose(t *testing.T) {
+	// 先关闭 State，再登记钩子，覆盖延迟清理调用方的兜底路径。
+	state := NewState()
+	state.Close()
+	calls := 0
+	state.AddCloseHook(func() {
+		// 记录关闭后登记的钩子是否立即执行。
+		calls++
+	})
+	if calls != 1 {
+		// 已关闭 State 必须立即释放调用方资源。
+		t.Fatalf("late close hook calls mismatch: got %d want 1", calls)
 	}
 }
 

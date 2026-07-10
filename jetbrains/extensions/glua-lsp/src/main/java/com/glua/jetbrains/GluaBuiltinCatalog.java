@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.intellij.openapi.application.Application;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.diagnostic.Logger;
 
@@ -289,7 +290,19 @@ public final class GluaBuiltinCatalog {
         return element != null && element.isJsonObject() ? element.getAsJsonObject() : null;
     }
 
+    /**
+     * 获取当前 IDE 的 GLua 设置。
+     *
+     * @return IDE 服务中的设置；无 Application 的测试环境返回默认设置
+     */
     private GluaSettings settings() {
-        return ApplicationManager.getApplication().getService(GluaSettings.class);
+        // 优先使用 IDE 服务，纯分析与单元测试环境则创建不持久化的默认设置。
+        Application application = ApplicationManager.getApplication();
+        if (application == null) {
+            // 测试环境没有 IntelliJ Application，默认设置可保证内置目录仍可加载。
+            return new GluaSettings();
+        }
+        GluaSettings settings = application.getService(GluaSettings.class);
+        return settings == null ? new GluaSettings() : settings;
     }
 }

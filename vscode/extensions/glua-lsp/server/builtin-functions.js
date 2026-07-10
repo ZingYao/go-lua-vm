@@ -393,16 +393,34 @@ function makeBuiltinStubContent(name, info) {
   if (!info) {
     return "";
   }
-  return [
+  const signature = String(info.signature || name);
+  const isFunction = signature.includes("(");
+  const localizedBodyComment = normalizeLocale(info._locale) === "zh-CN"
+    ? "此函数仅作为语言服务器跳转目标，函数体不会执行"
+    : "body left intentionally empty for language-server jump target";
+  const header = [
     `-- ${info.description}`,
     `-- @param`,
     ...info.params.map((param) => `-- ${param}`),
     `-- @return ${info.returns}`,
     ...(info.example ? [`-- @example`, ...String(Array.isArray(info.example) ? info.example.join("\n") : info.example).split("\n").map((line) => `-- ${line}`)] : []),
     "",
-    `-- ${name}: ${info.signature}`,
+    `-- ${name}: ${signature}`,
+  ];
+  if (!isFunction) {
+    const parts = name.split(".");
+    const body = [];
+    for (let index = 1; index < parts.length; index++) {
+      const tableName = parts.slice(0, index).join(".");
+      body.push(`${tableName} = ${tableName} or {}`);
+    }
+    body.push(`${name} = ${JSON.stringify(signature)}`);
+    return [...header, ...body].join("\n");
+  }
+  return [
+    ...header,
     `function ${name}()`,
-    `  -- body left intentionally empty for language-server jump target`,
+    `  -- ${localizedBodyComment}`,
     `end`,
   ].join("\n");
 }

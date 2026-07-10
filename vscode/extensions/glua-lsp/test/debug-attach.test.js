@@ -147,18 +147,18 @@ async function main() {
   });
   assert.strictEqual(extension._test.parseGluaDapReadyLine("missing ready"), null);
   assert.strictEqual(extension._test.isManagedProcessControlLine("GLua DAP client configured; starting script.\n"), true);
-  assert.strictEqual(extension._test.isManagedProcessControlLine("hello,圈圈\n"), false);
+  assert.strictEqual(extension._test.isManagedProcessControlLine("hello,zing\n"), false);
 
   debugConsoleText.length = 0;
   outputLines.length = 0;
   const managedOutputRouter = extension._test.createManagedProcessOutputRouter(outputChannel);
   managedOutputRouter.route("GLua DAP server listening on 127.0.0.1:65019\n", "stderr", false);
-  managedOutputRouter.route("hello,圈圈\n", "stdout", true);
+  managedOutputRouter.route("hello,zing\n", "stdout", true);
   managedOutputRouter.route("GLua DAP client configured; starting script.\n", "stderr", true);
   managedOutputRouter.flush(true);
   assert(outputLines.includes("GLua DAP server listening on 127.0.0.1:65019\n"), "ready line should stay in output channel");
   assert(outputLines.includes("GLua DAP client configured; starting script.\n"), "DAP control line should stay in output channel");
-  assert.deepStrictEqual(debugConsoleText, ["hello,圈圈\n"], "script stdout should go to debug console");
+  assert.deepStrictEqual(debugConsoleText, ["hello,zing\n"], "script stdout should go to debug console");
 
   assert.strictEqual(extension._test.isGluaDebugSession({ type: "glua" }), true);
   assert.strictEqual(extension._test.isGluaDebugSession({ type: "node" }), false);

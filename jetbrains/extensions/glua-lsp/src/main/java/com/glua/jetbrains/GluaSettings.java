@@ -24,6 +24,7 @@ public final class GluaSettings implements PersistentStateComponent<GluaSettings
         public boolean dapDebugLog = false;
         public String gluaExecutable = "";
         public String gluacExecutable = "";
+        public String languageServerExecutable = "";
     }
 
     private StateData state = new StateData();
@@ -119,5 +120,13 @@ public final class GluaSettings implements PersistentStateComponent<GluaSettings
 
     public void setGluacExecutable(String gluacExecutable) {
         state.gluacExecutable = gluacExecutable == null ? "" : gluacExecutable.trim();
+    }
+
+    public String languageServerExecutable() {
+        return state.languageServerExecutable == null ? "" : state.languageServerExecutable.trim();
+    }
+
+    public void setLanguageServerExecutable(String languageServerExecutable) {
+        state.languageServerExecutable = languageServerExecutable == null ? "" : languageServerExecutable.trim();
     }
 }

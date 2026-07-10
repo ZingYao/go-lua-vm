@@ -160,6 +160,8 @@ type VM struct {
 	stringTableReadCache []stringTableReadCacheEntry
 	// stringTableReadCacheProto 记录 stringTableReadCache 对应的 Proto，避免 VM 池复用时误用旧缓存。
 	stringTableReadCacheProto *bytecode.Proto
+	// disableStringTableReadCache 表示当前执行路径要求逐次读取动态 table 字段，不使用 inline cache。
+	disableStringTableReadCache bool
 	// borrowedSelfRecursiveLocalFunctionClosureEnabled 控制非逃逸自递归局部函数闭包借用路径。
 	borrowedSelfRecursiveLocalFunctionClosureEnabled bool
 	// borrowedSelfRecursiveLocalFunctionProto 记录借用闭包对应的子 Proto，避免跨 Proto 复用错误闭包。
@@ -216,11 +218,13 @@ type arithmeticIntOperandCacheEntry struct {
 
 // stringTableReadCacheEntry 表示一条字符串常量 table 读取 inline cache。
 //
-// table 与 version 共同判定缓存是否仍然匹配；同一 Proto 的同一 PC 固定对应同一个字符串常量 key，
+// table、tableID 与 version 共同判定缓存是否仍然匹配；同一 Proto 的同一 PC 固定对应同一个字符串常量 key，
 // 因此 key 不需要重复保存。value 可以是 nil 值，valid 用于区分未初始化缓存。
 type stringTableReadCacheEntry struct {
 	// table 保存上次命中的 Lua table 指针。
 	table *Table
+	// tableID 保存 table 的稳定创建身份，防止 Go GC 地址复用把新 table 当成旧 table。
+	tableID uint64
 	// version 保存 table 上次命中时的 raw 写入版本。
 	version uint64
 	// value 保存上次读取到的 Lua 值。
@@ -6310,6 +6314,23 @@ func (vm *VM) SetCurrentPC(pc int) {
 	vm.currentPC = pc
 }
 
+// SetStringTableReadCacheDisabled 设置当前 VM 是否禁用字符串字段读取 inline cache。
+//
+// disabled=true 用于事件、调试等需要精确观察动态临时 table 的路径；切换到禁用状态会立即丢弃
+// 旧缓存，disabled=false 恢复默认缓存行为。该标记只影响 VM 内部优化，不改变 Lua table 语义。
+func (vm *VM) SetStringTableReadCacheDisabled(disabled bool) {
+	// nil VM 没有可更新的缓存配置。
+	if vm == nil {
+		// 调用方可在可选 VM 路径安全调用。
+		return
+	}
+	if disabled {
+		// 禁用时清空旧命中，避免恢复前误用动态 table 的历史结果。
+		vm.stringTableReadCache = nil
+	}
+	vm.disableStringTableReadCache = disabled
+}
+
 // cachedStringTableRead 尝试读取当前 PC 的字符串 table inline cache。
 //
 // table 必须是无元表 table；缓存命中还要求 table raw 写入版本未变化。返回 ok=false 时调用方
@@ -6319,12 +6340,12 @@ func (vm *VM) cachedStringTableRead(table *Table) (Value, bool) {
 		// 缺少 VM 或 table 时不能使用缓存。
 		return NilValue(), false
 	}
-	if vm.currentPC < 0 || vm.currentPC >= len(vm.stringTableReadCache) {
+	if vm.disableStringTableReadCache || vm.currentPC < 0 || vm.currentPC >= len(vm.stringTableReadCache) {
 		// 没有绑定 Proto 或 PC 超出缓存范围时退回普通读取。
 		return NilValue(), false
 	}
 	cacheEntry := vm.stringTableReadCache[vm.currentPC]
-	if !cacheEntry.valid || cacheEntry.table != table {
+	if !cacheEntry.valid || cacheEntry.table != table || cacheEntry.tableID != table.CacheIdentity() {
 		// 缓存尚未初始化或来自其他 table 时不能复用。
 		return NilValue(), false
 	}
@@ -6343,12 +6364,13 @@ func (vm *VM) rememberStringTableRead(table *Table, value Value) {
 		// 缺少 VM 或 table 时没有可记录对象。
 		return
 	}
-	if !vm.ensureStringTableReadCache() {
+	if vm.disableStringTableReadCache || !vm.ensureStringTableReadCache() {
 		// 没有绑定 Proto 或 PC 超出缓存范围时跳过记录。
 		return
 	}
 	vm.stringTableReadCache[vm.currentPC] = stringTableReadCacheEntry{
 		table:   table,
+		tableID: table.CacheIdentity(),
 		version: table.MutationVersion(),
 		value:   value,
 		valid:   true,
@@ -7181,19 +7203,19 @@ func (vm *VM) executeGetTabUp(instruction bytecode.Instruction) error {
 			keyConstant := vm.constants[keyIndex]
 			if keyConstant.Kind == bytecode.ConstantString {
 				// string 常量 raw get 不会触发元方法，未命中直接返回 nil。
-				if vm.currentPC >= 0 && vm.currentPC < len(vm.stringTableReadCache) {
+				if !vm.disableStringTableReadCache && vm.currentPC >= 0 && vm.currentPC < len(vm.stringTableReadCache) {
 					// 热路径直接检查当前 PC 的 table/version，避免每次全局读取进入 helper。
 					cacheEntry := vm.stringTableReadCache[vm.currentPC]
-					if cacheEntry.valid && cacheEntry.table == table && cacheEntry.version == table.mutationVersion {
+					if cacheEntry.valid && cacheEntry.table == table && cacheEntry.tableID == table.CacheIdentity() && cacheEntry.version == table.mutationVersion {
 						// table 版本未变化时复用上一轮同 PC 的读取结果。
 						vm.registers[targetIndex] = cacheEntry.value
 						return nil
 					}
 				}
 				value := table.RawGetString(keyConstant.String)
-				if vm.ensureStringTableReadCache() {
+				if !vm.disableStringTableReadCache && vm.ensureStringTableReadCache() {
 					// 记录当前 PC 的读取结果，下一轮相同字段可直接命中。
-					vm.stringTableReadCache[vm.currentPC] = stringTableReadCacheEntry{table: table, version: table.mutationVersion, value: value, valid: true}
+					vm.stringTableReadCache[vm.currentPC] = stringTableReadCacheEntry{table: table, tableID: table.CacheIdentity(), version: table.mutationVersion, value: value, valid: true}
 				}
 				vm.registers[targetIndex] = value
 				return nil
@@ -7286,19 +7308,19 @@ func (vm *VM) executeGetTable(instruction bytecode.Instruction) error {
 				keyConstant := vm.constants[keyIndex]
 				if keyConstant.Kind == bytecode.ConstantString {
 					// string 常量 raw get 不会触发元方法，未命中直接返回 nil。
-					if vm.currentPC >= 0 && vm.currentPC < len(vm.stringTableReadCache) {
+					if !vm.disableStringTableReadCache && vm.currentPC >= 0 && vm.currentPC < len(vm.stringTableReadCache) {
 						// 热路径直接检查当前 PC 的 table/version，避免每次字段读取进入 helper。
 						cacheEntry := vm.stringTableReadCache[vm.currentPC]
-						if cacheEntry.valid && cacheEntry.table == table && cacheEntry.version == table.mutationVersion {
+						if cacheEntry.valid && cacheEntry.table == table && cacheEntry.tableID == table.CacheIdentity() && cacheEntry.version == table.mutationVersion {
 							// table 版本未变化时复用上一轮同 PC 的读取结果。
 							vm.registers[targetIndex] = cacheEntry.value
 							return nil
 						}
 					}
 					value := table.RawGetString(keyConstant.String)
-					if vm.ensureStringTableReadCache() {
+					if !vm.disableStringTableReadCache && vm.ensureStringTableReadCache() {
 						// 记录当前 PC 的读取结果，下一轮相同字段可直接命中。
-						vm.stringTableReadCache[vm.currentPC] = stringTableReadCacheEntry{table: table, version: table.mutationVersion, value: value, valid: true}
+						vm.stringTableReadCache[vm.currentPC] = stringTableReadCacheEntry{table: table, tableID: table.CacheIdentity(), version: table.mutationVersion, value: value, valid: true}
 					}
 					vm.registers[targetIndex] = value
 					return nil

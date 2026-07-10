@@ -1,0 +1,56 @@
+-- GLua 序列化补强与通用扩展回归脚本。
+
+-- 显式数组/对象解决空 table 的格式歧义。
+assert(glua.json.encode(glua.array()) == "[]")
+assert(glua.json.encode(glua.object()) == "{}")
+assert(glua.json.decode("123", { numberMode = "string" }) == "123")
+assert(not pcall(glua.json.decode, "{}", { maxInputBytes = 1 }))
+
+-- TOML 编解码使用同一套结构预算。
+local tomlText = glua.toml.encode({ author = "zing", values = { 1, 2 } })
+local tomlValue = glua.toml.decode(tomlText)
+assert(tomlValue.author == "zing" and tomlValue.values[2] == 2)
+
+-- XML 支持 namespace、CDATA 和可逆类型标记。
+local xmlText = glua.xml.encode({ code = "001", missing = glua.null }, {
+  root = "document",
+  namespace = "urn:glua",
+  typed = true,
+})
+local xmlValue = glua.xml.decode(xmlText, { typed = true })
+assert(xmlValue.code == "001" and xmlValue.missing == glua.null)
+local cdataText = glua.xml.encode({ _cdata = "<zing>" }, { root = "content" })
+assert(glua.xml.decode(cdataText) == "<zing>")
+
+-- codec、hash、regex 和 UUID 使用纯 Go 标准库。
+assert(glua.codec.base64Decode(glua.codec.base64Encode("zing")) == "zing")
+assert(glua.codec.hexDecode(glua.codec.hexEncode("zing")) == "zing")
+assert(glua.hash.md5("zing") == "2f5117cb8211933814c3da646e0e4dde")
+assert(glua.hash.sha256("zing") == "bd2e37ad80b24655fc1887ac05c7ca75f5e7eac58294ef3b17996492a09c3004")
+assert(glua.hash.hmac("sha256", "key", "data") == "5031fe3d989c6d1537a013fa6e739da23463fdaec3b70137d828e36ace221bd0")
+assert(glua.regex.match("^z.*g$", "zing"))
+assert(glua.regex.replace("[0-9]+", "a1b2", "#", 1) == "a#b2")
+local identifier = glua.uuid.v4()
+assert(glua.uuid.validate(identifier))
+
+-- ZIP 在内存中压缩文件映射，并执行路径和解压预算检查。
+local archive = glua.zip.compress({ ["a.txt"] = "A", ["dir/b.bin"] = "B" })
+local files = glua.zip.decompress(archive)
+assert(files["a.txt"] == "A" and files["dir/b.bin"] == "B")
+assert(not pcall(glua.zip.compress, { ["../escape"] = "bad" }))
+
+-- schema 校验返回 boolean/message/path，assert 在失败时抛出错误。
+local schema = {
+  type = "object",
+  required = { "name" },
+  additionalProperties = false,
+  properties = {
+    name = { type = "string", minLength = 2, pattern = "^[a-z]+$" },
+  },
+}
+assert(glua.schema.validate({ name = "zing" }, schema))
+local ok, _, path = glua.schema.validate({ name = "Z" }, schema)
+assert(not ok and path == "$.name")
+assert(not pcall(glua.schema.assert, {}, schema))
+
+print("GLUA_UTILITY_API_OK")

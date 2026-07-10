@@ -1,0 +1,48 @@
+-- GLua JSON、YAML、XML 公共 API 回归脚本。
+
+-- glua.null 用于保留对象字段和数组槽位中的格式 null。
+local source = {
+  name = "zing",
+  enabled = true,
+  count = 2,
+  values = { 1, glua.null, "三" },
+}
+
+-- JSON 默认紧凑输出，第二参数 true 启用两空格格式化。
+local jsonText = glua.json.encode(source)
+local jsonPretty = glua.json.encode(source, true)
+assert(jsonPretty:find("\n", 1, true))
+local jsonValue = glua.json.decode(jsonText)
+assert(jsonValue.name == "zing")
+assert(jsonValue.values[2] == glua.null)
+
+-- YAML 使用同一套 table 形状和 null 规则。
+local yamlText = glua.yaml.encode(source)
+local yamlValue = glua.yaml.decode(yamlText)
+assert(yamlValue.enabled == true)
+assert(yamlValue.values[3] == "三")
+
+-- XML 对象键映射元素，连续数组映射 item，_attr 映射属性。
+local xmlText = glua.xml.encode({
+  user = { _attr = { id = 9 }, name = "zing" },
+  values = { 1, 2 },
+}, { root = "document", pretty = true })
+local xmlValue = glua.xml.decode(xmlText)
+assert(xmlValue.user._attr.id == 9)
+assert(xmlValue.user.name == "zing")
+assert(xmlValue.values[1] == 1 and xmlValue.values[2] == 2)
+
+-- inferTypes=false 用于保留有前导零的文本。
+local xmlStringValue = glua.xml.decode("<root><code>001</code></root>", { inferTypes = false })
+assert(xmlStringValue.code == "001")
+
+-- 循环引用、混合键、非法 XML 名称和多文档输入必须明确失败。
+local cycle = {}
+cycle.self = cycle
+assert(not pcall(glua.json.encode, cycle))
+assert(not pcall(glua.yaml.encode, { [1] = "array", name = "object" }))
+assert(not pcall(glua.xml.encode, { ["bad name"] = true }))
+assert(not pcall(glua.json.decode, "{} {}"))
+assert(not pcall(glua.json.decode, "9223372036854775808"))
+
+print("GLUA_SERIALIZATION_OK")

@@ -1,7 +1,7 @@
 <idea-plugin>
   <id>com.glua.jetbrains</id>
   <name>GLua 语言扩展</name>
-  <vendor url="https://github.com/ZingYao/go-lua-vm">Zing</vendor>
+  <vendor url="https://github.com/ZingYao/go-lua-vm">zing</vendor>
   <description><![CDATA[
     <h2>GLua 语言扩展</h2>
     <p>面向 <b>go-lua-vm</b> 的 Lua/glua 编辑器支持，覆盖日常编码、模块跳转、文档提示和 DAP 调试连接。</p>
@@ -45,27 +45,8 @@
       language="GLua"
       implementationClass="com.glua.jetbrains.GluaCommenter"/>
 
-    <annotator
-      language="GLua"
-      implementationClass="com.glua.jetbrains.GluaAnnotator"/>
-
-    <completion.contributor
-      language="GLua"
-      implementationClass="com.glua.jetbrains.GluaCompletionContributor"/>
-
     <enterHandlerDelegate
       implementation="com.glua.jetbrains.GluaEnterHandler"/>
-
-    <psi.referenceContributor
-      language="GLua"
-      implementation="com.glua.jetbrains.GluaBuiltinReferenceContributor"/>
-
-    <gotoDeclarationHandler
-      implementation="com.glua.jetbrains.GluaGotoDeclarationHandler"/>
-
-    <lang.documentationProvider
-      language="GLua"
-      implementationClass="com.glua.jetbrains.GluaDocumentationProvider"/>
 
     <postFormatProcessor
       implementation="com.glua.jetbrains.GluaPostFormatProcessor"/>
@@ -73,15 +54,15 @@
     <xdebugger.breakpointType
       implementation="com.glua.jetbrains.GluaLineBreakpointType"/>
 
-    <com.intellij.platform.backend.documentation.targetProvider
-      implementation="com.glua.jetbrains.GluaDocumentationTargetProvider"/>
-
     <applicationService
       serviceImplementation="com.glua.jetbrains.GluaSettings"/>
 
     <applicationConfigurable
       instance="com.glua.jetbrains.GluaSettingsConfigurable"
       displayName="GLua"/>
+
+    <platform.lsp.serverSupportProvider
+      implementation="com.glua.jetbrains.GluaLspServerSupportProvider"/>
 
     <configurationType
       implementation="com.glua.jetbrains.GluaDapRunConfigurationType"/>

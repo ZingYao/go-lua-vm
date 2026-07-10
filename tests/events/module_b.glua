@@ -1,0 +1,9 @@
+-- 跨文件同名函数过滤测试模块 B。
+local module = {}
+
+function module.run()
+  -- 返回固定值，便于主测试确认实际调用的是模块 B。
+  return "module-b"
+end
+
+return module

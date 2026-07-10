@@ -1,0 +1,157 @@
+-- GLua event API 正常路径验证：由 scripts/test-glua-events.sh 执行。
+local event = glua.event
+local moduleA = dofile("tests/events/module_a.glua")
+local moduleB = dofile("tests/events/module_b.glua")
+local function sameProtoFactory()
+  -- 每次调用都从同一个函数 Proto 创建新的 closure 对象。
+  return function() return "same-proto" end
+end
+local sameProtoA = sameProtoFactory()
+local sameProtoB = sameProtoFactory()
+
+-- 验证事件命名空间和全部预设常量，防止公开名称发生不兼容变更。
+assert(type(event) == "table")
+assert(event.events.progress_line == "progress.line")
+assert(event.events.progress_start == "progress.start")
+assert(event.events.progress_end == "progress.end")
+assert(event.events.progress_error == "progress.error")
+assert(event.events.progress_exit == "progress.exit")
+assert(event.events.progress_function_call == "progress.function_call")
+assert(event.events.progress_function_return == "progress.function_return")
+assert(event.events.progress_function_error == "progress.function_error")
+assert(event.events.progress_function_exit == "progress.function_exit")
+
+-- 记录各类事件的触发结果，后续通过精确计数检查过滤和生命周期语义。
+local lineCount = 0
+local syncPayload = nil
+local asyncPayload = nil
+local functionCalls = 0
+local functionReturns = 0
+local functionExits = 0
+local exactFunctionCalls = 0
+
+-- 源码行事件必须返回事件 ID，并提供事件名和毫秒时间戳。
+local lineID = event.setProgress(event.events.progress_line, function(ctx)
+  assert(ctx.event == event.events.progress_line)
+  assert(type(ctx.timestamp) == "number" and ctx.timestamp > 0)
+  print("EVENT_CALLBACK", ctx.event, "source", ctx.source, "line", ctx.line)
+  lineCount = lineCount + 1
+end)
+assert(type(lineID) == "number")
+
+-- 自定义同步事件应在 callProgress 返回前完成回调，并原样传递 payload。
+local syncID = event.setProgress("test.custom.sync", function(ctx)
+  assert(ctx.event == "test.custom.sync")
+  assert(type(ctx.timestamp) == "number" and ctx.timestamp > 0)
+  print("EVENT_CALLBACK", ctx.event, "payload", ctx.payload, "async", ctx.async)
+  syncPayload = ctx.payload
+end)
+event.callProgress("test.custom.sync", "sync payload")
+assert(syncPayload == "sync payload")
+
+-- 自定义异步事件先进入 VM 队列，在后续安全点执行回调。
+local asyncID = event.setProgressAsync("test.custom.async", function(ctx)
+  assert(ctx.async)
+  assert(ctx.event == "test.custom.async")
+  print("EVENT_CALLBACK", ctx.event, "payload", ctx.payload, "async", ctx.async)
+  asyncPayload = ctx.payload
+end)
+event.callProgressAsync("test.custom.async", "async payload")
+
+-- observed 用于验证函数正常调用、返回和退出生命周期。
+local function observed(value)
+  return value * 2
+end
+
+-- 为函数调用、返回、错误和退出事件分别注册过滤后的观察回调。
+local callID = event.setProgress(event.events.progress_function_call, function(ctx)
+  assert(ctx.event == event.events.progress_function_call)
+  print("EVENT_CALLBACK", ctx.event, "function", ctx.functionName, "line", ctx.line)
+  functionCalls = functionCalls + 1
+end, { whitelist = { "observed" } })
+local returnID = event.setProgress(event.events.progress_function_return, function(ctx)
+  print("EVENT_CALLBACK", ctx.event, "function", ctx.functionName, "line", ctx.line)
+  functionReturns = functionReturns + 1
+end, { whitelist = { "observed" } })
+local exitID = event.setProgress(event.events.progress_function_exit, function(ctx)
+  print("EVENT_CALLBACK", ctx.event, "function", ctx.functionName, "line", ctx.line)
+  functionExits = functionExits + 1
+end, { whitelist = { "observed" } })
+
+-- 函数变量名单按 closure identity 匹配，可区分两个文件导出的同名 run 方法。
+local exactID = event.setProgress(event.events.progress_function_call, function(ctx)
+  print("EVENT_CALLBACK", ctx.event, "function", ctx.functionName, "line", ctx.line, "filter", "exact")
+  exactFunctionCalls = exactFunctionCalls + 1
+end, { whitelist = { moduleA.run } })
+
+assert(moduleA.run() == "module-a")
+assert(moduleB.run() == "module-b")
+assert(exactFunctionCalls == 1, exactFunctionCalls)
+assert(event.setConfig(exactID, { whitelist = { sameProtoA } }))
+assert(sameProtoA() == "same-proto")
+assert(sameProtoB() == "same-proto")
+assert(exactFunctionCalls == 2, exactFunctionCalls)
+assert(event.setConfig(exactID, { blacklist = { moduleA.run } }))
+assert(moduleA.run() == "module-a")
+assert(exactFunctionCalls == 2, exactFunctionCalls)
+assert(event.setConfig(exactID, { whitelist = { moduleA.run } }))
+
+-- eventList 只统计当前文件，并按事件名稳定列出各事件监听器数量。
+local initialList = event.eventList()
+assert(initialList.totalEvents == 6, initialList.totalEvents)
+assert(initialList.totalListeners == 7, initialList.totalListeners)
+assert(initialList.activeListeners == 7, initialList.activeListeners)
+assert(initialList.mutedListeners == 0, initialList.mutedListeners)
+assert(initialList.syncListeners == 6, initialList.syncListeners)
+assert(initialList.asyncListeners == 1, initialList.asyncListeners)
+for index = 2, #initialList.events do
+  assert(initialList.events[index - 1].event < initialList.events[index].event)
+end
+
+-- 注册配置必须能通过事件 ID 读取，白名单仅允许指定函数触发回调。
+local config = event.getConfig(callID)
+assert(config.whitelist[1] == "observed")
+assert(observed(21) == 42)
+
+-- 再次调用 Lua 函数以触发安全点，消费自定义异步事件并核对生命周期计数。
+assert(observed(1) == 2)
+assert(asyncPayload == "async payload")
+assert(functionCalls == 2, functionCalls)
+assert(functionReturns == 2, functionReturns)
+assert(functionExits == 2, functionExits)
+
+-- 动态切换为黑名单后，observed 仍正常执行，但不再触发调用事件。
+assert(event.setConfig(callID, { blacklist = { "observed" } }))
+assert(event.getConfig(callID).blacklist[1] == "observed")
+assert(observed(2) == 4)
+assert(functionCalls == 2, functionCalls)
+
+-- 静音只暂停回调；解除静音后，同一个事件 ID 应恢复工作。
+assert(event.setConfig(callID, { whitelist = { "observed" } }))
+assert(event.setMuted(callID, true))
+local mutedList = event.eventList()
+assert(mutedList.totalListeners == 7)
+assert(mutedList.activeListeners == 6)
+assert(mutedList.mutedListeners == 1)
+assert(observed(3) == 6)
+assert(functionCalls == 2, functionCalls)
+assert(event.setMuted(callID, false))
+assert(observed(4) == 8)
+assert(functionCalls == 3, functionCalls)
+
+-- 删除事件后再次删除应返回 false，证明注册表已经清理对应 ID。
+assert(event.remove(syncID))
+assert(not event.remove(syncID))
+assert(event.remove(asyncID))
+assert(event.remove(exactID))
+assert(event.remove(callID))
+assert(event.remove(returnID))
+assert(event.remove(exitID))
+assert(event.remove(lineID))
+assert(lineCount > 0, lineCount)
+local emptyList = event.eventList()
+assert(emptyList.totalEvents == 0)
+assert(emptyList.totalListeners == 0)
+
+-- 统一完成标记由 shell 运行器读取。
+print("GLUA_EVENT_API_OK")

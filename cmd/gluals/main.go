@@ -27,6 +27,11 @@ func main() {
 		_, _ = fmt.Fprint(os.Stdout, helpText())
 		return
 	}
+	if err := lsp.LoadBuiltinCatalogFiles(options.BuiltinDocs); err != nil {
+		// builtin catalog 无法加载时拒绝启动，避免插件悄悄退化为不完整补全。
+		_, _ = fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	server := lsp.New(os.Stdin, os.Stdout, options.Syntax)
 	if err := server.Run(context.Background()); err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)
@@ -40,6 +45,8 @@ type options struct {
 	Syntax extensions.SyntaxSet
 	// Help 表示是否输出帮助文本。
 	Help bool
+	// BuiltinDocs 保存插件传入的 builtin JSON 文档路径。
+	BuiltinDocs []string
 }
 
 // parseArgs 解析 gluals 启动参数。
@@ -68,6 +75,15 @@ func parseArgs(args []string) (options, error) {
 			parsedOptions.Syntax = parsedSyntax
 			continue
 		}
+		if argument == "--gluals-builtin-docs" {
+			// 独立 builtin 文档参数必须消费下一个路径。
+			index++
+			if index >= len(args) {
+				return options{}, fmt.Errorf("option --gluals-builtin-docs requires an argument")
+			}
+			parsedOptions.BuiltinDocs = append(parsedOptions.BuiltinDocs, args[index])
+			continue
+		}
 		if len(argument) > len("--gluals-syntax=") && argument[:len("--gluals-syntax=")] == "--gluals-syntax=" {
 			// 等号形式便于 IDE 配置。
 			parsedSyntax, err := extensions.ParseSyntaxSet(argument[len("--gluals-syntax="):])
@@ -75,6 +91,11 @@ func parseArgs(args []string) (options, error) {
 				return options{}, err
 			}
 			parsedOptions.Syntax = parsedSyntax
+			continue
+		}
+		if len(argument) > len("--gluals-builtin-docs=") && argument[:len("--gluals-builtin-docs=")] == "--gluals-builtin-docs=" {
+			// 等号形式便于 IDE 配置多个文档路径。
+			parsedOptions.BuiltinDocs = append(parsedOptions.BuiltinDocs, argument[len("--gluals-builtin-docs="):])
 			continue
 		}
 		return options{}, fmt.Errorf("unrecognized option %q", argument)
@@ -91,6 +112,7 @@ func helpText() string {
 	builder.WriteString("Options:\n")
 	builder.WriteString("  -h, --help               show this help\n")
 	builder.WriteString("  --gluals-syntax value    select syntax mode: lua53, extended, all, continue,switch,const\n\n")
+	builder.WriteString("  --gluals-builtin-docs path  load a plugin builtin JSON catalog (repeatable)\n\n")
 	builder.WriteString(buildinfo.FeatureText(false))
 	return builder.String()
 }

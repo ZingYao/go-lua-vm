@@ -4,7 +4,7 @@
   "description": "%extension.description%",
   "version": "1.0.0",
   "publisher": "Zing",
-  "author": "Zing",
+  "author": "zing",
   "repository": {
     "type": "git",
     "url": "https://github.com/ZingYao/go-lua-vm.git",
@@ -22,9 +22,11 @@
     "debug-adapter"
   ],
   "scripts": {
-    "build": "esbuild extension.js --bundle --platform=node --format=cjs --external:vscode --outfile=dist/extension.js && esbuild server/index.js --bundle --platform=node --format=cjs --outfile=dist/server.js",
+    "build": "npm run build:gluals && npm run build:extension",
+    "build:gluals": "../../../scripts/build-gluals-platforms.sh",
+    "build:extension": "esbuild extension.js --bundle --platform=node --format=cjs --external:vscode --outfile=dist/extension.js && esbuild server/index.js --bundle --platform=node --format=cjs --outfile=dist/server.js",
     "vscode:prepublish": "npm run build",
-    "test": "node test/golden-diagnostics.test.js && node test/golden-require-definition.test.js && node test/golden-completion.test.js && node test/formatting.test.js && node test/debug-attach.test.js"
+    "test": "node test/gluals-resolver.test.js && node test/syntax-highlighting.test.js && node test/builtin-stub.test.js && node test/golden-diagnostics.test.js && node test/golden-require-definition.test.js && node test/golden-completion.test.js && node test/formatting.test.js && node test/debug-attach.test.js"
   },
   "engines": {
     "vscode": "^1.80.0"
@@ -402,6 +404,12 @@
           "default": "",
           "order": 40,
           "description": "%glua.configuration.executable.description%"
+        },
+        "glua.languageServerExecutable": {
+          "type": "string",
+          "default": "",
+          "order": 45,
+          "description": "%glua.configuration.languageServerExecutable.description%"
         },
         "glua.gluacExecutable": {
           "type": "string",

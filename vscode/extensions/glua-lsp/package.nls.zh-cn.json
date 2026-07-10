@@ -28,6 +28,7 @@
   "glua.configuration.events.description": "在语言服务中启用 GLua event API 符号。",
   "glua.configuration.docLanguage.description": "内置文档、悬停文本和签名帮助使用的语言标签。",
   "glua.configuration.executable.description": "调试启动辅助功能使用的 glua 可执行文件路径。可通过命令“GLua: 选择 glua 可执行文件”选择文件。",
+  "glua.configuration.languageServerExecutable.description": "gluals 可执行文件路径。当前操作系统和架构没有内置版本时必须配置。",
   "glua.configuration.gluacExecutable.description": "编译辅助功能使用的 gluac 可执行文件路径。可通过命令“GLua: 选择 gluac 可执行文件”选择文件。",
   "glua.configuration.dapHost.description": "attach 调试使用的远程 GLua DAP 主机；启用 glua.useRemoteDap 后，调试当前文件也会使用该主机。",
   "glua.configuration.dapPort.description": "attach 调试使用的远程 GLua DAP 端口；启用 glua.useRemoteDap 后，调试当前文件也会使用该端口。",

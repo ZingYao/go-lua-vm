@@ -1598,13 +1598,88 @@ func TestOpenLibsCanDisableGluaEvents(t *testing.T) {
 		// 标准库注册仍应成功。
 		t.Fatalf("OpenLibs with events disabled failed: %v", err)
 	}
-	if value := state.Globals().RawGetString("setFunctionEvent"); !value.IsNil() {
-		// 关闭事件能力后不应注册函数级事件入口。
-		t.Fatalf("setFunctionEvent should not be registered when events are disabled: %#v", value)
+	gluaValue := state.Globals().RawGetString("glua")
+	gluaTable, ok := gluaValue.Ref.(*runtime.Table)
+	if gluaValue.Kind != runtime.KindTable || !ok || gluaTable == nil {
+		// 序列化扩展始终需要 glua 根命名空间。
+		t.Fatalf("glua serialization namespace should remain available: %#v", gluaValue)
 	}
-	if value := state.Globals().RawGetString("events"); !value.IsNil() {
-		// 关闭事件能力后不应注册 events 常量表。
-		t.Fatalf("events table should not be registered when events are disabled: %#v", value)
+	if value := gluaTable.RawGetString("event"); !value.IsNil() {
+		// 关闭事件能力后只移除 glua.event，不影响其他 glua 扩展。
+		t.Fatalf("glua.event should not be registered when events are disabled: %#v", value)
+	}
+	for _, namespace := range []string{"json", "yaml", "xml", "toml", "codec", "hash", "regex", "uuid", "zip", "schema"} {
+		// 序列化和通用扩展命名空间与事件条件编译相互独立。
+		if value := gluaTable.RawGetString(namespace); value.Kind != runtime.KindTable {
+			// 缺少任一命名空间都表示 OpenLibs 注册不完整。
+			t.Fatalf("glua.%s should remain available: %#v", namespace, value)
+		}
+	}
+	for _, functionName := range []string{"array", "object"} {
+		// 结构形状函数也不依赖 Event 开关。
+		if value := gluaTable.RawGetString(functionName); value.Kind != runtime.KindGoClosure {
+			// 缺少形状标记入口会破坏空容器往返。
+			t.Fatalf("glua.%s should remain available: %#v", functionName, value)
+		}
+	}
+}
+
+// TestDoStringGluaSerialization 验证 JSON、YAML 和 XML 的 Lua 公共 API。
+//
+// 测试无外部输入；三种格式必须支持中文、数组、对象、null 和错误传播，JSON/XML 选项必须生效。
+func TestDoStringGluaSerialization(t *testing.T) {
+	// 创建完整标准库 State，使 pcall、assert 和 string 方法可用于公开 API 验收。
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 序列化命名空间依赖 OpenLibs 注册。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+	if err := DoString(state, `
+local value = {
+  name = "zing",
+  active = true,
+  count = 3,
+  items = { 1, glua.null, "三" },
+}
+
+local compact = glua.json.encode(value)
+assert(compact == '{"active":true,"count":3,"items":[1,null,"三"],"name":"zing"}', compact)
+local pretty = glua.json.encode(value, true)
+assert(pretty:find("\n", 1, true))
+local jsonValue = glua.json.decode(compact)
+assert(jsonValue.name == "zing" and jsonValue.active and jsonValue.count == 3)
+assert(jsonValue.items[2] == glua.null and jsonValue.items[2] == glua.json.null)
+
+local yamlText = glua.yaml.encode(value)
+assert(yamlText:find("name: zing", 1, true))
+local yamlValue = glua.yaml.decode(yamlText)
+assert(yamlValue.items[2] == glua.yaml.null and yamlValue.items[3] == "三")
+
+local xmlText = glua.xml.encode({
+  person = { _attr = { id = 7 }, name = "zing", active = true },
+  items = { 1, 2, 3 },
+}, { root = "document", pretty = true })
+assert(xmlText:find("<document>", 1, true))
+assert(xmlText:find('<person id="7">', 1, true))
+local xmlValue = glua.xml.decode(xmlText)
+assert(xmlValue.person._attr.id == 7)
+assert(xmlValue.person.name == "zing" and xmlValue.person.active == true)
+assert(xmlValue.items[1] == 1 and xmlValue.items[3] == 3)
+local xmlStrings = glua.xml.decode('<root><value>001</value></root>', { inferTypes = false })
+assert(xmlStrings.value == "001")
+
+local cycle = {}
+cycle.self = cycle
+assert(not pcall(glua.json.encode, cycle))
+assert(not pcall(glua.yaml.encode, { [1] = "array", name = "object" }))
+assert(not pcall(glua.xml.encode, { ["bad name"] = true }))
+assert(not pcall(glua.json.decode, "{} {}"))
+assert(not pcall(glua.json.decode, "9223372036854775808"))
+assert(not pcall(glua.yaml.decode, "---\na: 1\n---\nb: 2\n"))
+`); err != nil {
+		// 任一公开 API 语义失败都输出 Lua 错误对象，便于定位具体断言。
+		t.Fatalf("GLua serialization failed: %v object=%s", err, runtime.ErrorObject(err).DebugString())
 	}
 }
 
@@ -2491,7 +2566,7 @@ debug.setmetatable("", {
   end,
 })
 assert(({} .. "b") == "ok")
-assert(calls == 1)
+if calls ~= 1 then error("calls=" .. tostring(calls)) end
 `
 	if err := DoString(state, source); err != nil {
 		// 非 string 操作数必须继续触发 `__concat` 元方法。
@@ -6586,57 +6661,13 @@ func TestTryExecuteLeafAddReturnInCaller(t *testing.T) {
 	}
 }
 
-// TestDoStringGluaFunctionEvents 验证 glua 函数级事件、自定义事件和局部变量快照。
-func TestDoStringGluaFunctionEvents(t *testing.T) {
-	if !DefaultOptions().GluaEventsEnabled {
-		// 当前构建未编译 glua events 时，正向事件用例不执行。
-		t.Skip("glua events are not compiled")
-	}
-	// 创建完整标准库 State，确保事件全局函数和 table/string 基础能力可用。
-	state := NewState()
-	defer state.Close()
-	if err := OpenLibs(state); err != nil {
-		// 标准库打开不应失败。
-		t.Fatalf("OpenLibs failed: %v", err)
-	}
-
-	source := `
-local seen = {}
-local function f(x)
-  local inside = x + 1
-  setFunctionEvent(events.function_call, function(ctx)
-    seen[#seen + 1] = ctx.event .. ":" .. tostring(ctx.locals.x)
-  end)
-  setFunctionEvent(events.function_return, function(ctx)
-    seen[#seen + 1] = ctx.event .. ":" .. tostring(ctx.payload[1])
-  end)
-  setFunctionEvent("mark", function(ctx)
-    seen[#seen + 1] = ctx.event .. ":" .. tostring(ctx.locals.inside) .. ":" .. tostring(ctx.payload)
-  end)
-  callFunctionEvent("mark", "payload")
-  return inside
-end
-assert(f(2) == 3)
-assert(f(4) == 5)
-assert(seen[1] == "mark:3:payload", seen[1])
-assert(seen[2] == events.function_return .. ":3", seen[2])
-assert(seen[3] == events.function_call .. ":4", seen[3])
-assert(seen[4] == "mark:5:payload", seen[4])
-assert(seen[5] == events.function_return .. ":5", seen[5])
-`
-	if err := DoString(state, source); err != nil {
-		// 函数级事件必须按注册作用域触发并能读取当前 local 快照。
-		t.Fatalf("DoString glua function events failed: %v", err)
-	}
-}
-
-// TestDoStringGluaProgressEvents 验证 glua 文件级进度事件和异步自定义事件。
+// TestDoStringGluaProgressEvents 验证 glua.event 文件级事件、函数进度事件和事件管理能力。
 func TestDoStringGluaProgressEvents(t *testing.T) {
 	if !DefaultOptions().GluaEventsEnabled {
 		// 当前构建未编译 glua events 时，正向事件用例不执行。
 		t.Skip("glua events are not compiled")
 	}
-	// 创建完整标准库 State，确保事件全局函数可用。
+	// 创建完整标准库 State，确保 glua.event 命名空间可用。
 	state := NewState()
 	defer state.Close()
 	if err := OpenLibs(state); err != nil {
@@ -6645,61 +6676,136 @@ func TestDoStringGluaProgressEvents(t *testing.T) {
 	}
 
 	source := `
-local progressLines = 0
-local asyncPayload
-local lifecycle = {}
-assert(events.progress_start == "progress.start")
-assert(events.progress_end == "progress.end")
-assert(events.progress_error == "progress.error")
-assert(events.progress_exit == "progress.exit")
-setProgressEvent(events.progress_line, function(ctx)
-  if ctx.event == events.progress_line and ctx.line then
-    progressLines = progressLines + 1
-  end
-end)
-setProgressEvent(events.progress_start, function(ctx)
-  lifecycle[#lifecycle + 1] = ctx.event .. ":" .. tostring(ctx.kind) .. ":" .. tostring(ctx.source ~= nil)
-end)
-setProgressEvent(events.progress_end, function(ctx)
-  lifecycle[#lifecycle + 1] = ctx.event
-end)
-setProgressEvent(events.progress_error, function(ctx)
-  lifecycle[#lifecycle + 1] = ctx.event .. ":" .. tostring(ctx.payload ~= nil)
-end)
-setProgressEvent(events.progress_exit, function(ctx)
-  lifecycle[#lifecycle + 1] = ctx.event
-end)
-setProgressEventAsync("custom.progress", function(ctx)
-  asyncPayload = ctx.payload
-end)
-callProgressEventAsync("custom.progress", "done")
-local afterAsync = true
-assert(afterAsync)
-assert(asyncPayload == "done", tostring(asyncPayload))
-assert(progressLines > 0, progressLines)
+local event = glua.event
+assert(event.events.progress_function_call == "progress.function_call")
+assert(event.events.progress_function_return == "progress.function_return")
+assert(event.events.progress_function_error == "progress.function_error")
+assert(event.events.progress_function_exit == "progress.function_exit")
 local function observed(limit)
   local value = 0
-  for index = 1, limit do
-    value = value + index
-  end
+  for index = 1, limit do value = value + index end
   return value
 end
-assert(observed(2) == 3)
-assert(lifecycle[1] == events.progress_start .. ":progress:true", lifecycle[1])
-assert(lifecycle[2] == events.progress_end, lifecycle[2])
-assert(lifecycle[3] == events.progress_exit, lifecycle[3])
-local errorStart = #lifecycle + 1
-local ok = pcall(function()
-  error("boom")
-end)
-assert(not ok)
-assert(lifecycle[errorStart] == events.progress_start .. ":progress:true", lifecycle[errorStart])
-assert(lifecycle[errorStart + 1] == events.progress_error .. ":true", lifecycle[errorStart + 1])
-assert(lifecycle[errorStart + 2] == events.progress_exit, lifecycle[errorStart + 2])
+local moduleA = { run = function() return "a" end }
+local moduleB = { run = function() return "b" end }
+local function factory() return function() return "same-proto" end end
+local sameProtoA = factory()
+local sameProtoB = factory()
+local calls = 0
+local callID = event.setProgress(event.events.progress_function_call, function(ctx)
+  calls = calls + 1
+end, { whitelist = { "observed" } })
+local config = event.getConfig(callID)
+assert(config.whitelist[1] == "observed")
+local exactCalls = 0
+local exactID = event.setProgress(event.events.progress_function_call, function(ctx)
+  exactCalls = exactCalls + 1
+end, { whitelist = { moduleA.run } })
+local initialList = event.eventList()
+assert(initialList.totalEvents == 1, initialList.totalEvents)
+assert(initialList.totalListeners == 2, initialList.totalListeners)
+assert(initialList.activeListeners == 2, initialList.activeListeners)
+assert(initialList.mutedListeners == 0, initialList.mutedListeners)
+assert(initialList.syncListeners == 2, initialList.syncListeners)
+assert(initialList.asyncListeners == 0, initialList.asyncListeners)
+assert(initialList.events[1].event == event.events.progress_function_call)
+assert(initialList.events[1].listeners == 2)
+assert(moduleA.run() == "a")
+assert(moduleB.run() == "b")
+assert(exactCalls == 1, exactCalls)
+assert(event.setConfig(exactID, { whitelist = { sameProtoA } }))
+assert(sameProtoA() == "same-proto")
+assert(sameProtoB() == "same-proto")
+assert(exactCalls == 2, exactCalls)
+assert(event.setConfig(exactID, { blacklist = { moduleA.run } }))
+assert(moduleA.run() == "a")
+assert(exactCalls == 2, exactCalls)
+assert(event.setConfig(exactID, { whitelist = { moduleA.run } }))
+assert(observed(3) == 6)
+assert(calls == 1, calls)
+assert(event.setConfig(callID, { blacklist = { "observed" } }))
+assert(observed(1) == 1)
+assert(calls == 1, calls)
+assert(event.setConfig(callID, { whitelist = { "observed" } }))
+assert(event.setMuted(callID, true))
+local mutedList = event.eventList()
+assert(mutedList.totalListeners == 2)
+assert(mutedList.activeListeners == 1)
+assert(mutedList.mutedListeners == 1)
+assert(observed(1) == 1)
+assert(calls == 1, calls)
+assert(event.setMuted(callID, false))
+assert(observed(1) == 1)
+assert(calls == 2, calls)
+assert(event.remove(exactID))
+assert(event.remove(callID))
+assert(not event.remove(callID))
+local emptyList = event.eventList()
+assert(emptyList.totalEvents == 0)
+assert(emptyList.totalListeners == 0)
+assert(observed(1) == 1)
+assert(calls == 2, calls)
 `
 	if err := DoString(state, source); err != nil {
-		// 文件级事件必须覆盖当前 chunk、生命周期和 VM 安全点异步回调。
-		t.Fatalf("DoString glua progress events failed: %v", err)
+		// glua.event 必须覆盖文件生命周期、函数调用生命周期和事件管理操作。
+		t.Fatalf("DoString glua progress events failed: %v object=%s", err, runtime.ErrorObject(err).DebugString())
+	}
+}
+
+// TestDoStringGluaFileProgressEvents 验证 glua.event 的文件进度、异步自定义事件和毫秒时间戳。
+func TestDoStringGluaFileProgressEvents(t *testing.T) {
+	if !DefaultOptions().GluaEventsEnabled {
+		// 当前构建未编译 glua events 时，正向事件用例不执行。
+		t.Skip("glua events are not compiled")
+	}
+	// 创建完整标准库 State，确保异步事件可在 VM 安全点消费。
+	state := NewState()
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// 标准库打开不应失败。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+
+	source := `
+local event = glua.event
+local lines = 0
+local starts = 0
+local ends = 0
+local asyncPayload
+event.setProgress(event.events.progress_line, function(ctx)
+  assert(ctx.timestamp > 0)
+  lines = lines + 1
+end)
+event.setProgress(event.events.progress_start, function(ctx)
+  starts = starts + 1
+end)
+event.setProgress(event.events.progress_end, function(ctx)
+  ends = ends + 1
+end)
+event.setProgressAsync("custom.progress", function(ctx)
+  assert(ctx.async)
+  asyncPayload = ctx.payload
+end)
+local list = event.eventList()
+assert(list.totalEvents == 4, list.totalEvents)
+assert(list.totalListeners == 4, list.totalListeners)
+assert(list.activeListeners == 4, list.activeListeners)
+assert(list.mutedListeners == 0, list.mutedListeners)
+assert(list.syncListeners == 3, list.syncListeners)
+assert(list.asyncListeners == 1, list.asyncListeners)
+event.callProgressAsync("custom.progress", "done")
+local function work()
+  return 1
+end
+assert(work() == 1)
+assert(asyncPayload == "done", tostring(asyncPayload))
+assert(lines > 0, lines)
+assert(starts > 0, starts)
+assert(ends > 0, ends)
+`
+	if err := DoString(state, source); err != nil {
+		// 文件级进度事件必须覆盖 source line、嵌套代码块和异步自定义事件。
+		t.Fatalf("DoString glua file progress events failed: %v object=%s", err, runtime.ErrorObject(err).DebugString())
 	}
 }
 

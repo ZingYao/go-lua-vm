@@ -4,10 +4,13 @@ import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.fileChooser.FileChooser;
 import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory;
 import com.intellij.openapi.options.Configurable;
+import com.intellij.openapi.project.Project;
+import com.intellij.openapi.project.ProjectManager;
 import com.intellij.openapi.ui.ComboBox;
 import com.intellij.openapi.ui.TextFieldWithBrowseButton;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.ui.ToolbarDecorator;
+import com.intellij.platform.lsp.api.LspServerManager;
 import org.jetbrains.annotations.Nls;
 import org.jetbrains.annotations.Nullable;
 
@@ -31,6 +34,7 @@ public final class GluaSettingsConfigurable implements Configurable {
     private final JCheckBox events = new JCheckBox();
     private final TextFieldWithBrowseButton gluaExecutable = new TextFieldWithBrowseButton();
     private final TextFieldWithBrowseButton gluacExecutable = new TextFieldWithBrowseButton();
+    private final TextFieldWithBrowseButton languageServerExecutable = new TextFieldWithBrowseButton();
     private final JCheckBox useRemoteDap = new JCheckBox();
     private final JTextField dapHost = new JTextField();
     private final JTextField dapPort = new JTextField();
@@ -48,6 +52,7 @@ public final class GluaSettingsConfigurable implements Configurable {
     public @Nullable JComponent createComponent() {
         gluaExecutable.addActionListener(ignored -> chooseExecutable(gluaExecutable));
         gluacExecutable.addActionListener(ignored -> chooseExecutable(gluacExecutable));
+        languageServerExecutable.addActionListener(ignored -> chooseExecutable(languageServerExecutable));
         useRemoteDap.addActionListener(ignored -> updateDapModeFields());
         builtinDocs.setVisibleRowCount(4);
 
@@ -68,12 +73,13 @@ public final class GluaSettingsConfigurable implements Configurable {
         addRow(2, GluaUiText.text("GLua events", "GLua events"), events);
         addRow(3, GluaUiText.text("glua executable", "glua 可执行文件"), gluaExecutable);
         addRow(4, GluaUiText.text("gluac executable", "gluac 可执行文件"), gluacExecutable);
-        addRow(5, GluaUiText.text("Use remote DAP", "使用远程 DAP"), useRemoteDap);
-        addRow(6, GluaUiText.text("Remote DAP host", "远程 DAP 主机"), dapHost);
-        addRow(7, GluaUiText.text("Remote DAP port", "远程 DAP 端口"), dapPort);
-        addRow(8, GluaUiText.text("Print DAP traffic", "输出 DAP 调试日志"), dapDebugLog);
-        addRow(9, GluaUiText.text("Builtin docs JSON files", "内置文档 JSON 文件"), docsPanel);
-        addRow(10, GluaUiText.text("Builtin docs JSON demo", "内置文档 JSON 示例"), demoText());
+        addRow(5, GluaUiText.text("gluals executable", "gluals 可执行文件"), languageServerExecutable);
+        addRow(6, GluaUiText.text("Use remote DAP", "使用远程 DAP"), useRemoteDap);
+        addRow(7, GluaUiText.text("Remote DAP host", "远程 DAP 主机"), dapHost);
+        addRow(8, GluaUiText.text("Remote DAP port", "远程 DAP 端口"), dapPort);
+        addRow(9, GluaUiText.text("Print DAP traffic", "输出 DAP 调试日志"), dapDebugLog);
+        addRow(10, GluaUiText.text("Builtin docs JSON files", "内置文档 JSON 文件"), docsPanel);
+        addRow(11, GluaUiText.text("Builtin docs JSON demo", "内置文档 JSON 示例"), demoText());
         reset();
         return panel;
     }
@@ -86,6 +92,7 @@ public final class GluaSettingsConfigurable implements Configurable {
             || settings.events() != events.isSelected()
             || !settings.gluaExecutable().equals(gluaExecutable.getText().trim())
             || !settings.gluacExecutable().equals(gluacExecutable.getText().trim())
+            || !settings.languageServerExecutable().equals(languageServerExecutable.getText().trim())
             || settings.useRemoteDap() != useRemoteDap.isSelected()
             || !settings.dapHost().equals(dapHost.getText().trim())
             || settings.dapPort() != parsePortOrDefault(dapPort.getText())
@@ -101,12 +108,16 @@ public final class GluaSettingsConfigurable implements Configurable {
         settings.setEvents(events.isSelected());
         settings.setGluaExecutable(gluaExecutable.getText());
         settings.setGluacExecutable(gluacExecutable.getText());
+        settings.setLanguageServerExecutable(languageServerExecutable.getText());
         settings.setUseRemoteDap(useRemoteDap.isSelected());
         settings.setDapHost(dapHost.getText());
         settings.setDapPort(parsePortOrDefault(dapPort.getText()));
         settings.setDapDebugLog(dapDebugLog.isSelected());
         settings.setBuiltinDocs(docs());
         GluaBuiltinCatalog.getInstance().reload();
+        for (Project project : ProjectManager.getInstance().getOpenProjects()) {
+            LspServerManager.getInstance(project).stopAndRestartIfNeeded(GluaLspServerSupportProvider.class);
+        }
     }
 
     @Override
@@ -117,6 +128,7 @@ public final class GluaSettingsConfigurable implements Configurable {
         events.setSelected(settings.events());
         gluaExecutable.setText(settings.gluaExecutable());
         gluacExecutable.setText(settings.gluacExecutable());
+        languageServerExecutable.setText(settings.languageServerExecutable());
         useRemoteDap.setSelected(settings.useRemoteDap());
         dapHost.setText(settings.dapHost());
         dapPort.setText(String.valueOf(settings.dapPort()));

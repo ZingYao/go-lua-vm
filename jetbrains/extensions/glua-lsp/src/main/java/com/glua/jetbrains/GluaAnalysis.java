@@ -49,8 +49,7 @@ final class GluaAnalysis {
         "xpcall"
     );
     private static final Set<String> EVENT_DECLARED = Set.of(
-        "events", "setFunctionEvent", "setFunctionEventAsync", "setProgressEvent", "setProgressEventAsync",
-        "callFunctionEvent", "callFunctionEventAsync", "callProgressEvent", "callProgressEventAsync"
+        "glua"
     );
 
     private GluaAnalysis() {
@@ -61,6 +60,7 @@ final class GluaAnalysis {
     }
 
     static String builtinTargetAt(CharSequence source, int offset) {
+        // 先解析当前位置的完整限定名及其局部命名空间别名，再回退到原有成员推断。
         List<GluaToken> tokens = GluaLexerUtil.scan(source);
         int index = nameTokenIndexAt(tokens, Math.max(0, offset));
         if (index < 0) {
@@ -71,6 +71,11 @@ final class GluaAnalysis {
             return null;
         }
         GluaBuiltinCatalog catalog = GluaBuiltinCatalog.getInstance();
+        String qualifiedName = qualifiedNameEndingAt(tokens, index);
+        String resolvedQualifiedName = resolveBuiltinQualifiedAlias(tokens, qualifiedName, offset, false);
+        if (catalog.get(resolvedQualifiedName) != null) {
+            return resolvedQualifiedName;
+        }
         if (index > 1 && isSeparator(tokens.get(index - 1)) && tokens.get(index - 2).isName()) {
             GluaToken separator = tokens.get(index - 1);
             String receiver = tokens.get(index - 2).text;
@@ -182,13 +187,149 @@ final class GluaAnalysis {
     }
 
     private static String completionModule(List<GluaToken> tokens, int separatorIndex, int receiverIndex, int offset) {
+        // 优先保留冒号调用的类型推断，再将点号接收者还原为内置命名空间。
         String inferred = tokens.get(separatorIndex).text.equals(":")
             ? inferredReceiverType(tokens, receiverIndex, offset)
             : "";
         if (inferred != null && !inferred.isBlank()) {
             return inferred;
         }
-        return tokens.get(receiverIndex).text;
+        List<String> segments = new ArrayList<>();
+        int cursor = receiverIndex;
+        while (cursor >= 0 && tokens.get(cursor).isName()) {
+            segments.add(0, tokens.get(cursor).text);
+            if (cursor < 2 || !tokens.get(cursor - 1).text.equals(".")) {
+                break;
+            }
+            cursor -= 2;
+        }
+        return resolveBuiltinQualifiedAlias(tokens, String.join(".", segments), offset, true);
+    }
+
+    /**
+     * 收集当前位置之前指向内置命名空间的简单局部别名。
+     *
+     * @param tokens 当前文件的词法单元
+     * @param offset 当前查询偏移，之后的声明不会生效
+     * @return 别名到完整内置命名空间的映射；无法确认的赋值会移除旧映射
+     */
+    private static Map<String, String> builtinNamespaceAliases(List<GluaToken> tokens, int offset) {
+        // 按源码顺序处理 local/const 单名称声明，并允许别名继续引用已有别名。
+        Map<String, String> aliases = new LinkedHashMap<>();
+        GluaBuiltinCatalog catalog = GluaBuiltinCatalog.getInstance();
+        for (int index = 0; index < tokens.size(); index++) {
+            GluaToken declaration = tokens.get(index);
+            if (declaration.start >= offset) {
+                break;
+            }
+            if (!declaration.text.equals("local") && !declaration.text.equals("const")) {
+                continue;
+            }
+            int aliasIndex = nextVisibleIndex(tokens, index);
+            if (aliasIndex < 0 || !tokens.get(aliasIndex).isName()) {
+                continue;
+            }
+            int equalsIndex = nextVisibleIndex(tokens, aliasIndex);
+            if (equalsIndex < 0 || !tokens.get(equalsIndex).text.equals("=")) {
+                continue;
+            }
+            int rightIndex = nextVisibleIndex(tokens, equalsIndex);
+            if (rightIndex < 0) {
+                continue;
+            }
+            String alias = tokens.get(aliasIndex).text;
+            if (!tokens.get(rightIndex).isName()) {
+                aliases.remove(alias);
+                continue;
+            }
+            StringBuilder rightName = new StringBuilder(tokens.get(rightIndex).text);
+            int rightEnd = rightIndex;
+            while (true) {
+                int dotIndex = nextVisibleIndex(tokens, rightEnd);
+                int memberIndex = nextVisibleIndex(tokens, dotIndex);
+                if (dotIndex < 0 || memberIndex < 0 || !tokens.get(dotIndex).text.equals(".") || !tokens.get(memberIndex).isName()) {
+                    break;
+                }
+                rightName.append('.').append(tokens.get(memberIndex).text);
+                rightEnd = memberIndex;
+            }
+            String resolvedName = rightName.toString();
+            int firstDot = resolvedName.indexOf('.');
+            if (firstDot > 0) {
+                String resolvedRoot = aliases.get(resolvedName.substring(0, firstDot));
+                if (resolvedRoot != null) {
+                    resolvedName = resolvedRoot + resolvedName.substring(firstDot);
+                }
+            }
+            if (!isBuiltinNamespace(catalog, resolvedName)) {
+                aliases.remove(alias);
+                continue;
+            }
+            aliases.put(alias, resolvedName);
+            index = rightEnd;
+        }
+        return aliases;
+    }
+
+    /**
+     * 将限定名根节点的局部别名展开为内置命名空间。
+     *
+     * @param tokens 当前文件的词法单元
+     * @param qualifiedName 待解析的名称
+     * @param offset 当前查询偏移
+     * @param allowRootAlias 是否允许补全场景展开裸接收者
+     * @return 已展开名称；无法识别时原样返回
+     */
+    private static String resolveBuiltinQualifiedAlias(List<GluaToken> tokens, String qualifiedName, int offset, boolean allowRootAlias) {
+        // 仅展开可证明指向内置命名空间的根别名，避免改变普通局部变量定义跳转。
+        int separatorIndex = qualifiedName.indexOf('.');
+        if (separatorIndex <= 0) {
+            return allowRootAlias
+                ? builtinNamespaceAliases(tokens, offset).getOrDefault(qualifiedName, qualifiedName)
+                : qualifiedName;
+        }
+        String root = qualifiedName.substring(0, separatorIndex);
+        String resolvedRoot = builtinNamespaceAliases(tokens, offset).get(root);
+        return resolvedRoot == null ? qualifiedName : resolvedRoot + qualifiedName.substring(separatorIndex);
+    }
+
+    /**
+     * 读取指定名称词法单元之前连续的点号限定名。
+     *
+     * @param tokens 当前文件的词法单元
+     * @param index 末尾名称索引
+     * @return 包含末尾名称的完整点号路径
+     */
+    private static String qualifiedNameEndingAt(List<GluaToken> tokens, int index) {
+        // 跳过空白和注释向前收集 name.name 结构。
+        Deque<String> segments = new ArrayDeque<>();
+        int cursor = index;
+        while (cursor >= 0 && tokens.get(cursor).isName()) {
+            segments.addFirst(tokens.get(cursor).text);
+            int dotIndex = previousVisibleIndex(tokens, cursor);
+            int receiverIndex = previousVisibleIndex(tokens, dotIndex);
+            if (dotIndex < 0 || receiverIndex < 0 || !tokens.get(dotIndex).text.equals(".") || !tokens.get(receiverIndex).isName()) {
+                break;
+            }
+            cursor = receiverIndex;
+        }
+        return String.join(".", segments);
+    }
+
+    /**
+     * 判断名称是否为内置项或内置命名空间。
+     *
+     * @param catalog 内置文档目录
+     * @param name 待判断名称
+     * @return 存在精确项或至少一个下级项时返回 true
+     */
+    private static boolean isBuiltinNamespace(GluaBuiltinCatalog catalog, String name) {
+        // 同时接受叶子内置项和仍可继续补全的中间命名空间。
+        if (catalog.get(name) != null) {
+            return true;
+        }
+        String prefix = name + ".";
+        return catalog.names().stream().anyMatch(candidate -> candidate.startsWith(prefix));
     }
 
     private static String inferredReceiverType(List<GluaToken> tokens, int receiverIndex, int offset) {
