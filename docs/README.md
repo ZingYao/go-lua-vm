@@ -3,7 +3,7 @@
 GLua 是以官方 Lua 5.3.6 行为为兼容基线、使用 Go 实现的 Lua 虚拟机与工具链。项目既可以作为 Go 库嵌入服务，也可以构建为 `glua`、`gluac` 和 `gluals` 命令行程序。
 
 <div class="glua-capabilities">
-  <div class="glua-capability"><strong>纯 Go 核心</strong>默认构建使用 <code>CGO_ENABLED=0</code>，VM、编译器、标准库和 Debug 不依赖系统 Lua。</div>
+  <div class="glua-capability"><strong>纯 Go 核心</strong>默认构建使用 <code>CGO_ENABLED=0</code>，VM、编译器、标准库和 Debug 不依赖系统 Lua，也不支持 Native C 模块。</div>
   <div class="glua-capability"><strong>Lua 5.3.6 兼容</strong>通过官方源码映射、可执行文件差分、Golden 和官方测试验证行为。</div>
   <div class="glua-capability"><strong>完整工具链</strong>提供脚本执行、字节码编译/反汇编、格式化、静态分析、DAP 与编辑器扩展。</div>
   <div class="glua-capability"><strong>可控扩展</strong>提供语法糖、Event、序列化、Hash、Regex、UUID、ZIP、Schema 和 Path。</div>
@@ -31,8 +31,8 @@ gluac --gluac-syntax=lua53 -o script.luac script.lua
 
 - Go `1.26.4`。
 - Git。
-- 默认纯 Go 构建不需要 C 编译器、Lua SDK 或 CGO。
-- Native 构建需要当前平台可用的 C 工具链，参见 [Native 三平台构建](NATIVE_BUILD_GUIDE.md)。
+- 默认纯 Go 构建不需要 C 编译器、Lua SDK 或 CGO，也不支持 Native C 模块。
+- Native 构建必须显式使用 `CGO_ENABLED=1` 和 `native_modules` build tag，并需要当前平台可用的 C 工具链，参见 [Native 三平台构建](NATIVE_BUILD_GUIDE.md)。
 
 ## 快速开始
 

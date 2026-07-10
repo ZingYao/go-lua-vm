@@ -14,6 +14,10 @@ body {
   letter-spacing: 0;
 }
 
+html {
+  scroll-behavior: smooth;
+}
+
 .cover {
   background-color: #102327 !important;
   background-image: url("favicon.svg") !important;
@@ -21,8 +25,15 @@ body {
   background-repeat: no-repeat !important;
   background-size: min(38vw, 390px) !important;
   color: #f8fafc;
-  height: 88vh !important;
-  min-height: 88vh !important;
+  height: 100vh !important;
+  min-height: 100vh !important;
+}
+
+@supports (height: 100dvh) {
+  .cover {
+    height: 100dvh !important;
+    min-height: 100dvh !important;
+  }
 }
 
 .cover::before {
@@ -139,8 +150,6 @@ body {
 
 @media (max-width: 720px) {
   .cover {
-    height: 86vh !important;
-    min-height: 86vh !important;
     background-position: center 18% !important;
     background-size: 150px !important;
   }
@@ -153,5 +162,11 @@ body {
   .glua-capabilities,
   .glua-metrics {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
   }
 }
