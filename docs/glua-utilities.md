@@ -1,6 +1,6 @@
 # GLua 通用扩展
 
-完整 `OpenLibs` 会在 `glua` 下注册 codec、hash、regex、uuid、zip 和 schema。全部实现保持纯 Go，不依赖 CGO。
+完整 `OpenLibs` 会在 `glua` 下注册 codec、hash、regex、uuid、zip、schema 和 path。全部实现保持纯 Go，不依赖 CGO。
 
 ## Codec
 
@@ -111,6 +111,40 @@ options：
 - `maxArchiveBytes = 67108864`，ZIP 二进制 64 MiB。
 
 实现会拒绝绝对路径、反斜杠、NUL、`..` 路径穿越、非规范路径、重复文件名、伪造大小和超限解压内容。目录条目不出现在返回 table 中。
+
+## Path
+
+`glua.path` 只进行当前宿主平台的词法路径运算，不读取文件、目录、环境变量或工作目录，也不判断目标是否存在：
+
+```lua
+local file = glua.path.join("config", "profiles", "default.toml")
+assert(glua.path.base(file) == "default.toml")
+assert(glua.path.ext(file) == ".toml")
+
+local relative = glua.path.rel(
+  glua.path.join("config", "profiles"),
+  glua.path.join("config", "shared.toml")
+)
+```
+
+API：
+
+- `glua.path.join(...)`：连接并清理任意数量的路径片段。
+- `glua.path.clean(path)`：返回最短等价词法路径。
+- `glua.path.base(path)`：返回最后一个路径元素。
+- `glua.path.dir(path)`：返回目录部分。
+- `glua.path.ext(path)`：返回包含前导点的扩展名。
+- `glua.path.isAbs(path)`：判断是否为宿主平台绝对路径。
+- `glua.path.rel(base, target)`：计算相对路径，无法跨卷表达时抛出错误。
+- `glua.path.split(path)`：返回 `dir, file`，其中 `dir` 保留尾部分隔符。
+- `glua.path.volume(path)`：返回 Windows 驱动器或 UNC 卷名，其他平台通常为空。
+- `glua.path.toSlash(path)`：把平台分隔符转换为 `/`。
+- `glua.path.fromSlash(path)`：把 `/` 转换为平台分隔符。
+- `glua.path.match(pattern, name)`：按宿主平台规则匹配路径模式，非法模式抛出错误。
+- `glua.path.separator`：当前平台目录分隔符。
+- `glua.path.listSeparator`：当前平台路径列表分隔符。
+
+该命名空间刻意不提供 `exists`、`glob`、`read`、`write` 或绝对路径解析，避免纯工具能力隐式获得宿主文件系统访问权限。
 
 ## Schema
 

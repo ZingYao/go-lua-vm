@@ -31,7 +31,7 @@ end, {
 - `glua.event.stats()`：返回当前文件监听器和异步队列统计。
 - `glua.event.eventList()`：返回当前源码文件已经注册的事件及监听器统计。
 
-每个回调都会收到一个上下文表，其中包含 `event`、`kind`、`timestamp`（Unix 毫秒时间戳）、`sequence`、`depth`、`payload`、`source`、`line`、`id`、`config`、`group`、`priority` 和 `once`。函数进度事件还会提供 `args`、`results`、`error`、`durationNs` 和调用元数据。
+每个回调都会收到一个上下文表，其中包含 `event`、`kind`、`timestamp`（Unix 毫秒时间戳）、`sequence`、`eventId`、`traceId`、可选 `parentEventId`、`depth`、`payload`、`source`、`line`、`id`、`config`、`group`、`priority` 和可靠性配置。函数进度事件还会提供 `args`、`results`、`error`、`durationNs` 和调用元数据。
 
 回调通过事件 ID 读取配置，因此调用 `setConfig` 后总能获取最新配置：
 
@@ -73,13 +73,17 @@ local id = event.setProgress(event.events.progress_function_call, callback, {
 第三个参数和 `setConfig` 支持以下字段：
 
 - `whitelist`、`blacklist`：函数名称或函数引用过滤器。
-- `once`：触发一次后自动删除。
+- `once`：触发一次后自动删除，等价于 `maxCalls = 1`。
+- `maxCalls`：最多实际执行次数，`0` 表示不限制；达到上限后自动删除。
 - `priority`：整数，越大越先执行；相同优先级保持注册顺序。
 - `group`：监听器分组名称。
 - `queueLimit`：该异步监听器最大待处理任务数，`0` 表示不限制。
 - `overflow`：队列溢出策略，可选 `drop_oldest`、`drop_newest`、`error`。
-- `onError`：异步回调错误策略，可选 `propagate`、`ignore`。
+- `onError`：同步和异步回调错误策略，可选 `propagate`、`ignore`、`mute`、`remove`；`throw` 和 `continue` 分别是前两者的别名。
 - `mutable`：是否允许上下文保留业务 table 的可变引用，默认 `false`。
+- `throttleMs`：前沿节流窗口，窗口内重复触发会被抑制，`0` 表示关闭。
+- `debounceMs`：异步防抖窗口，只允许用于 `setProgressAsync`；窗口内只保留最新上下文。
+- `sampleRate`：`0..1` 的确定性累加采样率，默认 `1`。
 
 默认情况下，`locals`、`upvalues`、`calleeUpvalues`、`args`、`results` 和其中嵌套的 table 都会递归复制并冻结。设置 `mutable = true` 后，回调可以直接修改原始 table，应只在明确需要拦截器行为时使用。
 
@@ -91,6 +95,10 @@ local id = event.setProgressAsync("task.done", callback, {
   queueLimit = 100,
   overflow = "drop_oldest",
   onError = "ignore",
+  maxCalls = 10,
+  throttleMs = 100,
+  debounceMs = 50,
+  sampleRate = 0.5,
 })
 
 event.setCallback(id, replacementCallback)
@@ -112,7 +120,10 @@ event.setCallback(id, replacementCallback)
   queuedTasks = 0,
   droppedTasks = 0,
   callbackErrors = 0,
+  suppressedEvents = 0,
+  debouncedTasks = 0,
   sequence = 42,
+  traceSequence = 1,
   events = {
     {
       event = "progress.function_call",
@@ -121,6 +132,11 @@ event.setCallback(id, replacementCallback)
       muted = 1,
       sync = 2,
       async = 0,
+      dispatchCount = 12,
+      errorCount = 0,
+      droppedCount = 0,
+      suppressedCount = 3,
+      totalDurationNs = 1000,
     },
   },
 }
@@ -130,7 +146,13 @@ event.setCallback(id, replacementCallback)
 
 ## 回调规则
 
-同步回调可以通过抛出错误中止执行。异步回调会先进入队列，不会在发出事件的指令位置立即执行；异步回调默认在后续 VM 安全点传播错误，`onError = "ignore"` 会忽略错误但仍累计错误统计。事件回调不会递归触发新的事件回调。
+同步回调可以通过抛出错误中止执行。异步回调会先进入队列，不会在发出事件的指令位置立即执行；异步回调默认在后续 VM 安全点传播错误。`onError = "ignore"` 记录后继续，`mute` 会保留并静音监听器，`remove` 会删除监听器和待处理任务。事件回调不会递归触发新的事件回调。
+
+每个回调上下文还包含 `eventId`、`traceId` 和可选 `parentEventId`。`eventId` 与 `sequence` 相同并在 State 内单调递增；同一代码执行链共享 `traceId`；存在较浅调用层事件时，`parentEventId` 指向最近父事件。监听器专属上下文同时包含 `maxCalls`、`throttleMs`、`debounceMs` 和 `sampleRate`。
+
+`event.get(id)` 除原有状态外会返回 `remainingCalls`、`dispatchCount`、`errorCount`、`droppedCount`、`suppressedCount`、`throttledCount`、`sampledOutCount`、`debouncedCount`、`totalDurationNs` 和 `averageDurationNs`。无限监听器的 `remainingCalls` 为 `-1`。
+
+防抖不启动 goroutine，也不会从后台线程重入 VM。到期任务在后续 VM 安全点执行；`event.flush()` 会忽略剩余等待时间，立即执行队列中的最新防抖任务。
 
 普通 `pcall`、`xpcall` 及其跨 `coroutine.yield` continuation 都会保留函数 call/return/error/exit 生命周期；错误即使最终被保护调用捕获，`progress_function_error` 仍会先触发。
 
@@ -145,4 +167,4 @@ event.setCallback(id, replacementCallback)
 ```
 
 可以通过 `GLUA_BIN` 验证其他构建产物，例如 `GLUA_BIN=/path/to/glua ./scripts/test-glua-events.sh`。
-该套件覆盖预设事件名、源码行观察、自定义同步与异步事件、函数调用/返回/错误/退出观察、跨文件同名函数引用过滤、监听器治理、回调替换、优先级、once、分组、队列策略、只读上下文、`pcall` 错误观察、统计、配置修改、静音、删除、时间戳，以及文件错误/退出生命周期回调。
+该套件覆盖预设事件名、源码行观察、自定义同步与异步事件、函数调用/返回/错误/退出观察、跨文件同名函数引用过滤、监听器治理、回调替换、优先级、once、maxCalls、节流、异步防抖、确定性采样、错误处置、调用链、分组、队列策略、只读上下文、`pcall` 错误观察、统计、配置修改、静音、删除、时间戳，以及文件错误/退出生命周期回调。

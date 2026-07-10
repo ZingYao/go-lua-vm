@@ -39,6 +39,18 @@ local files = glua.zip.decompress(archive)
 assert(files["a.txt"] == "A" and files["dir/b.bin"] == "B")
 assert(not pcall(glua.zip.compress, { ["../escape"] = "bad" }))
 
+-- path 只执行当前宿主平台的词法路径运算，不访问文件系统。
+local joined = glua.path.join("root", "folder", "file.txt")
+assert(glua.path.base(joined) == "file.txt")
+assert(glua.path.ext(joined) == ".txt")
+assert(glua.path.dir(joined) == glua.path.join("root", "folder"))
+assert(glua.path.rel(glua.path.join("root", "folder"), glua.path.join("root", "file.txt")) == ".." .. glua.path.separator .. "file.txt")
+local directory, fileName = glua.path.split(joined)
+assert(directory == glua.path.join("root", "folder") .. glua.path.separator and fileName == "file.txt")
+assert(glua.path.match("*.txt", fileName))
+assert(glua.path.toSlash(glua.path.fromSlash("root/folder/file.txt")) == "root/folder/file.txt")
+assert(not pcall(glua.path.match, "[", "file.txt"))
+
 -- schema 校验返回 boolean/message/path，assert 在失败时抛出错误。
 local schema = {
   type = "object",

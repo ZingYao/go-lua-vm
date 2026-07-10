@@ -27,6 +27,18 @@ var gluaUtilityFallbackBuiltins = map[string]builtinFunctionDoc{
 	"glua.uuid.parse":         gluaUtilityBuiltin("glua.uuid.parse(text)", "规范化 UUID 文本。", "text: UUID string", "returns: UUID string or nil."),
 	"glua.zip.compress":       gluaUtilityBuiltin("glua.zip.compress(entries [, options])", "在内存中压缩安全文件映射。", "entries: file map", "returns: ZIP binary string."),
 	"glua.zip.decompress":     gluaUtilityBuiltin("glua.zip.decompress(archive [, options])", "在资源限制内解压 ZIP。", "archive: ZIP binary string", "returns: file map."),
+	"glua.path.join":          gluaUtilityBuiltin("glua.path.join(...)", "连接并清理路径片段。", "...: path strings", "returns: platform path."),
+	"glua.path.clean":         gluaUtilityBuiltin("glua.path.clean(path)", "清理词法路径。", "path: path string", "returns: cleaned path."),
+	"glua.path.base":          gluaUtilityBuiltin("glua.path.base(path)", "返回最后一个路径元素。", "path: path string", "returns: final element."),
+	"glua.path.dir":           gluaUtilityBuiltin("glua.path.dir(path)", "返回目录部分。", "path: path string", "returns: directory path."),
+	"glua.path.ext":           gluaUtilityBuiltin("glua.path.ext(path)", "返回扩展名。", "path: path string", "returns: extension."),
+	"glua.path.isAbs":         gluaUtilityBuiltin("glua.path.isAbs(path)", "判断宿主平台绝对路径。", "path: path string", "returns: boolean."),
+	"glua.path.rel":           gluaUtilityBuiltin("glua.path.rel(base, target)", "计算相对路径。", "base: base path", "returns: relative path."),
+	"glua.path.split":         gluaUtilityBuiltin("glua.path.split(path)", "拆分目录和文件名。", "path: path string", "returns: dir, file."),
+	"glua.path.volume":        gluaUtilityBuiltin("glua.path.volume(path)", "返回平台卷名。", "path: path string", "returns: volume name."),
+	"glua.path.toSlash":       gluaUtilityBuiltin("glua.path.toSlash(path)", "转换为正斜杠路径。", "path: path string", "returns: converted path."),
+	"glua.path.fromSlash":     gluaUtilityBuiltin("glua.path.fromSlash(path)", "转换为平台分隔符路径。", "path: path string", "returns: converted path."),
+	"glua.path.match":         gluaUtilityBuiltin("glua.path.match(pattern, name)", "匹配平台路径模式。", "pattern: path pattern", "returns: boolean."),
 	"glua.schema.validate":    gluaUtilityBuiltin("glua.schema.validate(value, schema)", "校验轻量 table schema。", "value: value", "returns: true, or false, message, path."),
 	"glua.schema.assert":      gluaUtilityBuiltin("glua.schema.assert(value, schema)", "断言值满足轻量 schema。", "value: value", "returns: original value."),
 }
@@ -58,7 +70,7 @@ func init() {
 		builtinFunctionDocs[name] = document
 	}
 	for _, name := range []string{
-		"glua.toml", "glua.codec", "glua.hash", "glua.regex", "glua.uuid", "glua.zip", "glua.schema",
+		"glua.toml", "glua.codec", "glua.hash", "glua.regex", "glua.uuid", "glua.zip", "glua.path", "glua.path.separator", "glua.path.listSeparator", "glua.schema",
 	} {
 		// 命名空间作为 constant 参与成员补全和定义跳转。
 		appendBuiltinConstant(name)

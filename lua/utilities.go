@@ -52,7 +52,7 @@ type gluaZipOptions struct {
 	level int
 }
 
-// registerGluaUtilityGlobals 注册 codec、hash、regex、uuid 和 zip 命名空间。
+// registerGluaUtilityGlobals 注册 codec、hash、regex、uuid、zip、schema 和 path 命名空间。
 //
 // state 必须已打开全局环境；函数没有返回值。宿主占用非 table 的 glua 全局时跳过注册，所有
 // 子 API 使用纯 Go 标准库且不访问宿主文件系统。
@@ -107,6 +107,8 @@ func registerGluaUtilityGlobals(state *State) {
 	schemaTable.RawSetString("validate", gluaGoFunction(gluaSchemaValidate))
 	schemaTable.RawSetString("assert", gluaGoFunction(gluaSchemaAssert))
 	gluaTable.RawSetString("schema", runtime.ReferenceValue(runtime.KindTable, schemaTable))
+
+	registerGluaPathGlobals(state)
 }
 
 // gluaGoFunction 把 Go 多返回函数包装为 runtime Value。

@@ -1608,7 +1608,7 @@ func TestOpenLibsCanDisableGluaEvents(t *testing.T) {
 		// 关闭事件能力后只移除 glua.event，不影响其他 glua 扩展。
 		t.Fatalf("glua.event should not be registered when events are disabled: %#v", value)
 	}
-	for _, namespace := range []string{"json", "yaml", "xml", "toml", "codec", "hash", "regex", "uuid", "zip", "schema"} {
+	for _, namespace := range []string{"json", "yaml", "xml", "toml", "codec", "hash", "regex", "uuid", "zip", "schema", "path"} {
 		// 序列化和通用扩展命名空间与事件条件编译相互独立。
 		if value := gluaTable.RawGetString(namespace); value.Kind != runtime.KindTable {
 			// 缺少任一命名空间都表示 OpenLibs 注册不完整。

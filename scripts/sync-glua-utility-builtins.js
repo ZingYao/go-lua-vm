@@ -99,6 +99,21 @@ const definitions = {
   "glua.zip": constant("glua.zip", "受资源限制的内存 ZIP 压缩/解压命名空间，不访问宿主文件系统。", "Resource-limited in-memory ZIP namespace with no host filesystem access."),
   "glua.zip.compress": entry("glua.zip.compress(entries [, options])", "把文件名到二进制字符串的对象压缩为 ZIP；拒绝危险路径并限制条目、文件、总输入和归档大小。", "Compresses a filename-to-binary-string object into ZIP, rejecting unsafe paths and enforcing size limits.", ["entries：文件映射 table", "options（可选）：method、level 和资源限制"], ["entries: file map table", "options (optional): method, level, and limits"], "返回：ZIP 二进制字符串。", "returns: ZIP binary string."),
   "glua.zip.decompress": entry("glua.zip.decompress(archive [, options])", "把 ZIP 二进制解压为文件映射；拒绝路径穿越、重复名称和超限内容。", "Decompresses ZIP into a file map, rejecting traversal, duplicate names, and oversized content.", ["archive：ZIP 二进制字符串", "options（可选）：资源限制"], ["archive: ZIP binary string", "options (optional): limits"], "返回：文件映射 table。", "returns: file map table."),
+  "glua.path": constant("glua.path", "只进行宿主平台词法路径运算且不访问文件系统的命名空间。", "Host-platform lexical path operations with no filesystem access."),
+  "glua.path.join": entry("glua.path.join(...)", "连接并清理任意数量的路径片段。", "Joins and cleans any number of path elements.", ["...：路径字符串"], ["...: path strings"], "返回：平台格式路径。", "returns: platform path."),
+  "glua.path.clean": entry("glua.path.clean(path)", "返回最短等价词法路径，不检查目标。", "Returns the shortest equivalent lexical path without checking the target.", ["path：路径字符串"], ["path: path string"], "返回：清理后的路径。", "returns: cleaned path."),
+  "glua.path.base": entry("glua.path.base(path)", "返回最后一个路径元素。", "Returns the last path element.", ["path：路径字符串"], ["path: path string"], "返回：文件名或末尾元素。", "returns: final path element."),
+  "glua.path.dir": entry("glua.path.dir(path)", "返回路径的目录部分。", "Returns the directory portion of a path.", ["path：路径字符串"], ["path: path string"], "返回：目录路径。", "returns: directory path."),
+  "glua.path.ext": entry("glua.path.ext(path)", "返回包含前导点的扩展名。", "Returns the final extension including its leading dot.", ["path：路径字符串"], ["path: path string"], "返回：扩展名或空字符串。", "returns: extension or empty string."),
+  "glua.path.isAbs": entry("glua.path.isAbs(path)", "按宿主平台规则判断绝对路径。", "Reports whether a path is absolute on the host platform.", ["path：路径字符串"], ["path: path string"], "返回：boolean。", "returns: boolean."),
+  "glua.path.rel": entry("glua.path.rel(base, target)", "计算 target 相对于 base 的词法路径，无法跨卷表达时抛错。", "Computes target relative to base and raises when the result cannot be represented across volumes.", ["base：基础路径", "target：目标路径"], ["base: base path", "target: target path"], "返回：相对路径。", "returns: relative path."),
+  "glua.path.split": entry("glua.path.split(path)", "拆分目录和最后一个元素，目录保留尾部分隔符。", "Splits a path into directory and final element, retaining the directory separator.", ["path：路径字符串"], ["path: path string"], "返回：dir、file。", "returns: dir, file."),
+  "glua.path.volume": entry("glua.path.volume(path)", "返回 Windows 驱动器或 UNC 卷名，其他平台通常为空。", "Returns a Windows drive or UNC volume name and usually empty text elsewhere.", ["path：路径字符串"], ["path: path string"], "返回：卷名字符串。", "returns: volume name string."),
+  "glua.path.toSlash": entry("glua.path.toSlash(path)", "把宿主平台分隔符转换为正斜杠。", "Converts host separators to forward slashes.", ["path：路径字符串"], ["path: path string"], "返回：转换后的路径。", "returns: converted path."),
+  "glua.path.fromSlash": entry("glua.path.fromSlash(path)", "把正斜杠转换为宿主平台分隔符。", "Converts forward slashes to host separators.", ["path：路径字符串"], ["path: path string"], "返回：转换后的路径。", "returns: converted path."),
+  "glua.path.match": entry("glua.path.match(pattern, name)", "按宿主平台路径模式匹配名称，非法模式抛错。", "Matches a name using host path-pattern rules and raises on malformed patterns.", ["pattern：路径模式", "name：待匹配名称"], ["pattern: path pattern", "name: name to match"], "返回：boolean。", "returns: boolean."),
+  "glua.path.separator": constant("glua.path.separator", "当前宿主平台目录分隔符。", "Current host directory separator."),
+  "glua.path.listSeparator": constant("glua.path.listSeparator", "当前宿主平台路径列表分隔符。", "Current host path-list separator."),
   "glua.schema": constant("glua.schema", "确定性的轻量 table schema 校验命名空间，不支持远程引用。", "Deterministic lightweight table-schema namespace without remote references."),
   "glua.schema.validate": entry("glua.schema.validate(value, schema)", "校验 type、enum、properties、required、additionalProperties、items、长度、范围和 RE2 pattern。数据失败返回 false、message、path，非法 schema 抛错。", "Validates type, enum, properties, required, additionalProperties, items, lengths, ranges, and RE2 patterns. Data mismatches return false/message/path; invalid schemas raise.", ["value：待校验值", "schema：轻量 schema table"], ["value: value to validate", "schema: lightweight schema table"], "返回：true，或 false、message、path。", "returns: true, or false, message, path."),
   "glua.schema.assert": entry("glua.schema.assert(value, schema)", "校验成功返回原值，失败抛出带 `$` 数据路径的 Lua error。", "Returns the original value on success and raises a Lua error with a `$` data path on failure.", ["value：待校验值", "schema：轻量 schema table"], ["value: value to validate", "schema: lightweight schema table"], "返回：原 value。", "returns: original value."),
@@ -108,6 +123,36 @@ const definitions = {
 const catalog = JSON.parse(fs.readFileSync(vscodeCatalogPath, "utf8"));
 catalog.functions = catalog.functions || {};
 Object.assign(catalog.functions, definitions);
+
+// 事件可靠性配置与运行时一起维护，避免两套编辑器继续展示旧选项。
+const syncEvent = catalog.functions["glua.event.setProgress"];
+if (syncEvent) {
+  syncEvent.params.en[1] = "callback: function(ctx); ctx includes eventId, traceId, optional parentEventId, timing, payload, and listener reliability metadata";
+  syncEvent.params["zh-CN"][1] = "callback：function(ctx)；ctx 包含 eventId、traceId、可选 parentEventId、时间、负载和监听器可靠性元数据";
+  syncEvent.params.en[2] = "config (optional): filters, once/maxCalls, priority/group, throttleMs, sampleRate, onError, and mutable";
+  syncEvent.params["zh-CN"][2] = "config（可选）：过滤器、once/maxCalls、priority/group、throttleMs、sampleRate、onError 和 mutable";
+  const reliabilityEn = " Reliability options cap executions, apply deterministic sampling or leading-edge throttling, and choose propagate, ignore, mute, or remove error handling.";
+  const reliabilityZh = " 可靠性配置可限制执行次数、执行确定性采样或前沿节流，并选择传播、忽略、静音或删除监听器的错误处置。";
+  while (syncEvent.description.en.endsWith(reliabilityEn)) {
+    // 先移除旧生成后缀，保证脚本重复执行得到相同目录。
+    syncEvent.description.en = syncEvent.description.en.slice(0, -reliabilityEn.length);
+  }
+  while (syncEvent.description["zh-CN"].endsWith(reliabilityZh)) {
+    // 中文说明使用相同幂等规则。
+    syncEvent.description["zh-CN"] = syncEvent.description["zh-CN"].slice(0, -reliabilityZh.length);
+  }
+  syncEvent.description.en += reliabilityEn;
+  syncEvent.description["zh-CN"] += reliabilityZh;
+}
+
+const asyncEvent = catalog.functions["glua.event.setProgressAsync"];
+if (asyncEvent) {
+  asyncEvent.params.en[2] = "config (optional): sync listener options plus debounceMs, queueLimit, and overflow";
+  asyncEvent.params["zh-CN"][2] = "config（可选）：同步监听器选项，以及 debounceMs、queueLimit 和 overflow";
+  asyncEvent.description.en = "Registers an asynchronous listener with the same source scope and preset timing as setProgress. Callbacks run only at VM safe points or flush(). debounceMs coalesces a time window to the latest context without a background goroutine; flush() forces pending debounced tasks. Queue limits provide backpressure, and onError supports propagate, ignore, mute, or remove.";
+  asyncEvent.description["zh-CN"] = "注册与 setProgress 作用域和预设时机相同的异步监听器。回调只在 VM 安全点或 flush() 中执行；debounceMs 不启动后台 goroutine，而是在时间窗内只保留最新上下文，flush() 会强制执行待处理防抖任务。队列上限提供背压，onError 支持 propagate、ignore、mute 或 remove。";
+}
+
 const output = JSON.stringify(catalog, null, 2) + "\n";
 fs.writeFileSync(vscodeCatalogPath, output);
 fs.writeFileSync(jetbrainsCatalogPath, output);

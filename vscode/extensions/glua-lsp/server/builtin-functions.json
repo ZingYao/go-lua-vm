@@ -4437,18 +4437,18 @@
       "params": {
         "en": [
           "event: preset or custom event name",
-          "callback: function(ctx); ctx includes event, timestamp, sequence, source, line, payload, id, config, and function-event args/results/error/durationNs metadata",
-          "config (optional): whitelist/blacklist, once, priority, group, queueLimit, overflow, onError, and mutable options"
+          "callback: function(ctx); ctx includes eventId, traceId, optional parentEventId, timing, payload, and listener reliability metadata",
+          "config (optional): filters, once/maxCalls, priority/group, throttleMs, sampleRate, onError, and mutable"
         ],
         "zh-CN": [
           "event：预设或自定义事件名",
-          "callback：function(ctx)；ctx 包含 event、timestamp、sequence、source、line、payload、id、config，函数事件还包含 args/results/error/durationNs",
-          "config（可选）：支持 whitelist/blacklist、once、priority、group、queueLimit、overflow、onError 和 mutable"
+          "callback：function(ctx)；ctx 包含 eventId、traceId、可选 parentEventId、时间、负载和监听器可靠性元数据",
+          "config（可选）：过滤器、once/maxCalls、priority/group、throttleMs、sampleRate、onError 和 mutable"
         ]
       },
       "description": {
-        "en": "Registers a synchronous listener scoped to the source file that calls this API. Preset timing: progress.line before a new source line; progress.start when the chunk starts; progress.end after normal completion; progress.error on failure; progress.exit on either completion path; progress.function_call immediately before a Lua closure runs; progress.function_return after a normal return; progress.function_error before an error is caught by pcall/xpcall; and progress.function_exit after either function outcome. Custom names run only when callProgress/callProgressAsync is invoked. The callback executes at the trigger point and blocks the program; callback errors interrupt the current execution path.",
-        "zh-CN": "为调用本 API 的当前源码文件注册同步监听器。预设事件的触发时机：progress.line 在即将执行新的源码行时触发；progress.start 在代码块开始执行时触发；progress.end 在代码块正常完成后触发；progress.error 在代码块因错误退出时触发；progress.exit 在代码块正常或异常离开时都会触发；progress.function_call 在 Lua 闭包开始执行前触发；progress.function_return 在函数正常返回后触发；progress.function_error 在函数错误被 pcall/xpcall 捕获前触发；progress.function_exit 在函数正常或异常离开后触发。自定义事件名只会由 callProgress/callProgressAsync 主动触发。同步 callback 会在事件触发点立即执行并阻塞当前程序，callback 抛错会中断当前执行路径。"
+        "en": "Registers a synchronous listener scoped to the source file that calls this API. Preset timing: progress.line before a new source line; progress.start when the chunk starts; progress.end after normal completion; progress.error on failure; progress.exit on either completion path; progress.function_call immediately before a Lua closure runs; progress.function_return after a normal return; progress.function_error before an error is caught by pcall/xpcall; and progress.function_exit after either function outcome. Custom names run only when callProgress/callProgressAsync is invoked. The callback executes at the trigger point and blocks the program; callback errors interrupt the current execution path. Reliability options cap executions, apply deterministic sampling or leading-edge throttling, and choose propagate, ignore, mute, or remove error handling.",
+        "zh-CN": "为调用本 API 的当前源码文件注册同步监听器。预设事件的触发时机：progress.line 在即将执行新的源码行时触发；progress.start 在代码块开始执行时触发；progress.end 在代码块正常完成后触发；progress.error 在代码块因错误退出时触发；progress.exit 在代码块正常或异常离开时都会触发；progress.function_call 在 Lua 闭包开始执行前触发；progress.function_return 在函数正常返回后触发；progress.function_error 在函数错误被 pcall/xpcall 捕获前触发；progress.function_exit 在函数正常或异常离开后触发。自定义事件名只会由 callProgress/callProgressAsync 主动触发。同步 callback 会在事件触发点立即执行并阻塞当前程序，callback 抛错会中断当前执行路径。 可靠性配置可限制执行次数、执行确定性采样或前沿节流，并选择传播、忽略、静音或删除监听器的错误处置。"
       },
       "example": {
         "en": "local id = glua.event.setProgress(glua.event.events.progress_function_call, function(ctx)\n  print(ctx.sequence, ctx.calleeName, ctx.line)\nend, { whitelist = { work }, priority = 10, group = \"trace\" })",
@@ -4468,17 +4468,17 @@
         "en": [
           "event: preset or custom event name",
           "callback: function(ctx) receiving an immutable context snapshot by default",
-          "config (optional): listener filters, lifecycle, queue, error, and mutability options"
+          "config (optional): sync listener options plus debounceMs, queueLimit, and overflow"
         ],
         "zh-CN": [
           "event：预设或自定义事件名",
           "callback：function(ctx)，默认接收不可变上下文快照",
-          "config（可选）：监听器过滤、生命周期、队列、错误和可变性选项"
+          "config（可选）：同步监听器选项，以及 debounceMs、queueLimit 和 overflow"
         ]
       },
       "description": {
-        "en": "Registers an asynchronous listener with the same source scope and preset trigger timing as setProgress. Triggering only enqueues a context snapshot; the callback runs at a later VM safe point or during flush(), so it does not block the original trigger instruction. queueLimit and overflow control backpressure. onError=propagate reports callback errors at the consuming safe point; onError=ignore records and suppresses them.",
-        "zh-CN": "注册异步监听器，其文件作用域和预设事件触发时机与 setProgress 完全相同。事件触发时只把上下文快照加入队列，callback 会在后续 VM 安全点或 flush() 中执行，因此不会阻塞原始触发指令。queueLimit 与 overflow 控制队列背压；onError=propagate 会在消费队列的安全点传播错误，onError=ignore 会记录并忽略错误。"
+        "en": "Registers an asynchronous listener with the same source scope and preset timing as setProgress. Callbacks run only at VM safe points or flush(). debounceMs coalesces a time window to the latest context without a background goroutine; flush() forces pending debounced tasks. Queue limits provide backpressure, and onError supports propagate, ignore, mute, or remove.",
+        "zh-CN": "注册与 setProgress 作用域和预设时机相同的异步监听器。回调只在 VM 安全点或 flush() 中执行；debounceMs 不启动后台 goroutine，而是在时间窗内只保留最新上下文，flush() 会强制执行待处理防抖任务。队列上限提供背压，onError 支持 propagate、ignore、mute 或 remove。"
       },
       "example": {
         "en": "glua.event.setProgressAsync(\"task.done\", function(ctx) print(ctx.payload) end)",
@@ -6281,6 +6281,388 @@
       "example": {
         "en": "glua.schema.assert(value, schema)",
         "zh-CN": "glua.schema.assert(value, schema)"
+      }
+    },
+    "glua.path": {
+      "signature": {
+        "en": "glua.path",
+        "zh-CN": "glua.path"
+      },
+      "returns": {
+        "en": "value: GLua extension object.",
+        "zh-CN": "值：GLua 扩展对象。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Host-platform lexical path operations with no filesystem access.",
+        "zh-CN": "只进行宿主平台词法路径运算且不访问文件系统的命名空间。"
+      },
+      "example": {
+        "en": "glua.path",
+        "zh-CN": "glua.path"
+      }
+    },
+    "glua.path.join": {
+      "signature": {
+        "en": "glua.path.join(...)",
+        "zh-CN": "glua.path.join(...)"
+      },
+      "returns": {
+        "en": "returns: platform path.",
+        "zh-CN": "返回：平台格式路径。"
+      },
+      "params": {
+        "en": [
+          "...: path strings"
+        ],
+        "zh-CN": [
+          "...：路径字符串"
+        ]
+      },
+      "description": {
+        "en": "Joins and cleans any number of path elements.",
+        "zh-CN": "连接并清理任意数量的路径片段。"
+      },
+      "example": {
+        "en": "glua.path.join(...)",
+        "zh-CN": "glua.path.join(...)"
+      }
+    },
+    "glua.path.clean": {
+      "signature": {
+        "en": "glua.path.clean(path)",
+        "zh-CN": "glua.path.clean(path)"
+      },
+      "returns": {
+        "en": "returns: cleaned path.",
+        "zh-CN": "返回：清理后的路径。"
+      },
+      "params": {
+        "en": [
+          "path: path string"
+        ],
+        "zh-CN": [
+          "path：路径字符串"
+        ]
+      },
+      "description": {
+        "en": "Returns the shortest equivalent lexical path without checking the target.",
+        "zh-CN": "返回最短等价词法路径，不检查目标。"
+      },
+      "example": {
+        "en": "glua.path.clean(path)",
+        "zh-CN": "glua.path.clean(path)"
+      }
+    },
+    "glua.path.base": {
+      "signature": {
+        "en": "glua.path.base(path)",
+        "zh-CN": "glua.path.base(path)"
+      },
+      "returns": {
+        "en": "returns: final path element.",
+        "zh-CN": "返回：文件名或末尾元素。"
+      },
+      "params": {
+        "en": [
+          "path: path string"
+        ],
+        "zh-CN": [
+          "path：路径字符串"
+        ]
+      },
+      "description": {
+        "en": "Returns the last path element.",
+        "zh-CN": "返回最后一个路径元素。"
+      },
+      "example": {
+        "en": "glua.path.base(path)",
+        "zh-CN": "glua.path.base(path)"
+      }
+    },
+    "glua.path.dir": {
+      "signature": {
+        "en": "glua.path.dir(path)",
+        "zh-CN": "glua.path.dir(path)"
+      },
+      "returns": {
+        "en": "returns: directory path.",
+        "zh-CN": "返回：目录路径。"
+      },
+      "params": {
+        "en": [
+          "path: path string"
+        ],
+        "zh-CN": [
+          "path：路径字符串"
+        ]
+      },
+      "description": {
+        "en": "Returns the directory portion of a path.",
+        "zh-CN": "返回路径的目录部分。"
+      },
+      "example": {
+        "en": "glua.path.dir(path)",
+        "zh-CN": "glua.path.dir(path)"
+      }
+    },
+    "glua.path.ext": {
+      "signature": {
+        "en": "glua.path.ext(path)",
+        "zh-CN": "glua.path.ext(path)"
+      },
+      "returns": {
+        "en": "returns: extension or empty string.",
+        "zh-CN": "返回：扩展名或空字符串。"
+      },
+      "params": {
+        "en": [
+          "path: path string"
+        ],
+        "zh-CN": [
+          "path：路径字符串"
+        ]
+      },
+      "description": {
+        "en": "Returns the final extension including its leading dot.",
+        "zh-CN": "返回包含前导点的扩展名。"
+      },
+      "example": {
+        "en": "glua.path.ext(path)",
+        "zh-CN": "glua.path.ext(path)"
+      }
+    },
+    "glua.path.isAbs": {
+      "signature": {
+        "en": "glua.path.isAbs(path)",
+        "zh-CN": "glua.path.isAbs(path)"
+      },
+      "returns": {
+        "en": "returns: boolean.",
+        "zh-CN": "返回：boolean。"
+      },
+      "params": {
+        "en": [
+          "path: path string"
+        ],
+        "zh-CN": [
+          "path：路径字符串"
+        ]
+      },
+      "description": {
+        "en": "Reports whether a path is absolute on the host platform.",
+        "zh-CN": "按宿主平台规则判断绝对路径。"
+      },
+      "example": {
+        "en": "glua.path.isAbs(path)",
+        "zh-CN": "glua.path.isAbs(path)"
+      }
+    },
+    "glua.path.rel": {
+      "signature": {
+        "en": "glua.path.rel(base, target)",
+        "zh-CN": "glua.path.rel(base, target)"
+      },
+      "returns": {
+        "en": "returns: relative path.",
+        "zh-CN": "返回：相对路径。"
+      },
+      "params": {
+        "en": [
+          "base: base path",
+          "target: target path"
+        ],
+        "zh-CN": [
+          "base：基础路径",
+          "target：目标路径"
+        ]
+      },
+      "description": {
+        "en": "Computes target relative to base and raises when the result cannot be represented across volumes.",
+        "zh-CN": "计算 target 相对于 base 的词法路径，无法跨卷表达时抛错。"
+      },
+      "example": {
+        "en": "glua.path.rel(base, target)",
+        "zh-CN": "glua.path.rel(base, target)"
+      }
+    },
+    "glua.path.split": {
+      "signature": {
+        "en": "glua.path.split(path)",
+        "zh-CN": "glua.path.split(path)"
+      },
+      "returns": {
+        "en": "returns: dir, file.",
+        "zh-CN": "返回：dir、file。"
+      },
+      "params": {
+        "en": [
+          "path: path string"
+        ],
+        "zh-CN": [
+          "path：路径字符串"
+        ]
+      },
+      "description": {
+        "en": "Splits a path into directory and final element, retaining the directory separator.",
+        "zh-CN": "拆分目录和最后一个元素，目录保留尾部分隔符。"
+      },
+      "example": {
+        "en": "glua.path.split(path)",
+        "zh-CN": "glua.path.split(path)"
+      }
+    },
+    "glua.path.volume": {
+      "signature": {
+        "en": "glua.path.volume(path)",
+        "zh-CN": "glua.path.volume(path)"
+      },
+      "returns": {
+        "en": "returns: volume name string.",
+        "zh-CN": "返回：卷名字符串。"
+      },
+      "params": {
+        "en": [
+          "path: path string"
+        ],
+        "zh-CN": [
+          "path：路径字符串"
+        ]
+      },
+      "description": {
+        "en": "Returns a Windows drive or UNC volume name and usually empty text elsewhere.",
+        "zh-CN": "返回 Windows 驱动器或 UNC 卷名，其他平台通常为空。"
+      },
+      "example": {
+        "en": "glua.path.volume(path)",
+        "zh-CN": "glua.path.volume(path)"
+      }
+    },
+    "glua.path.toSlash": {
+      "signature": {
+        "en": "glua.path.toSlash(path)",
+        "zh-CN": "glua.path.toSlash(path)"
+      },
+      "returns": {
+        "en": "returns: converted path.",
+        "zh-CN": "返回：转换后的路径。"
+      },
+      "params": {
+        "en": [
+          "path: path string"
+        ],
+        "zh-CN": [
+          "path：路径字符串"
+        ]
+      },
+      "description": {
+        "en": "Converts host separators to forward slashes.",
+        "zh-CN": "把宿主平台分隔符转换为正斜杠。"
+      },
+      "example": {
+        "en": "glua.path.toSlash(path)",
+        "zh-CN": "glua.path.toSlash(path)"
+      }
+    },
+    "glua.path.fromSlash": {
+      "signature": {
+        "en": "glua.path.fromSlash(path)",
+        "zh-CN": "glua.path.fromSlash(path)"
+      },
+      "returns": {
+        "en": "returns: converted path.",
+        "zh-CN": "返回：转换后的路径。"
+      },
+      "params": {
+        "en": [
+          "path: path string"
+        ],
+        "zh-CN": [
+          "path：路径字符串"
+        ]
+      },
+      "description": {
+        "en": "Converts forward slashes to host separators.",
+        "zh-CN": "把正斜杠转换为宿主平台分隔符。"
+      },
+      "example": {
+        "en": "glua.path.fromSlash(path)",
+        "zh-CN": "glua.path.fromSlash(path)"
+      }
+    },
+    "glua.path.match": {
+      "signature": {
+        "en": "glua.path.match(pattern, name)",
+        "zh-CN": "glua.path.match(pattern, name)"
+      },
+      "returns": {
+        "en": "returns: boolean.",
+        "zh-CN": "返回：boolean。"
+      },
+      "params": {
+        "en": [
+          "pattern: path pattern",
+          "name: name to match"
+        ],
+        "zh-CN": [
+          "pattern：路径模式",
+          "name：待匹配名称"
+        ]
+      },
+      "description": {
+        "en": "Matches a name using host path-pattern rules and raises on malformed patterns.",
+        "zh-CN": "按宿主平台路径模式匹配名称，非法模式抛错。"
+      },
+      "example": {
+        "en": "glua.path.match(pattern, name)",
+        "zh-CN": "glua.path.match(pattern, name)"
+      }
+    },
+    "glua.path.separator": {
+      "signature": {
+        "en": "glua.path.separator",
+        "zh-CN": "glua.path.separator"
+      },
+      "returns": {
+        "en": "value: GLua extension object.",
+        "zh-CN": "值：GLua 扩展对象。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Current host directory separator.",
+        "zh-CN": "当前宿主平台目录分隔符。"
+      },
+      "example": {
+        "en": "glua.path.separator",
+        "zh-CN": "glua.path.separator"
+      }
+    },
+    "glua.path.listSeparator": {
+      "signature": {
+        "en": "glua.path.listSeparator",
+        "zh-CN": "glua.path.listSeparator"
+      },
+      "returns": {
+        "en": "value: GLua extension object.",
+        "zh-CN": "值：GLua 扩展对象。"
+      },
+      "params": {
+        "en": [],
+        "zh-CN": []
+      },
+      "description": {
+        "en": "Current host path-list separator.",
+        "zh-CN": "当前宿主平台路径列表分隔符。"
+      },
+      "example": {
+        "en": "glua.path.listSeparator",
+        "zh-CN": "glua.path.listSeparator"
       }
     }
   }

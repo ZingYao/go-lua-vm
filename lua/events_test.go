@@ -4,6 +4,7 @@ package lua
 
 import (
 	"testing"
+	"time"
 
 	"github.com/ZingYao/go-lua-vm/runtime"
 )
@@ -151,10 +152,15 @@ func TestGluaEventInvalidOptions(t *testing.T) {
 		value runtime.Value
 	}{
 		{name: "once type", field: "once", value: runtime.StringValue("true")},
+		{name: "negative max calls", field: "maxCalls", value: runtime.IntegerValue(-1)},
 		{name: "negative queue", field: "queueLimit", value: runtime.IntegerValue(-1)},
 		{name: "overflow enum", field: "overflow", value: runtime.StringValue("block")},
 		{name: "error enum", field: "onError", value: runtime.StringValue("panic")},
 		{name: "mutable type", field: "mutable", value: runtime.IntegerValue(1)},
+		{name: "negative throttle", field: "throttleMs", value: runtime.IntegerValue(-1)},
+		{name: "negative debounce", field: "debounceMs", value: runtime.IntegerValue(-1)},
+		{name: "sample type", field: "sampleRate", value: runtime.StringValue("half")},
+		{name: "sample range", field: "sampleRate", value: runtime.NumberValue(1.1)},
 	}
 	for _, testCase := range testCases {
 		// 每个非法字段独立构造 table，避免前一用例污染后一用例。
@@ -166,5 +172,158 @@ func TestGluaEventInvalidOptions(t *testing.T) {
 				t.Fatalf("invalid %s option was accepted", testCase.field)
 			}
 		})
+	}
+}
+
+// TestGluaEventReliabilityAdmission 验证限次、确定性采样和节流在派发前的额度行为。
+//
+// 测试显式传入纳秒时间，不依赖真实时钟漂移；每个监听器独立验证计数和释放语义。
+func TestGluaEventReliabilityAdmission(t *testing.T) {
+	// 辅助注册表只包含当前测试监听器，模拟正常注册索引。
+	registry := &gluaEventRegistry{eventsByID: make(map[int64]*gluaEventCallback)}
+
+	limited := &gluaEventCallback{id: 1, options: gluaEventOptions{maxCalls: 2, sampleRate: 1}}
+	registry.eventsByID[limited.id] = limited
+	if !registry.canDispatchAt(limited, nil, runtime.NilValue(), false, time.Unix(0, 1)) || !registry.canDispatchAt(limited, nil, runtime.NilValue(), false, time.Unix(0, 2)) {
+		// 两次额度都必须允许占用。
+		t.Fatalf("maxCalls should admit first two dispatches")
+	}
+	if registry.canDispatchAt(limited, nil, runtime.NilValue(), false, time.Unix(0, 3)) {
+		// 两个待执行额度已经耗尽上限，第三次必须被拒绝。
+		t.Fatalf("maxCalls admitted an excess dispatch")
+	}
+	registry.releaseDispatchClaim(limited)
+	if !registry.canDispatchAt(limited, nil, runtime.NilValue(), false, time.Unix(0, 4)) {
+		// 释放一个未执行额度后应允许再次占用。
+		t.Fatalf("released maxCalls claim was not reusable")
+	}
+
+	sampled := &gluaEventCallback{id: 2, options: gluaEventOptions{sampleRate: 0.5}}
+	registry.eventsByID[sampled.id] = sampled
+	admitted := 0
+	for index := int64(1); index <= 4; index++ {
+		// 0.5 累加采样应稳定拒绝、接受、拒绝、接受。
+		if registry.canDispatchAt(sampled, nil, runtime.NilValue(), false, time.Unix(0, index)) {
+			// 接受后立即释放，避免额度影响下一次采样。
+			admitted++
+			registry.releaseDispatchClaim(sampled)
+		}
+	}
+	if admitted != 2 || sampled.sampledOutCount != 2 {
+		// 采样结果和抑制统计必须完全确定。
+		t.Fatalf("sample admission=%d sampledOut=%d", admitted, sampled.sampledOutCount)
+	}
+
+	throttled := &gluaEventCallback{id: 3, options: gluaEventOptions{sampleRate: 1, throttleNs: 100}}
+	registry.eventsByID[throttled.id] = throttled
+	if !registry.canDispatchAt(throttled, nil, runtime.NilValue(), false, time.Unix(0, 1000)) {
+		// 第一次触发必须通过节流。
+		t.Fatalf("first throttled dispatch was rejected")
+	}
+	registry.releaseDispatchClaim(throttled)
+	if registry.canDispatchAt(throttled, nil, runtime.NilValue(), false, time.Unix(0, 1050)) {
+		// 时间窗内触发必须被抑制。
+		t.Fatalf("throttle admitted an event inside its window")
+	}
+	if !registry.canDispatchAt(throttled, nil, runtime.NilValue(), false, time.Unix(0, 1100)) {
+		// 到达边界时必须允许触发。
+		t.Fatalf("throttle rejected an event at its boundary")
+	}
+	if throttled.throttledCount != 1 {
+		// 节流统计只记录被抑制的一次。
+		t.Fatalf("throttledCount=%d", throttled.throttledCount)
+	}
+}
+
+// TestGluaEventDebounceQueue 验证异步防抖只保留最新上下文并遵守到期时间。
+//
+// 测试直接检查队列 readyAt，不休眠、不启动 goroutine，也不依赖 VM 指令执行速度。
+func TestGluaEventDebounceQueue(t *testing.T) {
+	// 注册表和监听器模拟一个已占用两次派发额度的异步防抖回调。
+	registry := &gluaEventRegistry{}
+	callback := &gluaEventCallback{id: 1, reservedCount: 2, options: gluaEventOptions{sampleRate: 1, debounceNs: int64(time.Second)}}
+	first := runtime.StringValue("first")
+	if accepted, err := registry.enqueue(callback, first); !accepted || err != nil {
+		// 第一个上下文必须创建独立任务。
+		t.Fatalf("first debounce enqueue accepted=%v err=%v", accepted, err)
+	}
+	latest := runtime.StringValue("latest")
+	if accepted, err := registry.enqueue(callback, latest); accepted || err != nil {
+		// 第二个上下文应合并而不是新增任务。
+		t.Fatalf("second debounce enqueue accepted=%v err=%v", accepted, err)
+	}
+	registry.eventsByID = map[int64]*gluaEventCallback{callback.id: callback}
+	registry.releaseDispatchClaim(callback)
+	if len(registry.queue) != 1 || registry.queue[0].context.String != "latest" || callback.debouncedCount != 1 {
+		// 队列必须只保留最新上下文和一次合并统计。
+		t.Fatalf("debounce queue=%#v count=%d", registry.queue, callback.debouncedCount)
+	}
+	if callback.reservedCount != 1 {
+		// 合并触发必须释放自己的额度，只保留最终任务的一次占用。
+		t.Fatalf("debounce reservedCount=%d", callback.reservedCount)
+	}
+	readyAt := registry.queue[0].readyAt
+	if tasks := registry.takeQueuedTasks(readyAt.Add(-time.Nanosecond), false); len(tasks) != 0 {
+		// 到期前普通安全点不能执行任务。
+		t.Fatalf("debounce task executed before ready time")
+	}
+	tasks := registry.takeQueuedTasks(readyAt, false)
+	if len(tasks) != 1 || tasks[0].context.String != "latest" {
+		// 到期时应取出唯一最新任务。
+		t.Fatalf("debounce ready tasks=%#v", tasks)
+	}
+}
+
+// TestGluaEventContextIdentity 验证调用链编号、父事件关系和根退出后的链切换。
+//
+// 测试使用固定调用深度，不依赖 VM 栈布局；返回编号必须单调且同一链共享 traceId。
+func TestGluaEventContextIdentity(t *testing.T) {
+	// 根事件建立 trace，较深事件应指向最近的较浅事件。
+	registry := &gluaEventRegistry{}
+	rootID, rootTraceID, rootParentID := registry.nextContextIdentity(GluaEventProgressStart, 1)
+	if rootID <= 0 || rootTraceID <= 0 || rootParentID != 0 {
+		// 根事件必须有有效身份且没有父事件。
+		t.Fatalf("root identity event=%d trace=%d parent=%d", rootID, rootTraceID, rootParentID)
+	}
+	childID, childTraceID, childParentID := registry.nextContextIdentity(GluaEventProgressFunctionCall, 2)
+	if childID <= rootID || childTraceID != rootTraceID || childParentID != rootID {
+		// 子事件必须共享 trace 并指向根深度最近事件。
+		t.Fatalf("child identity event=%d trace=%d parent=%d", childID, childTraceID, childParentID)
+	}
+	exitID, exitTraceID, exitParentID := registry.nextContextIdentity(GluaEventProgressExit, 1)
+	if exitID <= childID || exitTraceID != rootTraceID || exitParentID != 0 {
+		// 根退出仍属于旧链，且同深度事件没有较浅父节点。
+		t.Fatalf("exit identity event=%d trace=%d parent=%d", exitID, exitTraceID, exitParentID)
+	}
+	nextID, nextTraceID, nextParentID := registry.nextContextIdentity("custom.next", 1)
+	if nextID <= exitID || nextTraceID == rootTraceID || nextParentID != 0 {
+		// 根退出后的独立事件必须建立新链。
+		t.Fatalf("next identity event=%d trace=%d parent=%d", nextID, nextTraceID, nextParentID)
+	}
+}
+
+// TestGluaEventTrimQueueOnLimitUpdate 验证收紧 maxCalls 会取消最新的超额异步任务。
+//
+// callback 已占用三个队列额度；收紧到一个后必须保留最早任务并同步更新抑制统计。
+func TestGluaEventTrimQueueOnLimitUpdate(t *testing.T) {
+	// 构造三个可区分上下文，确保裁剪方向稳定。
+	callback := &gluaEventCallback{id: 1, reservedCount: 3, options: gluaEventOptions{maxCalls: 1, sampleRate: 1}}
+	registry := &gluaEventRegistry{
+		queue: []gluaEventTask{
+			{callback: callback, context: runtime.StringValue("first")},
+			{callback: callback, context: runtime.StringValue("second")},
+			{callback: callback, context: runtime.StringValue("third")},
+		},
+	}
+	registry.mu.Lock()
+	registry.trimCallbackQueueLocked(callback, 1)
+	registry.mu.Unlock()
+	if len(registry.queue) != 1 || registry.queue[0].context.String != "first" {
+		// 最早任务必须保留，最新两个任务被取消。
+		t.Fatalf("trimmed queue=%#v", registry.queue)
+	}
+	if callback.reservedCount != 1 || callback.suppressedCount != 2 || registry.suppressedEvents != 2 {
+		// 额度和两级统计必须同步减少或增加。
+		t.Fatalf("reserved=%d callbackSuppressed=%d registrySuppressed=%d", callback.reservedCount, callback.suppressedCount, registry.suppressedEvents)
 	}
 }

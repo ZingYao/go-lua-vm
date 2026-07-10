@@ -39,6 +39,97 @@ event.callProgress("test.once")
 assert(onceCount == 1)
 assert(event.get(onceID) == nil)
 
+-- maxCalls 使用与 once 相同的自动删除路径，达到上限后不再执行。
+local limitedCount = 0
+local limitedID = event.setProgress("test.max-calls", function(ctx)
+  limitedCount = limitedCount + 1
+  assert(ctx.maxCalls == 2)
+end, { maxCalls = 2 })
+event.callProgress("test.max-calls")
+event.callProgress("test.max-calls")
+event.callProgress("test.max-calls")
+assert(limitedCount == 2)
+assert(event.get(limitedID) == nil)
+
+-- sampleRate 使用确定性累加采样，0.5 应稳定执行每两个触发中的一个。
+local sampledCount = 0
+local sampledID = event.setProgress("test.sample", function()
+  sampledCount = sampledCount + 1
+end, { sampleRate = 0.5 })
+for _ = 1, 4 do
+  event.callProgress("test.sample")
+end
+local sampledInfo = event.get(sampledID)
+assert(sampledCount == 2)
+assert(sampledInfo.sampledOutCount == 2)
+assert(sampledInfo.suppressedCount == 2)
+assert(event.remove(sampledID))
+
+-- throttleMs 使用前沿节流，连续触发只接受第一次并记录抑制统计。
+local throttledCount = 0
+local throttledID = event.setProgress("test.throttle", function()
+  throttledCount = throttledCount + 1
+end, { throttleMs = 60000 })
+event.callProgress("test.throttle")
+event.callProgress("test.throttle")
+local throttledInfo = event.get(throttledID)
+assert(throttledCount == 1)
+assert(throttledInfo.throttledCount == 1)
+assert(throttledInfo.suppressedCount == 1)
+assert(event.remove(throttledID))
+
+-- debounceMs 只用于异步监听器，时间窗内保留最新上下文；flush 强制执行最新任务。
+local debouncedPayload = nil
+local debouncedID = event.setProgressAsync("test.debounce", function(ctx)
+  debouncedPayload = ctx.payload
+end, { debounceMs = 60000 })
+event.callProgress("test.debounce", "first")
+event.callProgress("test.debounce", "second")
+event.callProgress("test.debounce", "latest")
+local debouncedInfo = event.get(debouncedID)
+assert(debouncedInfo.debouncedCount == 2)
+assert(event.flush() == 1)
+assert(debouncedPayload == "latest")
+assert(event.remove(debouncedID))
+assert(not pcall(event.setProgress, "test.invalid-debounce", function() end, { debounceMs = 1 }))
+
+-- onError 可选择继续、静音或删除；错误始终进入监听器统计。
+local ignoredID = event.setProgress("test.error-ignore", function()
+  error("ignored callback error")
+end, { onError = "continue" })
+event.callProgress("test.error-ignore")
+assert(event.get(ignoredID).errorCount == 1)
+assert(event.remove(ignoredID))
+
+local mutedID = event.setProgress("test.error-mute", function()
+  error("muted callback error")
+end, { onError = "mute" })
+event.callProgress("test.error-mute")
+assert(event.get(mutedID).muted)
+assert(event.remove(mutedID))
+
+local removedID = event.setProgress("test.error-remove", function()
+  error("removed callback error")
+end, { onError = "remove" })
+event.callProgress("test.error-remove")
+assert(event.get(removedID) == nil)
+
+-- 每个上下文包含稳定事件编号和调用链编号，同一执行链内编号递增。
+local identities = {}
+local identityID = event.setProgress("test.identity", function(ctx)
+  identities[#identities + 1] = {
+    eventId = ctx.eventId,
+    sequence = ctx.sequence,
+    traceId = ctx.traceId,
+  }
+end)
+event.callProgress("test.identity")
+event.callProgress("test.identity")
+assert(identities[1].eventId == identities[1].sequence)
+assert(identities[2].eventId > identities[1].eventId)
+assert(identities[2].traceId == identities[1].traceId)
+assert(event.remove(identityID))
+
 -- 分组静音和删除只能影响当前源码文件中的目标分组。
 assert(event.setGroupMuted("priority", true) == 2)
 event.callProgress("test.priority")
@@ -142,6 +233,9 @@ local stats = event.stats()
 assert(type(stats.queuedTasks) == "number")
 assert(type(stats.droppedTasks) == "number")
 assert(type(stats.callbackErrors) == "number")
+assert(type(stats.suppressedEvents) == "number")
+assert(type(stats.debouncedTasks) == "number")
+assert(type(stats.traceSequence) == "number")
 assert(type(stats.sequence) == "number")
 assert(event.flush() == 0)
 

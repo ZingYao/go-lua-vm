@@ -196,6 +196,7 @@
         "regex",
         "uuid",
         "zip",
+        "path",
         "schema",
         "event"
       ],
@@ -205,6 +206,7 @@
         "xml": "glua.xml",
         "toml": "glua.toml",
         "hash": "glua.hash",
+        "path": "glua.path",
         "schema": "glua.schema"
       }
     },
@@ -260,6 +262,34 @@
       "detailContains": {
         "compress": "glua.zip.compress(entries [, options])",
         "decompress": "glua.zip.decompress(archive [, options])"
+      }
+    },
+    {
+      "name": "glua path completion",
+      "kind": "builtin-member",
+      "source": "glua.path.",
+      "marker": "glua.path.",
+      "cursor": "after-marker",
+      "expected": [
+        "join",
+        "clean",
+        "base",
+        "dir",
+        "ext",
+        "isAbs",
+        "rel",
+        "split",
+        "volume",
+        "toSlash",
+        "fromSlash",
+        "match",
+        "separator",
+        "listSeparator"
+      ],
+      "detailContains": {
+        "join": "glua.path.join(...)",
+        "rel": "glua.path.rel(base, target)",
+        "match": "glua.path.match(pattern, name)"
       }
     },
     {

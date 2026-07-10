@@ -1530,14 +1530,14 @@ var builtinFunctionDocs = map[string]builtinFunctionDoc{
 	"glua.event.setProgress": {
 		Signature:   "glua.event.setProgress(event, callback [, config])",
 		Returns:     "returns: event id.",
-		Parameters:  []string{"event: preset or custom event name", "callback: function(ctx)", "config (optional): name/function filter table"},
-		Description: "注册当前源码文件内同步执行的进度事件回调；函数名单支持名称字符串或函数变量。",
+		Parameters:  []string{"event: preset or custom event name", "callback: function(ctx)", "config (optional): filters and reliability options"},
+		Description: "注册当前源码文件内同步执行的进度事件回调；支持限次、优先级、节流、采样及传播、忽略、静音、删除错误策略。",
 	},
 	"glua.event.setProgressAsync": {
 		Signature:   "glua.event.setProgressAsync(event, callback [, config])",
 		Returns:     "returns: event id.",
-		Parameters:  []string{"event: preset or custom event name", "callback: function(ctx)", "config (optional): name/function filter table"},
-		Description: "注册在后续 VM 安全点执行的进度事件回调；函数名单支持名称字符串或函数变量。",
+		Parameters:  []string{"event: preset or custom event name", "callback: function(ctx)", "config (optional): filters, reliability, debounce, and queue options"},
+		Description: "注册在后续 VM 安全点执行的进度事件回调；额外支持无后台线程的防抖合并和队列背压。",
 	},
 	"glua.event.callProgress": {
 		Signature:   "glua.event.callProgress(event [, payload])",

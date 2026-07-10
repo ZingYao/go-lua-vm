@@ -676,10 +676,39 @@ func TestEventBuiltinCatalogDescribesTriggerTiming(t *testing.T) {
 		t.Fatalf("setProgress builtin is missing")
 	}
 	hover := formatBuiltinHover("glua.event.setProgress", info)
-	for _, expected := range []string{"预设事件的触发时机", "progress.function_error 在函数错误被 pcall/xpcall 捕获前触发", "**说明**", "**参数**", "**返回值**", "**示例**"} {
+	for _, expected := range []string{"预设事件的触发时机", "progress.function_error 在函数错误被 pcall/xpcall 捕获前触发", "maxCalls", "确定性采样", "静音", "**说明**", "**参数**", "**返回值**", "**示例**"} {
 		// 关键触发语义和本地化标题缺一不可。
 		if !strings.Contains(hover, expected) {
 			t.Fatalf("setProgress hover missing %q: %s", expected, hover)
+		}
+	}
+}
+
+// TestPathBuiltinCatalog 验证 glua.path 的补全目录和中文安全边界说明。
+func TestPathBuiltinCatalog(t *testing.T) {
+	// 加载实际发布目录，确保 VSCode 与 JetBrains 共同获得 path 文档。
+	previousLocale := activeBuiltinCatalogLocale
+	t.Cleanup(func() {
+		// 测试结束恢复原文档语言。
+		applyBuiltinCatalogLocale(previousLocale)
+	})
+	catalogPath := filepath.Join("..", "..", "vscode", "extensions", "glua-lsp", "server", "builtin-functions.json")
+	if err := LoadBuiltinCatalogFiles([]string{catalogPath}); err != nil {
+		// 发布目录必须保持合法 JSON。
+		t.Fatalf("LoadBuiltinCatalogFiles failed: %v", err)
+	}
+	applyBuiltinCatalogLocale("zh-CN")
+	info, ok := builtinFunctionInfo("glua.path.rel")
+	if !ok {
+		// rel 必须参与补全、定义和 Hover。
+		t.Fatalf("glua.path.rel builtin is missing")
+	}
+	hover := formatBuiltinHover("glua.path.rel", info)
+	for _, expected := range []string{"glua.path.rel(base, target)", "词法路径", "跨卷", "**说明**", "**参数**", "**返回值**"} {
+		// 签名、纯词法语义和失败边界必须完整展示。
+		if !strings.Contains(hover, expected) {
+			// 任一缺失都会让编辑器说明与运行时不一致。
+			t.Fatalf("glua.path.rel hover missing %q: %s", expected, hover)
 		}
 	}
 }

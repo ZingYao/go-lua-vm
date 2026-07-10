@@ -31,6 +31,8 @@ const (
 	GluaEventProgressFunctionError = "progress.function_error"
 	// GluaEventProgressFunctionExit 表示当前文件内一次函数调用离开，成功和失败都会触发。
 	GluaEventProgressFunctionExit = "progress.function_exit"
+	// maxGluaEventDurationMs 防止毫秒配置转换为纳秒时发生 int64 溢出。
+	maxGluaEventDurationMs = int64(^uint64(0)>>1) / int64(time.Millisecond)
 )
 
 // gluaEventCallback 保存一个 Lua 侧事件回调。
@@ -53,8 +55,8 @@ type gluaEventCallback struct {
 	filter gluaEventFilter
 	// options 保存监听器治理、队列和错误处理配置。
 	options gluaEventOptions
-	// onceFired 表示 once 监听器已经被一次派发占用，后续派发必须跳过。
-	onceFired bool
+	// reservedCount 保存已经占用派发额度但尚未执行完成的同步或异步任务数。
+	reservedCount int64
 	// dispatchCount 保存回调实际执行次数。
 	dispatchCount int64
 	// errorCount 保存回调执行失败次数。
@@ -63,12 +65,26 @@ type gluaEventCallback struct {
 	droppedCount int64
 	// totalDurationNs 保存回调累计执行耗时。
 	totalDurationNs int64
+	// suppressedCount 保存因限次、节流、采样或防抖合并而未独立执行的触发次数。
+	suppressedCount int64
+	// throttledCount 保存被 throttleMs 时间窗抑制的触发次数。
+	throttledCount int64
+	// sampledOutCount 保存被确定性 sampleRate 过滤的触发次数。
+	sampledOutCount int64
+	// debouncedCount 保存被 debounceMs 合并进已有异步任务的触发次数。
+	debouncedCount int64
+	// lastAcceptedAt 保存最近一次通过节流检查的时间，并保留 Go 单调时钟部分。
+	lastAcceptedAt time.Time
+	// sampleBalance 保存确定性采样累加器，避免随机源导致测试和事件重放不稳定。
+	sampleBalance float64
 }
 
 // gluaEventOptions 保存单个监听器的可选治理配置。
 type gluaEventOptions struct {
 	// once 表示监听器成功占用一次派发后自动删除。
 	once bool
+	// maxCalls 限制监听器最多实际执行次数，0 表示不限制。
+	maxCalls int64
 	// priority 越大越先派发；相同优先级保持注册顺序。
 	priority int64
 	// group 保存调用方定义的监听器分组名称。
@@ -77,10 +93,16 @@ type gluaEventOptions struct {
 	queueLimit int
 	// overflow 定义队列满时的处理方式。
 	overflow string
-	// onError 定义异步回调错误的处理方式。
+	// onError 定义同步和异步回调错误的处理方式。
 	onError string
 	// mutable 表示上下文中的 locals/upvalues 是否允许保留可变引用。
 	mutable bool
+	// throttleNs 限制两次接受触发之间的最短纳秒间隔。
+	throttleNs int64
+	// debounceNs 延迟异步任务，并在时间窗内只保留最新上下文。
+	debounceNs int64
+	// sampleRate 使用 0 到 1 的确定性比例控制触发采样。
+	sampleRate float64
 }
 
 // gluaEventFilter 保存函数调用进度事件的过滤配置。
@@ -105,6 +127,8 @@ type gluaEventTask struct {
 	callback *gluaEventCallback
 	// context 保存传给 callback 的上下文表。
 	context Value
+	// readyAt 保存防抖任务最早允许执行的时间，零值表示立即可执行。
+	readyAt time.Time
 }
 
 // gluaEventRegistry 保存单个 State 的 glua 自定义事件注册表。
@@ -129,6 +153,18 @@ type gluaEventRegistry struct {
 	droppedTasks int64
 	// callbackErrors 保存事件回调累计错误数。
 	callbackErrors int64
+	// suppressedEvents 保存因可靠性策略未独立执行的累计触发数。
+	suppressedEvents int64
+	// debouncedTasks 保存被合并到已有异步任务的累计触发数。
+	debouncedTasks int64
+	// traceSequence 保存当前 State 分配过的调用链编号。
+	traceSequence int64
+	// currentTraceID 保存当前代码执行链使用的编号。
+	currentTraceID int64
+	// traceDepth 保存当前根调用链开始时的 Lua 帧深度。
+	traceDepth int64
+	// lastEventByDepth 保存每个调用深度最近的事件编号，供 parentEventId 关联。
+	lastEventByDepth map[int64]int64
 }
 
 var (
@@ -137,12 +173,13 @@ var (
 	// gluaEventContextFields 定义事件上下文允许复制的固定字段，避免 RawNext 遗漏 RawSetString 写入的键。
 	gluaEventContextFields = []string{
 		"event", "kind", "async", "payload", "timestamp",
-		"sequence", "durationNs", "depth", "args", "results", "error",
+		"sequence", "eventId", "traceId", "parentEventId", "durationNs", "depth", "args", "results", "error",
 		"source", "lineDefined", "lastLineDefined",
 		"functionName", "nameWhat", "line", "function", "locals", "upvalues",
 		"callee", "calleeName", "calleeNameWhat", "calleeType", "callPC",
 		"calleeSource", "calleeLineDefined", "calleeLastLineDefined", "calleeUpvalues",
-		"id", "config", "group", "priority", "once",
+		"id", "config", "group", "priority", "once", "maxCalls",
+		"throttleMs", "debounceMs", "sampleRate",
 	}
 )
 
@@ -296,6 +333,8 @@ func closeGluaEventRegistry(state *State, registry *gluaEventRegistry) {
 	registry.progressEvents = nil
 	registry.roots = nil
 	registry.dispatchDepth = 0
+	registry.currentTraceID = 0
+	registry.lastEventByDepth = nil
 }
 
 // setGluaProgressEvent 实现 glua.event.setProgress 和 glua.event.setProgressAsync。
@@ -315,6 +354,10 @@ func setGluaProgressEvent(state *State, async bool, args ...runtime.Value) ([]ru
 	if err != nil {
 		// 治理配置错误按 Lua error 语义返回给调用方。
 		return nil, err
+	}
+	if options.debounceNs > 0 && !async {
+		// 防抖需要延迟和合并任务，只能用于不会阻塞触发点的异步监听器。
+		return nil, runtime.RaiseError(runtime.StringValue("event config debounceMs requires setProgressAsync"))
 	}
 	source := currentGluaCallerSource(state)
 	if source == "" {
@@ -452,6 +495,14 @@ func setGluaEventConfig(state *State, args ...runtime.Value) ([]runtime.Value, e
 		// 治理配置错误直接传播。
 		return nil, err
 	}
+	if options.debounceNs > 0 {
+		// 更新为防抖配置前确认原监听器属于异步类型。
+		async, found := registry.eventAsync(eventID)
+		if found && !async {
+			// 同步监听器不能延迟执行，调用方应重新注册异步监听器。
+			return nil, runtime.RaiseError(runtime.StringValue("event config debounceMs requires an asynchronous listener"))
+		}
+	}
 	updated := registry.setEventConfig(eventID, configValue, filter, options)
 	return []runtime.Value{runtime.BooleanValue(updated)}, nil
 }
@@ -575,7 +626,7 @@ func flushGluaEvents(state *State, args ...runtime.Value) ([]runtime.Value, erro
 		// 参数存在时拒绝执行，避免误以为可刷新其他 State。
 		return nil, runtime.RaiseError(runtime.StringValue("glua.event.flush expects no arguments"))
 	}
-	count, err := drainGluaEventQueueCount(state)
+	count, err := drainGluaEventQueueCount(state, true)
 	if err != nil {
 		// propagate 策略的异步错误由 flush 返回。
 		return nil, err
@@ -707,8 +758,8 @@ func parseGluaEventFilter(configValue runtime.Value) (gluaEventFilter, error) {
 
 // parseGluaEventOptions 从配置表解析监听器治理和异步队列选项。
 func parseGluaEventOptions(configValue runtime.Value) (gluaEventOptions, error) {
-	// 默认值保持历史行为：持续监听、注册顺序、无队列上限、异步错误向上传播。
-	options := gluaEventOptions{overflow: "drop_newest", onError: "propagate"}
+	// 默认值保持历史行为：持续监听、完整采样、注册顺序、无队列上限、回调错误向上传播。
+	options := gluaEventOptions{overflow: "drop_newest", onError: "propagate", sampleRate: 1}
 	if configValue.IsNil() {
 		// 未提供配置时直接返回兼容默认值。
 		return options, nil
@@ -724,6 +775,17 @@ func parseGluaEventOptions(configValue runtime.Value) (gluaEventOptions, error) 
 			return options, runtime.RaiseError(runtime.StringValue("event config once must be boolean"))
 		}
 		options.once = value.Bool
+	}
+	if value := configTable.RawGetString("maxCalls"); !value.IsNil() {
+		// maxCalls 使用非负整数，0 表示不限制。
+		if value.Kind != runtime.KindInteger || value.Integer < 0 {
+			return options, runtime.RaiseError(runtime.StringValue("event config maxCalls must be a non-negative integer"))
+		}
+		options.maxCalls = value.Integer
+	}
+	if options.once && options.maxCalls > 1 {
+		// once 与大于一次的上限互相矛盾，拒绝模糊配置。
+		return options, runtime.RaiseError(runtime.StringValue("event config once conflicts with maxCalls greater than 1"))
 	}
 	if value := configTable.RawGetString("priority"); !value.IsNil() {
 		// priority 使用整数保证排序稳定。
@@ -754,11 +816,24 @@ func parseGluaEventOptions(configValue runtime.Value) (gluaEventOptions, error) 
 		options.overflow = value.String
 	}
 	if value := configTable.RawGetString("onError"); !value.IsNil() {
-		// 异步错误默认传播，也可显式忽略并计入统计。
-		if value.Kind != runtime.KindString || (value.String != "propagate" && value.String != "ignore") {
-			return options, runtime.RaiseError(runtime.StringValue("event config onError must be propagate or ignore"))
+		// 错误策略同时适用于同步和异步回调，并兼容 throw/continue 自然别名。
+		if value.Kind != runtime.KindString {
+			return options, runtime.RaiseError(runtime.StringValue("event config onError must be propagate, ignore, mute, or remove"))
 		}
-		options.onError = value.String
+		switch value.String {
+		case "propagate", "throw":
+			// throw 归一化为向当前执行路径传播。
+			options.onError = "propagate"
+		case "ignore", "continue":
+			// continue 归一化为记录错误后继续执行。
+			options.onError = "ignore"
+		case "mute", "remove":
+			// mute 和 remove 保留原值，由错误收尾路径治理监听器。
+			options.onError = value.String
+		default:
+			// 未知策略不能静默降级。
+			return options, runtime.RaiseError(runtime.StringValue("event config onError must be propagate, ignore, mute, or remove"))
+		}
 	}
 	if value := configTable.RawGetString("mutable"); !value.IsNil() {
 		// mutable 为后续上下文引用策略提供显式开关。
@@ -766,6 +841,38 @@ func parseGluaEventOptions(configValue runtime.Value) (gluaEventOptions, error) 
 			return options, runtime.RaiseError(runtime.StringValue("event config mutable must be boolean"))
 		}
 		options.mutable = value.Bool
+	}
+	if value := configTable.RawGetString("throttleMs"); !value.IsNil() {
+		// 节流时间使用非负整数毫秒，0 表示关闭。
+		if value.Kind != runtime.KindInteger || value.Integer < 0 || value.Integer > maxGluaEventDurationMs {
+			return options, runtime.RaiseError(runtime.StringValue("event config throttleMs must be a non-negative integer"))
+		}
+		options.throttleNs = value.Integer * int64(time.Millisecond)
+	}
+	if value := configTable.RawGetString("debounceMs"); !value.IsNil() {
+		// 防抖时间使用非负整数毫秒，具体执行只允许异步监听器。
+		if value.Kind != runtime.KindInteger || value.Integer < 0 || value.Integer > maxGluaEventDurationMs {
+			return options, runtime.RaiseError(runtime.StringValue("event config debounceMs must be a non-negative integer"))
+		}
+		options.debounceNs = value.Integer * int64(time.Millisecond)
+	}
+	if value := configTable.RawGetString("sampleRate"); !value.IsNil() {
+		// 采样率接受 integer 或 number，并限定在闭区间 0 到 1。
+		switch value.Kind {
+		case runtime.KindInteger:
+			// 整数只可能合法表达 0 或 1。
+			options.sampleRate = float64(value.Integer)
+		case runtime.KindNumber:
+			// 浮点数保留调用方给出的比例。
+			options.sampleRate = value.Number
+		default:
+			// 其他 Lua 类型不执行隐式数值转换。
+			return options, runtime.RaiseError(runtime.StringValue("event config sampleRate must be a number between 0 and 1"))
+		}
+		if options.sampleRate < 0 || options.sampleRate > 1 {
+			// 越界比例没有稳定采样语义。
+			return options, runtime.RaiseError(runtime.StringValue("event config sampleRate must be a number between 0 and 1"))
+		}
 	}
 	return options, nil
 }
@@ -1004,16 +1111,28 @@ func (registry *gluaEventRegistry) setEventConfig(eventID int64, configValue run
 		return false
 	}
 	registry.mu.Lock()
-	defer registry.mu.Unlock()
 	callback := registry.eventsByID[eventID]
 	if callback == nil {
 		// 未找到 id 时返回 false。
+		registry.mu.Unlock()
 		return false
 	}
 	callback.configValue = configValue
 	callback.filter = filter
 	callback.options = options
+	callback.lastAcceptedAt = time.Time{}
+	callback.sampleBalance = 0
 	registry.rootEvent(callback)
+	limit := callback.callLimit()
+	if limit > 0 {
+		// 收紧上限时取消超出剩余额度的最新异步任务。
+		remaining := limit - callback.dispatchCount
+		if remaining < 0 {
+			// 已执行次数超过新上限时没有剩余额度。
+			remaining = 0
+		}
+		registry.trimCallbackQueueLocked(callback, remaining)
+	}
 	callbacks := registry.progressEvents[callback.source][callback.eventName]
 	sort.SliceStable(callbacks, func(left int, right int) bool {
 		// 配置修改 priority 后立即重排，id 相对顺序保持稳定。
@@ -1023,7 +1142,74 @@ func (registry *gluaEventRegistry) setEventConfig(eventID int64, configValue run
 		}
 		return callbacks[left].id < callbacks[right].id
 	})
+	limitReached := limit > 0 && callback.dispatchCount >= limit
+	registry.mu.Unlock()
+	if limitReached {
+		// 新配置的执行上限已经耗尽时立即移除，避免留下永远不会触发的监听器。
+		registry.removeEvent(eventID)
+	}
 	return true
+}
+
+// trimCallbackQueueLocked 把监听器待执行任务收紧到指定额度。
+//
+// 调用方必须持有 registry.mu；maximumReserved 不得为负。函数优先取消最新任务并更新抑制统计。
+func (registry *gluaEventRegistry) trimCallbackQueueLocked(callback *gluaEventCallback, maximumReserved int64) {
+	// 只有超出新额度时才需要修改队列。
+	if registry == nil || callback == nil || callback.reservedCount <= maximumReserved {
+		// 无超额任务时保持队列顺序。
+		return
+	}
+	excess := callback.reservedCount - maximumReserved
+	for index := len(registry.queue) - 1; index >= 0 && excess > 0; index-- {
+		// 从队尾查找目标监听器，优先保留更早触发的任务。
+		if registry.queue[index].callback != callback {
+			// 其他监听器任务不能被当前配置更新取消。
+			continue
+		}
+		copy(registry.queue[index:], registry.queue[index+1:])
+		registry.queue[len(registry.queue)-1] = gluaEventTask{}
+		registry.queue = registry.queue[:len(registry.queue)-1]
+		callback.reservedCount--
+		callback.suppressedCount++
+		registry.suppressedEvents++
+		excess--
+	}
+}
+
+// eventAsync 查询指定监听器是否为异步注册。
+//
+// eventID 必须来自当前 State；返回 async、found。查询持锁，不暴露回调内部指针。
+func (registry *gluaEventRegistry) eventAsync(eventID int64) (bool, bool) {
+	// 读取监听器类型时与删除、更新配置互斥。
+	if registry == nil {
+		// nil 注册表没有监听器。
+		return false, false
+	}
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	callback := registry.eventsByID[eventID]
+	if callback == nil {
+		// 不存在的 id 返回 found=false。
+		return false, false
+	}
+	return callback.async, true
+}
+
+// callLimit 返回监听器实际使用的最大执行次数。
+//
+// once 始终等价于一次，其他监听器使用 maxCalls；0 表示不限制。
+func (callback *gluaEventCallback) callLimit() int64 {
+	// once 优先于普通上限，解析阶段已经拒绝互相矛盾的值。
+	if callback == nil {
+		// nil 回调没有可执行额度。
+		return 0
+	}
+	if callback.options.once {
+		// once 固定只执行一次。
+		return 1
+	}
+	return callback.options.maxCalls
 }
 
 // eventConfig 返回指定 id 当前保存的原始配置 table。
@@ -1076,12 +1262,37 @@ func newGluaEventSnapshot(callback *gluaEventCallback) *runtime.Table {
 	result.RawSetString("async", runtime.BooleanValue(callback.async))
 	result.RawSetString("muted", runtime.BooleanValue(callback.muted))
 	result.RawSetString("once", runtime.BooleanValue(callback.options.once))
+	result.RawSetString("maxCalls", runtime.IntegerValue(callback.callLimit()))
 	result.RawSetString("priority", runtime.IntegerValue(callback.options.priority))
 	result.RawSetString("group", runtime.StringValue(callback.options.group))
+	result.RawSetString("throttleMs", runtime.IntegerValue(callback.options.throttleNs/int64(time.Millisecond)))
+	result.RawSetString("debounceMs", runtime.IntegerValue(callback.options.debounceNs/int64(time.Millisecond)))
+	result.RawSetString("sampleRate", runtime.NumberValue(callback.options.sampleRate))
+	result.RawSetString("onError", runtime.StringValue(callback.options.onError))
 	result.RawSetString("dispatchCount", runtime.IntegerValue(callback.dispatchCount))
 	result.RawSetString("errorCount", runtime.IntegerValue(callback.errorCount))
 	result.RawSetString("droppedCount", runtime.IntegerValue(callback.droppedCount))
+	result.RawSetString("suppressedCount", runtime.IntegerValue(callback.suppressedCount))
+	result.RawSetString("throttledCount", runtime.IntegerValue(callback.throttledCount))
+	result.RawSetString("sampledOutCount", runtime.IntegerValue(callback.sampledOutCount))
+	result.RawSetString("debouncedCount", runtime.IntegerValue(callback.debouncedCount))
 	result.RawSetString("totalDurationNs", runtime.IntegerValue(callback.totalDurationNs))
+	averageDurationNs := int64(0)
+	if callback.dispatchCount > 0 {
+		// 平均耗时只在至少执行一次后计算，避免除零。
+		averageDurationNs = callback.totalDurationNs / callback.dispatchCount
+	}
+	result.RawSetString("averageDurationNs", runtime.IntegerValue(averageDurationNs))
+	remainingCalls := int64(-1)
+	if limit := callback.callLimit(); limit > 0 {
+		// 有限监听器返回不小于零的剩余可执行次数。
+		remainingCalls = limit - callback.dispatchCount - callback.reservedCount
+		if remainingCalls < 0 {
+			// 并发配置更新等边界下快照不暴露负数。
+			remainingCalls = 0
+		}
+	}
+	result.RawSetString("remainingCalls", runtime.IntegerValue(remainingCalls))
 	return result
 }
 
@@ -1144,7 +1355,10 @@ func (registry *gluaEventRegistry) eventList(source string) *runtime.Table {
 	result.RawSetString("queuedTasks", runtime.IntegerValue(int64(len(registry.queue))))
 	result.RawSetString("droppedTasks", runtime.IntegerValue(registry.droppedTasks))
 	result.RawSetString("callbackErrors", runtime.IntegerValue(registry.callbackErrors))
+	result.RawSetString("suppressedEvents", runtime.IntegerValue(registry.suppressedEvents))
+	result.RawSetString("debouncedTasks", runtime.IntegerValue(registry.debouncedTasks))
 	result.RawSetString("sequence", runtime.IntegerValue(registry.sequence))
+	result.RawSetString("traceSequence", runtime.IntegerValue(registry.traceSequence))
 	return result
 }
 
@@ -1174,6 +1388,11 @@ func newGluaEventListTable(source string, eventsByName map[string][]*gluaEventCa
 		muted := 0
 		syncListeners := 0
 		asyncListeners := 0
+		dispatchCount := int64(0)
+		errorCount := int64(0)
+		droppedCount := int64(0)
+		suppressedCount := int64(0)
+		totalDurationNs := int64(0)
 		for _, callback := range eventsByName[eventName] {
 			// nil 回调不属于有效监听器，可能仅在并发删除的旧切片中短暂出现。
 			if callback == nil {
@@ -1195,12 +1414,22 @@ func newGluaEventListTable(source string, eventsByName map[string][]*gluaEventCa
 				// 同步注册计入 sync 数量。
 				syncListeners++
 			}
+			dispatchCount += callback.dispatchCount
+			errorCount += callback.errorCount
+			droppedCount += callback.droppedCount
+			suppressedCount += callback.suppressedCount
+			totalDurationNs += callback.totalDurationNs
 		}
 		entry.RawSetString("listeners", runtime.IntegerValue(int64(listeners)))
 		entry.RawSetString("active", runtime.IntegerValue(int64(active)))
 		entry.RawSetString("muted", runtime.IntegerValue(int64(muted)))
 		entry.RawSetString("sync", runtime.IntegerValue(int64(syncListeners)))
 		entry.RawSetString("async", runtime.IntegerValue(int64(asyncListeners)))
+		entry.RawSetString("dispatchCount", runtime.IntegerValue(dispatchCount))
+		entry.RawSetString("errorCount", runtime.IntegerValue(errorCount))
+		entry.RawSetString("droppedCount", runtime.IntegerValue(droppedCount))
+		entry.RawSetString("suppressedCount", runtime.IntegerValue(suppressedCount))
+		entry.RawSetString("totalDurationNs", runtime.IntegerValue(totalDurationNs))
 		eventsTable.RawSetInteger(int64(eventIndex+1), runtime.ReferenceValue(runtime.KindTable, entry))
 		totalListeners += listeners
 		totalActive += active
@@ -1218,7 +1447,10 @@ func newGluaEventListTable(source string, eventsByName map[string][]*gluaEventCa
 	result.RawSetString("queuedTasks", runtime.IntegerValue(0))
 	result.RawSetString("droppedTasks", runtime.IntegerValue(0))
 	result.RawSetString("callbackErrors", runtime.IntegerValue(0))
+	result.RawSetString("suppressedEvents", runtime.IntegerValue(0))
+	result.RawSetString("debouncedTasks", runtime.IntegerValue(0))
 	result.RawSetString("sequence", runtime.IntegerValue(0))
+	result.RawSetString("traceSequence", runtime.IntegerValue(0))
 	return result
 }
 
@@ -1301,20 +1533,21 @@ func (registry *gluaEventRegistry) dispatchCallbacks(state *State, callbacks []*
 			accepted, enqueueErr := registry.enqueue(callback, callbackContext)
 			if enqueueErr != nil {
 				// error 溢出策略同步报告给事件触发点。
+				registry.releaseDispatchClaim(callback)
 				return nil, enqueueErr
 			}
 			if !accepted {
-				// once 任务未成功入队时允许后续事件再次尝试。
-				registry.releaseOnce(callback)
+				// 任务被丢弃或防抖合并时释放本次派发额度。
+				registry.releaseDispatchClaim(callback)
 			}
 			continue
 		}
 		setGluaContextAsync(callbackContext, false)
 		err := registry.callCallback(state, callback, callbackContext)
-		registry.finishOnce(callback)
-		if err != nil {
-			// 同步回调错误直接传播给当前 Lua 执行路径。
-			return nil, err
+		registry.finishDispatch(callback)
+		if resolvedErr := registry.resolveCallbackError(callback, err); resolvedErr != nil {
+			// propagate 策略把同步回调错误返回当前 Lua 执行路径。
+			return nil, resolvedErr
 		}
 	}
 	return nil, nil
@@ -1340,20 +1573,21 @@ func (registry *gluaEventRegistry) dispatchFunctionCallbacks(state *State, callb
 			accepted, enqueueErr := registry.enqueue(callback, callbackContext)
 			if enqueueErr != nil {
 				// error 溢出策略同步报告给调用点。
+				registry.releaseDispatchClaim(callback)
 				return nil, enqueueErr
 			}
 			if !accepted {
-				// 未入队的 once 监听器恢复为可触发状态。
-				registry.releaseOnce(callback)
+				// 未独立入队的任务释放本次派发额度。
+				registry.releaseDispatchClaim(callback)
 			}
 			continue
 		}
 		setGluaContextAsync(callbackContext, false)
 		err := registry.callCallback(state, callback, callbackContext)
-		registry.finishOnce(callback)
-		if err != nil {
-			// 同步 callback 错误中断当前函数调用。
-			return nil, err
+		registry.finishDispatch(callback)
+		if resolvedErr := registry.resolveCallbackError(callback, err); resolvedErr != nil {
+			// propagate 策略中断当前函数调用。
+			return nil, resolvedErr
 		}
 	}
 	return nil, nil
@@ -1361,6 +1595,14 @@ func (registry *gluaEventRegistry) dispatchFunctionCallbacks(state *State, callb
 
 // canDispatch 判断回调当前是否仍有效、未静音且满足函数名过滤。
 func (registry *gluaEventRegistry) canDispatch(callback *gluaEventCallback, candidates []string, callee runtime.Value, applyFilter bool) bool {
+	// 正常派发使用当前时间；测试和内部策略可调用带显式时间的实现。
+	return registry.canDispatchAt(callback, candidates, callee, applyFilter, time.Now())
+}
+
+// canDispatchAt 判断回调是否满足过滤、限次、采样和节流规则。
+//
+// now 是调用方提供的当前时间；返回 true 时会占用一次执行额度，未执行任务必须显式释放。
+func (registry *gluaEventRegistry) canDispatchAt(callback *gluaEventCallback, candidates []string, callee runtime.Value, applyFilter bool, now time.Time) bool {
 	// 读取回调状态时持锁，避免删除或静音与 VM 派发并发产生数据竞争。
 	if registry == nil || callback == nil {
 		// nil 注册表或回调不能参与派发。
@@ -1368,36 +1610,53 @@ func (registry *gluaEventRegistry) canDispatch(callback *gluaEventCallback, cand
 	}
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
-	if registry.eventsByID[callback.id] != callback || callback.muted || callback.onceFired {
+	if registry.eventsByID[callback.id] != callback || callback.muted {
 		// 已删除或静音的注册在本次派发中失效。
 		return false
 	}
-	if !applyFilter {
-		// 普通 progress 事件不应用 function 白名单/黑名单。
-		if callback.options.once {
-			// once 监听器在持锁状态下占用派发资格，防止并发重复入队。
-			callback.onceFired = true
+	if applyFilter {
+		// 函数事件先应用黑白名单，普通事件跳过该分支。
+		if !callback.filter.blacklist.empty() && callback.filter.blacklist.matches(candidates, callee) {
+			// 黑名单优先级最高，命中时始终跳过。
+			return false
 		}
-		return true
+		if !callback.filter.whitelist.empty() && !callback.filter.whitelist.matches(candidates, callee) {
+			// 非空白名单未命中时跳过。
+			return false
+		}
 	}
-	if !callback.filter.blacklist.empty() && callback.filter.blacklist.matches(candidates, callee) {
-		// 黑名单优先级最高，命中时始终跳过。
+	limit := callback.callLimit()
+	if limit > 0 && callback.dispatchCount+callback.reservedCount >= limit {
+		// 已执行和已占用任务达到上限后抑制后续触发。
+		callback.suppressedCount++
+		registry.suppressedEvents++
 		return false
 	}
-	if callback.filter.whitelist.empty() {
-		// 未配置白名单时，未命中黑名单即可派发。
-		if callback.options.once {
-			// 过滤通过后占用 once 派发资格。
-			callback.onceFired = true
+	if callback.options.sampleRate < 1 {
+		// 确定性累加采样保证相同事件序列可复现。
+		callback.sampleBalance += callback.options.sampleRate
+		if callback.sampleBalance < 1 {
+			// 累加器尚未达到一次完整样本，本次被采样丢弃。
+			callback.sampledOutCount++
+			callback.suppressedCount++
+			registry.suppressedEvents++
+			return false
 		}
-		return true
+		callback.sampleBalance--
 	}
-	matched := callback.filter.whitelist.matches(candidates, callee)
-	if matched && callback.options.once {
-		// 白名单命中后占用 once 派发资格。
-		callback.onceFired = true
+	if callback.options.throttleNs > 0 && !callback.lastAcceptedAt.IsZero() && now.Sub(callback.lastAcceptedAt) < time.Duration(callback.options.throttleNs) {
+		// 两次接受触发间隔不足时执行前沿节流。
+		callback.throttledCount++
+		callback.suppressedCount++
+		registry.suppressedEvents++
+		return false
 	}
-	return matched
+	if callback.options.throttleNs > 0 {
+		// 只有通过全部检查的触发才推进节流时间窗。
+		callback.lastAcceptedAt = now
+	}
+	callback.reservedCount++
+	return true
 }
 
 // empty 判断过滤集合是否没有名称和函数引用。
@@ -1527,6 +1786,10 @@ func setGluaContextCallbackMetadata(context runtime.Value, callback *gluaEventCa
 	table.RawSetString("group", runtime.StringValue(callback.options.group))
 	table.RawSetString("priority", runtime.IntegerValue(callback.options.priority))
 	table.RawSetString("once", runtime.BooleanValue(callback.options.once))
+	table.RawSetString("maxCalls", runtime.IntegerValue(callback.callLimit()))
+	table.RawSetString("throttleMs", runtime.IntegerValue(callback.options.throttleNs/int64(time.Millisecond)))
+	table.RawSetString("debounceMs", runtime.IntegerValue(callback.options.debounceNs/int64(time.Millisecond)))
+	table.RawSetString("sampleRate", runtime.NumberValue(callback.options.sampleRate))
 }
 
 // setGluaContextAsync 写入事件上下文的 async 标记。
@@ -1553,6 +1816,25 @@ func (registry *gluaEventRegistry) enqueue(callback *gluaEventCallback, context 
 	}
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
+	readyAt := time.Time{}
+	if callback.options.debounceNs > 0 {
+		// 防抖任务只在时间窗结束后执行，并优先合并已有待处理任务。
+		readyAt = time.Now().Add(time.Duration(callback.options.debounceNs))
+		for index := range registry.queue {
+			// 同一监听器最多保留一个防抖任务，后触发上下文覆盖旧上下文。
+			if registry.queue[index].callback != callback {
+				// 其他监听器任务不参与合并。
+				continue
+			}
+			registry.queue[index].context = context
+			registry.queue[index].readyAt = readyAt
+			callback.debouncedCount++
+			callback.suppressedCount++
+			registry.debouncedTasks++
+			registry.suppressedEvents++
+			return false, nil
+		}
+	}
 	if callback.options.queueLimit > 0 {
 		// 队列上限按监听器计算，避免一个高频监听器挤占其他异步事件。
 		pending := 0
@@ -1576,6 +1858,10 @@ func (registry *gluaEventRegistry) enqueue(callback *gluaEventCallback, context 
 				copy(registry.queue[oldestIndex:], registry.queue[oldestIndex+1:])
 				registry.queue[len(registry.queue)-1] = gluaEventTask{}
 				registry.queue = registry.queue[:len(registry.queue)-1]
+				if callback.reservedCount > 0 {
+					// 被替换旧任务不再执行，需要释放它占用的额度。
+					callback.reservedCount--
+				}
 			case "error":
 				// error 策略不修改队列，并把溢出报告给触发点。
 				return false, runtime.RaiseError(runtime.StringValue(fmt.Sprintf("event async queue limit reached for listener %d", callback.id)))
@@ -1589,44 +1875,59 @@ func (registry *gluaEventRegistry) enqueue(callback *gluaEventCallback, context 
 			registry.droppedTasks++
 		}
 	}
-	registry.queue = append(registry.queue, gluaEventTask{callback: callback, context: context})
+	registry.queue = append(registry.queue, gluaEventTask{callback: callback, context: context, readyAt: readyAt})
 	return true, nil
 }
 
-// releaseOnce 释放未成功入队的 once 监听器占用状态。
-func (registry *gluaEventRegistry) releaseOnce(callback *gluaEventCallback) {
-	// 只有仍存在的 once 监听器需要恢复派发资格。
-	if registry == nil || callback == nil || !callback.options.once {
-		// 普通监听器没有 once 状态。
+// releaseDispatchClaim 释放未成功独立入队的派发额度。
+//
+// callback 必须来自当前注册表；函数没有返回值。删除后的监听器无需恢复额度。
+func (registry *gluaEventRegistry) releaseDispatchClaim(callback *gluaEventCallback) {
+	// 所有限次和不限次监听器都维护 reservedCount，保证统计和配置更新一致。
+	if registry == nil || callback == nil {
+		// 无效参数没有额度可释放。
 		return
 	}
 	registry.mu.Lock()
-	if registry.eventsByID[callback.id] == callback {
-		// 监听器仍有效时允许下一次事件重新触发。
-		callback.onceFired = false
+	if registry.eventsByID[callback.id] == callback && callback.reservedCount > 0 {
+		// 监听器仍有效且确有占用时减少一次。
+		callback.reservedCount--
 	}
 	registry.mu.Unlock()
 }
 
-// finishOnce 在 once 回调实际执行后删除监听器。
-func (registry *gluaEventRegistry) finishOnce(callback *gluaEventCallback) {
-	// 非 once 回调不改变注册状态。
-	if registry == nil || callback == nil || !callback.options.once {
-		// 普通监听器保持注册。
+// finishDispatch 释放已执行任务额度，并在达到执行上限后删除监听器。
+//
+// callback 必须刚由 callCallback 执行；函数没有返回值。once 使用与 maxCalls 相同的收尾路径。
+func (registry *gluaEventRegistry) finishDispatch(callback *gluaEventCallback) {
+	// 完成路径先更新占用，再判断是否耗尽上限。
+	if registry == nil || callback == nil {
+		// 无效参数没有监听器可收尾。
 		return
 	}
-	registry.removeEvent(callback.id)
+	registry.mu.Lock()
+	if callback.reservedCount > 0 {
+		// 每个实际执行任务对应一个派发占用。
+		callback.reservedCount--
+	}
+	limit := callback.callLimit()
+	limitReached := limit > 0 && callback.dispatchCount >= limit
+	registry.mu.Unlock()
+	if limitReached {
+		// 达到上限后删除监听器和它仍残留的异步任务。
+		registry.removeEvent(callback.id)
+	}
 }
 
 // drainGluaEventQueue 在 VM 安全点消费当前 State 的异步事件队列。
 func drainGluaEventQueue(state *State) error {
 	// 安全点消费异步队列，避免 goroutine 直接重入 Lua VM。
-	_, err := drainGluaEventQueueCount(state)
+	_, err := drainGluaEventQueueCount(state, false)
 	return err
 }
 
 // drainGluaEventQueueCount 消费异步队列并返回实际执行任务数。
-func drainGluaEventQueueCount(state *State) (int, error) {
+func drainGluaEventQueueCount(state *State, force bool) (int, error) {
 	// flush 和 VM 安全点共用同一消费路径，保证错误策略一致。
 	registry := gluaRegistryForState(state)
 	if registry == nil {
@@ -1636,7 +1937,7 @@ func drainGluaEventQueueCount(state *State) (int, error) {
 	executed := 0
 	for {
 		// 每轮只取当前队列快照，允许回调继续追加下一批任务。
-		tasks := registry.takeQueuedTasks()
+		tasks := registry.takeQueuedTasks(time.Now(), force)
 		if len(tasks) == 0 {
 			// 队列耗尽后结束消费。
 			return executed, nil
@@ -1644,15 +1945,16 @@ func drainGluaEventQueueCount(state *State) (int, error) {
 		for _, task := range tasks {
 			if !registry.queuedCallbackActive(task.callback) {
 				// 已删除或静音的监听器不执行旧队列任务。
+				registry.releaseDispatchClaim(task.callback)
 				continue
 			}
 			// 异步回调错误在安全点传播，仍不会阻塞事件触发点本身。
 			err := registry.callCallback(state, task.callback, task.context)
 			executed++
-			registry.finishOnce(task.callback)
-			if err != nil && task.callback.options.onError != "ignore" {
-				// propagate 保持历史行为，在当前安全点返回错误。
-				return executed, err
+			registry.finishDispatch(task.callback)
+			if resolvedErr := registry.resolveCallbackError(task.callback, err); resolvedErr != nil {
+				// propagate 在当前安全点返回错误，其他策略已经完成治理。
+				return executed, resolvedErr
 			}
 		}
 	}
@@ -1660,7 +1962,7 @@ func drainGluaEventQueueCount(state *State) (int, error) {
 
 // queuedCallbackActive 判断异步任务对应监听器是否仍可执行。
 func (registry *gluaEventRegistry) queuedCallbackActive(callback *gluaEventCallback) bool {
-	// 队列任务允许 onceFired 状态，但必须仍注册且未静音。
+	// 队列任务已经占用派发额度，但必须仍注册且未静音。
 	if registry == nil || callback == nil {
 		// 损坏任务不能执行。
 		return false
@@ -1670,8 +1972,10 @@ func (registry *gluaEventRegistry) queuedCallbackActive(callback *gluaEventCallb
 	return registry.eventsByID[callback.id] == callback && !callback.muted
 }
 
-// takeQueuedTasks 取出当前异步任务快照。
-func (registry *gluaEventRegistry) takeQueuedTasks() []gluaEventTask {
+// takeQueuedTasks 取出已经到期或被强制刷新的异步任务。
+//
+// now 用于防抖到期判断；force=true 会忽略到期时间，供 flush 确定性清空队列。
+func (registry *gluaEventRegistry) takeQueuedTasks(now time.Time, force bool) []gluaEventTask {
 	// 取队列前先校验 registry。
 	if registry == nil {
 		// nil 注册表没有任务。
@@ -1683,13 +1987,55 @@ func (registry *gluaEventRegistry) takeQueuedTasks() []gluaEventTask {
 		// 回调执行期间不递归消费队列，避免异步任务嵌套失控。
 		return nil
 	}
-	tasks := append([]gluaEventTask(nil), registry.queue...)
-	for index := range registry.queue {
-		// 清空旧槽位，避免保留回调和上下文引用。
-		registry.queue[index] = gluaEventTask{}
+	tasks := make([]gluaEventTask, 0, len(registry.queue))
+	pendingWriteIndex := 0
+	for index, task := range registry.queue {
+		// 普通任务立即可执行，防抖任务需要到期或显式 force。
+		if force || task.readyAt.IsZero() || !task.readyAt.After(now) {
+			// 到期任务移入本轮执行快照。
+			tasks = append(tasks, task)
+			registry.queue[index] = gluaEventTask{}
+			continue
+		}
+		registry.queue[pendingWriteIndex] = task
+		if pendingWriteIndex != index {
+			// 已前移的旧槽位需要清空强引用。
+			registry.queue[index] = gluaEventTask{}
+		}
+		pendingWriteIndex++
 	}
-	registry.queue = registry.queue[:0]
+	registry.queue = registry.queue[:pendingWriteIndex]
 	return tasks
+}
+
+// resolveCallbackError 按监听器配置处理一次已经计入统计的回调错误。
+//
+// err 为 nil 时直接返回 nil；propagate 返回原错误，ignore 继续，mute 静音，remove 删除监听器。
+func (registry *gluaEventRegistry) resolveCallbackError(callback *gluaEventCallback, err error) error {
+	// 成功回调不触发任何治理动作。
+	if err == nil || registry == nil || callback == nil {
+		// nil 错误保持成功语义。
+		return err
+	}
+	registry.mu.Lock()
+	onError := callback.options.onError
+	registry.mu.Unlock()
+	switch onError {
+	case "ignore":
+		// 错误已经计入统计，但当前执行路径继续。
+		return nil
+	case "mute":
+		// 静音保留监听器、配置与统计，允许后续显式恢复。
+		registry.setEventMuted(callback.id, true)
+		return nil
+	case "remove":
+		// 删除监听器并取消剩余异步任务。
+		registry.removeEvent(callback.id)
+		return nil
+	default:
+		// propagate 是默认值，未知内部值也安全地向上传播。
+		return err
+	}
 }
 
 // callCallback 调用单个事件回调。
@@ -1738,13 +2084,22 @@ func buildGluaEventContext(state *State, kind string, eventName string, payload 
 	context.RawSetString("async", runtime.BooleanValue(async))
 	context.RawSetString("payload", payload)
 	context.RawSetString("timestamp", runtime.IntegerValue(time.Now().UnixMilli()))
-	if registry := gluaRegistryForState(state); registry != nil {
-		// sequence 在单个 State 内严格递增，便于关联同毫秒内的事件顺序。
-		context.RawSetString("sequence", runtime.IntegerValue(registry.nextSequence()))
-	}
+	depth := int64(0)
 	if state != nil {
 		// depth 使用当前 Lua/Go 调用帧深度快照。
-		context.RawSetString("depth", runtime.IntegerValue(int64(state.CallDepth())))
+		depth = int64(state.CallDepth())
+		context.RawSetString("depth", runtime.IntegerValue(depth))
+	}
+	if registry := gluaRegistryForState(state); registry != nil {
+		// 事件编号、调用链和父事件在同一锁内分配，保证并发宿主触发时关系一致。
+		eventID, traceID, parentEventID := registry.nextContextIdentity(eventName, depth)
+		context.RawSetString("sequence", runtime.IntegerValue(eventID))
+		context.RawSetString("eventId", runtime.IntegerValue(eventID))
+		context.RawSetString("traceId", runtime.IntegerValue(traceID))
+		if parentEventID > 0 {
+			// 根事件没有 parentEventId 字段，子事件才写入有效编号。
+			context.RawSetString("parentEventId", runtime.IntegerValue(parentEventID))
+		}
 	}
 	if proto != nil {
 		// Proto 元数据存在时补充源码和定义行范围。
@@ -1773,18 +2128,54 @@ func buildGluaEventContext(state *State, kind string, eventName string, payload 
 	return runtime.ReferenceValue(runtime.KindTable, context)
 }
 
-// nextSequence 返回当前 State 事件流的下一个单调序号。
-func (registry *gluaEventRegistry) nextSequence() int64 {
-	// 序号更新与事件统计共用注册表锁。
+// nextContextIdentity 分配事件编号、调用链编号和父事件编号。
+//
+// eventName 和 depth 来自当前 VM 帧；返回值在单个 State 内稳定递增，并按较浅调用深度关联父事件。
+func (registry *gluaEventRegistry) nextContextIdentity(eventName string, depth int64) (int64, int64, int64) {
+	// 编号和调用链状态在同一临界区更新。
 	if registry == nil {
-		// nil 注册表没有事件序号。
-		return 0
+		// nil 注册表没有可分配身份。
+		return 0, 0, 0
 	}
 	registry.mu.Lock()
+	defer registry.mu.Unlock()
 	registry.sequence++
-	sequence := registry.sequence
-	registry.mu.Unlock()
-	return sequence
+	eventID := registry.sequence
+	if registry.currentTraceID == 0 || (eventName == GluaEventProgressStart && depth <= registry.traceDepth) {
+		// 首个事件或新的根代码块开始时分配调用链，并清理旧深度关系。
+		registry.traceSequence++
+		registry.currentTraceID = registry.traceSequence
+		registry.traceDepth = depth
+		registry.lastEventByDepth = make(map[int64]int64)
+	}
+	parentEventID := int64(0)
+	for parentDepth := depth - 1; parentDepth >= 0; parentDepth-- {
+		// 选择最近的较浅调用深度事件作为父节点。
+		if candidate := registry.lastEventByDepth[parentDepth]; candidate > 0 {
+			// 找到最近父事件后停止向上扫描。
+			parentEventID = candidate
+			break
+		}
+	}
+	if registry.lastEventByDepth == nil {
+		// 非 start 事件也可能是调用链首个可见事件，需要初始化索引。
+		registry.lastEventByDepth = make(map[int64]int64)
+	}
+	for trackedDepth := range registry.lastEventByDepth {
+		// 当前深度的新事件会让更深层旧节点失效，避免跨已返回函数错误关联。
+		if trackedDepth > depth {
+			// 删除已经离开的更深调用层。
+			delete(registry.lastEventByDepth, trackedDepth)
+		}
+	}
+	registry.lastEventByDepth[depth] = eventID
+	traceID := registry.currentTraceID
+	if eventName == GluaEventProgressExit && depth <= registry.traceDepth {
+		// 根代码块 exit 使用当前 traceId，后续独立事件再创建新调用链。
+		registry.currentTraceID = 0
+		registry.lastEventByDepth = nil
+	}
+	return eventID, traceID, parentEventID
 }
 
 // currentGluaCallerFrame 返回最近的 Lua 调用帧。

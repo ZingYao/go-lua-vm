@@ -92,7 +92,7 @@ func SetContext(state *State, ctx context.Context) error
 
 `OpenLibs` 还会注册 `glua.json`、`glua.yaml`、`glua.xml` 和 `glua.toml` 纯 Go 序列化命名空间。Lua table 的数组/对象判定、`glua.null`、XML 映射和错误边界参见 [GLua 序列化](glua-serialization.md)。
 
-`glua.codec`、`glua.hash`、`glua.regex`、`glua.uuid`、`glua.zip` 和 `glua.schema` 的 API、安全边界及回归方式参见 [GLua 通用扩展](glua-utilities.md)。
+`glua.codec`、`glua.hash`、`glua.regex`、`glua.uuid`、`glua.zip`、`glua.path` 和 `glua.schema` 的 API、安全边界及回归方式参见 [GLua 通用扩展](glua-utilities.md)。
 
 ## 加载与执行 API
 
