@@ -51,10 +51,6 @@ fi
   echo "- Added multilingual CLI help and documentation output. Only English and Chinese are supported; choose output with \`GLUA_LANG=en\` or \`GLUA_LANG=zh-CN\` (the tools also follow \`LC_ALL\`, \`LC_MESSAGES\`, and \`LANG\` when \`GLUA_LANG\` is not set)."
   echo "- Release CLI artifacts are native_modules builds for Linux, Windows, and Android; macOS native_modules packages are produced from a local Mac build."
   echo
-  echo "### Changes"
-  echo
-  printf '%s\n' "${commit_lines}"
-  echo
   echo "## 中文"
   echo
   echo "本次发布会为非 macOS 目标生成全功能 CLI 产物，构建时启用 \`CGO_ENABLED=1\` 和 \`native_modules\` build tag，因此这些发布版本包含 Lua C 原生模块加载能力。macOS native 产物由本机编译后单独上传。"
@@ -74,9 +70,14 @@ fi
   echo "- 增加 CLI 工具的多语言帮助与文档输出。目前仅支持英文和中文；可使用 \`GLUA_LANG=en\` 或 \`GLUA_LANG=zh-CN\` 选择输出语言，未设置 \`GLUA_LANG\` 时会读取 \`LC_ALL\`、\`LC_MESSAGES\` 和 \`LANG\`。"
   echo "- Linux、Windows 和 Android 的 CLI 发布产物均为 native_modules 构建；macOS native_modules 包由本机 Mac 构建补充。"
   echo
-  echo "### 变更列表"
+  echo "## Changes / 变更列表"
+  echo
+  echo "<details>"
+  echo "<summary>Show commit list / 展开提交列表</summary>"
   echo
   printf '%s\n' "${commit_lines}"
+  echo
+  echo "</details>"
 } >"${output_path}"
 
 echo "generated release notes: ${output_path}"
