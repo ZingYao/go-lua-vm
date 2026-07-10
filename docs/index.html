@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="GLua 是兼容 Lua 5.3.6 的纯 Go 虚拟机、命令行工具与扩展开发平台。"
+    />
+    <title>GLua 文档</title>
+    <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/docsify@4.13.1/lib/themes/vue.css" />
+    <link rel="stylesheet" href="assets/theme.css" />
+  </head>
+  <body>
+    <noscript>GLua 文档需要启用 JavaScript 才能显示。</noscript>
+    <div id="app">正在加载 GLua 文档...</div>
+    <script>
+      window.$docsify = {
+        name: "GLua",
+        repo: "https://github.com/ZingYao/go-lua-vm",
+        homepage: "README.md",
+        coverpage: true,
+        loadNavbar: true,
+        loadSidebar: true,
+        auto2top: true,
+        relativePath: true,
+        subMaxLevel: 3,
+        maxLevel: 4,
+        notFoundPage: true,
+        themeColor: "#0f766e",
+        search: {
+          placeholder: "搜索文档",
+          noData: "没有找到相关内容",
+          depth: 4,
+        },
+        copyCode: {
+          buttonText: "复制",
+          errorText: "复制失败",
+          successText: "已复制",
+        },
+      };
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/docsify@4.13.1/lib/docsify.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/docsify@4.13.1/lib/plugins/search.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/docsify-copy-code@3.0.2/dist/docsify-copy-code.min.js"></script>
+  </body>
+</html>

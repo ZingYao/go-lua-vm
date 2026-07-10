@@ -25,7 +25,7 @@ TARGETS := \
 	darwin-arm64 \
 	android-arm64
 
-.PHONY: all build build-ls dist $(TARGETS) package-vscode package-jetbrains package-extensions clean
+.PHONY: all build build-ls docs dist $(TARGETS) package-vscode package-jetbrains package-extensions clean
 
 all: build
 
@@ -40,6 +40,9 @@ build-ls:
 	@mkdir -p "$(BIN_DIR)"
 	@echo "building gluals"
 	@CGO_ENABLED=1 "$(GO)" build -tags native_modules -trimpath -ldflags="-s -w" -o "$(BIN_DIR)/gluals" ./cmd/gluals
+
+docs:
+	@./scripts/build-docs-site.sh
 
 dist: $(TARGETS)
 

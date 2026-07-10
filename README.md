@@ -2,6 +2,8 @@
 
 `go-lua-vm` 是一个纯 Go 实现的 Lua 5.3 虚拟机项目，迁移基线锁定为官方 Lua 5.3.6。项目覆盖 compiler、bytecode、runtime、stdlib、Debug、CLI、`luac` 兼容工具以及 Go 嵌入 API，默认构建不依赖 CGO、Lua C API 或系统动态库。
 
+[在线文档](https://zingyao.github.io/go-lua-vm/) · [文档构建状态](https://github.com/ZingYao/go-lua-vm/actions/workflows/docs.yml)
+
 ## 项目定位
 
 - **Lua 5.3.6 行为兼容**：以官方 C 源码和官方可执行文件为基线，覆盖语法、字节码、VM、标准库、Debug 和 CLI 行为。
@@ -106,15 +108,17 @@ func main() {
 
 ## 语法扩展
 
-项目在 Lua 5.3 基线上提供可选的 `continue` 与 `switch/case/default` 语法扩展。扩展只改变 lexer/parser/codegen 层，最终仍生成标准 Lua 5.3 VM 指令。
+项目在 Lua 5.3 基线上提供可选的 `continue`、`switch/case/default` 与 `const` 语法扩展。扩展只改变 lexer/parser/codegen 层，最终仍生成标准 Lua 5.3 VM 指令。
 
 ```bash
 go build -tags lua53 ./cmd/glua
 go build -tags with_continue ./cmd/glua
 go build -tags with_switch ./cmd/glua
+go build -tags with_const ./cmd/glua
+go build -tags with_all ./cmd/glua
 ```
 
-运行时可通过 `--glua-syntax`、`--gluac-syntax` 或 Go API 选择 Lua 5.3 兼容模式或扩展模式。详细语义见 [docs/CONTROL_FLOW_EXTENSIONS.md](docs/CONTROL_FLOW_EXTENSIONS.md)。
+运行时可通过 `--glua-syntax`、`--gluac-syntax` 或 Go API 选择 Lua 5.3 兼容模式或扩展模式。详细语义和示例见[在线语法糖文档](https://zingyao.github.io/go-lua-vm/#/SYNTAX_EXTENSIONS)。
 
 ## 动态库与 require 边界
 
@@ -128,7 +132,7 @@ go build -tags with_switch ./cmd/glua
 CGO_ENABLED=1 go build -tags native_modules -o bin/glua-native ./cmd/glua
 ```
 
-该构建在 CLI 中注入 State-aware native loader，用仓库内 Lua 5.3 public headers 和 native shim 支持 Lua C 模块。当前 macOS arm64 已通过仓库内 `lua-cjson` 源码的 `.so` 与 `.dylib` 运行期验收；Linux `.so`、Windows `.dll`、官方 Lua 5.3 ABI 现成二进制模块和更复杂第三方模块仍按文档继续闭环。native 模块执行本机机器码，拥有进程权限；生产环境需要限制动态库来源和 `package.cpath`。
+该构建在 CLI 中注入 State-aware native loader，用仓库内 Lua 5.3 public headers 和 native shim 支持 Lua C 模块。macOS arm64、Linux arm64 和 Windows amd64 已覆盖仓库内真实模块源码构建及运行期验收，包含 lua-cjson、LPeg 和 LuaSocket；其他系统与架构仍需目标平台独立验收。native 模块执行本机机器码，拥有进程权限；生产环境需要限制动态库来源和 `package.cpath`。三平台前置条件和命令见[在线 Native 构建文档](https://zingyao.github.io/go-lua-vm/#/NATIVE_BUILD_GUIDE)。
 
 ## 验证命令
 

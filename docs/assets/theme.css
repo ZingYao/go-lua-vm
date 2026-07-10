@@ -1,0 +1,157 @@
+:root {
+  --glua-ink: #172126;
+  --glua-muted: #53636b;
+  --glua-green: #0f766e;
+  --glua-green-dark: #0b5f59;
+  --glua-cyan: #0e7490;
+  --glua-yellow: #eab308;
+  --glua-surface: #f5f8f8;
+  --glua-line: #d9e2e3;
+}
+
+body {
+  color: var(--glua-ink);
+  letter-spacing: 0;
+}
+
+.cover {
+  background-color: #102327 !important;
+  background-image: url("favicon.svg") !important;
+  background-position: 82% center !important;
+  background-repeat: no-repeat !important;
+  background-size: min(38vw, 390px) !important;
+  color: #f8fafc;
+  height: 88vh !important;
+  min-height: 88vh !important;
+}
+
+.cover::before {
+  background: rgba(8, 24, 27, 0.84);
+}
+
+.cover-main {
+  max-width: 760px;
+}
+
+.cover-main h1 {
+  font-size: clamp(42px, 8vw, 76px);
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.cover-main blockquote {
+  color: #c9d7d8;
+}
+
+.cover-main .anchor span {
+  color: #ffffff;
+}
+
+.cover-main > p:last-child a {
+  border: 1px solid #5eead4;
+  border-radius: 6px;
+  color: #ccfbf1;
+}
+
+.cover-main > p:last-child a:last-child {
+  background: #14b8a6;
+  color: #062925;
+}
+
+.sidebar {
+  border-right: 1px solid var(--glua-line);
+}
+
+.sidebar-nav > ul > li > p {
+  color: var(--glua-muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.markdown-section {
+  max-width: 980px;
+}
+
+.markdown-section h1,
+.markdown-section h2,
+.markdown-section h3 {
+  letter-spacing: 0;
+}
+
+.markdown-section h2 {
+  border-bottom: 1px solid var(--glua-line);
+  padding-bottom: 8px;
+}
+
+.markdown-section code {
+  border-radius: 4px;
+}
+
+.markdown-section table {
+  display: table;
+  width: 100%;
+}
+
+.glua-capabilities,
+.glua-metrics {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  margin: 22px 0;
+}
+
+.glua-capability,
+.glua-metric {
+  background: var(--glua-surface);
+  border: 1px solid var(--glua-line);
+  border-left: 4px solid var(--glua-green);
+  border-radius: 6px;
+  min-height: 112px;
+  padding: 16px;
+}
+
+.glua-capability strong,
+.glua-metric strong {
+  color: var(--glua-green-dark);
+  display: block;
+  font-size: 18px;
+  margin-bottom: 6px;
+}
+
+.glua-metric .value {
+  color: var(--glua-cyan);
+  display: block;
+  font-size: 28px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.glua-note {
+  background: #fefce8;
+  border: 1px solid #fde68a;
+  border-left: 4px solid var(--glua-yellow);
+  border-radius: 6px;
+  margin: 18px 0;
+  padding: 14px 16px;
+}
+
+@media (max-width: 720px) {
+  .cover {
+    height: 86vh !important;
+    min-height: 86vh !important;
+    background-position: center 18% !important;
+    background-size: 150px !important;
+  }
+
+  .markdown-section table {
+    display: block;
+    overflow-x: auto;
+  }
+
+  .glua-capabilities,
+  .glua-metrics {
+    grid-template-columns: 1fr;
+  }
+}
