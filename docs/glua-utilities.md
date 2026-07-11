@@ -23,8 +23,21 @@ API：
 - `glua.codec.hexDecode(text)`
 - `glua.codec.urlEncode(text)`
 - `glua.codec.urlDecode(text)`
+- `glua.codec.base64EncodeFile(file [, urlSafe])`
+- `glua.codec.base64DecodeFile(file [, urlSafe])`
+- `glua.codec.hexEncodeFile(file)`
+- `glua.codec.hexDecodeFile(file)`
 
 Base64 默认使用带填充标准字符表；`urlSafe = true` 使用带填充 URL-safe 字符表。Lua string 可以包含任意二进制字节，因此编解码不会经过 UTF-8 转换。
+
+文件方法只接受 `io.open` 等 IO 标准库入口返回的可读 file userdata，从文件当前位置读取到 EOF。方法不会自动 seek 或关闭文件，文件生命周期仍由调用方管理。Codec 文件方法虽使用流式读取，但最终返回完整 Lua string，因此内存占用仍随输出大小增长。
+
+```lua
+local file = assert(io.open("payload.bin", "rb"))
+local encoded = glua.codec.base64EncodeFile(file)
+assert(io.type(file) == "file")
+file:close()
+```
 
 ## Hash
 
@@ -40,8 +53,15 @@ API：
 - `glua.hash.sha256(data)`
 - `glua.hash.sha512(data)`
 - `glua.hash.hmac(algorithm, key, data)`
+- `glua.hash.md5File(file)`
+- `glua.hash.sha1File(file)`
+- `glua.hash.sha256File(file)`
+- `glua.hash.sha512File(file)`
+- `glua.hash.hmacFile(algorithm, key, file)`
 
 所有结果都是小写十六进制。HMAC 支持 `md5`、`sha1`、`sha256`、`sha512`。MD5 和 SHA-1 仅用于兼容旧协议或非安全校验，新设计应使用 SHA-256 或 SHA-512；密码存储不应直接使用这些快速摘要算法。
+
+Hash 文件方法使用固定缓冲流式计算，不持有完整文件内容；同样只消费当前位置到 EOF，不 seek 也不关闭文件。
 
 ## Regex
 

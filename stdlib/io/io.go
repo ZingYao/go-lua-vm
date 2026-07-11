@@ -188,6 +188,28 @@ func (file *File) Closed() bool {
 	return file.closed
 }
 
+// Read 从 file userdata 当前位置读取二进制字节。
+//
+// buffer 由调用方提供且可为空；返回值遵循 io.Reader 语义。已关闭或不可读文件返回
+// Lua error；如果 file:read 已经建立缓冲器，则继续复用该缓冲器，避免丢失预读字节。
+func (file *File) Read(buffer []byte) (int, error) {
+	// 读取前统一校验文件生命周期和读端能力。
+	if file == nil || file.closed {
+		// 空文件和已关闭文件都不能继续读取。
+		return 0, runtime.RaiseError(runtime.StringValue("attempt to use a closed file"))
+	}
+	if file.reader == nil {
+		// 只写 file userdata 没有可用读端。
+		return 0, runtime.RaiseError(runtime.StringValue("file is not readable"))
+	}
+	reader := file.reader
+	if file.lineReader != nil {
+		// 复用既有行缓冲器，保持与 file:read 共享同一当前位置。
+		reader = file.lineReader
+	}
+	return reader.Read(buffer)
+}
+
 // Flush 刷新 file userdata。
 //
 // 标准流当前保持 no-op；普通文件若提供 Flusher 则调用 Flush，否则按 Lua 兼容方向视为成功。

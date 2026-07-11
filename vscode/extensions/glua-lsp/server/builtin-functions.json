@@ -6664,6 +6664,248 @@
         "en": "glua.path.listSeparator",
         "zh-CN": "glua.path.listSeparator"
       }
+    },
+    "glua.codec.base64EncodeFile": {
+      "signature": {
+        "en": "glua.codec.base64EncodeFile(file [, urlSafe])",
+        "zh-CN": "glua.codec.base64EncodeFile(file [, urlSafe])"
+      },
+      "returns": {
+        "en": "returns: Base64 string.",
+        "zh-CN": "返回：Base64 字符串。"
+      },
+      "params": {
+        "en": [
+          "file: readable file returned by io.open",
+          "urlSafe (optional): boolean"
+        ],
+        "zh-CN": [
+          "file：io.open 返回的可读 file",
+          "urlSafe（可选）：boolean"
+        ]
+      },
+      "description": {
+        "en": "Reads a readable io file from its current position to EOF and encodes Base64 without seeking or closing it.",
+        "zh-CN": "从可读 io file 当前位置读取到 EOF 并编码为 Base64；不 seek 也不关闭文件。"
+      },
+      "example": {
+        "en": "glua.codec.base64EncodeFile(assert(io.open('data.bin', 'rb')))",
+        "zh-CN": "glua.codec.base64EncodeFile(assert(io.open('data.bin', 'rb')))"
+      }
+    },
+    "glua.codec.base64DecodeFile": {
+      "signature": {
+        "en": "glua.codec.base64DecodeFile(file [, urlSafe])",
+        "zh-CN": "glua.codec.base64DecodeFile(file [, urlSafe])"
+      },
+      "returns": {
+        "en": "returns: binary string.",
+        "zh-CN": "返回：二进制字符串。"
+      },
+      "params": {
+        "en": [
+          "file: readable file returned by io.open",
+          "urlSafe (optional): boolean"
+        ],
+        "zh-CN": [
+          "file：io.open 返回的可读 file",
+          "urlSafe（可选）：boolean"
+        ]
+      },
+      "description": {
+        "en": "Reads Base64 text from a readable io file at its current position and decodes it without seeking or closing it.",
+        "zh-CN": "从可读 io file 当前位置读取 Base64 文本并解码；不 seek 也不关闭文件。"
+      },
+      "example": {
+        "en": "glua.codec.base64DecodeFile(file [, urlSafe])",
+        "zh-CN": "glua.codec.base64DecodeFile(file [, urlSafe])"
+      }
+    },
+    "glua.codec.hexEncodeFile": {
+      "signature": {
+        "en": "glua.codec.hexEncodeFile(file)",
+        "zh-CN": "glua.codec.hexEncodeFile(file)"
+      },
+      "returns": {
+        "en": "returns: hexadecimal string.",
+        "zh-CN": "返回：十六进制字符串。"
+      },
+      "params": {
+        "en": [
+          "file: readable file returned by io.open"
+        ],
+        "zh-CN": [
+          "file：io.open 返回的可读 file"
+        ]
+      },
+      "description": {
+        "en": "Reads a readable io file from its current position to EOF and encodes lowercase hexadecimal without seeking or closing it.",
+        "zh-CN": "从可读 io file 当前位置读取到 EOF 并编码为小写十六进制；不 seek 也不关闭文件。"
+      },
+      "example": {
+        "en": "glua.codec.hexEncodeFile(file)",
+        "zh-CN": "glua.codec.hexEncodeFile(file)"
+      }
+    },
+    "glua.codec.hexDecodeFile": {
+      "signature": {
+        "en": "glua.codec.hexDecodeFile(file)",
+        "zh-CN": "glua.codec.hexDecodeFile(file)"
+      },
+      "returns": {
+        "en": "returns: binary string.",
+        "zh-CN": "返回：二进制字符串。"
+      },
+      "params": {
+        "en": [
+          "file: readable file returned by io.open"
+        ],
+        "zh-CN": [
+          "file：io.open 返回的可读 file"
+        ]
+      },
+      "description": {
+        "en": "Reads and decodes hexadecimal from a readable io file at its current position without seeking or closing it.",
+        "zh-CN": "从可读 io file 当前位置读取并解码十六进制；不 seek 也不关闭文件。"
+      },
+      "example": {
+        "en": "glua.codec.hexDecodeFile(file)",
+        "zh-CN": "glua.codec.hexDecodeFile(file)"
+      }
+    },
+    "glua.hash.md5File": {
+      "signature": {
+        "en": "glua.hash.md5File(file)",
+        "zh-CN": "glua.hash.md5File(file)"
+      },
+      "returns": {
+        "en": "returns: 32-character digest.",
+        "zh-CN": "返回：32 字符摘要。"
+      },
+      "params": {
+        "en": [
+          "file: readable file returned by io.open"
+        ],
+        "zh-CN": [
+          "file：io.open 返回的可读 file"
+        ]
+      },
+      "description": {
+        "en": "Streams MD5 from a readable io file at its current position for compatibility only, without seeking or closing it.",
+        "zh-CN": "从可读 io file 当前位置流式计算 MD5，仅用于兼容；不 seek 也不关闭文件。"
+      },
+      "example": {
+        "en": "glua.hash.md5File(file)",
+        "zh-CN": "glua.hash.md5File(file)"
+      }
+    },
+    "glua.hash.sha1File": {
+      "signature": {
+        "en": "glua.hash.sha1File(file)",
+        "zh-CN": "glua.hash.sha1File(file)"
+      },
+      "returns": {
+        "en": "returns: 40-character digest.",
+        "zh-CN": "返回：40 字符摘要。"
+      },
+      "params": {
+        "en": [
+          "file: readable file returned by io.open"
+        ],
+        "zh-CN": [
+          "file：io.open 返回的可读 file"
+        ]
+      },
+      "description": {
+        "en": "Streams SHA-1 from a readable io file at its current position for compatibility only, without seeking or closing it.",
+        "zh-CN": "从可读 io file 当前位置流式计算 SHA-1，仅用于兼容；不 seek 也不关闭文件。"
+      },
+      "example": {
+        "en": "glua.hash.sha1File(file)",
+        "zh-CN": "glua.hash.sha1File(file)"
+      }
+    },
+    "glua.hash.sha256File": {
+      "signature": {
+        "en": "glua.hash.sha256File(file)",
+        "zh-CN": "glua.hash.sha256File(file)"
+      },
+      "returns": {
+        "en": "returns: 64-character digest.",
+        "zh-CN": "返回：64 字符摘要。"
+      },
+      "params": {
+        "en": [
+          "file: readable file returned by io.open"
+        ],
+        "zh-CN": [
+          "file：io.open 返回的可读 file"
+        ]
+      },
+      "description": {
+        "en": "Streams SHA-256 from a readable io file at its current position without seeking or closing it.",
+        "zh-CN": "从可读 io file 当前位置流式计算 SHA-256；不 seek 也不关闭文件。"
+      },
+      "example": {
+        "en": "glua.hash.sha256File(assert(io.open('data.bin', 'rb')))",
+        "zh-CN": "glua.hash.sha256File(assert(io.open('data.bin', 'rb')))"
+      }
+    },
+    "glua.hash.sha512File": {
+      "signature": {
+        "en": "glua.hash.sha512File(file)",
+        "zh-CN": "glua.hash.sha512File(file)"
+      },
+      "returns": {
+        "en": "returns: 128-character digest.",
+        "zh-CN": "返回：128 字符摘要。"
+      },
+      "params": {
+        "en": [
+          "file: readable file returned by io.open"
+        ],
+        "zh-CN": [
+          "file：io.open 返回的可读 file"
+        ]
+      },
+      "description": {
+        "en": "Streams SHA-512 from a readable io file at its current position without seeking or closing it.",
+        "zh-CN": "从可读 io file 当前位置流式计算 SHA-512；不 seek 也不关闭文件。"
+      },
+      "example": {
+        "en": "glua.hash.sha512File(file)",
+        "zh-CN": "glua.hash.sha512File(file)"
+      }
+    },
+    "glua.hash.hmacFile": {
+      "signature": {
+        "en": "glua.hash.hmacFile(algorithm, key, file)",
+        "zh-CN": "glua.hash.hmacFile(algorithm, key, file)"
+      },
+      "returns": {
+        "en": "returns: lowercase hexadecimal HMAC.",
+        "zh-CN": "返回：小写十六进制 HMAC。"
+      },
+      "params": {
+        "en": [
+          "algorithm: digest name",
+          "key: binary key",
+          "file: readable file returned by io.open"
+        ],
+        "zh-CN": [
+          "algorithm：算法名",
+          "key：二进制密钥",
+          "file：io.open 返回的可读 file"
+        ]
+      },
+      "description": {
+        "en": "Streams HMAC from a readable io file at its current position without seeking or closing it.",
+        "zh-CN": "从可读 io file 当前位置流式计算 HMAC；不 seek 也不关闭文件。"
+      },
+      "example": {
+        "en": "glua.hash.hmacFile(algorithm, key, file)",
+        "zh-CN": "glua.hash.hmacFile(algorithm, key, file)"
+      }
     }
   }
 }

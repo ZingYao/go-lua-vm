@@ -3,10 +3,106 @@ package lua
 import (
 	"archive/zip"
 	"bytes"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/ZingYao/go-lua-vm/runtime"
 )
+
+// TestDoStringGluaFileCodecAndHash 验证 Codec 和 Hash 文件方法只读取 io.open 对象。
+//
+// 测试使用二进制文件与编码文件，覆盖当前位置、所有摘要、HMAC、非法编码、
+// 非 file、只写文件和已关闭文件；方法返回后句柄必须仍由 Lua 调用方关闭。
+func TestDoStringGluaFileCodecAndHash(t *testing.T) {
+	// 准备独立临时文件，避免测试读取位置和文件系统状态交叉污染。
+	temporaryDirectory := t.TempDir()
+	binaryPath := filepath.Join(temporaryDirectory, "payload.bin")
+	base64Path := filepath.Join(temporaryDirectory, "payload.b64")
+	hexPath := filepath.Join(temporaryDirectory, "payload.hex")
+	invalidBase64Path := filepath.Join(temporaryDirectory, "invalid.b64")
+	invalidHexPath := filepath.Join(temporaryDirectory, "invalid.hex")
+	payload := "zing\x00data\xfb\xff"
+	files := map[string]string{
+		binaryPath:        payload,
+		base64Path:        "emluZwBkYXRh+/8=",
+		hexPath:           "7a696e670064617461fbff",
+		invalidBase64Path: "%%%",
+		invalidHexPath:    "abc",
+	}
+	for filePath, content := range files {
+		// 每个 fixture 一次写入，后续由 Lua io.open 真实创建 file userdata。
+		if err := os.WriteFile(filePath, []byte(content), 0o600); err != nil {
+			// fixture 失败时无法验证文件 API。
+			t.Fatalf("write fixture %s failed: %v", filePath, err)
+		}
+	}
+
+	state := NewStateWithOptions(Options{AllowHostFilesystem: true})
+	defer state.Close()
+	if err := OpenLibs(state); err != nil {
+		// Codec、Hash 和 io.open 均由完整标准库注册。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+	source := `
+local binaryPath = ` + quoteLuaString(binaryPath) + `
+local base64Path = ` + quoteLuaString(base64Path) + `
+local hexPath = ` + quoteLuaString(hexPath) + `
+local invalidBase64Path = ` + quoteLuaString(invalidBase64Path) + `
+local invalidHexPath = ` + quoteLuaString(invalidHexPath) + `
+local payload = "zing\0data\251\255"
+
+local function readWith(path, callback)
+  local file = assert(io.open(path, "rb"))
+  local result = callback(file)
+  assert(io.type(file) == "file")
+  assert(file:close())
+  return result
+end
+
+assert(readWith(binaryPath, glua.codec.base64EncodeFile) == glua.codec.base64Encode(payload))
+assert(readWith(base64Path, glua.codec.base64DecodeFile) == payload)
+assert(readWith(binaryPath, function(file)
+  return glua.codec.base64EncodeFile(file, true)
+end) == glua.codec.base64Encode(payload, true))
+assert(readWith(binaryPath, glua.codec.hexEncodeFile) == glua.codec.hexEncode(payload))
+assert(readWith(hexPath, glua.codec.hexDecodeFile) == payload)
+
+assert(readWith(binaryPath, glua.hash.md5File) == glua.hash.md5(payload))
+assert(readWith(binaryPath, glua.hash.sha1File) == glua.hash.sha1(payload))
+assert(readWith(binaryPath, glua.hash.sha256File) == glua.hash.sha256(payload))
+assert(readWith(binaryPath, glua.hash.sha512File) == glua.hash.sha512(payload))
+assert(readWith(binaryPath, function(file)
+  return glua.hash.hmacFile("sha256", "secret", file)
+end) == glua.hash.hmac("sha256", "secret", payload))
+
+local positioned = assert(io.open(binaryPath, "rb"))
+assert(positioned:read(1) == "z")
+assert(glua.hash.sha256File(positioned) == glua.hash.sha256(payload:sub(2)))
+assert(positioned:close())
+
+assert(not pcall(glua.codec.base64EncodeFile, binaryPath))
+assert(not pcall(glua.hash.sha256File, binaryPath))
+assert(not pcall(function()
+  readWith(invalidBase64Path, glua.codec.base64DecodeFile)
+end))
+assert(not pcall(function()
+  readWith(invalidHexPath, glua.codec.hexDecodeFile)
+end))
+
+local writeOnly = assert(io.open(` + quoteLuaString(filepath.Join(temporaryDirectory, "write-only.bin")) + `, "wb"))
+assert(not pcall(glua.hash.sha256File, writeOnly))
+assert(writeOnly:close())
+
+local closed = assert(io.open(binaryPath, "rb"))
+assert(closed:close())
+assert(not pcall(glua.codec.hexEncodeFile, closed))
+`
+	if err := DoString(state, source); err != nil {
+		// 任一 Lua 断言失败都输出完整错误。
+		t.Fatalf("file codec/hash script failed: %v", err)
+	}
+}
 
 // TestGluaZIPDecompressRejectsUnsafeArchives 验证解压入口拒绝外部恶意 ZIP。
 //
