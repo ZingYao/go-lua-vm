@@ -2,6 +2,7 @@ package iolib
 
 import (
 	"errors"
+	gio "io"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
@@ -193,6 +194,53 @@ func TestFileUserdataCloseAndFlush(t *testing.T) {
 	if recorder.closeCount != 1 {
 		// 重复 close 不应再次关闭底层资源。
 		t.Fatalf("close count after second close = %d, want 1", recorder.closeCount)
+	}
+}
+
+// TestFileReadStreamsFromCurrentPosition 验证 File.Read 复用 file:read 的缓冲位置。
+//
+// 测试先按行读取再通过 io.Reader 读取剩余字节，并覆盖已关闭、只写文件的
+// Lua error 语义；Read 不应 seek 或主动关闭文件。
+func TestFileReadStreamsFromCurrentPosition(t *testing.T) {
+	// 行读取会预读底层 reader，后续 Read 必须从同一缓冲器继续。
+	file := NewFile("stream", strings.NewReader("first\nsecond"), nil, nil, nil)
+	line, err := file.ReadLine()
+	if err != nil {
+		// 首行读取不应失败。
+		t.Fatalf("ReadLine failed: %v", err)
+	}
+	if line != "first" {
+		// ReadLine 不包含行尾。
+		t.Fatalf("ReadLine = %q, want first", line)
+	}
+	remaining, err := gio.ReadAll(file)
+	if err != nil {
+		// 流式读取应消费预读缓冲中的剩余内容。
+		t.Fatalf("Read remaining failed: %v", err)
+	}
+	if string(remaining) != "second" {
+		// 跳过预读缓冲会导致此处错误返回 EOF。
+		t.Fatalf("remaining = %q, want second", remaining)
+	}
+	if file.Closed() {
+		// Read 只读取内容，文件生命周期仍归调用方。
+		t.Fatalf("Read should not close file")
+	}
+
+	closed := NewFile("closed", strings.NewReader("x"), nil, nil, nil)
+	if err := closed.Close(); err != nil {
+		// 测试需要先进入关闭状态。
+		t.Fatalf("Close failed: %v", err)
+	}
+	if _, err := closed.Read(make([]byte, 1)); !errors.Is(err, runtime.ErrLuaError) {
+		// 已关闭文件必须保留可被 pcall 捕获的 Lua error 语义。
+		t.Fatalf("closed Read error = %v, want Lua error", err)
+	}
+
+	writeOnly := NewFile("write-only", nil, &strings.Builder{}, nil, nil)
+	if _, err := writeOnly.Read(make([]byte, 1)); !errors.Is(err, runtime.ErrLuaError) {
+		// 只写文件没有 reader 能力。
+		t.Fatalf("write-only Read error = %v, want Lua error", err)
 	}
 }
 

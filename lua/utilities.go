@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/ZingYao/go-lua-vm/runtime"
+	iolib "github.com/ZingYao/go-lua-vm/stdlib/io"
 )
 
 const (
@@ -74,6 +75,10 @@ func registerGluaUtilityGlobals(state *State) {
 	codecTable.RawSetString("hexDecode", gluaGoFunction(gluaCodecHexDecode))
 	codecTable.RawSetString("urlEncode", gluaGoFunction(gluaCodecURLEncode))
 	codecTable.RawSetString("urlDecode", gluaGoFunction(gluaCodecURLDecode))
+	codecTable.RawSetString("base64EncodeFile", gluaGoFunction(gluaCodecBase64EncodeFile))
+	codecTable.RawSetString("base64DecodeFile", gluaGoFunction(gluaCodecBase64DecodeFile))
+	codecTable.RawSetString("hexEncodeFile", gluaGoFunction(gluaCodecHexEncodeFile))
+	codecTable.RawSetString("hexDecodeFile", gluaGoFunction(gluaCodecHexDecodeFile))
 	gluaTable.RawSetString("codec", runtime.ReferenceValue(runtime.KindTable, codecTable))
 
 	hashTable := runtime.NewTable()
@@ -82,6 +87,11 @@ func registerGluaUtilityGlobals(state *State) {
 	hashTable.RawSetString("sha256", gluaGoFunction(gluaHashSHA256))
 	hashTable.RawSetString("sha512", gluaGoFunction(gluaHashSHA512))
 	hashTable.RawSetString("hmac", gluaGoFunction(gluaHashHMAC))
+	hashTable.RawSetString("md5File", gluaGoFunction(gluaHashMD5File))
+	hashTable.RawSetString("sha1File", gluaGoFunction(gluaHashSHA1File))
+	hashTable.RawSetString("sha256File", gluaGoFunction(gluaHashSHA256File))
+	hashTable.RawSetString("sha512File", gluaGoFunction(gluaHashSHA512File))
+	hashTable.RawSetString("hmacFile", gluaGoFunction(gluaHashHMACFile))
 	gluaTable.RawSetString("hash", runtime.ReferenceValue(runtime.KindTable, hashTable))
 
 	regexTable := runtime.NewTable()
@@ -223,6 +233,97 @@ func gluaCodecURLDecode(args ...runtime.Value) ([]runtime.Value, error) {
 	return []runtime.Value{runtime.StringValue(decoded)}, nil
 }
 
+// gluaCodecBase64EncodeFile 从当前文件位置流式读取并返回 Base64 文本。
+//
+// args 为可读 file userdata 和可选 urlSafe boolean；返回完整 Base64 string。方法不 seek、
+// 不关闭文件；文件错误、已关闭或不可读会返回 Lua error。
+func gluaCodecBase64EncodeFile(args ...runtime.Value) ([]runtime.Value, error) {
+	// 解析文件读端和可选 URL-safe 字符表开关。
+	reader, urlSafe, err := gluaFileReaderWithOptionalBoolean("glua.codec.base64EncodeFile", args)
+	if err != nil {
+		// 参数或文件错误直接返回。
+		return nil, err
+	}
+	encoding := base64.StdEncoding
+	if urlSafe {
+		// URL-safe 模式使用 - 和 _ 字符表。
+		encoding = base64.URLEncoding
+	}
+	var output bytes.Buffer
+	encoder := base64.NewEncoder(encoding, &output)
+	if _, err := io.Copy(encoder, reader); err != nil {
+		// 读取失败时不返回部分编码结果。
+		return nil, gluaSerializationError("glua.codec.base64EncodeFile: " + err.Error())
+	}
+	if err := encoder.Close(); err != nil {
+		// Close 会写入最后一组字节和 padding，失败时编码结果不完整。
+		return nil, gluaSerializationError("glua.codec.base64EncodeFile: " + err.Error())
+	}
+	return []runtime.Value{runtime.StringValue(output.String())}, nil
+}
+
+// gluaCodecBase64DecodeFile 从当前文件位置流式读取 Base64 文本并返回二进制字符串。
+//
+// args 为可读 file userdata 和可选 urlSafe boolean；非法字符或 padding 返回 Lua error。
+// 方法只消费当前位置之后的字节，不 seek 也不关闭文件。
+func gluaCodecBase64DecodeFile(args ...runtime.Value) ([]runtime.Value, error) {
+	// 解析文件读端和对应字符表。
+	reader, urlSafe, err := gluaFileReaderWithOptionalBoolean("glua.codec.base64DecodeFile", args)
+	if err != nil {
+		// 参数或文件错误直接返回。
+		return nil, err
+	}
+	encoding := base64.StdEncoding
+	if urlSafe {
+		// URL-safe 模式使用 - 和 _ 字符表。
+		encoding = base64.URLEncoding
+	}
+	var output bytes.Buffer
+	if _, err := io.Copy(&output, base64.NewDecoder(encoding, reader)); err != nil {
+		// 非法 Base64 不暴露已解码的部分结果。
+		return nil, gluaSerializationError("glua.codec.base64DecodeFile: " + err.Error())
+	}
+	return []runtime.Value{runtime.StringValue(output.String())}, nil
+}
+
+// gluaCodecHexEncodeFile 从当前文件位置流式读取并返回小写十六进制文本。
+//
+// args 必须只包含一个可读 file userdata；返回长度为输入两倍的 hex string。方法
+// 不 seek、不关闭文件，读取失败返回 Lua error。
+func gluaCodecHexEncodeFile(args ...runtime.Value) ([]runtime.Value, error) {
+	// 文件版 Hex 编码严格要求单个读取对象。
+	reader, err := gluaSingleFileReader("glua.codec.hexEncodeFile", args)
+	if err != nil {
+		// 参数或文件错误直接返回。
+		return nil, err
+	}
+	var output bytes.Buffer
+	if _, err := io.Copy(hex.NewEncoder(&output), reader); err != nil {
+		// 读取失败时不返回部分 Hex 文本。
+		return nil, gluaSerializationError("glua.codec.hexEncodeFile: " + err.Error())
+	}
+	return []runtime.Value{runtime.StringValue(output.String())}, nil
+}
+
+// gluaCodecHexDecodeFile 从当前文件位置流式读取 Hex 文本并返回二进制字符串。
+//
+// args 必须只包含一个可读 file userdata；大小写 Hex 都接受，奇数长度或非法字符
+// 返回 Lua error。方法不 seek、不关闭文件。
+func gluaCodecHexDecodeFile(args ...runtime.Value) ([]runtime.Value, error) {
+	// 文件版 Hex 解码严格要求单个读取对象。
+	reader, err := gluaSingleFileReader("glua.codec.hexDecodeFile", args)
+	if err != nil {
+		// 参数或文件错误直接返回。
+		return nil, err
+	}
+	var output bytes.Buffer
+	if _, err := io.Copy(&output, hex.NewDecoder(reader)); err != nil {
+		// 非法 Hex 不暴露已解码的部分结果。
+		return nil, gluaSerializationError("glua.codec.hexDecodeFile: " + err.Error())
+	}
+	return []runtime.Value{runtime.StringValue(output.String())}, nil
+}
+
 // gluaHashMD5 返回输入的 MD5 小写十六进制摘要。
 //
 // args 必须只有一个二进制 string；MD5 仅用于兼容校验，不应作为密码或安全签名算法。
@@ -301,6 +402,164 @@ func gluaHashHMAC(args ...runtime.Value) ([]runtime.Value, error) {
 	digest := hmac.New(constructor, []byte(args[1].String))
 	_, _ = digest.Write([]byte(args[2].String))
 	return []runtime.Value{runtime.StringValue(hex.EncodeToString(digest.Sum(nil)))}, nil
+}
+
+// gluaHashMD5File 从当前文件位置计算 MD5 小写十六进制摘要。
+//
+// args 必须只包含一个可读 file userdata；返回 hex digest。MD5 只用于兼容校验，
+// 方法不 seek、不关闭文件，读取失败返回 Lua error。
+func gluaHashMD5File(args ...runtime.Value) ([]runtime.Value, error) {
+	// 复用文件摘要入口，保持所有算法的文件语义一致。
+	return gluaHashFileDigest("glua.hash.md5File", md5.New, args)
+}
+
+// gluaHashSHA1File 从当前文件位置计算 SHA-1 小写十六进制摘要。
+//
+// args 必须只包含一个可读 file userdata；返回 hex digest。SHA-1 只用于兼容校验，
+// 方法不 seek、不关闭文件，读取失败返回 Lua error。
+func gluaHashSHA1File(args ...runtime.Value) ([]runtime.Value, error) {
+	// 复用文件摘要入口，保持所有算法的文件语义一致。
+	return gluaHashFileDigest("glua.hash.sha1File", sha1.New, args)
+}
+
+// gluaHashSHA256File 从当前文件位置计算 SHA-256 小写十六进制摘要。
+//
+// args 必须只包含一个可读 file userdata；返回 64 字符 hex digest。方法不 seek、
+// 不关闭文件，读取失败返回 Lua error。
+func gluaHashSHA256File(args ...runtime.Value) ([]runtime.Value, error) {
+	// 复用文件摘要入口，保持所有算法的文件语义一致。
+	return gluaHashFileDigest("glua.hash.sha256File", sha256.New, args)
+}
+
+// gluaHashSHA512File 从当前文件位置计算 SHA-512 小写十六进制摘要。
+//
+// args 必须只包含一个可读 file userdata；返回 128 字符 hex digest。方法不 seek、
+// 不关闭文件，读取失败返回 Lua error。
+func gluaHashSHA512File(args ...runtime.Value) ([]runtime.Value, error) {
+	// 复用文件摘要入口，保持所有算法的文件语义一致。
+	return gluaHashFileDigest("glua.hash.sha512File", sha512.New, args)
+}
+
+// gluaHashFileDigest 从 file userdata 当前位置流式计算固定摘要。
+//
+// apiName 用于错误文本，constructor 创建 hash.Hash，args 必须为单 file userdata；
+// 返回小写 hex digest。方法不持有完整文件内容，读取失败返回 Lua error。
+func gluaHashFileDigest(apiName string, constructor func() hash.Hash, args []runtime.Value) ([]runtime.Value, error) {
+	// 摘要器直接作为流式 writer，使内存不随文件大小增长。
+	reader, err := gluaSingleFileReader(apiName, args)
+	if err != nil {
+		// 参数或文件错误直接返回。
+		return nil, err
+	}
+	digest := constructor()
+	if _, err := io.Copy(digest, reader); err != nil {
+		// 读取不完整时不返回部分摘要。
+		return nil, gluaSerializationError(apiName + ": " + err.Error())
+	}
+	return []runtime.Value{runtime.StringValue(hex.EncodeToString(digest.Sum(nil)))}, nil
+}
+
+// gluaHashHMACFile 从当前文件位置流式计算指定 SHA 算法的 HMAC。
+//
+// args 必须为 algorithm、key 和 file userdata；algorithm 支持 md5、sha1、sha256、sha512，
+// 返回小写 hex HMAC。方法不 seek、不关闭文件，读取失败返回 Lua error。
+func gluaHashHMACFile(args ...runtime.Value) ([]runtime.Value, error) {
+	// HMAC 文件入口需要算法、密钥和可读文件三个参数。
+	if len(args) != 3 || args[0].Kind != runtime.KindString || args[1].Kind != runtime.KindString {
+		// 参数形态错误不尝试打开或解释路径。
+		return nil, gluaSerializationError("glua.hash.hmacFile expects algorithm, key, and file")
+	}
+	reader, err := gluaFileReaderValue("glua.hash.hmacFile", args[2])
+	if err != nil {
+		// 第三个参数必须是未关闭的可读 file userdata。
+		return nil, err
+	}
+	var constructor func() hash.Hash
+	switch strings.ToLower(args[0].String) {
+	case "md5":
+		// 兼容旧协议的 MD5 HMAC。
+		constructor = md5.New
+	case "sha1":
+		// 兼容旧协议的 SHA-1 HMAC。
+		constructor = sha1.New
+	case "sha256":
+		// 推荐的 SHA-256 HMAC。
+		constructor = sha256.New
+	case "sha512":
+		// 高强度 SHA-512 HMAC。
+		constructor = sha512.New
+	default:
+		// 未知算法不回退到其他摘要。
+		return nil, gluaSerializationError("glua.hash.hmacFile algorithm must be md5, sha1, sha256, or sha512")
+	}
+	digest := hmac.New(constructor, []byte(args[1].String))
+	if _, err := io.Copy(digest, reader); err != nil {
+		// 读取不完整时不返回部分 HMAC。
+		return nil, gluaSerializationError("glua.hash.hmacFile: " + err.Error())
+	}
+	return []runtime.Value{runtime.StringValue(hex.EncodeToString(digest.Sum(nil)))}, nil
+}
+
+// gluaSingleFileReader 解析一个严格的 file userdata 参数。
+//
+// apiName 用于错误文本，args 必须只有一项；返回从当前文件位置读取的 io.Reader。
+// 参数不是 io.open 文件对象时返回 Lua error，不把字符串解释为路径。
+func gluaSingleFileReader(apiName string, args []runtime.Value) (io.Reader, error) {
+	// 严格限定单参数，避免多余选项被静默忽略。
+	if len(args) != 1 {
+		// 文件方法只接受一个 file userdata。
+		return nil, gluaSerializationError(apiName + " expects a file")
+	}
+	return gluaFileReaderValue(apiName, args[0])
+}
+
+// gluaFileReaderWithOptionalBoolean 解析 file userdata 和可选布尔开关。
+//
+// apiName 用于错误文本，args 必须为 file 或 file、boolean；返回读取器和开关值。
+// 文件类型或布尔类型错误时返回 Lua error。
+func gluaFileReaderWithOptionalBoolean(apiName string, args []runtime.Value) (io.Reader, bool, error) {
+	// Base64 文件方法最多接受一个可选字符表开关。
+	if len(args) < 1 || len(args) > 2 {
+		// 参数数量超出签名时直接拒绝。
+		return nil, false, gluaSerializationError(apiName + " expects file and optional boolean")
+	}
+	reader, err := gluaFileReaderValue(apiName, args[0])
+	if err != nil {
+		// 第一个参数必须是 io.open 文件对象。
+		return nil, false, err
+	}
+	if len(args) == 1 {
+		// 缺省开关时使用标准 Base64 字符表。
+		return reader, false, nil
+	}
+	if args[1].Kind != runtime.KindBoolean {
+		// 可选开关必须是明确的 boolean。
+		return nil, false, gluaSerializationError(apiName + " optional flag must be boolean")
+	}
+	return reader, args[1].Bool, nil
+}
+
+// gluaFileReaderValue 从 Lua 值提取标准库 file userdata 读取器。
+//
+// apiName 用于错误文本，value 必须由 io.open 或等价 io 入口创建；返回共享当前
+// 位置的 reader。非 file userdata 返回 Lua error，已关闭和不可读错误在首次 Read 时传播。
+func gluaFileReaderValue(apiName string, value runtime.Value) (io.Reader, error) {
+	// 只有 userdata 才可能承载 io 标准库文件对象。
+	if value.Kind != runtime.KindUserdata {
+		// 字符串明确按类型错误处理，不会被解释成路径。
+		return nil, gluaSerializationError(apiName + " expects an io file")
+	}
+	userdata, ok := value.Ref.(*runtime.Userdata)
+	if !ok || userdata == nil {
+		// 损坏的 userdata 引用不具备文件能力。
+		return nil, gluaSerializationError(apiName + " expects an io file")
+	}
+	file, ok := userdata.Data.(*iolib.File)
+	if !ok || file == nil {
+		// 其他业务 userdata 不能伪装成 io.open 文件。
+		return nil, gluaSerializationError(apiName + " expects an io file")
+	}
+	return file, nil
 }
 
 // gluaRegexMatch 判断 RE2 正则是否匹配文本任意位置。

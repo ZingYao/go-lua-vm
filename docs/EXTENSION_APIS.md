@@ -133,8 +133,8 @@ local signature = glua.hash.hmac("sha256", "secret", decoded)
 
 方法：
 
-- Codec：`base64Encode`、`base64Decode`、`hexEncode`、`hexDecode`、`urlEncode`、`urlDecode`。
-- Hash：`md5`、`sha1`、`sha256`、`sha512`、`hmac`。
+- Codec：`base64Encode`、`base64Decode`、`hexEncode`、`hexDecode`、`urlEncode`、`urlDecode`，以及接受可读 `io.open` 对象的 `base64EncodeFile`、`base64DecodeFile`、`hexEncodeFile`、`hexDecodeFile`。
+- Hash：`md5`、`sha1`、`sha256`、`sha512`、`hmac`，以及从文件当前位置流式计算的 `md5File`、`sha1File`、`sha256File`、`sha512File`、`hmacFile`。
 
 MD5 和 SHA-1 只用于旧协议兼容，不应用于密码存储或新签名设计。
 
