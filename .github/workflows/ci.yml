@@ -59,6 +59,9 @@ jobs:
 
       - name: Lua Race Check
         if: runner.os == 'Linux'
+        # Go race detector 在 Linux 上依赖 CGO；该例外仅启用测试工具链，核心代码仍禁止 import "C"。
+        env:
+          CGO_ENABLED: "1"
         run: go test -race ./lua
 
   native-cross-compile:
