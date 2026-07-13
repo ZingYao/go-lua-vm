@@ -31,6 +31,7 @@ required_files=(
   glua-utilities.md
   assets/theme.css
   assets/favicon.svg
+  assets/prism-glua.js
 )
 
 for required_file in "${required_files[@]}"; do
@@ -43,6 +44,13 @@ done
 # 固定 Docsify 版本，避免 CDN latest 在无代码变更时改变站点行为。
 if ! grep -Fq 'docsify@4.13.1' "${source_directory}/index.html"; then
   printf 'docs/index.html must pin docsify@4.13.1\n' >&2
+  exit 1
+fi
+
+# GLua 代码块必须加载固定版本 Lua 基础语法和项目扩展 grammar。
+if ! grep -Fq 'prismjs@1.30.0/components/prism-lua.min.js' "${source_directory}/index.html" ||
+  ! grep -Fq 'assets/prism-glua.js' "${source_directory}/index.html"; then
+  printf 'docs/index.html must load the pinned GLua Prism grammar\n' >&2
   exit 1
 fi
 

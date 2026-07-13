@@ -30,7 +30,7 @@
 
 | 方法 | 说明 |
 | --- | --- |
-| `setProgress(event, callback [, config])` | 注册当前文件同步监听器，返回事件 ID |
+| `setProgress(event, callback [, config])` | 注册同步监听器，默认覆盖当前 State 全部 Lua source，返回事件 ID |
 | `setProgressAsync(event, callback [, config])` | 注册安全点异步监听器 |
 | `callProgress(event [, payload])` | 同步触发当前文件自定义事件 |
 | `callProgressAsync(event [, payload])` | 异步触发当前文件自定义事件 |
@@ -44,11 +44,11 @@
 | `setGroupMuted(group, muted)` | 批量静音分组 |
 | `removeGroup(group)` | 删除分组 |
 | `flush()` | 立即消费异步和防抖任务 |
-| `eventList()` / `stats()` | 查询当前文件监听器与队列统计 |
+| `eventList()` / `stats()` | 查询对当前来源生效的监听器与队列统计 |
 
 ### Sample
 
-~~~lua
+~~~glua
 local event = glua.event
 
 local listenerID = event.setProgressAsync(
@@ -67,6 +67,7 @@ local listenerID = event.setProgressAsync(
     overflow = "drop_oldest",
     onError = "mute",
     group = "trace",
+    scope = "runtime",
   }
 )
 
@@ -79,6 +80,8 @@ print(summary.totalListeners, summary.suppressedEvents)
 ~~~
 
 Event 回调默认接收只读快照，不会直接修改业务 table。详细触发时机、上下文字段和错误策略见 [Event 文档](glua-event.md)。
+
+`scope` 默认为 `runtime`；设置为 `file` 时只匹配注册来源。Go 宿主可使用 `lua.SetProgressEvent`、`lua.CallProgressEvent`、`lua.CallProgressEventAsync` 和 `lua.FlushProgressEvents` 与 Lua 双向触发，完整示例见 [Event 文档](glua-event.md#从-go-与-lua-交互)。
 
 ## 序列化
 

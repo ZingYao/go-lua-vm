@@ -81,6 +81,8 @@ type gluaEventCallback struct {
 
 // gluaEventOptions 保存单个监听器的可选治理配置。
 type gluaEventOptions struct {
+	// scope 表示监听当前 State 全部 source 或仅监听注册 source。
+	scope ProgressEventScope
 	// once 表示监听器成功占用一次派发后自动删除。
 	once bool
 	// maxCalls 限制监听器最多实际执行次数，0 表示不限制。
@@ -179,7 +181,7 @@ var (
 		"callee", "calleeName", "calleeNameWhat", "calleeType", "callPC",
 		"calleeSource", "calleeLineDefined", "calleeLastLineDefined", "calleeUpvalues",
 		"id", "config", "group", "priority", "once", "maxCalls",
-		"throttleMs", "debounceMs", "sampleRate",
+		"throttleMs", "debounceMs", "sampleRate", "scope",
 	}
 )
 
@@ -361,13 +363,26 @@ func setGluaProgressEvent(state *State, async bool, args ...runtime.Value) ([]ru
 	}
 	source := currentGluaCallerSource(state)
 	if source == "" {
-		// 当前源码名缺失时无法建立文件级作用域。
+		// 当前源码名缺失时无法记录监听器注册来源，也无法支持 file scope。
 		return nil, runtime.RaiseError(runtime.StringValue("glua.event.setProgress requires a current Lua source"))
 	}
+	eventID, err := registerGluaProgressEvent(state, source, eventName, callback, configValue, filter, options, async)
+	if err != nil {
+		// 注册表或 State 错误按 Lua error 语义返回。
+		return nil, err
+	}
+	return []runtime.Value{runtime.IntegerValue(eventID)}, nil
+}
+
+// registerGluaProgressEvent 把已经解析的监听器写入 State 注册表。
+//
+// source、eventName 和 callback 必须有效；options.scope 必须已经归一化。返回新事件 ID。
+func registerGluaProgressEvent(state *State, source string, eventName string, callback runtime.Value, configValue runtime.Value, filter gluaEventFilter, options gluaEventOptions, async bool) (int64, error) {
+	// 注册入口集中维护索引、排序和 GC 根，供 Lua 与 Go API 共同复用。
 	registry := gluaRegistryForState(state)
 	if registry == nil {
 		// 缺少注册表说明 State 不可用。
-		return nil, runtime.ErrNilState
+		return 0, runtime.ErrNilState
 	}
 	registry.mu.Lock()
 	if registry.progressEvents == nil {
@@ -403,7 +418,99 @@ func setGluaProgressEvent(state *State, async bool, args ...runtime.Value) ([]ru
 	registry.eventsByID[callbackEntry.id] = callbackEntry
 	registry.rootEvent(callbackEntry)
 	registry.mu.Unlock()
-	return []runtime.Value{runtime.IntegerValue(callbackEntry.id)}, nil
+	return callbackEntry.id, nil
+}
+
+// setGluaProgressEventForSource 从 Go API 为明确 source 注册进度事件。
+func setGluaProgressEventForSource(state *State, source string, eventName string, callback runtime.Value, apiOptions ProgressEventOptions) (int64, error) {
+	// Go 入口先验证 State 生命周期和 Event 初始化状态，再复用 Lua 配置解析器。
+	if state == nil {
+		// nil State 无法保存监听器。
+		return 0, runtime.ErrNilState
+	}
+	if err := state.CheckContext(); err != nil {
+		// 已关闭或被取消的 State 不接受新监听器。
+		return 0, err
+	}
+	if !state.Options().GluaEventsEnabled {
+		// 当前 State 显式关闭了 Event 能力。
+		return 0, ErrGluaEventsUnavailable
+	}
+	if source == "" || eventName == "" {
+		// source 和事件名共同决定匹配边界，均不能为空。
+		return 0, runtime.RaiseError(runtime.StringValue("progress event source and event must not be empty"))
+	}
+	if !gluaEventFilterFunction(callback) {
+		// callback 必须能被 Lua VM 调用。
+		return 0, ErrExpectedCallable
+	}
+	registry := gluaRegistryForState(state)
+	if registry == nil || registry.roots == nil {
+		// OpenLibs 负责创建 GC 根；未初始化时不能安全保存 callback。
+		return 0, ErrGluaEventsNotOpen
+	}
+	configValue := apiOptions.Config
+	if configValue.Kind == 0 {
+		// Value 零值在公开 Go API 中表示未提供配置。
+		configValue = runtime.NilValue()
+	}
+	filter, err := parseGluaEventFilter(configValue)
+	if err != nil {
+		// 过滤配置错误直接返回给 Go 调用方。
+		return 0, err
+	}
+	options, err := parseGluaEventOptions(configValue)
+	if err != nil {
+		// 治理配置错误直接返回给 Go 调用方。
+		return 0, err
+	}
+	options.scope = apiOptions.Scope
+	if options.debounceNs > 0 && !apiOptions.Async {
+		// 防抖依赖异步队列，不能用于同步 Go callback。
+		return 0, runtime.RaiseError(runtime.StringValue("event config debounceMs requires an asynchronous listener"))
+	}
+	return registerGluaProgressEvent(state, source, eventName, callback, configValue, filter, options, apiOptions.Async)
+}
+
+// dispatchGluaProgressEventFromGo 从 Go API 为明确 source 触发进度事件。
+func dispatchGluaProgressEventFromGo(state *State, source string, eventName string, payload runtime.Value, async bool) error {
+	// Go 入口保持与注册入口相同的 State 和参数约束。
+	if state == nil {
+		// nil State 没有可触发的运行时。
+		return runtime.ErrNilState
+	}
+	if err := state.CheckContext(); err != nil {
+		// 已关闭或取消的 State 不能执行回调。
+		return err
+	}
+	if !state.Options().GluaEventsEnabled {
+		// 当前 State 没有启用 Event 能力。
+		return ErrGluaEventsUnavailable
+	}
+	if source == "" || eventName == "" {
+		// 显式来源和事件名不能为空。
+		return runtime.RaiseError(runtime.StringValue("progress event source and event must not be empty"))
+	}
+	_, err := dispatchGluaProgressEvent(state, source, eventName, payload, async)
+	return err
+}
+
+// flushGluaProgressEventsFromGo 从 Go API 强制消费当前 State 的异步事件队列。
+func flushGluaProgressEventsFromGo(state *State) (int, error) {
+	// flush 前确认 State 可用且 Event 能力已开启。
+	if state == nil {
+		// nil State 没有异步队列。
+		return 0, runtime.ErrNilState
+	}
+	if err := state.CheckContext(); err != nil {
+		// 已关闭或取消的 State 不能执行队列任务。
+		return 0, err
+	}
+	if !state.Options().GluaEventsEnabled {
+		// 当前 State 没有 Event 队列。
+		return 0, ErrGluaEventsUnavailable
+	}
+	return drainGluaEventQueueCount(state, true)
 }
 
 // callGluaProgressEvent 实现 glua.event.callProgress 和 glua.event.callProgressAsync。
@@ -758,8 +865,8 @@ func parseGluaEventFilter(configValue runtime.Value) (gluaEventFilter, error) {
 
 // parseGluaEventOptions 从配置表解析监听器治理和异步队列选项。
 func parseGluaEventOptions(configValue runtime.Value) (gluaEventOptions, error) {
-	// 默认值保持历史行为：持续监听、完整采样、注册顺序、无队列上限、回调错误向上传播。
-	options := gluaEventOptions{overflow: "drop_newest", onError: "propagate", sampleRate: 1}
+	// 默认监听当前 State 全部 source，并保持持续监听、完整采样和回调错误向上传播。
+	options := gluaEventOptions{scope: ProgressEventScopeRuntime, overflow: "drop_newest", onError: "propagate", sampleRate: 1}
 	if configValue.IsNil() {
 		// 未提供配置时直接返回兼容默认值。
 		return options, nil
@@ -768,6 +875,13 @@ func parseGluaEventOptions(configValue runtime.Value) (gluaEventOptions, error) 
 	if !ok || configTable == nil {
 		// 配置类型已经由上层校验，此处防御损坏引用。
 		return options, runtime.RaiseError(runtime.StringValue("event config must be table"))
+	}
+	if value := configTable.RawGetString("scope"); !value.IsNil() {
+		// scope 只接受 runtime 或 file，避免未知值意外扩大监听范围。
+		if value.Kind != runtime.KindString || (value.String != string(ProgressEventScopeRuntime) && value.String != string(ProgressEventScopeFile)) {
+			return options, runtime.RaiseError(runtime.StringValue("event config scope must be runtime or file"))
+		}
+		options.scope = ProgressEventScope(value.String)
 	}
 	if value := configTable.RawGetString("once"); !value.IsNil() {
 		// once 只接受 boolean，避免字符串真值产生歧义。
@@ -1257,6 +1371,7 @@ func newGluaEventSnapshot(callback *gluaEventCallback) *runtime.Table {
 	result.RawSetString("id", runtime.IntegerValue(callback.id))
 	result.RawSetString("event", runtime.StringValue(callback.eventName))
 	result.RawSetString("source", runtime.StringValue(callback.source))
+	result.RawSetString("scope", runtime.StringValue(string(callback.options.scope)))
 	result.RawSetString("callback", callback.value)
 	result.RawSetString("config", callback.configValue)
 	result.RawSetString("async", runtime.BooleanValue(callback.async))
@@ -1350,7 +1465,7 @@ func (registry *gluaEventRegistry) eventList(source string) *runtime.Table {
 	}
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
-	eventsByName := registry.progressEvents[source]
+	eventsByName := registry.relevantEventsLocked(source)
 	result := newGluaEventListTable(source, eventsByName)
 	result.RawSetString("queuedTasks", runtime.IntegerValue(int64(len(registry.queue))))
 	result.RawSetString("droppedTasks", runtime.IntegerValue(registry.droppedTasks))
@@ -1360,6 +1475,43 @@ func (registry *gluaEventRegistry) eventList(source string) *runtime.Table {
 	result.RawSetString("sequence", runtime.IntegerValue(registry.sequence))
 	result.RawSetString("traceSequence", runtime.IntegerValue(registry.traceSequence))
 	return result
+}
+
+// relevantEventsLocked 聚合对指定 source 生效的 runtime 与 file 监听器。
+func (registry *gluaEventRegistry) relevantEventsLocked(source string) map[string][]*gluaEventCallback {
+	// 调用方已持有注册表锁，这里只构造独立切片供统计读取。
+	result := make(map[string][]*gluaEventCallback)
+	for registrationSource, eventsByName := range registry.progressEvents {
+		// runtime 监听器跨 source 生效；file 监听器只匹配注册 source。
+		for eventName, callbacks := range eventsByName {
+			// 每个事件名独立聚合，最后统一排序。
+			for _, callback := range callbacks {
+				// 损坏回调或不匹配的 file 监听器不进入结果。
+				if callback == nil || (callback.options.scope == ProgressEventScopeFile && registrationSource != source) {
+					continue
+				}
+				result[eventName] = append(result[eventName], callback)
+			}
+		}
+	}
+	for eventName := range result {
+		// 跨文件聚合后重新按优先级和注册 ID 建立全局稳定顺序。
+		sortGluaEventCallbacks(result[eventName])
+	}
+	return result
+}
+
+// sortGluaEventCallbacks 按优先级降序和注册 ID 升序稳定排序。
+func sortGluaEventCallbacks(callbacks []*gluaEventCallback) {
+	// 所有派发与统计聚合共用同一排序规则。
+	sort.SliceStable(callbacks, func(left int, right int) bool {
+		// 高优先级先执行；相同优先级保持更早注册的监听器在前。
+		if callbacks[left].options.priority != callbacks[right].options.priority {
+			// priority 不同时按降序排列。
+			return callbacks[left].options.priority > callbacks[right].options.priority
+		}
+		return callbacks[left].id < callbacks[right].id
+	})
 }
 
 // newGluaEventListTable 构建稳定排序的事件监听器统计表。
@@ -1487,10 +1639,14 @@ func dispatchGluaProgressEvent(state *State, source string, eventName string, pa
 		return nil, nil
 	}
 	context := buildGluaEventContext(state, "progress", eventName, payload, forceAsync, nil, currentGluaCallerProto(state))
+	if contextTable, ok := context.Ref.(*runtime.Table); ok && contextTable != nil {
+		// Go 触发或跨文件触发时，以显式 source 覆盖当前调用帧推导值。
+		contextTable.RawSetString("source", runtime.StringValue(source))
+	}
 	return registry.dispatchCallbacks(state, callbacks, context, forceAsync)
 }
 
-// progressCallbacks 返回文件事件回调快照。
+// progressCallbacks 返回对指定 source 生效的事件回调快照。
 func (registry *gluaEventRegistry) progressCallbacks(source string, eventName string) []*gluaEventCallback {
 	// 读取回调前先校验 registry。
 	if registry == nil {
@@ -1503,13 +1659,19 @@ func (registry *gluaEventRegistry) progressCallbacks(source string, eventName st
 		// 事件回调执行期间屏蔽重入派发。
 		return nil
 	}
-	eventsByName := registry.progressEvents[source]
-	if len(eventsByName) == 0 {
-		// 该源码没有任何事件。
-		return nil
+	callbacks := make([]*gluaEventCallback, 0)
+	for registrationSource, eventsByName := range registry.progressEvents {
+		// 从全部注册来源收集 runtime 监听器和当前 source 的 file 监听器。
+		for _, callback := range eventsByName[eventName] {
+			// nil 回调和不匹配的 file 监听器不参与派发。
+			if callback == nil || (callback.options.scope == ProgressEventScopeFile && registrationSource != source) {
+				continue
+			}
+			callbacks = append(callbacks, callback)
+		}
 	}
-	callbacks := eventsByName[eventName]
-	return append([]*gluaEventCallback(nil), callbacks...)
+	sortGluaEventCallbacks(callbacks)
+	return callbacks
 }
 
 // dispatchCallbacks 执行或入队一组事件回调。
@@ -1785,6 +1947,7 @@ func setGluaContextCallbackMetadata(context runtime.Value, callback *gluaEventCa
 	table.RawSetString("config", callback.configValue)
 	table.RawSetString("group", runtime.StringValue(callback.options.group))
 	table.RawSetString("priority", runtime.IntegerValue(callback.options.priority))
+	table.RawSetString("scope", runtime.StringValue(string(callback.options.scope)))
 	table.RawSetString("once", runtime.BooleanValue(callback.options.once))
 	table.RawSetString("maxCalls", runtime.IntegerValue(callback.callLimit()))
 	table.RawSetString("throttleMs", runtime.IntegerValue(callback.options.throttleNs/int64(time.Millisecond)))

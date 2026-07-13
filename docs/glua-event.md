@@ -1,14 +1,15 @@
 # GLua 事件
 
-`glua.event` 提供文件作用域的执行观察能力。在某个 Lua 文件中注册的事件只对该源文件生效。
+`glua.event` 提供运行时级执行观察能力。`setProgress` 和 `setProgressAsync` 默认监听同一个 `lua.State` 中涉及的所有 Lua source；第三个参数设置 `scope = "file"` 后，监听器才只对注册时的源码文件生效。
 
-```lua
+```glua
 local event = glua.event
 
 local id = event.setProgress(event.events.progress_function_call, function(ctx)
   print(ctx.timestamp, ctx.event)
 end, {
   whitelist = { "work" },
+  scope = "file",
 })
 ```
 
@@ -16,7 +17,7 @@ end, {
 
 - `glua.event.setProgress(event, callback [, config])`：同步注册事件，返回事件 ID。
 - `glua.event.setProgressAsync(event, callback [, config])`：注册异步事件，回调会进入队列并在 VM 安全点执行，返回事件 ID。
-- `glua.event.callProgress(event [, payload])`：在当前文件中同步触发自定义事件。
+- `glua.event.callProgress(event [, payload])`：以当前文件为触发来源同步触发自定义事件。
 - `glua.event.callProgressAsync(event [, payload])`：将自定义事件加入异步队列。
 - `glua.event.setMuted(id, muted)`：临时静音或重新启用指定事件。
 - `glua.event.setCallback(id, callback)`：替换监听器回调，保留原事件 ID、配置和统计。
@@ -29,13 +30,13 @@ end, {
 - `glua.event.removeGroup(group)`：删除当前文件指定分组，返回删除数量。
 - `glua.event.flush()`：立即消费当前 State 的异步事件队列，返回执行数量。
 - `glua.event.stats()`：返回当前文件监听器和异步队列统计。
-- `glua.event.eventList()`：返回当前源码文件已经注册的事件及监听器统计。
+- `glua.event.eventList()`：返回对当前源码生效的 runtime 监听器与匹配的 file 监听器统计。
 
-每个回调都会收到一个上下文表，其中包含 `event`、`kind`、`timestamp`（Unix 毫秒时间戳）、`sequence`、`eventId`、`traceId`、可选 `parentEventId`、`depth`、`payload`、`source`、`line`、`id`、`config`、`group`、`priority` 和可靠性配置。函数进度事件还会提供 `args`、`results`、`error`、`durationNs` 和调用元数据。
+每个回调都会收到一个上下文表，其中包含 `event`、`kind`、`timestamp`（Unix 毫秒时间戳）、`sequence`、`eventId`、`traceId`、可选 `parentEventId`、`depth`、`payload`、`source`、`scope`、`line`、`id`、`config`、`group`、`priority` 和可靠性配置。`source` 始终是实际产生事件的来源，`scope` 是当前监听器的匹配范围。函数进度事件还会提供 `args`、`results`、`error`、`durationNs` 和调用元数据。
 
 回调通过事件 ID 读取配置，因此调用 `setConfig` 后总能获取最新配置：
 
-```lua
+```glua
 event.setProgress(event.events.progress_function_call, function(ctx)
   local config = event.getConfig(ctx.id)
   if config then
@@ -72,6 +73,7 @@ local id = event.setProgress(event.events.progress_function_call, callback, {
 
 第三个参数和 `setConfig` 支持以下字段：
 
+- `scope`：`"runtime"` 或 `"file"`。默认 `runtime`，监听当前 State 中全部 Lua source；`file` 只监听注册来源。`setConfig` 可以动态切换范围。
 - `whitelist`、`blacklist`：函数名称或函数引用过滤器。
 - `once`：触发一次后自动删除，等价于 `maxCalls = 1`。
 - `maxCalls`：最多实际执行次数，`0` 表示不限制；达到上限后自动删除。
@@ -87,7 +89,7 @@ local id = event.setProgress(event.events.progress_function_call, callback, {
 
 默认情况下，`locals`、`upvalues`、`calleeUpvalues`、`args`、`results` 和其中嵌套的 table 都会递归复制并冻结。设置 `mutable = true` 后，回调可以直接修改原始 table，应只在明确需要拦截器行为时使用。
 
-```lua
+```glua
 local id = event.setProgressAsync("task.done", callback, {
   once = true,
   priority = 10,
@@ -106,9 +108,9 @@ event.setCallback(id, replacementCallback)
 
 ## 监听器列表
 
-`event.eventList()` 只统计调用它的当前源码文件，返回结构如下：
+`event.eventList()` 统计对调用来源生效的监听器：全部 runtime 监听器，以及注册来源与当前来源相同的 file 监听器。返回结构如下：
 
-```lua
+```glua
 {
   source = "@/path/to/main.glua",
   totalEvents = 2,
@@ -157,6 +159,43 @@ event.setCallback(id, replacementCallback)
 普通 `pcall`、`xpcall` 及其跨 `coroutine.yield` continuation 都会保留函数 call/return/error/exit 生命周期；错误即使最终被保护调用捕获，`progress_function_error` 仍会先触发。
 
 `State.Close()` 会删除该 State 的事件注册表，并清空监听器、配置根引用和待处理异步任务。直接调用 `state.Close()` 与包级 `lua.Close(state)` 使用同一清理路径，重复关闭不会再次执行回调或保留全局索引。
+
+## 从 Go 与 Lua 交互
+
+`lua` 包提供稳定 Go API，调用方不需要访问内部事件注册表。State 必须先执行 `lua.OpenLibs`；`source` 应与 Lua `Proto.Source` 使用相同名称，例如 `@worker.glua`。
+
+```go
+state := lua.NewState()
+defer state.Close()
+if err := lua.OpenLibs(state); err != nil {
+    return err
+}
+
+listenerID, err := lua.SetProgressEvent(
+    state,
+    "@host.go",
+    "order.ready",
+    func(ctx lua.ProgressEventContext) error {
+        fmt.Println(ctx.Source, ctx.Payload.DebugString(), ctx.Timestamp)
+        return nil
+    },
+)
+if err != nil {
+    return err
+}
+fmt.Println("listener", listenerID)
+
+if err := lua.CallProgressEvent(
+    state,
+    "@worker.glua",
+    "order.ready",
+    lua.Value{Kind: lua.KindString, String: "A-100"},
+); err != nil {
+    return err
+}
+```
+
+Lua 也可以先用 `glua.event.setProgress` 注册，Go 再调用 `lua.CallProgressEvent`；反向场景则使用 `lua.SetProgressEvent` 注册 Go callback，由 Lua 的 `glua.event.callProgress` 触发。异步版本是 `lua.CallProgressEventAsync`，宿主需要立即消费队列时调用 `lua.FlushProgressEvents`。Go 注册时可传入 `lua.ProgressEventOptions{Scope: lua.ProgressEventScopeFile}` 限定来源。
 
 ## 独立回归脚本
 

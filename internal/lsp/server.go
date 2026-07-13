@@ -1530,26 +1530,26 @@ var builtinFunctionDocs = map[string]builtinFunctionDoc{
 	"glua.event.setProgress": {
 		Signature:   "glua.event.setProgress(event, callback [, config])",
 		Returns:     "returns: event id.",
-		Parameters:  []string{"event: preset or custom event name", "callback: function(ctx)", "config (optional): filters and reliability options"},
-		Description: "注册当前源码文件内同步执行的进度事件回调；支持限次、优先级、节流、采样及传播、忽略、静音、删除错误策略。",
+		Parameters:  []string{"event: preset or custom event name", "callback: function(ctx)", "config (optional): scope, filters, and reliability options"},
+		Description: "注册同步进度事件回调；默认监听当前 State 中全部 Lua source，config.scope=file 时仅监听注册文件，并支持限次、优先级、节流、采样及错误治理。",
 	},
 	"glua.event.setProgressAsync": {
 		Signature:   "glua.event.setProgressAsync(event, callback [, config])",
 		Returns:     "returns: event id.",
 		Parameters:  []string{"event: preset or custom event name", "callback: function(ctx)", "config (optional): filters, reliability, debounce, and queue options"},
-		Description: "注册在后续 VM 安全点执行的进度事件回调；额外支持无后台线程的防抖合并和队列背压。",
+		Description: "注册在后续 VM 安全点执行的进度事件回调；作用域与 setProgress 相同，并额外支持无后台线程的防抖合并和队列背压。",
 	},
 	"glua.event.callProgress": {
 		Signature:   "glua.event.callProgress(event [, payload])",
 		Returns:     "returns: nil.",
 		Parameters:  []string{"event: custom event name", "payload (optional): callback payload"},
-		Description: "同步触发当前源码文件的自定义事件。",
+		Description: "以当前源码为触发来源同步触发自定义事件，匹配 runtime 监听器和当前来源的 file 监听器。",
 	},
 	"glua.event.callProgressAsync": {
 		Signature:   "glua.event.callProgressAsync(event [, payload])",
 		Returns:     "returns: nil.",
 		Parameters:  []string{"event: custom event name", "payload (optional): callback payload"},
-		Description: "异步排队当前源码文件的自定义事件。",
+		Description: "以当前源码为触发来源异步排队自定义事件，匹配 runtime 监听器和当前来源的 file 监听器。",
 	},
 	"glua.event.remove": {
 		Signature:   "glua.event.remove(id)",
@@ -1572,8 +1572,8 @@ var builtinFunctionDocs = map[string]builtinFunctionDoc{
 	"glua.event.setConfig": {
 		Signature:   "glua.event.setConfig(id, config)",
 		Returns:     "returns: true when updated.",
-		Parameters:  []string{"id: event id", "config: filter table"},
-		Description: "替换事件的函数过滤配置。",
+		Parameters:  []string{"id: event id", "config: scope, filter, and reliability table"},
+		Description: "替换事件的作用域、函数过滤和可靠性配置。",
 	},
 	"glua.event.getConfig": {
 		Signature:   "glua.event.getConfig(id)",
@@ -1583,9 +1583,9 @@ var builtinFunctionDocs = map[string]builtinFunctionDoc{
 	},
 	"glua.event.eventList": {
 		Signature:   "glua.event.eventList()",
-		Returns:     "returns: current source event listener summary table.",
+		Returns:     "returns: listeners effective for the current source.",
 		Parameters:  []string{},
-		Description: "返回当前源码文件已注册事件及同步、异步、活跃和静音监听器统计。",
+		Description: "返回对当前源码生效的全部 runtime 监听器和匹配的 file 监听器统计。",
 	},
 	"glua.event.get": {
 		Signature:   "glua.event.get(id)",

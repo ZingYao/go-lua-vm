@@ -126,6 +126,74 @@ func TestCompileSourceWithSyntaxDisablesExtensions(t *testing.T) {
 	}
 }
 
+// TestExtendedBinaryChunkRunsWithGluaBuiltins 验证扩展源码编译为 Lua 5.3 binary chunk 后仍可执行。
+//
+// 编译阶段启用全部语法扩展，加载阶段关闭源码语法扩展；用例同时覆盖 const、continue、switch、
+// JSON 和 Event，证明 binary chunk 不依赖运行时再次解析扩展源码。
+func TestExtendedBinaryChunkRunsWithGluaBuiltins(t *testing.T) {
+	// 使用明确扩展集合编译源码，再通过标准 binary chunk 编解码边界落盘。
+	source := `
+const base, bonus = 40, 2
+local total = 0
+for index = 1, 4 do
+  if index == 2 then continue end
+  switch index do
+    case 1
+      total = total + index
+    case 3, 4
+      total = total + index
+    default
+      error("unexpected switch branch")
+  end
+end
+assert(base + bonus == 42)
+assert(total == 8)
+
+local encoded = glua.json.encode({ value = base + bonus })
+local decoded = glua.json.decode(encoded)
+assert(decoded.value == 42)
+
+local observed = nil
+glua.event.setProgress("luac.custom", function(ctx)
+  observed = ctx.payload
+end, { scope = "file" })
+glua.event.callProgress("luac.custom", "event-ok")
+assert(observed == "event-ok")
+return "GLUA_LUAC_EXTENSIONS_OK"
+`
+	proto, err := CompileSourceWithSyntax(source, "@extended-builtins.glua", extensions.Default())
+	if err != nil {
+		// 合法扩展源码必须能够生成 Lua 5.3 Proto。
+		t.Fatalf("CompileSourceWithSyntax failed: %v", err)
+	}
+	chunkPath := filepath.Join(t.TempDir(), "extended-builtins.luac")
+	if err := os.WriteFile(chunkPath, bytecode.DumpBinaryChunk(proto), 0o600); err != nil {
+		// 临时 binary chunk 必须完整写入供公开加载 API 验证。
+		t.Fatalf("write binary chunk failed: %v", err)
+	}
+
+	options := lua.WithSyntaxExtensions(lua.DefaultOptions(), extensions.None())
+	state := lua.NewStateWithOptions(options)
+	defer state.Close()
+	if err := lua.OpenLibs(state); err != nil {
+		// GLua 内置方法和 Event 命名空间必须先注册。
+		t.Fatalf("OpenLibs failed: %v", err)
+	}
+	if err := lua.LoadFile(state, chunkPath); err != nil {
+		// 加载 binary chunk 不应进入关闭扩展后的源码 parser。
+		t.Fatalf("LoadFile binary chunk failed: %v", err)
+	}
+	results, err := lua.Call(state, state.ValueAt(-1))
+	if err != nil {
+		// 字节码执行必须保留扩展语法编译结果和 GLua 内置方法行为。
+		t.Fatalf("Call binary chunk failed: %v object=%s", err, runtime.ErrorObject(err).DebugString())
+	}
+	if len(results) != 1 || results[0].Kind != runtime.KindString || results[0].String != "GLUA_LUAC_EXTENSIONS_OK" {
+		// 完成标记同时验证返回值与 binary chunk 主函数执行完成。
+		t.Fatalf("binary chunk result = %#v", results)
+	}
+}
+
 // TestCompileSourceSimpleFunctionBodyPrototypeShape 固定简单函数体紧凑编译候选必须保持的 Proto 形态。
 func TestCompileSourceSimpleFunctionBodyPrototypeShape(t *testing.T) {
 	// 编译官方 compile_3000_functions 同构的单函数样例，锁定未来 fast path 的 bytecode/debug 输出边界。

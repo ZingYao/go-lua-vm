@@ -74,3 +74,21 @@ func beginProtectedGluaFunctionEvent(state *State, function Value, arguments []V
 	// protected call 保持原始执行路径，不产生事件副作用。
 	return func([]Value, error) error { return nil }, nil
 }
+
+// setGluaProgressEventForSource 在未编译事件能力时返回不可用错误。
+func setGluaProgressEventForSource(state *State, source string, eventName string, callback runtime.Value, options ProgressEventOptions) (int64, error) {
+	// 条件编译关闭 Event 后不创建监听器。
+	return 0, ErrGluaEventsUnavailable
+}
+
+// dispatchGluaProgressEventFromGo 在未编译事件能力时返回不可用错误。
+func dispatchGluaProgressEventFromGo(state *State, source string, eventName string, payload runtime.Value, async bool) error {
+	// 条件编译关闭 Event 后不触发回调。
+	return ErrGluaEventsUnavailable
+}
+
+// flushGluaProgressEventsFromGo 在未编译事件能力时返回不可用错误。
+func flushGluaProgressEventsFromGo(state *State) (int, error) {
+	// 条件编译关闭 Event 后没有可消费队列。
+	return 0, ErrGluaEventsUnavailable
+}

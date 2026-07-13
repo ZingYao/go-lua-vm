@@ -34,7 +34,7 @@ glua --glua-disable-syntax=switch script.glua
 
 `continue` 跳过最近一层循环当前轮剩余语句。
 
-~~~lua
+~~~glua
 for value = 1, 10 do
   if value % 2 == 0 then
     continue
@@ -49,7 +49,7 @@ end
 
 `switch` 表达式只求值一次，每个 `case` 可以包含多个候选值，默认不贯穿执行：
 
-~~~lua
+~~~glua
 local status = 201
 
 switch status do
@@ -76,7 +76,7 @@ end
 
 `const` 声明当前词法作用域内的只读绑定，必须立即初始化：
 
-~~~lua
+~~~glua
 const apiVersion = "v1"
 const minPort, maxPort = 1024, 65535
 
@@ -92,7 +92,7 @@ print(apiVersion, minPort, maxPort)
 
 词法 `const` 不会自动成为模块字段。模块通过 `_glua_const` 表声明只读导出：
 
-~~~lua
+~~~glua
 -- protocol.glua
 local protocol = {
   mutableRetries = 3,
@@ -108,7 +108,7 @@ return protocol
 
 调用方直接从模块根表读取：
 
-~~~lua
+~~~glua
 local protocol = require("protocol")
 
 print(protocol.VERSION)

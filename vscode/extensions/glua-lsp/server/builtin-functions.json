@@ -4438,17 +4438,17 @@
         "en": [
           "event: preset or custom event name",
           "callback: function(ctx); ctx includes eventId, traceId, optional parentEventId, timing, payload, and listener reliability metadata",
-          "config (optional): filters, once/maxCalls, priority/group, throttleMs, sampleRate, onError, and mutable"
+          "config (optional): scope, filters, once/maxCalls, priority/group, throttleMs, sampleRate, onError, and mutable"
         ],
         "zh-CN": [
           "event：预设或自定义事件名",
           "callback：function(ctx)；ctx 包含 eventId、traceId、可选 parentEventId、时间、负载和监听器可靠性元数据",
-          "config（可选）：过滤器、once/maxCalls、priority/group、throttleMs、sampleRate、onError 和 mutable"
+          "config（可选）：scope、过滤器、once/maxCalls、priority/group、throttleMs、sampleRate、onError 和 mutable"
         ]
       },
       "description": {
-        "en": "Registers a synchronous listener scoped to the source file that calls this API. Preset timing: progress.line before a new source line; progress.start when the chunk starts; progress.end after normal completion; progress.error on failure; progress.exit on either completion path; progress.function_call immediately before a Lua closure runs; progress.function_return after a normal return; progress.function_error before an error is caught by pcall/xpcall; and progress.function_exit after either function outcome. Custom names run only when callProgress/callProgressAsync is invoked. The callback executes at the trigger point and blocks the program; callback errors interrupt the current execution path. Reliability options cap executions, apply deterministic sampling or leading-edge throttling, and choose propagate, ignore, mute, or remove error handling.",
-        "zh-CN": "为调用本 API 的当前源码文件注册同步监听器。预设事件的触发时机：progress.line 在即将执行新的源码行时触发；progress.start 在代码块开始执行时触发；progress.end 在代码块正常完成后触发；progress.error 在代码块因错误退出时触发；progress.exit 在代码块正常或异常离开时都会触发；progress.function_call 在 Lua 闭包开始执行前触发；progress.function_return 在函数正常返回后触发；progress.function_error 在函数错误被 pcall/xpcall 捕获前触发；progress.function_exit 在函数正常或异常离开后触发。自定义事件名只会由 callProgress/callProgressAsync 主动触发。同步 callback 会在事件触发点立即执行并阻塞当前程序，callback 抛错会中断当前执行路径。 可靠性配置可限制执行次数、执行确定性采样或前沿节流，并选择传播、忽略、静音或删除监听器的错误处置。"
+        "en": "Registers a synchronous listener for every Lua source in the current State by default. Set config.scope to file to match only the registration source; setConfig can switch the scope later. Preset timing: progress.line before a new source line; progress.start when the chunk starts; progress.end after normal completion; progress.error on failure; progress.exit on either completion path; progress.function_call immediately before a Lua closure runs; progress.function_return after a normal return; progress.function_error before an error is caught by pcall/xpcall; and progress.function_exit after either function outcome. Custom names run only when callProgress/callProgressAsync is invoked. The callback executes at the trigger point and blocks the program; callback errors interrupt the current execution path.",
+        "zh-CN": "默认在当前 State 的全部 Lua source 中注册同步监听器；config.scope 设置为 file 时只匹配注册来源，之后也可用 setConfig 切换范围。预设事件的触发时机：progress.line 在即将执行新的源码行时触发；progress.start 在代码块开始执行时触发；progress.end 在代码块正常完成后触发；progress.error 在代码块因错误退出时触发；progress.exit 在代码块正常或异常离开时都会触发；progress.function_call 在 Lua 闭包开始执行前触发；progress.function_return 在函数正常返回后触发；progress.function_error 在函数错误被 pcall/xpcall 捕获前触发；progress.function_exit 在函数正常或异常离开后触发。自定义事件名只会由 callProgress/callProgressAsync 主动触发。同步 callback 会在触发点立即执行并阻塞当前程序，callback 抛错会中断当前执行路径。"
       },
       "example": {
         "en": "local id = glua.event.setProgress(glua.event.events.progress_function_call, function(ctx)\n  print(ctx.sequence, ctx.calleeName, ctx.line)\nend, { whitelist = { work }, priority = 10, group = \"trace\" })",
@@ -4607,16 +4607,16 @@
       "params": {
         "en": [
           "id: event id",
-          "config: filter table"
+          "config: scope, filter, and reliability table"
         ],
         "zh-CN": [
           "id：事件 ID",
-          "config：过滤表"
+          "config：作用域、过滤与可靠性配置表"
         ]
       },
       "description": {
-        "en": "Replaces the function filter configuration for an event.",
-        "zh-CN": "替换事件的函数过滤配置。"
+        "en": "Replaces the scope, function filters, and reliability configuration for an event.",
+        "zh-CN": "替换事件的作用域、函数过滤与可靠性配置。"
       },
       "example": {
         "en": "glua.event.setConfig(id, { blacklist = { \"print\" } })",
@@ -4833,16 +4833,16 @@
         "zh-CN": "glua.event.eventList()"
       },
       "returns": {
-        "en": "returns: current source event listener summary table.",
-        "zh-CN": "返回：当前源码文件的事件监听器统计表。"
+        "en": "returns: listeners effective for the current source.",
+        "zh-CN": "返回：对当前来源生效的事件监听器统计表。"
       },
       "params": {
         "en": [],
         "zh-CN": []
       },
       "description": {
-        "en": "Lists registered events and active, muted, synchronous, and asynchronous listener counts for the current source file.",
-        "zh-CN": "列出当前源码文件已注册事件，以及活跃、静音、同步和异步监听器数量。"
+        "en": "Lists runtime listeners and matching file listeners effective for the current source.",
+        "zh-CN": "列出对当前来源生效的全部 runtime 监听器和匹配的 file 监听器统计。"
       },
       "example": {
         "en": "local summary = glua.event.eventList()",

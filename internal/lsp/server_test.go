@@ -676,7 +676,7 @@ func TestEventBuiltinCatalogDescribesTriggerTiming(t *testing.T) {
 		t.Fatalf("setProgress builtin is missing")
 	}
 	hover := formatBuiltinHover("glua.event.setProgress", info)
-	for _, expected := range []string{"预设事件的触发时机", "progress.function_error 在函数错误被 pcall/xpcall 捕获前触发", "maxCalls", "确定性采样", "静音", "**说明**", "**参数**", "**返回值**", "**示例**"} {
+	for _, expected := range []string{"默认在当前 State 的全部 Lua source", "config.scope 设置为 file", "预设事件的触发时机", "progress.function_error 在函数错误被 pcall/xpcall 捕获前触发", "**说明**", "**参数**", "**返回值**", "**示例**"} {
 		// 关键触发语义和本地化标题缺一不可。
 		if !strings.Contains(hover, expected) {
 			t.Fatalf("setProgress hover missing %q: %s", expected, hover)
