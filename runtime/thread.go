@@ -168,6 +168,18 @@ func (thread *Thread) Status() CoroutineStatus {
 	return CoroutineStatusRunning
 }
 
+// IsMain 返回当前线程是否为所属 State 的主线程。
+//
+// nil 线程返回 false；该只读标记用于调试器区分 DAP 主线程与 Lua coroutine，不改变 resume/yield 语义。
+func (thread *Thread) IsMain() bool {
+	// nil 线程不能是主线程。
+	if thread == nil {
+		// 返回 false 保持调用方枚举线程时的安全语义。
+		return false
+	}
+	return thread.isMain
+}
+
 // Resume 恢复线程执行。
 //
 // 入参 args 会作为本次 resume 的实参快照写入 thread stack。返回值为 resume 成功路径的

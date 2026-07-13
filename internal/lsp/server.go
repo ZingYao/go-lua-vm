@@ -36,13 +36,17 @@ const (
 var semanticTokenTypes = []string{"namespace", "type", "class", "enum", "interface", "struct", "typeParameter", "parameter", "variable", "property", "enumMember", "event", "function", "method", "macro", "keyword", "modifier", "comment", "string", "number", "regexp", "operator"}
 
 const (
-	semanticTypeVariable = 8
-	semanticTypeFunction = 12
-	semanticTypeKeyword  = 15
-	semanticTypeComment  = 17
-	semanticTypeString   = 18
-	semanticTypeNumber   = 19
-	semanticTypeOperator = 21
+	semanticTypeNamespace = 0
+	semanticTypeVariable  = 8
+	semanticTypeProperty  = 9
+	semanticTypeEvent     = 11
+	semanticTypeFunction  = 12
+	semanticTypeMethod    = 13
+	semanticTypeKeyword   = 15
+	semanticTypeComment   = 17
+	semanticTypeString    = 18
+	semanticTypeNumber    = 19
+	semanticTypeOperator  = 21
 )
 
 // Server 表示 glua language server 实例。
@@ -982,8 +986,8 @@ func semanticTokens(text string, syntax extensions.SyntaxSet) []int {
 	data := make([]int, 0, len(tokens)*5)
 	lastLine := 0
 	lastStart := 0
-	for _, token := range tokens {
-		tokenType, ok := semanticTypeForToken(token, syntax)
+	for index, token := range tokens {
+		tokenType, ok := semanticTypeForTokenAt(tokens, index, syntax)
 		if !ok {
 			// 不具备语义分类的 token 继续由 TextMate grammar 着色。
 			continue
@@ -1008,6 +1012,67 @@ func semanticTokens(text string, syntax extensions.SyntaxSet) []int {
 		lastStart = start
 	}
 	return data
+}
+
+// semanticTypeForTokenAt 根据相邻 token 上下文返回更精确的语义类型。
+//
+// tokens 是完整文档 token，index 指向当前项，syntax 是启用的 GLua 语法集合；返回值兼容 LSP legend。
+func semanticTypeForTokenAt(tokens []tokenInfo, index int, syntax extensions.SyntaxSet) (int, bool) {
+	// 越界输入没有可高亮 token。
+	if index < 0 || index >= len(tokens) {
+		return 0, false
+	}
+	token := tokens[index]
+	if token.Kind != lexer.TokenIdentifier {
+		// 非标识符继续使用原有词法分类。
+		return semanticTypeForToken(token, syntax)
+	}
+	var previous tokenInfo
+	if index > 0 {
+		// 前一个 token 用于识别成员、方法和函数声明。
+		previous = tokens[index-1]
+	}
+	var next tokenInfo
+	if index+1 < len(tokens) {
+		// 后一个 token 用于识别调用和命名空间访问。
+		next = tokens[index+1]
+	}
+	if isBuiltinNamespace(token.Text) && (next.Text == "." || next.Text == ":") {
+		// 标准库和 glua 根对象与扩展 grammar 一样标记为命名空间。
+		return semanticTypeNamespace, true
+	}
+	if previous.Text == "." || previous.Text == ":" {
+		// 点号和冒号后的名称按调用、预设事件和普通属性区分。
+		if next.Text == "(" {
+			return semanticTypeMethod, true
+		}
+		if isPresetEventName(token.Text) {
+			return semanticTypeEvent, true
+		}
+		return semanticTypeProperty, true
+	}
+	if previous.Text == "function" || (index > 1 && tokens[index-2].Text == "local" && previous.Text == "function") {
+		// function 声明后的名称是函数定义。
+		return semanticTypeFunction, true
+	}
+	if next.Text == "(" || isBuiltinFunction(token.Text) {
+		// 普通调用与内置调用都使用函数颜色。
+		return semanticTypeFunction, true
+	}
+	return semanticTypeForToken(token, syntax)
+}
+
+// isPresetEventName 判断成员名是否是 GLua 预设进度事件常量。
+//
+// name 是不含命名空间的成员名称；返回 true 表示应按 event 常量高亮。
+func isPresetEventName(name string) bool {
+	// 显式列举与扩展 grammar 相同的稳定事件集合，避免普通 progress_ 前缀被误判。
+	switch name {
+	case "progress_line", "progress_start", "progress_end", "progress_error", "progress_exit", "progress_function_call", "progress_function_return", "progress_function_error", "progress_function_exit":
+		return true
+	default:
+		return false
+	}
 }
 
 // semanticTypeForToken 返回 token 的 semantic token 类型。
@@ -1585,7 +1650,7 @@ var builtinFunctionDocs = map[string]builtinFunctionDoc{
 		Signature:   "glua.event.eventList()",
 		Returns:     "returns: listeners effective for the current source.",
 		Parameters:  []string{},
-		Description: "返回对当前源码生效的全部 runtime 监听器和匹配的 file 监听器统计。",
+		Description: "返回对当前源码生效的全部 runtime 监听器、匹配的 file 监听器、队列状态和 State 预算统计。",
 	},
 	"glua.event.get": {
 		Signature:   "glua.event.get(id)",
@@ -1615,13 +1680,13 @@ var builtinFunctionDocs = map[string]builtinFunctionDoc{
 		Signature:   "glua.event.flush()",
 		Returns:     "returns: executed async task count.",
 		Parameters:  []string{},
-		Description: "立即消费当前 State 的异步事件队列。",
+		Description: "立即消费当前 State 的异步事件队列；达到单次 drain 预算时保留剩余任务并返回错误。",
 	},
 	"glua.event.stats": {
 		Signature:   "glua.event.stats()",
 		Returns:     "returns: current source listener and queue statistics.",
 		Parameters:  []string{},
-		Description: "返回当前源码文件监听器、队列、丢弃任务和回调错误统计。",
+		Description: "返回当前源码文件监听器、队列、丢弃任务、回调错误和 listener/queue/drain 三项 State 预算统计。",
 	},
 	"glua.json.encode": {
 		Signature:   "glua.json.encode(value [, prettyOrOptions])",
@@ -1955,9 +2020,18 @@ func moduleExportMembers(path string) []exportedMember {
 	// 先读取模块源码，再用项目 lexer 提取 return 表名及其成员定义。
 	text, err := os.ReadFile(path)
 	if err != nil {
+		// 文件不可读时没有可安全暴露的模块成员。
 		return nil
 	}
-	tokens := scanTokens(string(text))
+	return moduleExportMembersFromSource(string(text))
+}
+
+// moduleExportMembersFromSource 从模块源码提取 return 表的直接成员定义。
+//
+// source 必须是完整 Lua 或 GLua 模块；返回成员范围相对于该源码，语法不完整时返回可静态识别的子集。
+func moduleExportMembersFromSource(source string) []exportedMember {
+	// 浏览器虚拟文件系统与磁盘 LSP 共用同一套 token 级成员提取规则。
+	tokens := scanTokens(source)
 	exportedTables := make(map[string]struct{})
 	for index, token := range tokens {
 		if token.Text == "return" && index+1 < len(tokens) && tokens[index+1].Kind == lexer.TokenIdentifier {

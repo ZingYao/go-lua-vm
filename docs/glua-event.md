@@ -80,7 +80,7 @@ local id = event.setProgress(event.events.progress_function_call, callback, {
 - `priority`：整数，越大越先执行；相同优先级保持注册顺序。
 - `group`：监听器分组名称。
 - `queueLimit`：该异步监听器最大待处理任务数，`0` 表示不限制。
-- `overflow`：队列溢出策略，可选 `drop_oldest`、`drop_newest`、`error`。
+- `overflow`：队列溢出策略，可选 `drop_oldest`、`drop_newest`、`error`。其中 `error` 会拒绝本次任务且保留旧队列；Go 宿主可通过 `ErrProgressEventQueueFull` / `ProgressEventQueueFullError` 识别该背压。
 - `onError`：同步和异步回调错误策略，可选 `propagate`、`ignore`、`mute`、`remove`；`throw` 和 `continue` 分别是前两者的别名。
 - `mutable`：是否允许上下文保留业务 table 的可变引用，默认 `false`。
 - `throttleMs`：前沿节流窗口，窗口内重复触发会被抑制，`0` 表示关闭。
@@ -144,7 +144,7 @@ event.setCallback(id, replacementCallback)
 }
 ```
 
-`events` 按事件名稳定排序。静音监听器仍计入 `listeners`，但不计入 `active`；删除监听器后，下一次调用会立即反映最新统计。`stats()` 当前返回与 `eventList()` 相同的结构。
+`events` 按事件名稳定排序。静音监听器仍计入 `listeners`，但不计入 `active`；删除监听器后，下一次调用会立即反映最新统计。`droppedTasks` 表示按丢弃策略移除的任务，`rejectedTasks` 表示按 `overflow = "error"` 拒绝的新任务，两者不会混计。`stats()` 当前返回与 `eventList()` 相同的结构。
 
 ## 回调规则
 
@@ -160,9 +160,11 @@ event.setCallback(id, replacementCallback)
 
 `State.Close()` 会删除该 State 的事件注册表，并清空监听器、配置根引用和待处理异步任务。直接调用 `state.Close()` 与包级 `lua.Close(state)` 使用同一清理路径，重复关闭不会再次执行回调或保留全局索引。
 
+单个 State 还具有三层硬预算：默认最多 4096 个监听器、65536 个异步待执行任务、单次安全点或显式 `flush` 最多处理 4096 个任务。Lua 侧无法绕过这些预算；Go 宿主可以通过 `lua.Options.MaxGluaEventListeners`、`MaxGluaEventQueuedTasks` 和 `MaxGluaEventTasksPerDrain` 调整。单次 drain 达到上限时，未处理任务继续保留在队列中，后续安全点或再次 flush 可以继续消费。
+
 ## 从 Go 与 Lua 交互
 
-`lua` 包提供稳定 Go API，调用方不需要访问内部事件注册表。State 必须先执行 `lua.OpenLibs`；`source` 应与 Lua `Proto.Source` 使用相同名称，例如 `@worker.glua`。
+`lua` 包提供稳定 Go API，调用方不需要访问内部事件注册表。State 必须先执行 `lua.OpenLibs`；`source` 应与 Lua `Proto.Source` 使用相同名称。文件来源使用 `FileProgressEventSource`，内存 chunk 使用 `ChunkProgressEventSource`，已经带 `@` 或 `=` 的值可交给 `NormalizeProgressEventSource` 校验。
 
 ```go
 state := lua.NewState()
@@ -171,9 +173,18 @@ if err := lua.OpenLibs(state); err != nil {
     return err
 }
 
+ownerSource, err := lua.ChunkProgressEventSource("host")
+if err != nil {
+    return err
+}
+workerSource, err := lua.FileProgressEventSource("worker.glua")
+if err != nil {
+    return err
+}
+
 listenerID, err := lua.SetProgressEvent(
     state,
-    "@host.go",
+    ownerSource,
     "order.ready",
     func(ctx lua.ProgressEventContext) error {
         fmt.Println(ctx.Source, ctx.Payload.DebugString(), ctx.Timestamp)
@@ -187,7 +198,7 @@ fmt.Println("listener", listenerID)
 
 if err := lua.CallProgressEvent(
     state,
-    "@worker.glua",
+    workerSource,
     "order.ready",
     lua.Value{Kind: lua.KindString, String: "A-100"},
 ); err != nil {
@@ -196,6 +207,20 @@ if err := lua.CallProgressEvent(
 ```
 
 Lua 也可以先用 `glua.event.setProgress` 注册，Go 再调用 `lua.CallProgressEvent`；反向场景则使用 `lua.SetProgressEvent` 注册 Go callback，由 Lua 的 `glua.event.callProgress` 触发。异步版本是 `lua.CallProgressEventAsync`，宿主需要立即消费队列时调用 `lua.FlushProgressEvents`。Go 注册时可传入 `lua.ProgressEventOptions{Scope: lua.ProgressEventScopeFile}` 限定来源。
+
+Go 宿主还可以使用 `RemoveProgressEvent`、`SetProgressEventMuted`、`SetProgressEventCallback`、`SetProgressEventOptions`、`GetProgressEvent`、`ListProgressEvents`、`ClearProgressEvents`、`SetProgressEventGroupMuted` 和 `RemoveProgressEventGroup` 管理监听器完整生命周期。`ListProgressEvents` 返回 `ProgressEventSummary` 类型化统计，`ListProgressEventsRaw` 保留与 Lua `eventList` 相同的原始 table。
+
+常用的 priority、group、once、maxCalls、节流、防抖、采样、队列和函数过滤配置已经提供类型化 Go 字段。`ProgressEventOptions.Config` 只用于自定义 metadata 或 legacy 配置；同一个规范字段不能同时通过 `Config` 和非零类型化字段定义，否则返回 `ErrProgressEventConfigConflict`。非法参数、State 预算超限和单监听器队列满分别可通过 `ErrProgressEventInvalidArgument`、`ErrProgressEventLimitExceeded`、`ErrProgressEventQueueFull` 识别；后两者可用 `errors.As` 取得具体预算或队列信息。
+
+`SetProgressEventOptions` 是完整替换语义。若只想修改部分字段，并且需要明确把 `once` 设为 `false`、把 `maxCalls`/`queueLimit`/节流窗口设为 `0`，Go 宿主应使用 `PatchProgressEventOptions`。它的字段均为指针：`nil` 表示保持当前值，非 `nil` 表示写入对应值。
+
+`eventList()` 与 Go 的 `ListProgressEvents` 还会提供队列诊断：已 drain 任务数、累计/平均/最大排队等待时间、最近一次 drain 的毫秒时间戳，以及最近一次 callback 错误和时间。诊断字段只用于观测，不会改变错误治理、限流或队列调度语义。
+
+Go 宿主可调用 `lua.SetProgressEventTraceHook` 接收每次 callback 完成后的 `ProgressEventTrace`，其中包含监听器 ID、事件名、触发 source、异步标记、完成时间、执行耗时和错误文本。该 hook 与 Lua callback 在同一执行 goroutine 中调用，适合快速写入指标或转交到宿主自己的非阻塞队列；hook panic 会被恢复，不影响 Lua 程序。
+
+单个 `lua.State` 不支持多个 goroutine 同时执行 Lua、触发 callback 或 flush 队列。Event 注册表内部锁只保护监听器元数据，不会把整个 VM 变成并发安全。Go callback 在触发该事件或消费安全点队列的 goroutine 中执行；`Async` 仅表示排队，不会创建后台 goroutine。调用方需要在自己的执行器或互斥边界中串行使用同一个 State。
+
+完整可运行代码见 `examples/event_bridge`。
 
 ## 独立回归脚本
 

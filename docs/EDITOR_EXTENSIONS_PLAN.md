@@ -228,7 +228,7 @@ end
 
 #### 当前 DAP 状态校准
 
-截至当前轮次，`runtime/dap` 已提供可复用的最小 DAP server；`glua` CLI 只是在收到 `--glua-dap-listen=host:port` 时创建并启动该 server。该 server 会输出 ready 标记，支持基础 DAP 握手、断点设置、源码行断点暂停、`stopped` 事件、最小 `stackTrace` 和 `continue`。VS Code 与 JetBrains 扩展已改为启动 `glua --glua-dap-listen=127.0.0.1:0 <file>`，等待 ready 后 attach 到真实端口，并在启动失败时展示命令、工作目录、监听地址、退出码和输出尾部。单步、完整调用栈、scope 和变量面板仍是后续实现项。
+截至当前轮次，`runtime/dap` 已提供可复用的 DAP server；`glua` CLI 只是在收到 `--glua-dap-listen=host:port` 时创建并启动该 server。该 server 会输出 ready 标记，支持基础 DAP 握手、断点设置、源码行断点暂停、`stopped` 事件、调用帧快照、`continue`，以及按调用深度区分的 `next`、`stepIn`、`stepOut`。变量面板提供当前帧 Locals、Upvalues、运行时 Globals、table 展开和可写变量。VS Code 与 JetBrains 扩展已改为启动 `glua --glua-dap-listen=127.0.0.1:0 <file>`，等待 ready 后 attach 到真实端口，并在启动失败时展示命令、工作目录、监听地址、退出码和输出尾部。
 
 #### glua runtime DAP server 目标
 

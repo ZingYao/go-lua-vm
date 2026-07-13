@@ -91,3 +91,11 @@ traceback 需要包含：
 - 使用 Lua 调 Go、Go 回调 Lua 验证混合栈。
 - 使用 hook 计数验证 VM 检查点。
 - 使用错误 hook 验证错误传播边界。
+
+## DAP 调试器现状
+
+`runtime/dap` 可由嵌入方复用，CLI 通过 `--glua-dap-listen=host:port` 显式启用。它支持断点、继续执行、调用栈快照和三类单步：`stepIn` 在下一条不同源码行暂停，允许进入被调函数；`next` 只在当前或更浅调用深度的下一条不同源码行暂停；`stepOut` 在离开当前调用深度后暂停。
+
+DAP `threads` 会显示主线程与当前 State 已创建的 Lua coroutine，并在断点事件中携带实际线程 ID。`evaluate` 支持暂停态的 Locals、Upvalues、Globals 及点号 table 路径，例如 `config.timeout`；它不会编译或执行任意 Lua 表达式，因此 Hover、Watch 和 Debug Console 不会产生副作用。
+
+变量面板当前提供当前帧的 Locals、Upvalues、运行时 Globals、table 展开与变量写入。Lua closure 存在共享 upvalue cell 时，编辑 Upvalue 会写回该 cell 并影响共享它的 closure；普通命令行执行不会启动 DAP listener。

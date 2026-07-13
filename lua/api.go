@@ -513,6 +513,10 @@ func OpenLibs(state *State) error {
 	}
 	registerLuaMetamethodRunner(state)
 	registerTableFinalizerRunner(state)
+	if err := validateGluaNamespace(state.Globals()); err != nil {
+		// 宿主占用 glua 为非 table 时不能静默跳过全部扩展注册。
+		return err
+	}
 	if err := baselib.Open((*runtime.State)(state)); err != nil {
 		// base 库注册失败时没有稳定全局环境，直接返回。
 		return err

@@ -37,6 +37,11 @@ if [[ -s /tmp/go-lua-vm-untracked-go.txt ]]; then
 fi
 
 CGO_ENABLED=0 go test ./...
+./scripts/check-performance-smoke.sh
+./scripts/check-performance-baseline.sh
+./scripts/check-public-go-api-surface.sh
+./scripts/check-public-go-api-fields.sh
+./scripts/test-public-go-api.sh
 
 if [[ "${GO_LUA_VM_CHECK_NATIVE_MODULES:-0}" == "1" ]]; then
   CGO_ENABLED=1 go test -tags native_modules ./internal/native ./internal/cli ./cmd/glua

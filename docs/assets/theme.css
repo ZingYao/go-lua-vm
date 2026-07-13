@@ -148,6 +148,816 @@ html {
   padding: 14px 16px;
 }
 
+.glua-runnable-example {
+  position: relative;
+}
+
+.glua-run-example {
+  align-items: center;
+  background: var(--glua-green);
+  border: 0;
+  border-radius: 0;
+  box-sizing: border-box;
+  color: #ffffff;
+  cursor: pointer;
+  display: flex;
+  font-size: 12px;
+  font-weight: 700;
+  height: 42px;
+  justify-content: center;
+  line-height: 1;
+  margin: 0;
+  min-width: 54px;
+  opacity: 0;
+  padding: 0 14px !important;
+  pointer-events: none;
+  position: absolute;
+  right: 54px;
+  top: 0;
+  transition: opacity 120ms ease, background-color 120ms ease;
+  z-index: 2;
+}
+
+.glua-runnable-example:hover .glua-run-example,
+.glua-runnable-example:focus-within .glua-run-example,
+.glua-run-example:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.glua-runnable-example .docsify-copy-code-button {
+  align-items: center !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  box-sizing: border-box !important;
+  display: flex !important;
+  font-size: 12px !important;
+  font-weight: 700 !important;
+  height: 42px !important;
+  justify-content: center !important;
+  line-height: 1 !important;
+  margin: 0 !important;
+  min-height: 42px !important;
+  min-width: 54px !important;
+  padding: 0 14px !important;
+  top: 0 !important;
+}
+
+.glua-page-actions {
+  bottom: 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  position: fixed;
+  right: 20px;
+  z-index: 999;
+}
+
+.glua-page-action {
+  background: #ffffff;
+  border: 1px solid #9eb2b5;
+  border-radius: 999px;
+  box-shadow: 0 5px 18px rgba(8, 24, 27, 0.16);
+  color: var(--glua-green-dark);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+  height: 48px;
+  padding: 0;
+  transition: background-color 120ms ease, color 120ms ease, transform 120ms ease;
+  width: 48px;
+}
+
+.glua-page-action:hover,
+.glua-page-action:focus-visible {
+  background: var(--glua-green);
+  color: #ffffff;
+  transform: translateY(-1px);
+}
+
+.glua-page-action-debug {
+  background: var(--glua-green);
+  border-color: var(--glua-green);
+  color: #ffffff;
+}
+
+.glua-page-action[hidden] {
+  display: none;
+}
+
+body.glua-playground-open {
+  overflow: hidden;
+}
+
+.glua-playground-overlay {
+  align-items: center;
+  background: rgba(8, 24, 27, 0.72);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 24px;
+  position: fixed;
+  z-index: 10000;
+}
+
+.glua-playground-overlay[hidden] {
+  display: none;
+}
+
+.glua-playground-dialog {
+  --glua-playground-bar: #13262b;
+  --glua-playground-button-bg: #182d33;
+  --glua-playground-button-border: #456068;
+  --glua-playground-button-hover: #5eead4;
+  --glua-playground-dialog-bg: #0b1518;
+  --glua-playground-editor-bg: #122126;
+  --glua-playground-gutter-bg: #0d191d;
+  --glua-playground-header-bg: #102327;
+  --glua-playground-header-border: #4e676b;
+  --glua-playground-hover: #172b31;
+  --glua-playground-input-bg: #122126;
+  --glua-playground-line: #294147;
+  --glua-playground-muted: #7f9ca3;
+  --glua-playground-output-bg: #091417;
+  --glua-playground-panel-bg: #0d191d;
+  --glua-playground-paused-bg: #3f360e;
+  --glua-playground-paused-border: #8a741b;
+  --glua-playground-paused-text: #fde68a;
+  --glua-playground-status-bg: rgba(94, 234, 212, 0.13);
+  --glua-playground-status-border: rgba(94, 234, 212, 0.3);
+  --glua-playground-status-text: #ccfbf1;
+  --glua-playground-stderr: #fca5a5;
+  --glua-playground-text: #d8e4e6;
+  --glua-playground-text-strong: #e6edf0;
+  background: var(--glua-playground-dialog-bg);
+  border: 1px solid var(--glua-playground-line);
+  border-radius: 10px;
+  box-shadow: 0 24px 80px rgba(3, 20, 23, 0.34);
+  color: var(--glua-playground-text);
+  display: flex;
+  flex-direction: column;
+  height: min(88vh, 900px);
+  max-width: 1400px;
+  min-height: 560px;
+  overflow: hidden;
+  transform: translate(var(--glua-dialog-x, 0px), var(--glua-dialog-y, 0px));
+  width: min(94vw, 1280px);
+}
+
+.glua-playground-dialog[data-theme="light"] {
+  --glua-playground-bar: #edf4f4;
+  --glua-playground-button-bg: #ffffff;
+  --glua-playground-button-border: #b8c8ca;
+  --glua-playground-button-hover: var(--glua-green-dark);
+  --glua-playground-dialog-bg: #ffffff;
+  --glua-playground-editor-bg: #ffffff;
+  --glua-playground-gutter-bg: #f3f7f7;
+  --glua-playground-header-bg: #f3f7f7;
+  --glua-playground-header-border: #9eb2b5;
+  --glua-playground-hover: #e7f0f1;
+  --glua-playground-input-bg: #ffffff;
+  --glua-playground-line: #c9d7d9;
+  --glua-playground-muted: #647b80;
+  --glua-playground-output-bg: #f8fafb;
+  --glua-playground-panel-bg: #f3f7f7;
+  --glua-playground-paused-bg: #fefce8;
+  --glua-playground-paused-border: #fde68a;
+  --glua-playground-paused-text: #854d0e;
+  --glua-playground-status-bg: #ccfbf1;
+  --glua-playground-status-border: #5eead4;
+  --glua-playground-status-text: #115e59;
+  --glua-playground-stderr: #b91c1c;
+  --glua-playground-text: #33464c;
+  --glua-playground-text-strong: #172b31;
+}
+
+.glua-playground-overlay.is-fullscreen {
+  padding: 0;
+}
+
+.glua-playground-overlay.is-fullscreen .glua-playground-dialog {
+  border: 0;
+  border-radius: 0;
+  height: 100vh;
+  max-width: none;
+  transform: none;
+  width: 100vw;
+}
+
+@supports (height: 100dvh) {
+  .glua-playground-overlay.is-fullscreen .glua-playground-dialog {
+    height: 100dvh;
+  }
+}
+
+.glua-playground-header,
+.glua-playground-toolbar,
+.glua-playground-input-row,
+.glua-playground-output-header {
+  align-items: center;
+  display: flex;
+}
+
+.glua-playground-header {
+  background: var(--glua-playground-header-bg);
+  border-bottom: 1px solid var(--glua-playground-line);
+  color: var(--glua-playground-text-strong);
+  cursor: grab;
+  gap: 8px;
+  min-height: 48px;
+  padding: 0 12px 0 16px;
+  touch-action: none;
+  user-select: none;
+}
+
+.glua-playground-dialog.is-dragging .glua-playground-header {
+  cursor: grabbing;
+}
+
+.glua-playground-heading {
+  align-items: baseline;
+  display: flex;
+  flex: 1;
+  gap: 10px;
+  min-width: 0;
+}
+
+.glua-playground-file {
+  color: var(--glua-playground-muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.glua-playground-status {
+  background: var(--glua-playground-status-bg);
+  border: 1px solid var(--glua-playground-status-border);
+  border-radius: 999px;
+  color: var(--glua-playground-status-text);
+  font-size: 11px;
+  padding: 3px 9px;
+}
+
+.glua-playground-toolbar {
+  background: var(--glua-playground-bar);
+  border-bottom: 1px solid var(--glua-playground-line);
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 12px;
+}
+
+.glua-playground-button {
+  background: var(--glua-playground-button-bg);
+  border: 1px solid var(--glua-playground-button-border);
+  border-radius: 5px;
+  color: var(--glua-playground-text);
+  cursor: pointer;
+  font-size: 12px;
+  min-height: 29px;
+  padding: 4px 10px;
+  position: relative;
+}
+
+.glua-playground-button[data-tooltip]::after {
+  background: #102327;
+  border: 1px solid #4e676b;
+  border-radius: 4px;
+  color: #ffffff;
+  content: attr(data-tooltip);
+  font-size: 11px;
+  font-weight: 500;
+  left: 50%;
+  line-height: 1.4;
+  opacity: 0;
+  padding: 5px 8px;
+  pointer-events: none;
+  position: absolute;
+  top: calc(100% + 7px);
+  transform: translateX(-50%) translateY(-2px);
+  transition: opacity 100ms ease, transform 100ms ease;
+  visibility: hidden;
+  white-space: nowrap;
+  z-index: 30;
+}
+
+.glua-playground-button[data-tooltip]:hover::after,
+.glua-playground-button[data-tooltip]:focus-visible::after {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+  visibility: visible;
+}
+
+.glua-playground-button:hover:not(:disabled) {
+  border-color: var(--glua-green);
+  color: var(--glua-playground-button-hover);
+}
+
+.glua-playground-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.glua-playground-header .glua-playground-button {
+  background: transparent;
+  border-color: var(--glua-playground-header-border);
+  color: var(--glua-playground-text-strong);
+  cursor: pointer;
+}
+
+.glua-playground-theme-control {
+  align-items: center;
+  display: flex;
+  font-size: 11px;
+  gap: 5px;
+}
+
+.glua-playground-theme-select {
+  background: var(--glua-playground-button-bg);
+  border: 1px solid var(--glua-playground-header-border);
+  border-radius: 5px;
+  color: var(--glua-playground-text-strong);
+  cursor: pointer;
+  font-size: 12px;
+  min-height: 29px;
+  padding: 3px 24px 3px 8px;
+}
+
+.glua-playground-workspace {
+  display: grid;
+  flex: 1;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 28%);
+  min-height: 0;
+}
+
+.glua-playground-main {
+  display: grid;
+  grid-template-rows: minmax(220px, 1fr) auto minmax(130px, 34%) auto;
+  min-height: 0;
+}
+
+.glua-playground-ide {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  min-height: 0;
+}
+
+.glua-playground-explorer {
+  background: var(--glua-playground-panel-bg);
+  border-right: 1px solid var(--glua-playground-line);
+  color: var(--glua-playground-text);
+  min-height: 0;
+  overflow: auto;
+}
+
+.glua-playground-explorer-header {
+  border-bottom: 1px solid var(--glua-playground-line);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px;
+}
+
+.glua-playground-workspace-label {
+  color: var(--glua-playground-muted);
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.glua-playground-file-search {
+  background: var(--glua-playground-input-bg);
+  border: 1px solid var(--glua-playground-button-border);
+  border-radius: 4px;
+  color: var(--glua-playground-text-strong);
+  font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  margin-top: 5px;
+  min-width: 0;
+  outline: none;
+  padding: 5px 7px;
+  width: 100%;
+}
+
+.glua-playground-file-search:focus {
+  border-color: #2dd4bf;
+  box-shadow: 0 0 0 1px rgba(45, 212, 191, 0.25);
+}
+
+.glua-playground-file-search::placeholder {
+  color: var(--glua-playground-muted);
+}
+
+.glua-playground-files {
+  padding: 5px 0;
+}
+
+.glua-playground-file-row {
+  align-items: center;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 28px 28px;
+}
+
+.glua-playground-directory-row {
+  align-items: center;
+  display: grid;
+}
+
+.glua-playground-directory-row:hover {
+  background: var(--glua-playground-hover);
+}
+
+.glua-playground-directory-row .glua-playground-directory-toggle {
+  background: transparent;
+  border: 0;
+  color: var(--glua-playground-text);
+  font-weight: 650;
+  min-height: 27px;
+  overflow: hidden;
+  padding: 3px 5px 3px calc(8px + var(--tree-indent, 0px));
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.glua-playground-file-row:hover {
+  background: var(--glua-playground-hover);
+}
+
+.glua-playground-file-row .glua-playground-button {
+  background: transparent;
+  border: 0;
+  color: var(--glua-playground-muted);
+  min-height: 27px;
+  overflow: hidden;
+  padding: 3px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.glua-playground-file-row .glua-playground-file-open {
+  color: var(--glua-playground-text);
+  padding-left: calc(18px + var(--tree-indent, 0px));
+  text-align: left;
+}
+
+.glua-playground-empty {
+  color: var(--glua-playground-muted);
+  font-size: 11px;
+  padding: 8px 10px;
+}
+
+.glua-playground-editor-pane {
+  display: grid;
+  grid-template-rows: 34px minmax(0, 1fr);
+  min-height: 0;
+  min-width: 0;
+}
+
+.glua-playground-tabs {
+  align-items: stretch;
+  background: var(--glua-playground-panel-bg);
+  display: flex;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.glua-playground-tab {
+  border-right: 1px solid var(--glua-playground-line);
+  display: flex;
+  flex: 0 0 auto;
+}
+
+.glua-playground-tab.is-active {
+  background: var(--glua-playground-editor-bg);
+  border-top: 2px solid #2dd4bf;
+}
+
+.glua-playground-tab .glua-playground-button {
+  background: transparent;
+  border: 0;
+  color: var(--glua-playground-muted);
+  min-height: 32px;
+  padding: 3px 7px;
+}
+
+.glua-playground-tab.is-active .glua-playground-tab-name {
+  color: var(--glua-playground-text-strong);
+}
+
+.glua-playground-tab .glua-playground-tab-close {
+  font-size: 17px;
+  padding-left: 2px;
+}
+
+.glua-playground-editor-shell {
+  background: var(--glua-playground-editor-bg);
+  display: block;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+.glua-playground-editor-shell.is-dragging {
+  outline: 3px dashed #5eead4;
+  outline-offset: -8px;
+}
+
+.glua-playground-drop-hint {
+  align-items: center;
+  background: rgba(15, 118, 110, 0.9);
+  color: #ffffff;
+  display: none;
+  font-size: 18px;
+  font-weight: 700;
+  inset: 20px;
+  justify-content: center;
+  pointer-events: none;
+  position: absolute;
+  z-index: 4;
+}
+
+.glua-playground-editor-shell.is-dragging .glua-playground-drop-hint {
+  display: flex;
+}
+
+.glua-playground-editor {
+  height: 100%;
+  min-height: 0;
+  width: 100%;
+}
+
+.glua-monaco-breakpoint {
+  background: #ef4444;
+  border-radius: 50%;
+  height: 10px !important;
+  margin-left: 5px;
+  margin-top: 6px;
+  width: 10px !important;
+}
+
+.glua-monaco-current::before {
+  border-bottom: 6px solid transparent;
+  border-left: 8px solid #facc15;
+  border-top: 6px solid transparent;
+  content: "";
+  display: block;
+  margin-left: 5px;
+  margin-top: 5px;
+}
+
+.glua-playground-editor-shell .CodeMirror {
+  background: var(--glua-playground-editor-bg);
+  color: var(--glua-playground-text-strong);
+  font: 13px/22px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  height: 100%;
+  tab-size: 2;
+  width: 100%;
+}
+
+.glua-playground-editor-shell .CodeMirror-scroll {
+  padding: 8px 0 18px;
+}
+
+.glua-playground-editor-shell .CodeMirror-gutters {
+  background: var(--glua-playground-gutter-bg);
+  border-right: 1px solid var(--glua-playground-line);
+}
+
+.glua-playground-editor-shell .CodeMirror-linenumber {
+  color: var(--glua-playground-muted);
+  padding: 0 8px 0 5px;
+}
+
+.glua-playground-editor-shell .glua-breakpoints {
+  cursor: pointer;
+  width: 17px;
+}
+
+.glua-breakpoint-marker {
+  display: block;
+  height: 22px;
+  position: relative;
+  width: 17px;
+}
+
+.glua-breakpoint-marker.has-breakpoint::before {
+  background: #ef4444;
+  border-radius: 50%;
+  content: "";
+  height: 9px;
+  left: 4px;
+  position: absolute;
+  top: 6px;
+  width: 9px;
+}
+
+.glua-breakpoint-marker.is-current::after {
+  border-bottom: 5px solid transparent;
+  border-left: 7px solid #facc15;
+  border-top: 5px solid transparent;
+  content: "";
+  left: 4px;
+  position: absolute;
+  top: 5px;
+}
+
+.glua-breakpoint-marker.has-breakpoint.is-current::after {
+  display: none;
+}
+
+.glua-current-line {
+  background: rgba(234, 179, 8, 0.18);
+}
+
+.cm-s-glua .CodeMirror-cursor {
+  border-left-color: #f8fafc;
+}
+
+.cm-s-glua .CodeMirror-selected {
+  background: #24434b;
+}
+
+.cm-s-glua .cm-keyword {
+  color: #f472b6;
+}
+
+.cm-s-glua .cm-variable,
+.cm-s-glua .cm-variable-2,
+.cm-s-glua .cm-variable-3 {
+  color: var(--glua-playground-text-strong);
+}
+
+.cm-s-glua .cm-def,
+.cm-s-glua .cm-builtin {
+  color: #67e8f9;
+}
+
+.cm-s-glua .cm-string,
+.cm-s-glua .cm-string-2 {
+  color: #86efac;
+}
+
+.cm-s-glua .cm-number,
+.cm-s-glua .cm-atom {
+  color: #fbbf24;
+}
+
+.cm-s-glua .cm-comment {
+  color: #7f9ca3;
+  font-style: italic;
+}
+
+.CodeMirror-hints {
+  border: 1px solid #5b7479;
+  box-shadow: 0 10px 28px rgba(3, 20, 23, 0.3);
+  font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  max-width: min(560px, 80vw);
+  z-index: 11000;
+}
+
+.CodeMirror-hint {
+  align-items: baseline;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 5px 8px;
+}
+
+.CodeMirror-hint-active {
+  background: var(--glua-green);
+}
+
+.glua-hint-label {
+  color: #0e7490;
+  font-weight: 700;
+}
+
+.CodeMirror-hint-active .glua-hint-label {
+  color: #ffffff;
+}
+
+.glua-hint-detail {
+  color: #64748b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.CodeMirror-hint-active .glua-hint-detail {
+  color: #ccfbf1;
+}
+
+.glua-playground-output-header {
+  background: var(--glua-playground-bar);
+  border-bottom: 1px solid var(--glua-playground-line);
+  border-top: 1px solid var(--glua-playground-line);
+  color: var(--glua-playground-text-strong);
+  font-size: 12px;
+  min-height: 30px;
+  padding: 0 12px;
+}
+
+.glua-playground-output {
+  background: var(--glua-playground-output-bg);
+  color: var(--glua-playground-text);
+  font: 12px/19px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  margin: 0;
+  overflow: auto;
+  padding: 10px 12px;
+  white-space: pre-wrap;
+}
+
+.glua-output-stderr {
+  color: var(--glua-playground-stderr);
+}
+
+.glua-output-stdout {
+  color: var(--glua-playground-text);
+}
+
+.glua-playground-input-row {
+  background: var(--glua-playground-bar);
+  border-top: 1px solid var(--glua-playground-line);
+  gap: 6px;
+  padding: 8px;
+}
+
+.glua-playground-input {
+  background: var(--glua-playground-input-bg);
+  border: 1px solid var(--glua-playground-button-border);
+  border-radius: 5px;
+  flex: 1;
+  color: var(--glua-playground-text-strong);
+  font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  min-height: 31px;
+  padding: 4px 8px;
+}
+
+.glua-playground-inspector {
+  background: var(--glua-playground-dialog-bg);
+  border-left: 1px solid var(--glua-playground-line);
+  color: var(--glua-playground-text);
+  min-height: 0;
+  overflow: auto;
+  padding: 14px;
+}
+
+.glua-playground-inspector-help {
+  color: var(--glua-playground-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 6px 0 12px;
+}
+
+.glua-paused-location {
+  background: var(--glua-playground-paused-bg);
+  border: 1px solid var(--glua-playground-paused-border);
+  border-radius: 4px;
+  color: var(--glua-playground-paused-text);
+  font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  margin-bottom: 10px;
+  padding: 7px;
+}
+
+.glua-variable {
+  border-bottom: 1px solid var(--glua-playground-line);
+  font-size: 12px;
+  padding: 5px 0;
+}
+
+.glua-variable-row {
+  align-items: baseline;
+  display: grid;
+  gap: 7px;
+  grid-template-columns: minmax(70px, auto) minmax(0, 1fr) auto;
+}
+
+.glua-variable-name {
+  color: var(--glua-green);
+  font-weight: 700;
+}
+
+.glua-variable-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+
+.glua-variable-type {
+  color: var(--glua-playground-muted);
+  font-size: 10px;
+}
+
+.glua-variable-children {
+  border-left: 1px solid var(--glua-playground-button-border);
+  margin: 4px 0 0 8px;
+  padding-left: 9px;
+}
+
+.glua-variable summary {
+  cursor: pointer;
+}
+
 @media (max-width: 720px) {
   .cover {
     background-position: center 18% !important;
@@ -162,6 +972,61 @@ html {
   .glua-capabilities,
   .glua-metrics {
     grid-template-columns: 1fr;
+  }
+
+  .glua-run-example {
+    opacity: 1;
+    pointer-events: auto;
+    right: 54px;
+  }
+
+  .glua-page-actions {
+    bottom: 12px;
+    gap: 6px;
+    right: 10px;
+  }
+
+  .glua-page-action {
+    height: 44px;
+    width: 44px;
+  }
+
+  .glua-playground-overlay {
+    padding: 0;
+  }
+
+  .glua-playground-dialog {
+    border: 0;
+    border-radius: 0;
+    height: 100vh;
+    min-height: 0;
+    transform: none;
+    width: 100vw;
+  }
+
+  .glua-playground-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .glua-playground-ide {
+    grid-template-columns: 150px minmax(0, 1fr);
+  }
+
+  .glua-playground-inspector {
+    border-left: 0;
+    border-top: 1px solid var(--glua-line);
+    display: none;
+  }
+
+  .glua-playground-header {
+    cursor: default;
+    flex-wrap: wrap;
+    padding: 7px 8px;
+    touch-action: auto;
+  }
+
+  .glua-playground-heading {
+    flex-basis: 55%;
   }
 }
 

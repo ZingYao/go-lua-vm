@@ -50,6 +50,7 @@ fi
   echo "- Added GLua extension methods: \`setFunctionEvent\`, \`setFunctionEventAsync\`, \`callFunctionEvent\`, \`callFunctionEventAsync\`, \`setProgressEvent\`, \`setProgressEventAsync\`, \`callProgressEvent\`, and \`callProgressEventAsync\`, with preset \`events.function_*\` and \`events.progress_*\` constants including call/return/error/exit and line/start/end/error/exit."
   echo "- Added multilingual CLI help and documentation output. Only English and Chinese are supported; choose output with \`GLUA_LANG=en\` or \`GLUA_LANG=zh-CN\` (the tools also follow \`LC_ALL\`, \`LC_MESSAGES\`, and \`LANG\` when \`GLUA_LANG\` is not set)."
   echo "- Release CLI artifacts are native_modules builds for Linux, Windows, and Android; macOS native_modules packages are produced from a local Mac build."
+  echo "- License: free noncommercial use under PolyForm Noncommercial 1.0.0; commercial use requires a separate paid license from zing."
   echo
   echo "## 中文"
   echo
@@ -69,6 +70,7 @@ fi
   echo "- 新增 GLua 扩展方法：\`setFunctionEvent\`、\`setFunctionEventAsync\`、\`callFunctionEvent\`、\`callFunctionEventAsync\`、\`setProgressEvent\`、\`setProgressEventAsync\`、\`callProgressEvent\`、\`callProgressEventAsync\`；预设 \`events.function_*\` 和 \`events.progress_*\` 常量，覆盖 call/return/error/exit 与 line/start/end/error/exit。"
   echo "- 增加 CLI 工具的多语言帮助与文档输出。目前仅支持英文和中文；可使用 \`GLUA_LANG=en\` 或 \`GLUA_LANG=zh-CN\` 选择输出语言，未设置 \`GLUA_LANG\` 时会读取 \`LC_ALL\`、\`LC_MESSAGES\` 和 \`LANG\`。"
   echo "- Linux、Windows 和 Android 的 CLI 发布产物均为 native_modules 构建；macOS native_modules 包由本机 Mac 构建补充。"
+  echo "- 授权：非商业用途可按 PolyForm Noncommercial 1.0.0 免费使用；商业用途需要向 zing 取得单独付费授权。"
   echo
   echo "## Changes / 变更列表"
   echo

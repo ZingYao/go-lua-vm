@@ -4,6 +4,8 @@
 
 [在线文档](https://zingyao.github.io/go-lua-vm/) · [文档构建状态](https://github.com/ZingYao/go-lua-vm/actions/workflows/docs.yml)
 
+> 授权说明：个人、教育、研究和其他非商业用途可按 PolyForm Noncommercial 1.0.0 免费使用；任何商业用途都需要向 `zing` 取得单独的付费商业授权。详见 [LICENSE](LICENSE) 与 [商业授权说明](COMMERCIAL_LICENSE.md)。本项目属于 source-available，不是 OSI 开源软件。
+
 ## 项目定位
 
 - **Lua 5.3.6 行为兼容**：以官方 C 源码和官方可执行文件为基线，覆盖语法、字节码、VM、标准库、Debug 和 CLI 行为。
@@ -91,6 +93,8 @@ func main() {
 ```
 
 更完整的嵌入 API、VFS、动态库 loader、Bridge 和对象代理说明见 [docs/API.md](docs/API.md)、[docs/BRIDGE.md](docs/BRIDGE.md) 与 [docs/RELEASE_LIMITS.md](docs/RELEASE_LIMITS.md)。
+
+完整示例索引位于 [examples](examples)，包括基础嵌入、Go 模块桥接、Event 生命周期以及序列化和通用扩展方法。
 
 ## CLI 兼容口径
 
@@ -188,6 +192,11 @@ GLUAC_BIN=./bin/gluac \
 | `third_party/lua-5.3.6` | Lua 5.3.6 官方源码参考，不参与 Go 构建。 |
 
 ## 对外文档
+
+### 授权
+
+- [LICENSE](LICENSE)：PolyForm Noncommercial 1.0.0 法律文本与 Required Notice。
+- [COMMERCIAL_LICENSE.md](COMMERCIAL_LICENSE.md)：免费非商业使用、付费商业授权和第三方组件边界。
 
 ### 项目与兼容口径
 

@@ -10,6 +10,14 @@
 - 允许 Lua 调 Go、Go 回调 Lua，并在错误、panic、context 取消时保持边界清晰。
 - 默认保持纯 Go 和无 CGO；Lua C 原生模块加载只在显式 `native_modules` 构建下启用。
 
+## 稳定包与并发边界
+
+第三方宿主应优先依赖 `lua`、`bridge` 和 `extensions` 包。`internal/*` 无法被外部 module 导入；`runtime`、`bytecode`、`compiler` 和 `stdlib` 虽然可以用于高级集成，但不承诺与 `lua` 包相同的长期 API 稳定性。
+
+单个 `lua.State` 是串行执行单元，不支持多个 goroutine 同时执行 Lua、操作栈、触发 Event callback 或消费异步队列。不同 State 可以由不同 goroutine 独立运行。宿主如果需要共享一个 State，必须在自身执行器或互斥边界中串行调度全部访问。
+
+`CallProgressEventAsync` 和 Lua 的 `setProgressAsync` 不会启动后台 goroutine；它们只把任务写入 State 队列，callback 在后续 VM 安全点或显式 `FlushProgressEvents` 的调用 goroutine 中执行。
+
 ## 核心类型草案
 
 ```go
@@ -17,6 +25,9 @@ type Options struct {
     MaxStackDepth               int
     MaxCallDepth                int
     MaxAllocationBudget         int64
+    MaxGluaEventListeners       int
+    MaxGluaEventQueuedTasks     int
+    MaxGluaEventTasksPerDrain   int
     AllowHostFilesystem         bool
     AllowEnvironment            bool
     AllowProcess                bool
@@ -34,7 +45,24 @@ type GoFunction func(args ...Value) (Value, error)
 type GoResultsFunction func(args ...Value) ([]Value, error)
 ```
 
-`Options` 使用零值表示默认限制。资源限制、宿主权限、VFS 和动态库 loader 策略在 `runtime`/stdlib 层执行，`lua` 包只负责把宿主配置转换为内部选项。`State` 和 `Value` 当前复用 runtime 的稳定值语义，外部调用方应只依赖 `lua` 包导出的别名、常量、构造函数和后续方法，不直接耦合内部包。
+`Options` 使用零值表示默认限制。Event 默认最多注册 4096 个监听器、保留 65536 个异步待执行任务，并在单次安全点或显式 flush 中最多处理 4096 个任务；宿主可按业务负载调低或调高三个 `MaxGluaEvent*` 字段。达到 State 预算时公开 Go API 返回可通过 `errors.Is(err, lua.ErrProgressEventLimitExceeded)` 识别的错误；声明 `var limitErr *lua.ProgressEventLimitError` 后还可使用 `errors.As(err, &limitErr)` 读取具体预算类型，剩余队列任务不会被静默丢弃。单监听器设置 `Overflow: "error"` 并达到 `QueueLimit` 时，使用 `errors.Is(err, lua.ErrProgressEventQueueFull)` 和 `errors.As(err, &lua.ProgressEventQueueFullError{})` 读取事件 ID、上限和当前待处理数；它与 State 级队列预算超限是两类不同的背压信号。
+
+完整替换监听器配置使用 `SetProgressEventOptions`。需要把某个字段明确改为 `false`、`0` 或空字符串时，使用 `PatchProgressEventOptions` 与指针字段，避免零值被理解成“未设置”：
+
+```go
+import "time"
+
+disabled := false
+unlimited := int64(0)
+noThrottle := time.Duration(0)
+_, err := lua.PatchProgressEventOptions(state, listenerID, lua.ProgressEventOptionsPatch{
+    Once:     &disabled,
+    MaxCalls: &unlimited,
+    Throttle: &noThrottle,
+})
+```
+
+资源限制、宿主权限、VFS 和动态库 loader 策略在 `runtime`/stdlib 层执行，`lua` 包只负责把宿主配置转换为内部选项。`State` 和 `Value` 当前复用 runtime 的稳定值语义，外部调用方应只依赖 `lua` 包导出的别名、常量、构造函数和后续方法，不直接耦合内部包。
 
 ## VFS 与动态库 loader
 

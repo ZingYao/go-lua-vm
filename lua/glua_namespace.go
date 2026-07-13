@@ -1,6 +1,31 @@
 package lua
 
-import "github.com/ZingYao/go-lua-vm/runtime"
+import (
+	"errors"
+	"fmt"
+
+	"github.com/ZingYao/go-lua-vm/runtime"
+)
+
+var (
+	// ErrGluaNamespaceConflict 表示宿主把全局 glua 占用为非 table，扩展无法安全注册。
+	ErrGluaNamespaceConflict = errors.New("global glua namespace must be a table")
+)
+
+// validateGluaNamespace 校验宿主预设的全局 glua 值是否允许挂载扩展。
+func validateGluaNamespace(globals *runtime.Table) error {
+	// 缺少全局表由 OpenLibs 的基础库初始化负责报告，这里只处理命名空间冲突。
+	if globals == nil {
+		// nil 全局表没有可校验值。
+		return nil
+	}
+	existing := globals.RawGetString("glua")
+	if existing.IsNil() || existing.Kind == runtime.KindTable {
+		// 未占用或已有 table 都允许扩展注册。
+		return nil
+	}
+	return fmt.Errorf("%w: got %s", ErrGluaNamespaceConflict, runtime.LuaTypeName(existing))
+}
 
 // gluaNamespaceTable 返回可挂载扩展能力的 glua 全局命名空间。
 //

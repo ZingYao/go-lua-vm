@@ -1,0 +1,47 @@
+-- 演示 JSON、YAML、XML、TOML 的编码、格式化、解码和 null/空容器表达。
+
+local profile = {
+  name = "zing",
+  enabled = true,
+  tags = glua.array({ "lua53", "go" }),
+  metadata = glua.object(),
+  optional = glua.null,
+}
+
+-- JSON 支持格式化输出；解码后保留显式数组、对象和 null 的结构语义。
+local jsonText = glua.json.encode(profile, {
+  pretty = true,
+  maxDepth = 32,
+  maxOutputBytes = 1024 * 1024,
+})
+local jsonValue = glua.json.decode(jsonText)
+assert(jsonValue.tags[2] == "go")
+assert(jsonValue.optional == glua.null)
+print("JSON:\n" .. jsonText)
+
+-- YAML 与 JSON 使用相同的 Lua table 形状和资源预算。
+local yamlText = glua.yaml.encode(profile)
+local yamlValue = glua.yaml.decode(yamlText)
+assert(yamlValue.name == "zing")
+print("YAML:\n" .. yamlText)
+
+-- XML 可用 typed 标记无损保存字符串、数字、null 和空容器类型。
+local xmlText = glua.xml.encode(profile, {
+  root = "profile",
+  pretty = true,
+  typed = true,
+})
+local xmlValue = glua.xml.decode(xmlText, { typed = true })
+assert(xmlValue.metadata ~= nil)
+assert(xmlValue.optional == glua.null)
+print("XML:\n" .. xmlText)
+
+-- TOML 没有 null，因此示例只编码可由 TOML 表达的字段。
+local tomlText = glua.toml.encode({
+  name = profile.name,
+  enabled = profile.enabled,
+  tags = profile.tags,
+})
+local tomlValue = glua.toml.decode(tomlText)
+assert(tomlValue.tags[1] == "lua53")
+print("TOML:\n" .. tomlText)

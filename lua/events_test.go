@@ -3,6 +3,7 @@
 package lua
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -77,6 +78,17 @@ func TestGluaEventAsyncQueueOverflowPolicies(t *testing.T) {
 	if accepted, err := registry.enqueue(errorPolicy, context); accepted || err == nil {
 		// 第二个任务必须返回溢出错误且保持原队列。
 		t.Fatalf("overflow error accepted=%v err=%v", accepted, err)
+	} else {
+		// error 策略必须返回可由 Go 宿主稳定分类的队列满错误。
+		var queueFullError *ProgressEventQueueFullError
+		if !errors.Is(err, ErrProgressEventQueueFull) || !errors.As(err, &queueFullError) || queueFullError.EventID != errorPolicy.id || queueFullError.Limit != 1 || queueFullError.Pending != 1 {
+			// 错误明细不完整会使宿主无法区分背压和脚本异常。
+			t.Fatalf("overflow error detail = %#v", err)
+		}
+	}
+	if errorPolicy.rejectedCount != 1 || registry.rejectedTasks != 1 {
+		// 拒绝统计必须与错误策略次数精确同步。
+		t.Fatalf("overflow rejection callback=%d registry=%d", errorPolicy.rejectedCount, registry.rejectedTasks)
 	}
 }
 
@@ -263,11 +275,11 @@ func TestGluaEventDebounceQueue(t *testing.T) {
 		t.Fatalf("debounce reservedCount=%d", callback.reservedCount)
 	}
 	readyAt := registry.queue[0].readyAt
-	if tasks := registry.takeQueuedTasks(readyAt.Add(-time.Nanosecond), false); len(tasks) != 0 {
+	if tasks := registry.takeQueuedTasks(readyAt.Add(-time.Nanosecond), false, 1); len(tasks) != 0 {
 		// 到期前普通安全点不能执行任务。
 		t.Fatalf("debounce task executed before ready time")
 	}
-	tasks := registry.takeQueuedTasks(readyAt, false)
+	tasks := registry.takeQueuedTasks(readyAt, false, 1)
 	if len(tasks) != 1 || tasks[0].context.String != "latest" {
 		// 到期时应取出唯一最新任务。
 		t.Fatalf("debounce ready tasks=%#v", tasks)

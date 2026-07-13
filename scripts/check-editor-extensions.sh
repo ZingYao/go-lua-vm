@@ -4,6 +4,9 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
 
+node scripts/test-playground-editor.js
+node scripts/test-playground-workspace.js
+
 node -e '
 const fs = require("fs");
 for (const file of [

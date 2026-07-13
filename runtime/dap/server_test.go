@@ -334,8 +334,8 @@ func TestServerVariablesAndStep(t *testing.T) {
 	scopesResponse := readProtocolMessage(t, reader)
 	scopesBody := scopesResponse["body"].(map[string]any)
 	scopes := scopesBody["scopes"].([]any)
-	if len(scopes) != 1 {
-		// 暂停帧应暴露 Locals scope。
+	if len(scopes) != 2 || scopes[0].(map[string]any)["name"] != "Locals" || scopes[1].(map[string]any)["name"] != "Globals" {
+		// 暂停帧应暴露 Locals 和可展开的 Globals scope。
 		t.Fatalf("scopes response = %#v", scopesResponse)
 	}
 	writeRequest(t, connection, 4, "variables")
@@ -431,6 +431,127 @@ func TestServerVariablesAndStep(t *testing.T) {
 	case <-time.After(time.Second):
 		// 第二次暂停必须被 continue 释放。
 		t.Fatalf("continue did not resume second stop")
+	}
+}
+
+// TestServerStepModesRespectCallDepth 验证 stepIn、next 与 stepOut 使用不同调用深度停止边界。
+func TestServerStepModesRespectCallDepth(t *testing.T) {
+	// 复用同一暂停位置模拟嵌套 Lua 调用；该用例只验证纯状态机，不需要启动 TCP 服务。
+	server := &Server{currentStop: &stoppedLocation{Source: "main.glua", Line: 10, Depth: 3}}
+	server.prepareStep(dapStepModeInto)
+	if !server.consumeStepStop("child.glua", 1, 4) {
+		// stepIn 必须允许进入更深调用帧后立即停在新源码行。
+		t.Fatal("stepIn did not stop in child frame")
+	}
+
+	server.currentStop = &stoppedLocation{Source: "main.glua", Line: 10, Depth: 3}
+	server.prepareStep(dapStepModeOver)
+	if server.consumeStepStop("child.glua", 1, 4) {
+		// next 必须跳过被调函数内部的行。
+		t.Fatal("next stopped inside child frame")
+	}
+	if !server.consumeStepStop("main.glua", 11, 3) {
+		// next 返回当前帧后应在下一条不同源码行停住。
+		t.Fatal("next did not stop in caller frame")
+	}
+
+	server.currentStop = &stoppedLocation{Source: "main.glua", Line: 10, Depth: 3}
+	server.prepareStep(dapStepModeOut)
+	if server.consumeStepStop("child.glua", 1, 4) || server.consumeStepStop("main.glua", 11, 3) {
+		// stepOut 在子帧和当前帧都不能提前停止。
+		t.Fatal("stepOut stopped before the current frame returned")
+	}
+	if !server.consumeStepStop("caller.glua", 8, 2) {
+		// 调用深度变浅后 stepOut 必须在下一条可见源码行停止。
+		t.Fatal("stepOut did not stop after returning to caller")
+	}
+}
+
+// TestServerUpvalueScopeAndWrite 验证 DAP Upvalues scope 展示当前 Lua closure 捕获值并可写回。
+func TestServerUpvalueScopeAndWrite(t *testing.T) {
+	// 手工构造带命名共享 cell 的 Lua closure，避免测试依赖网络或完整 DAP 暂停流程。
+	cell := runtime.NewClosedUpvalueCell(runtime.StringValue("before"))
+	closure := &runtime.LuaClosure{
+		Proto:        &bytecode.Proto{Upvalues: []bytecode.UpvalueDesc{{Name: "captured"}}},
+		Upvalues:     []runtime.Value{runtime.StringValue("stale")},
+		UpvalueCells: []*runtime.UpvalueCell{cell},
+	}
+	server := &Server{
+		currentStop:    &stoppedLocation{Frames: []runtime.CallFrame{{Kind: runtime.CallFrameKindLua, Function: runtime.ReferenceValue(runtime.KindLuaClosure, closure)}}},
+		nextVariableID: dapFirstDynamicVariablesReference,
+		variableValues: make(map[int]runtime.Value), variableTables: make(map[*runtime.Table]int), variableTableKeys: make(map[int]runtime.Value),
+	}
+	scopes := server.scopes()["scopes"].([]map[string]any)
+	if len(scopes) != 1 || scopes[0]["name"] != "Upvalues" || scopes[0]["variablesReference"] != dapUpvaluesVariablesReference {
+		// 无 Locals/Globals 时必须仍单独展示可读 Upvalues scope。
+		t.Fatalf("scopes = %#v", scopes)
+	}
+	arguments, err := json.Marshal(map[string]any{"variablesReference": dapUpvaluesVariablesReference})
+	if err != nil {
+		// 固定测试参数必须可被 JSON 编码。
+		t.Fatalf("marshal variables arguments failed: %v", err)
+	}
+	variables := server.variables(arguments)["variables"].([]map[string]any)
+	if len(variables) != 1 || variables[0]["name"] != "captured" || variables[0]["value"] != "string(\"before\")" {
+		// shared cell 当前值必须覆盖旧 Upvalues 快照。
+		t.Fatalf("upvalue variables = %#v", variables)
+	}
+	setArguments, err := json.Marshal(map[string]any{"variablesReference": dapUpvaluesVariablesReference, "name": "captured", "value": "\"after\""})
+	if err != nil {
+		// 固定写回参数必须可被 JSON 编码。
+		t.Fatalf("marshal setVariable arguments failed: %v", err)
+	}
+	response, err := server.setVariable(setArguments)
+	if err != nil || response["value"] != "string(\"after\")" || cell.Value().String != "after" {
+		// DAP 写回必须更新共享 cell，而不是只改显示快照。
+		t.Fatalf("set upvalue response=%#v err=%v cell=%#v", response, err, cell.Value())
+	}
+}
+
+// TestServerThreadsAndEvaluate 验证 DAP 协程映射与暂停态只读变量路径求值。
+func TestServerThreadsAndEvaluate(t *testing.T) {
+	// State 同时保留主线程和一个新建 coroutine，模拟真实调试会话可见线程集合。
+	state := runtime.NewState()
+	coroutine := state.NewThread(runtime.ReferenceValue(runtime.KindGoClosure, runtime.GoResultsFunction(func(args ...runtime.Value) ([]runtime.Value, error) {
+		// 测试线程只需要可调用入口，不需要实际 resume。
+		return nil, nil
+	})))
+	if coroutine == nil {
+		// 正常 State 必须允许创建 coroutine。
+		t.Fatal("NewThread returned nil")
+	}
+	globals := state.Globals()
+	globals.RawSetString("global", runtime.IntegerValue(9))
+	child := runtime.NewTable()
+	child.RawSetString("name", runtime.StringValue("nested"))
+	globals.RawSetString("tools", runtime.ReferenceValue(runtime.KindTable, child))
+	closure := &runtime.LuaClosure{Proto: &bytecode.Proto{Upvalues: []bytecode.UpvalueDesc{{Name: "captured"}}}, Upvalues: []runtime.Value{runtime.StringValue("up")}}
+	server := &Server{
+		currentStop: &stoppedLocation{
+			State: state, Thread: coroutine,
+			Variables: []runtime.ActiveLocalSnapshot{{Name: "local", Value: runtime.StringValue("local")}},
+			Frames:    []runtime.CallFrame{{Kind: runtime.CallFrameKindLua, Function: runtime.ReferenceValue(runtime.KindLuaClosure, closure)}},
+		},
+		nextVariableID: dapFirstDynamicVariablesReference,
+		variableValues: make(map[int]runtime.Value), variableTables: make(map[*runtime.Table]int), variableTableKeys: make(map[int]runtime.Value),
+		threadIDs: make(map[*runtime.Thread]int), nextThreadID: 1,
+	}
+	threadList := server.threads()["threads"].([]map[string]any)
+	if len(threadList) != 2 || threadList[0]["name"] != "main (running)" {
+		// 主线程与 coroutine 都必须进入 DAP threads 返回值。
+		t.Fatalf("threads = %#v", threadList)
+	}
+	for expression, want := range map[string]string{"local": "string(\"local\")", "captured": "string(\"up\")", "global": "integer(9)", "tools.name": "string(\"nested\")"} {
+		arguments, err := json.Marshal(map[string]any{"expression": expression})
+		if err != nil {
+			// 固定表达式参数必须可编码。
+			t.Fatalf("marshal evaluate %s failed: %v", expression, err)
+		}
+		response := server.evaluate(arguments)
+		if response["result"] != want {
+			// 只读路径解析必须按 Locals、Upvalues、Globals 顺序返回值。
+			t.Fatalf("evaluate %s = %#v, want %s", expression, response, want)
+		}
 	}
 }
 

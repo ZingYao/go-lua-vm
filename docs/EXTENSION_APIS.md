@@ -44,7 +44,7 @@
 | `setGroupMuted(group, muted)` | 批量静音分组 |
 | `removeGroup(group)` | 删除分组 |
 | `flush()` | 立即消费异步和防抖任务 |
-| `eventList()` / `stats()` | 查询对当前来源生效的监听器与队列统计 |
+| `eventList()` / `stats()` | 查询对当前来源生效的监听器、丢弃/拒绝任务与队列统计 |
 
 ### Sample
 
@@ -82,6 +82,10 @@ print(summary.totalListeners, summary.suppressedEvents)
 Event 回调默认接收只读快照，不会直接修改业务 table。详细触发时机、上下文字段和错误策略见 [Event 文档](glua-event.md)。
 
 `scope` 默认为 `runtime`；设置为 `file` 时只匹配注册来源。Go 宿主可使用 `lua.SetProgressEvent`、`lua.CallProgressEvent`、`lua.CallProgressEventAsync` 和 `lua.FlushProgressEvents` 与 Lua 双向触发，完整示例见 [Event 文档](glua-event.md#从-go-与-lua-交互)。
+
+Go 宿主还可以通过 `RemoveProgressEvent`、`SetProgressEventMuted`、`SetProgressEventCallback`、`SetProgressEventOptions`、`GetProgressEvent`、类型化 `ListProgressEvents`、原始 `ListProgressEventsRaw`、`ClearProgressEvents`、`SetProgressEventGroupMuted` 和 `RemoveProgressEventGroup` 完成监听器治理。`FileProgressEventSource`、`ChunkProgressEventSource` 和 `NormalizeProgressEventSource` 用于构造与 `Proto.Source` 一致的来源。单个 State 必须串行使用；异步 Event 是安全点队列，不是后台 goroutine。
+
+State 默认限制 4096 个监听器、65536 个排队任务和单次 drain 4096 个任务，可通过 `lua.Options.MaxGluaEventListeners`、`MaxGluaEventQueuedTasks`、`MaxGluaEventTasksPerDrain` 调整。Go 侧参数、配置冲突和预算错误均提供稳定 sentinel 与结构化错误类型。
 
 ## 序列化
 

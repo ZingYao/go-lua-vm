@@ -39,6 +39,12 @@ func drainGluaEventQueue(state *State) error {
 	return nil
 }
 
+// setGluaProgressEventTraceHook 在关闭 Event 构建中返回统一不可用错误。
+func setGluaProgressEventTraceHook(state *State, hook ProgressEventTraceHook) error {
+	// 无 Event registry 时不能保存宿主观测 hook。
+	return ErrGluaEventsUnavailable
+}
+
 // gluaHasAnyEvent 在未编译事件能力时固定返回 false。
 func gluaHasAnyEvent(state *State) bool {
 	// 当前构建不包含 glua events，VM 不需要启用事件精确帧同步。
@@ -90,5 +96,53 @@ func dispatchGluaProgressEventFromGo(state *State, source string, eventName stri
 // flushGluaProgressEventsFromGo 在未编译事件能力时返回不可用错误。
 func flushGluaProgressEventsFromGo(state *State) (int, error) {
 	// 条件编译关闭 Event 后没有可消费队列。
+	return 0, ErrGluaEventsUnavailable
+}
+
+// removeGluaProgressEventFromGo 在未编译事件能力时返回不可用错误。
+func removeGluaProgressEventFromGo(state *State, eventID int64) (bool, error) {
+	// 条件编译关闭 Event 后没有监听器可删除。
+	return false, ErrGluaEventsUnavailable
+}
+
+// setGluaProgressEventMutedFromGo 在未编译事件能力时返回不可用错误。
+func setGluaProgressEventMutedFromGo(state *State, eventID int64, muted bool) (bool, error) {
+	// 条件编译关闭 Event 后没有监听器可静音。
+	return false, ErrGluaEventsUnavailable
+}
+
+// setGluaProgressEventCallbackFromGo 在未编译事件能力时返回不可用错误。
+func setGluaProgressEventCallbackFromGo(state *State, eventID int64, callback runtime.Value) (bool, error) {
+	// 条件编译关闭 Event 后没有 callback 可替换。
+	return false, ErrGluaEventsUnavailable
+}
+
+// setGluaProgressEventOptionsFromGo 在未编译事件能力时返回不可用错误。
+func setGluaProgressEventOptionsFromGo(state *State, eventID int64, options ProgressEventOptions) (bool, error) {
+	// 条件编译关闭 Event 后没有配置可更新。
+	return false, ErrGluaEventsUnavailable
+}
+
+// getGluaProgressEventFromGo 在未编译事件能力时返回不可用错误。
+func getGluaProgressEventFromGo(state *State, eventID int64) (runtime.Value, error) {
+	// 条件编译关闭 Event 后没有监听器快照。
+	return runtime.NilValue(), ErrGluaEventsUnavailable
+}
+
+// listGluaProgressEventsFromGo 在未编译事件能力时返回不可用错误。
+func listGluaProgressEventsFromGo(state *State, source string) (runtime.Value, error) {
+	// 条件编译关闭 Event 后没有监听器统计。
+	return runtime.NilValue(), ErrGluaEventsUnavailable
+}
+
+// clearGluaProgressEventsFromGo 在未编译事件能力时返回不可用错误。
+func clearGluaProgressEventsFromGo(state *State, source string, eventName string, group string) (int, error) {
+	// 条件编译关闭 Event 后没有监听器可清理。
+	return 0, ErrGluaEventsUnavailable
+}
+
+// setGluaProgressEventGroupMutedFromGo 在未编译事件能力时返回不可用错误。
+func setGluaProgressEventGroupMutedFromGo(state *State, source string, group string, muted bool) (int, error) {
+	// 条件编译关闭 Event 后没有分组可静音。
 	return 0, ErrGluaEventsUnavailable
 }

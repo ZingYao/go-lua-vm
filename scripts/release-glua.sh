@@ -52,6 +52,8 @@ for platform in "${platforms[@]}"; do
     go_env+=(GOARM="${goarm}")
   fi
   env "${go_env[@]}" go build -trimpath -o "${binary_path}" ./cmd/glua
+  cp LICENSE "${release_dir}/${artifact_name}/LICENSE"
+  cp COMMERCIAL_LICENSE.md "${release_dir}/${artifact_name}/COMMERCIAL_LICENSE.md"
 
   (
     cd "${release_dir}"

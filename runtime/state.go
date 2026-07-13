@@ -674,6 +674,21 @@ func (state *State) Running() (*Thread, bool) {
 	return state.runningThread, state.runningThread.isMain
 }
 
+// Threads 返回当前 State 已创建线程的独立快照。
+//
+// 返回结果包含主线程和仍被 State 管理的 coroutine；调用方不得修改 Thread 内部状态。State 为 nil 或已
+// 关闭时返回 nil。该方法用于调试器、监控和宿主展示线程列表，不参与 Lua 调度。
+func (state *State) Threads() []*Thread {
+	// 无效或关闭 State 不再暴露可能已经释放的线程对象。
+	if state == nil || state.closed {
+		// 空快照表示没有可观测线程。
+		return nil
+	}
+	threads := make([]*Thread, len(state.threads))
+	copy(threads, state.threads)
+	return threads
+}
+
 // HasCreatedCoroutines 返回当前 State 是否创建过主线程之外的 coroutine。
 //
 // 返回 true 表示调用现场可能需要保留 coroutine continuation 链，Lua 调用热路径应避免使用会裁剪

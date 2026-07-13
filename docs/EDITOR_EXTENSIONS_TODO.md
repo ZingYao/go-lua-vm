@@ -95,8 +95,8 @@
 - [x] runtime/dap：实现可被嵌入方复用的 DAP server，CLI 只通过 `--glua-dap-listen=host:port` 调用该服务并输出 ready 标记。
 - [x] runtime/dap：DAP server 支持 initialize、launch/attach、setBreakpoints、configurationDone、threads、stackTrace、scopes、variables、continue、next、stepIn、stepOut、disconnect 的基础协议响应。
 - [x] glua VM：接入指令级 DebugObserver，支持源码行断点命中、stopped 事件、最小 stackTrace 和 continue 继续。
-- [ ] glua VM：补齐 step over / step in / step out 的真实暂停语义。
-- [ ] glua VM：补齐完整调用栈、scope 和 locals/upvalues 变量读取。
+- [x] glua VM：补齐 step over / step in / step out 的真实暂停语义。
+- [x] glua VM：补齐调用栈、Locals、Upvalues、Globals、table 展开与变量写入。
 - [x] VS Code：Debug current file / launch 配置启动 `glua --glua-dap-listen=127.0.0.1:0 <file>`，等待 ready 后 attach。
 - [x] JetBrains：Debug Current GLua File 启动 `glua --glua-dap-listen=127.0.0.1:0 <file>`，等待 ready 后 attach。
 - [x] VS Code / JetBrains：Debug 失败时显示命令、工作目录、监听地址、退出码和 stderr/stdout 尾部。
