@@ -216,7 +216,10 @@ build_luasocket_module() {
     args+=("-DNDEBUG" "-DLUASOCKET_NODEBUG")
   fi
 
-  args+=("${platform_cflags[@]}")
+  # macOS 自带 Bash 3.2 在 set -u 下不能展开空数组，仅在存在平台参数时追加。
+  if [[ "${#platform_cflags[@]}" -gt 0 ]]; then
+    args+=("${platform_cflags[@]}")
+  fi
   args+=("-o" "${output_path}")
   args+=("${link_args[@]}")
   args+=("$@")
