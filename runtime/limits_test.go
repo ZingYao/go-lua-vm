@@ -7,7 +7,8 @@ import (
 
 // TestNormalizeOptions 验证资源限制选项零值会填充默认值。
 //
-// 默认栈深度和调用深度对齐 Lua 5.3 默认配置，负分配预算会归一为不限制。
+// 默认栈深度和调用深度对齐 Lua 5.3 默认配置，Event 使用有界监听器与异步任务预算，负分配预算
+// 会归一为不限制。
 func TestNormalizeOptions(t *testing.T) {
 	options := NormalizeOptions(Options{MaxAllocationBudget: -1})
 
@@ -22,6 +23,10 @@ func TestNormalizeOptions(t *testing.T) {
 	// 负预算必须归一为 0，表示不限制。
 	if options.MaxAllocationBudget != 0 {
 		t.Fatalf("allocation budget mismatch: got %d", options.MaxAllocationBudget)
+	}
+	if options.MaxGluaEventListeners != DefaultMaxGluaEventListeners || options.MaxGluaEventQueuedTasks != DefaultMaxGluaEventQueuedTasks || options.MaxGluaEventTasksPerDrain != DefaultMaxGluaEventTasksPerDrain {
+		// Event 零值配置必须落到生产安全默认预算，不能形成无限注册表或队列。
+		t.Fatalf("event limits mismatch: %#v", options)
 	}
 	if options.AllowHostFilesystem || options.AllowEnvironment || options.AllowProcess {
 		// 宿主访问权限默认必须关闭，避免嵌入模式无意访问宿主资源。
@@ -79,7 +84,12 @@ func TestResourceLimitChecksPass(t *testing.T) {
 //
 // 该配置后续会被栈、调用帧和分配器复用。
 func TestNewStateWithOptions(t *testing.T) {
-	state := NewStateWithOptions(Options{MaxStackDepth: 8, MaxCallDepth: 4, MaxAllocationBudget: 1024, AllowHostFilesystem: true, AllowEnvironment: true, AllowProcess: true})
+	// 同时设置 VM、宿主权限和 Event 预算，验证 State 保存的是完整规范化副本。
+	state := NewStateWithOptions(Options{
+		MaxStackDepth: 8, MaxCallDepth: 4, MaxAllocationBudget: 1024,
+		AllowHostFilesystem: true, AllowEnvironment: true, AllowProcess: true,
+		MaxGluaEventListeners: 5, MaxGluaEventQueuedTasks: 7, MaxGluaEventTasksPerDrain: 3,
+	})
 	options := state.Options()
 
 	// State 必须保留调用方传入的资源限制配置。
@@ -89,5 +99,9 @@ func TestNewStateWithOptions(t *testing.T) {
 	if !options.AllowHostFilesystem || !options.AllowEnvironment || !options.AllowProcess {
 		// 显式宿主访问授权必须随 State 保存，供标准库注册时读取。
 		t.Fatalf("state host access options mismatch: %#v", options)
+	}
+	if options.MaxGluaEventListeners != 5 || options.MaxGluaEventQueuedTasks != 7 || options.MaxGluaEventTasksPerDrain != 3 {
+		// 自定义 Event 预算必须原样保留，供注册表和 drain 路径读取。
+		t.Fatalf("state event options mismatch: %#v", options)
 	}
 }

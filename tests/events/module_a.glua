@@ -5,7 +5,7 @@ local module = {}
 module.listenerID = glua.event.setProgress("module-a.only", function(ctx)
   -- 测试不主动触发该事件；若后续触发则输出上下文，便于观察跨文件回调归属。
   print("EVENT_CALLBACK", ctx.event, "source", ctx.source, "payload", ctx.payload)
-end)
+end, { scope = "file" })
 
 function module.run()
   -- 返回固定值，便于主测试确认实际调用的是模块 A。

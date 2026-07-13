@@ -4797,8 +4797,8 @@
         "zh-CN": []
       },
       "description": {
-        "en": "Immediately drains the current State asynchronous event queue.",
-        "zh-CN": "立即消费当前 State 的异步事件队列。"
+        "en": "Immediately drains the current State asynchronous event queue. When the per-drain budget is reached, remaining tasks stay queued and the call reports an error.",
+        "zh-CN": "立即消费当前 State 的异步事件队列；达到单次 drain 预算时保留剩余任务并返回错误。"
       },
       "example": {
         "en": "local count = glua.event.flush()",
@@ -4819,8 +4819,8 @@
         "zh-CN": []
       },
       "description": {
-        "en": "Returns listener, queue, dropped task, callback error, and sequence statistics.",
-        "zh-CN": "返回监听器、队列、丢弃任务、回调错误和事件序号统计。"
+        "en": "Returns listener, queue, dropped/rejected task, callback error, sequence, and State listener/queue/drain budget statistics.",
+        "zh-CN": "返回监听器、队列、丢弃/拒绝任务、回调错误、事件序号和 listener/queue/drain 三项 State 预算统计。"
       },
       "example": {
         "en": "local stats = glua.event.stats()",
@@ -4841,8 +4841,8 @@
         "zh-CN": []
       },
       "description": {
-        "en": "Lists runtime listeners and matching file listeners effective for the current source.",
-        "zh-CN": "列出对当前来源生效的全部 runtime 监听器和匹配的 file 监听器统计。"
+        "en": "Lists runtime listeners and matching file listeners effective for the current source, together with queue, dropped/rejected task state, and State budgets.",
+        "zh-CN": "列出对当前来源生效的全部 runtime 监听器、匹配的 file 监听器、队列、丢弃/拒绝任务状态和 State 预算统计。"
       },
       "example": {
         "en": "local summary = glua.event.eventList()",

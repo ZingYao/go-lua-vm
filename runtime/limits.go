@@ -13,6 +13,12 @@ const (
 	DefaultMaxStackDepth = 1000000
 	// DefaultMaxCallDepth 为 Lua 调用帧提供默认预算，预留主 chunk、标准库和 debug 包装帧余量。
 	DefaultMaxCallDepth = 1000
+	// DefaultMaxGluaEventListeners 限制单个 State 可同时持有的 Event 监听器数量。
+	DefaultMaxGluaEventListeners = 4096
+	// DefaultMaxGluaEventQueuedTasks 限制单个 State 异步 Event 队列的任务总数。
+	DefaultMaxGluaEventQueuedTasks = 65536
+	// DefaultMaxGluaEventTasksPerDrain 限制单次安全点或显式 flush 执行的 Event 任务数。
+	DefaultMaxGluaEventTasksPerDrain = 4096
 )
 
 // Options 描述 Lua State 的资源限制配置。
@@ -55,6 +61,12 @@ type Options struct {
 	GluaEventsEnabled bool
 	// GluaEventsEnabledSet 表示调用方是否显式设置过 GluaEventsEnabled。
 	GluaEventsEnabledSet bool
+	// MaxGluaEventListeners 限制单个 State 的 Event 监听器总数。
+	MaxGluaEventListeners int
+	// MaxGluaEventQueuedTasks 限制单个 State 的异步 Event 待执行任务总数。
+	MaxGluaEventQueuedTasks int
+	// MaxGluaEventTasksPerDrain 限制单次 VM 安全点或显式 flush 最多执行的异步任务数。
+	MaxGluaEventTasksPerDrain int
 	// DebugObserver 保存可选 VM 调试观察器。
 	//
 	// nil 表示不启用外部调试能力；非 nil 时执行循环会在每条 Lua 指令前调用观察器，调用方可据此实现
@@ -99,6 +111,18 @@ func NormalizeOptions(options Options) Options {
 	} else if options.GluaEventsEnabled {
 		// 显式开启时仍受 build tag 裁剪，避免未编译事件文件时暴露半能力。
 		options.GluaEventsEnabled = gluaEventsCompiled()
+	}
+	if options.MaxGluaEventListeners <= 0 {
+		// 未配置或负数都使用安全默认值，避免零值 State 获得无限监听器。
+		options.MaxGluaEventListeners = DefaultMaxGluaEventListeners
+	}
+	if options.MaxGluaEventQueuedTasks <= 0 {
+		// 异步任务总量必须有 State 级上限，单监听器 queueLimit 不能替代全局预算。
+		options.MaxGluaEventQueuedTasks = DefaultMaxGluaEventQueuedTasks
+	}
+	if options.MaxGluaEventTasksPerDrain <= 0 {
+		// 单次 drain 使用独立预算，避免一个安全点长时间占用宿主线程。
+		options.MaxGluaEventTasksPerDrain = DefaultMaxGluaEventTasksPerDrain
 	}
 
 	// 返回已经填充默认值的选项。

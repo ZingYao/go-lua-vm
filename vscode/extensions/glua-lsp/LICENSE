@@ -1,9 +1,11 @@
-UNLICENSED
+This extension is part of GLua and is licensed under the repository root
+PolyForm Noncommercial License 1.0.0.
 
-This VS Code extension package is currently not licensed for public redistribution.
-It is distributed only as part of the go-lua-vm project workspace unless the
-project owner publishes a separate license grant.
+https://polyformproject.org/licenses/noncommercial/1.0.0
 
-The package metadata intentionally uses:
+Required Notice: Copyright 2026 zing. GLua is available for noncommercial use
+under the PolyForm Noncommercial License 1.0.0. Commercial use requires a
+separate paid license from zing.
 
-license: UNLICENSED
+See the repository root LICENSE and COMMERCIAL_LICENSE.md files for the full
+terms. Third-party components retain their own licenses.

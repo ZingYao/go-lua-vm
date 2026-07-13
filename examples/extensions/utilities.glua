@@ -1,0 +1,52 @@
+-- 演示纯 Go 通用扩展：Codec、Hash、Regex、UUID、ZIP、Schema 和 Path。
+
+-- Codec 与 Hash 适合协议编码、完整性校验和签名；MD5/SHA-1 不应用于新安全协议。
+local payload = "GLua\0payload"
+local encoded = glua.codec.base64Encode(payload)
+assert(glua.codec.base64Decode(encoded) == payload)
+print("base64", encoded)
+print("sha256", glua.hash.sha256(payload))
+print("hmac", glua.hash.hmac("sha256", "demo-secret", payload))
+
+-- Regex 使用 RE2，不支持回溯和反向引用；find 返回 Lua 1-based 字节位置。
+local first, last = glua.regex.find("order-[0-9]+", "id=order-42")
+assert(first == 4 and last == 11)
+print("regex", first, last)
+
+-- UUID v4 可生成、校验并规范化标识符。
+local identifier = glua.uuid.v4()
+assert(glua.uuid.validate(identifier))
+print("uuid", glua.uuid.parse(identifier))
+
+-- ZIP 只压缩内存 table，并拒绝绝对路径和 .. 路径穿越。
+local archive = glua.zip.compress({
+  ["config/app.json"] = '{"ready":true}',
+  ["assets/readme.txt"] = "GLua",
+}, {
+  method = "deflate",
+  maxTotalBytes = 1024 * 1024,
+})
+local files = glua.zip.decompress(archive)
+assert(files["assets/readme.txt"] == "GLua")
+print("zip bytes", #archive)
+
+-- Schema 返回 boolean、错误消息和 JSONPath 风格路径，也可用 assert 直接抛出错误。
+local schema = {
+  type = "object",
+  required = { "name", "port" },
+  additionalProperties = false,
+  properties = {
+    name = { type = "string", minLength = 2 },
+    port = { type = "integer", minimum = 1, maximum = 65535 },
+  },
+}
+local config = glua.schema.assert({ name = "api", port = 8080 }, schema)
+print("schema", config.name, config.port)
+
+-- Path 不访问文件系统，只按当前宿主平台执行可移植的词法路径运算。
+local configPath = glua.path.join("config", "profiles", "default.toml")
+local profileDir = glua.path.dir(configPath)
+local relative = glua.path.rel(profileDir, glua.path.join("config", "shared.toml"))
+assert(glua.path.base(configPath) == "default.toml")
+assert(glua.path.ext(configPath) == ".toml")
+print("path", glua.path.toSlash(configPath), glua.path.toSlash(relative))

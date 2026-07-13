@@ -1,0 +1,11 @@
+GLua is licensed under the PolyForm Noncommercial License 1.0.0:
+https://polyformproject.org/licenses/noncommercial/1.0.0
+
+Required Notice: Copyright 2026 zing. GLua is available for noncommercial use
+under the PolyForm Noncommercial License 1.0.0. Commercial use requires a
+separate paid license from zing.
+
+Commercial licensing information:
+https://github.com/ZingYao/go-lua-vm/blob/master/COMMERCIAL_LICENSE.md
+
+Third-party components retain their own licenses.

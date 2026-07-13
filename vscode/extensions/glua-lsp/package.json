@@ -14,7 +14,7 @@
     "url": "https://github.com/ZingYao/go-lua-vm/issues"
   },
   "homepage": "https://github.com/ZingYao/go-lua-vm/tree/master/vscode/extensions/glua-lsp",
-  "license": "UNLICENSED",
+  "license": "SEE LICENSE IN LICENSE",
   "keywords": [
     "lua",
     "glua",

@@ -63,3 +63,7 @@ echo "tags=native_modules"
 for cmd in glua gluac gluals; do
   env "${go_env[@]}" go build -tags native_modules -trimpath -ldflags="-s -w" -o "${output_dir}/${cmd}${exe}" "./cmd/${cmd}"
 done
+
+# 发布目录必须携带非商业许可证和商业授权说明，避免二进制脱离仓库后丢失授权边界。
+cp "${repo_root}/LICENSE" "${output_dir}/LICENSE"
+cp "${repo_root}/COMMERCIAL_LICENSE.md" "${output_dir}/COMMERCIAL_LICENSE.md"

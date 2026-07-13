@@ -49,10 +49,13 @@ type Server struct {
 	variableValues       map[int]runtime.Value
 	variableTables       map[*runtime.Table]int
 	variableTableKeys    map[int]runtime.Value
+	threadIDs            map[*runtime.Thread]int
+	nextThreadID         int
 	sourceRoot           string
-	stepMode             bool
+	stepMode             dapStepMode
 	stepSource           string
 	stepLine             int
+	stepDepth            int
 	pauseRequested       bool
 	skipBreakpointSource string
 	skipBreakpointLine   int
@@ -79,10 +82,12 @@ func NewServer(address string) (*Server, error) {
 		breakpoints:       make(map[string]map[int]bool),
 		continueCh:        make(chan struct{}),
 		configuredCh:      make(chan struct{}),
-		nextVariableID:    2,
+		nextVariableID:    dapFirstDynamicVariablesReference,
 		variableValues:    make(map[int]runtime.Value),
 		variableTables:    make(map[*runtime.Table]int),
 		variableTableKeys: make(map[int]runtime.Value),
+		threadIDs:         make(map[*runtime.Thread]int),
+		nextThreadID:      1,
 		sourceRoot:        workingDir,
 	}, nil
 }
@@ -206,7 +211,34 @@ type stoppedLocation struct {
 	Reason    string
 	Variables []runtime.ActiveLocalSnapshot
 	VM        *runtime.VM
+	Depth     int
+	Frames    []runtime.CallFrame
+	State     *runtime.State
+	Thread    *runtime.Thread
 }
+
+const (
+	// dapLocalsVariablesReference 是 DAP Locals scope 的固定变量引用。
+	dapLocalsVariablesReference = 1
+	// dapUpvaluesVariablesReference 是 DAP Upvalues scope 的固定变量引用。
+	dapUpvaluesVariablesReference = 2
+	// dapFirstDynamicVariablesReference 是 table 展开节点的第一个动态变量引用。
+	dapFirstDynamicVariablesReference = 3
+)
+
+// dapStepMode 表示 DAP 单步命令要求的调用深度边界。
+type dapStepMode string
+
+const (
+	// dapStepModeNone 表示当前没有等待命中的单步请求。
+	dapStepModeNone dapStepMode = ""
+	// dapStepModeInto 表示在下一条不同源码行暂停，可进入更深调用帧。
+	dapStepModeInto dapStepMode = "into"
+	// dapStepModeOver 表示只在当前或更浅调用深度的下一条不同源码行暂停。
+	dapStepModeOver dapStepMode = "over"
+	// dapStepModeOut 表示在离开当前调用深度后暂停。
+	dapStepModeOut dapStepMode = "out"
+)
 
 // protocolMessage 表示 DAP JSON 消息的通用字段。
 //
@@ -411,7 +443,7 @@ func (session *connectionSession) responseBody(request protocolMessage) (any, bo
 		return map[string]any{
 			"supportsConfigurationDoneRequest": true,
 			"supportsTerminateRequest":         true,
-			"supportsEvaluateForHovers":        false,
+			"supportsEvaluateForHovers":        true,
 			"supportsSetVariable":              true,
 		}, true
 	case "launch", "attach":
@@ -425,11 +457,14 @@ func (session *connectionSession) responseBody(request protocolMessage) (any, bo
 		// 解析并保存源码断点，让 VM 指令观察器可以在对应行暂停。
 		return session.server.setBreakpoints(request.Arguments), true
 	case "threads":
-		// GLua 目前只暴露主线程；协程线程映射后续再接入。
-		return map[string]any{"threads": []map[string]any{{"id": 1, "name": "main"}}}, true
+		// 主线程与已创建 coroutine 都映射为稳定 DAP threads。
+		return session.server.threads(), true
+	case "evaluate":
+		// 仅在暂停态读取有限表达式，不执行任意 Lua 代码。
+		return session.server.evaluate(request.Arguments), true
 	case "stackTrace":
-		// 当前先暴露暂停点所在的顶层帧，后续再扩展完整调用栈。
-		return session.server.stackTrace(), true
+		// 暂停时返回从当前帧到最早帧的调用栈快照。
+		return session.server.stackTrace(request.Arguments), true
 	case "scopes":
 		// 暂停时暴露当前帧局部变量 scope；未暂停时没有 scope。
 		return session.server.scopes(), true
@@ -444,9 +479,19 @@ func (session *connectionSession) responseBody(request protocolMessage) (any, bo
 		// 断开调试会话时释放暂停点，避免 CLI 永久等待。
 		session.server.resumeAll(true)
 		return map[string]any{}, true
-	case "next", "stepIn", "stepOut":
-		// 当前先实现源码行级步进；三种步进都会在下一条不同源码行暂停。
-		session.server.prepareStep()
+	case "next":
+		// next 只在当前或更浅调用深度的下一条不同源码行暂停。
+		session.server.prepareStep(dapStepModeOver)
+		session.server.resumeAll(false)
+		return map[string]any{}, true
+	case "stepIn":
+		// stepIn 允许进入被调函数，在任意深度的下一条不同源码行暂停。
+		session.server.prepareStep(dapStepModeInto)
+		session.server.resumeAll(false)
+		return map[string]any{}, true
+	case "stepOut":
+		// stepOut 必须等待当前调用帧返回到更浅深度后再暂停。
+		session.server.prepareStep(dapStepModeOut)
 		session.server.resumeAll(false)
 		return map[string]any{}, true
 	case "pause":
@@ -465,6 +510,125 @@ func (server *Server) markConfigured() {
 	server.configOnce.Do(func() {
 		close(server.configuredCh)
 	})
+}
+
+// threads 返回当前暂停 State 可观测的主线程与 coroutine DAP 描述。
+func (server *Server) threads() map[string]any {
+	// 线程列表从当前暂停 State 读取；未暂停时仍保留兼容的 main 线程占位。
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if server.currentStop == nil || server.currentStop.State == nil {
+		// 尚未绑定 State 时维持最小 DAP threads 响应。
+		return map[string]any{"threads": []map[string]any{{"id": 1, "name": "main (not stopped)"}}}
+	}
+	threads := server.currentStop.State.Threads()
+	result := make([]map[string]any, 0, len(threads))
+	for _, thread := range threads {
+		// nil 项不构成 Lua coroutine，不进入 DAP 列表。
+		if thread == nil {
+			continue
+		}
+		threadID := server.threadIDLocked(thread)
+		name := "coroutine " + strconv.Itoa(threadID)
+		if thread.IsMain() {
+			// 主线程使用固定可读名称，便于 IDE 线程面板识别。
+			name = "main"
+		}
+		result = append(result, map[string]any{"id": threadID, "name": name + " (" + string(thread.Status()) + ")"})
+	}
+	return map[string]any{"threads": result}
+}
+
+// threadIDLocked 为一个 runtime thread 分配稳定的 DAP 整数标识。
+//
+// 调用方必须持有 server.mu；线程对象生命周期由 State 管理，因此 server 仅保留调试会话期间的弱语义索引。
+func (server *Server) threadIDLocked(thread *runtime.Thread) int {
+	// 已分配线程复用同一 DAP id，保证前端刷新不抖动。
+	if threadID, ok := server.threadIDs[thread]; ok {
+		return threadID
+	}
+	threadID := server.nextThreadID
+	server.nextThreadID++
+	server.threadIDs[thread] = threadID
+	return threadID
+}
+
+// evaluate 在暂停态解析无副作用的变量路径表达式。
+//
+// 支持标识符、点号 table 字段和字符串/整数 table 下标；不编译或执行 Lua 代码，避免 Hover、Watch 或
+// Debug Console 改变被调试程序状态。解析失败按 DAP evaluate 约定返回字符串结果而非断开连接。
+func (server *Server) evaluate(arguments json.RawMessage) map[string]any {
+	var request struct {
+		Expression string `json:"expression"`
+	}
+	if err := json.Unmarshal(arguments, &request); err != nil {
+		// 结构错误返回可展示结果，避免简化客户端因错误请求失去调试会话。
+		return map[string]any{"result": "<invalid evaluate arguments>", "variablesReference": 0}
+	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	value, err := server.evaluateLocked(request.Expression)
+	if err != nil {
+		// 不支持的表达式以文本反馈，不执行 fallback Lua chunk。
+		return map[string]any{"result": "<" + err.Error() + ">", "variablesReference": 0}
+	}
+	return map[string]any{"result": value.DebugString(), "type": valueTypeName(value), "variablesReference": server.valueReferenceLocked(value)}
+}
+
+// evaluateLocked 解析并读取当前暂停帧可见的变量路径。
+//
+// 调用方必须持有 server.mu；表达式语法有意保持只读且最小化。
+func (server *Server) evaluateLocked(expression string) (runtime.Value, error) {
+	// 没有暂停点时不存在安全的变量可见性边界。
+	if server.currentStop == nil {
+		return runtime.NilValue(), errors.New("GLua is not stopped")
+	}
+	parts := strings.Split(strings.TrimSpace(expression), ".")
+	if len(parts) == 0 || parts[0] == "" {
+		return runtime.NilValue(), errors.New("expression must be a variable path")
+	}
+	value, ok := server.evaluateRootLocked(parts[0])
+	if !ok {
+		return runtime.NilValue(), fmt.Errorf("unknown variable %q", parts[0])
+	}
+	for _, part := range parts[1:] {
+		// 点号后必须是非空字段，且仅允许 raw table 读取。
+		if part == "" || value.Kind != runtime.KindTable {
+			return runtime.NilValue(), errors.New("expression is not a readable table path")
+		}
+		table, tableOK := value.Ref.(*runtime.Table)
+		if !tableOK || table == nil {
+			return runtime.NilValue(), errors.New("expression references an invalid table")
+		}
+		value = table.RawGetString(part)
+	}
+	return value, nil
+}
+
+// evaluateRootLocked 按 Locals、Upvalues、Globals 优先级读取路径根变量。
+//
+// 调用方必须持有 server.mu；该顺序与 Lua 词法查找可观察部分保持一致。
+func (server *Server) evaluateRootLocked(name string) (runtime.Value, bool) {
+	for _, local := range server.currentStop.Variables {
+		// 局部变量优先覆盖同名 upvalue 和全局。
+		if local.Name == name {
+			return local.Value, true
+		}
+	}
+	for _, upvalue := range server.currentStopUpvaluesLocked() {
+		// 当前 closure 的具名 upvalue 是第二层查找范围。
+		if upvalue.name == name {
+			return upvalue.value, true
+		}
+	}
+	if server.currentStop.State != nil && server.currentStop.State.Globals() != nil {
+		// 最后使用全局表 raw 读取，避免元方法产生副作用。
+		value := server.currentStop.State.Globals().RawGetString(name)
+		if !value.IsNil() {
+			return value, true
+		}
+	}
+	return runtime.NilValue(), false
 }
 
 // setBreakpoints 解析 DAP setBreakpoints 参数并更新 server 断点表。
@@ -517,50 +681,132 @@ func (server *Server) setBreakpoints(arguments json.RawMessage) map[string]any {
 	return map[string]any{"breakpoints": breakpointResults}
 }
 
-// stackTrace 返回当前暂停点的最小调用栈。
+// stackTrace 返回当前暂停点的完整可用调用栈快照。
 //
-// 真实多帧调用栈后续会从 runtime.CallFrame 快照扩展；当前至少让 IDE 能定位断点行。
-func (server *Server) stackTrace() map[string]any {
+// Lua 帧会从 closure Proto 读取 source 和行号；Go 帧没有稳定源码位置时只返回名称，避免 IDE 跳到错误文件。
+func (server *Server) stackTrace(arguments json.RawMessage) map[string]any {
 	server.mu.Lock()
 	defer server.mu.Unlock()
 	if server.currentStop == nil {
 		// 未暂停时没有可展示帧。
 		return map[string]any{"stackFrames": []any{}, "totalFrames": 0}
 	}
-	frame := map[string]any{
-		"id":     1,
-		"name":   "main",
-		"line":   server.currentStop.Line,
-		"column": 1,
-		"source": map[string]any{
-			"name": filepath.Base(server.currentStop.Source),
-			"path": server.currentStop.Source,
-		},
+	requestedThreadID := parseDAPThreadID(arguments)
+	activeThreadID := server.threadIDLocked(server.currentStop.Thread)
+	frames := server.currentStop.Frames
+	stopSource := server.currentStop.Source
+	stopLine := server.currentStop.Line
+	if requestedThreadID > 0 && requestedThreadID != activeThreadID && server.currentStop.State != nil {
+		// 选择已挂起 coroutine 时读取其 yield 保存的 traceback，而不伪造当前执行位置。
+		frames = nil
+		stopSource = ""
+		stopLine = 0
+		for _, thread := range server.currentStop.State.Threads() {
+			if thread != nil && server.threadIDLocked(thread) == requestedThreadID {
+				frames = thread.TracebackFrames()
+				break
+			}
+		}
 	}
-	return map[string]any{"stackFrames": []map[string]any{frame}, "totalFrames": 1}
+	if len(frames) == 0 {
+		// 顶层 chunk 在没有显式调用帧时仍需返回当前暂停位置。
+		frames = []runtime.CallFrame{{Kind: runtime.CallFrameKindLua, Name: "main"}}
+	}
+	result := make([]map[string]any, 0, len(frames))
+	for index, frame := range frames {
+		// 当前顶层帧以断点位置为准，其余帧使用各自 Proto 调试信息。
+		frameSource, frameLine := dapCallFrameLocation(frame)
+		if index == 0 {
+			frameSource = stopSource
+			frameLine = stopLine
+		}
+		name := frame.Name
+		if name == "" {
+			// 缺少 debug 名称时区分 Lua/Go 帧，仍保证变量窗口可读。
+			if frame.Kind == runtime.CallFrameKindGo {
+				name = "[Go function]"
+			} else {
+				name = "[Lua function]"
+			}
+		}
+		entry := map[string]any{"id": index + 1, "name": name, "line": frameLine, "column": 1}
+		if frameSource != "" {
+			// 仅在存在真实 source 时提供跳转目标。
+			entry["source"] = map[string]any{"name": filepath.Base(frameSource), "path": frameSource}
+		}
+		result = append(result, entry)
+	}
+	return map[string]any{"stackFrames": result, "totalFrames": len(result)}
+}
+
+// parseDAPThreadID 解析 DAP stackTrace 请求中的可选线程标识。
+//
+// 参数缺失或损坏时返回 0，调用方按当前暂停线程处理，兼容未传 threadId 的简化客户端。
+func parseDAPThreadID(arguments json.RawMessage) int {
+	// 空参数没有指定线程。
+	if len(arguments) == 0 {
+		// 0 表示使用当前暂停线程。
+		return 0
+	}
+	var request struct {
+		ThreadID int `json:"threadId"`
+	}
+	if err := json.Unmarshal(arguments, &request); err != nil {
+		// 损坏参数不应中断整个调试会话。
+		return 0
+	}
+	return request.ThreadID
+}
+
+// dapCallFrameLocation 从 Lua closure Proto 推导 DAP 可展示的位置。
+func dapCallFrameLocation(frame runtime.CallFrame) (string, int) {
+	// Go closure 不含 Lua Proto，不能伪造 source 或行号。
+	if frame.Function.Kind != runtime.KindLuaClosure {
+		return "", 0
+	}
+	closure, _ := frame.Function.Ref.(*runtime.LuaClosure)
+	if closure == nil || closure.Proto == nil {
+		// 损坏或 stripped closure 没有可定位调试信息。
+		return "", 0
+	}
+	source := normalizeSourcePath(closure.Proto.Source, "")
+	if frame.CurrentPC < 0 || frame.CurrentPC >= len(closure.Proto.LineInfo) {
+		// 缺少当前 PC 行号时仍返回 source，方便 IDE 展示调用关系。
+		return source, 0
+	}
+	return source, closure.Proto.LineInfo[frame.CurrentPC]
 }
 
 // scopes 返回当前暂停帧的 DAP 变量作用域。
 //
-// 当前实现只暴露局部变量作用域；variablesReference 固定为 1，并由 variables 方法读取当前暂停点快照。
+// 当前实现暴露局部变量、当前 Lua closure 的 upvalue 和全局环境；固定 scope 引用不会与 table 展开引用冲突。
 func (server *Server) scopes() map[string]any {
 	server.mu.Lock()
 	defer server.mu.Unlock()
-	if server.currentStop == nil || len(server.currentStop.Variables) == 0 {
-		// 未暂停或没有局部变量时返回空 scope。
+	if server.currentStop == nil {
+		// 未暂停时没有可展示 scope。
 		return map[string]any{"scopes": []any{}}
 	}
-	scope := map[string]any{
-		"name":               "Locals",
-		"variablesReference": 1,
-		"expensive":          false,
+	scopes := make([]map[string]any, 0, 3)
+	if len(server.currentStop.Variables) > 0 {
+		// 仅在存在可见具名局部变量时展示 Locals scope。
+		scopes = append(scopes, map[string]any{"name": "Locals", "variablesReference": dapLocalsVariablesReference, "expensive": false})
 	}
-	return map[string]any{"scopes": []map[string]any{scope}}
+	if len(server.currentStopUpvaluesLocked()) > 0 {
+		// 当前 Lua closure 有捕获值时展示独立 Upvalues scope。
+		scopes = append(scopes, map[string]any{"name": "Upvalues", "variablesReference": dapUpvaluesVariablesReference, "expensive": false})
+	}
+	if server.currentStop.State != nil && server.currentStop.State.Globals() != nil {
+		// 全局环境是可读写 Lua table，复用现有 variables/table 展开和 setVariable 路径。
+		globalValue := runtime.ReferenceValue(runtime.KindTable, server.currentStop.State.Globals())
+		scopes = append(scopes, map[string]any{"name": "Globals", "variablesReference": server.valueReferenceLocked(globalValue), "expensive": true})
+	}
+	return map[string]any{"scopes": scopes}
 }
 
 // variables 返回当前暂停点保存的局部变量快照。
 //
-// variablesReference=1 表示 Locals scope；table 值会分配独立 reference，客户端展开 table 时会用该
+// 固定引用分别表示 Locals 和 Upvalues scope；table 值会分配独立 reference，客户端展开 table 时会用该
 // reference 再次请求子项。未知 reference 返回空列表，保持 DAP 客户端请求幂等且不会 panic。
 func (server *Server) variables(arguments json.RawMessage) map[string]any {
 	server.mu.Lock()
@@ -572,9 +818,13 @@ func (server *Server) variables(arguments json.RawMessage) map[string]any {
 	reference := parseVariablesReference(arguments)
 	if reference <= 0 {
 		// 部分简化客户端不会携带 arguments；兼容为 Locals scope。
-		reference = 1
+		reference = dapLocalsVariablesReference
 	}
-	if reference != 1 {
+	if reference == dapUpvaluesVariablesReference {
+		// Upvalues 使用当前顶层 Lua closure 的实时值快照。
+		return map[string]any{"variables": server.upvalueVariablesLocked()}
+	}
+	if reference != dapLocalsVariablesReference {
 		// 非 Locals reference 表示展开 table 子项。
 		return map[string]any{"variables": server.tableVariablesLocked(reference)}
 	}
@@ -589,6 +839,81 @@ func (server *Server) variables(arguments json.RawMessage) map[string]any {
 		})
 	}
 	return map[string]any{"variables": values}
+}
+
+// dapUpvalue 保存 DAP Upvalues scope 需要展示和写回的一项闭包捕获值。
+type dapUpvalue struct {
+	// name 是 Proto 调试信息中的 upvalue 名称，缺失时使用稳定下标名称。
+	name string
+	// index 是 Lua closure 中的零基 upvalue 下标。
+	index int
+	// value 是当前 cell 或 legacy Upvalues 切片中的实时值。
+	value runtime.Value
+	// closure 是提供该 upvalue 的当前 Lua closure。
+	closure *runtime.LuaClosure
+}
+
+// currentStopUpvaluesLocked 从当前暂停点的顶层 Lua 调用帧提取可见 upvalue。
+//
+// 调用方必须持有 server.mu；Go closure 没有统一的可写 upvalue 模型，因此不会伪装成 Lua Upvalues scope。
+func (server *Server) currentStopUpvaluesLocked() []dapUpvalue {
+	// 没有暂停帧时不存在可读 upvalue。
+	if server.currentStop == nil || len(server.currentStop.Frames) == 0 {
+		// 顶层 chunk 未建立调用帧时安全返回空集合。
+		return nil
+	}
+	function := server.currentStop.Frames[0].Function
+	if function.Kind != runtime.KindLuaClosure {
+		// Go 或损坏帧不提供 Lua closure upvalue。
+		return nil
+	}
+	closure, ok := function.Ref.(*runtime.LuaClosure)
+	if !ok || closure == nil {
+		// 损坏 closure 引用不能进入变量面板。
+		return nil
+	}
+	count := len(closure.Upvalues)
+	if len(closure.UpvalueCells) > count {
+		// 已捕获 cell 的数量可能超过旧快照切片，保留全部可见值。
+		count = len(closure.UpvalueCells)
+	}
+	upvalues := make([]dapUpvalue, 0, count)
+	for index := 0; index < count; index++ {
+		// 缺少名称时使用 Lua debug 库兼容的稳定占位名称。
+		name := fmt.Sprintf("upvalue_%d", index+1)
+		if closure.Proto != nil && index < len(closure.Proto.Upvalues) && closure.Proto.Upvalues[index].Name != "" {
+			name = closure.Proto.Upvalues[index].Name
+		}
+		value := runtime.NilValue()
+		if index < len(closure.UpvalueCells) && closure.UpvalueCells[index] != nil {
+			// 共享 cell 优先返回当前值，避免展示创建 closure 时的旧快照。
+			value = closure.UpvalueCells[index].Value()
+		} else if index < len(closure.Upvalues) {
+			// legacy closure 没有 cell 时保留原始切片兼容。
+			value = closure.Upvalues[index]
+		}
+		upvalues = append(upvalues, dapUpvalue{name: name, index: index, value: value, closure: closure})
+	}
+	return upvalues
+}
+
+// upvalueVariablesLocked 把当前 Lua closure upvalue 转换为 DAP 变量树节点。
+//
+// 调用方必须持有 server.mu；table upvalue 使用现有展开引用机制。
+func (server *Server) upvalueVariablesLocked() []map[string]any {
+	// 统一从当前暂停点读取实时 upvalue，避免长期缓存已失效 closure。
+	upvalues := server.currentStopUpvaluesLocked()
+	values := make([]map[string]any, 0, len(upvalues))
+	for _, upvalue := range upvalues {
+		// 每个捕获值沿用 Locals 的类型、调试展示和 table 展开语义。
+		values = append(values, map[string]any{
+			"name":               upvalue.name,
+			"value":              upvalue.value.DebugString(),
+			"type":               valueTypeName(upvalue.value),
+			"variablesReference": server.valueReferenceLocked(upvalue.value),
+		})
+	}
+	return values
 }
 
 // parseVariablesReference 解析 DAP variables 请求的 variablesReference。
@@ -646,7 +971,7 @@ func (server *Server) tableVariablesLocked(reference int) []map[string]any {
 
 // setVariable 修改当前暂停点中的一个变量。
 //
-// variablesReference=1 表示 Locals scope，name 按局部变量名匹配；其它 reference 表示 table 子项。
+// 固定引用表示 Locals 或 Upvalues scope，name 按变量名匹配；其它 reference 表示 table 子项。
 // value 只解析 nil、boolean、number 和 string 字面量；无法解析的文本按普通 string 写入。
 func (server *Server) setVariable(arguments json.RawMessage) (map[string]any, error) {
 	var request struct {
@@ -676,13 +1001,42 @@ func (server *Server) setVariable(arguments json.RawMessage) (map[string]any, er
 	reference := request.VariablesReference
 	if reference <= 0 {
 		// 少量客户端可能缺省 reference，按 Locals scope 兼容。
-		reference = 1
+		reference = dapLocalsVariablesReference
 	}
-	if reference == 1 {
+	if reference == dapLocalsVariablesReference {
 		// Locals scope 写回 VM 寄存器。
 		return server.setLocalVariableLocked(request.Name, value)
 	}
+	if reference == dapUpvaluesVariablesReference {
+		// Upvalues scope 写回当前 Lua closure 的捕获值或共享 cell。
+		return server.setUpvalueVariableLocked(request.Name, value)
+	}
 	return server.setTableVariableLocked(reference, request.Name, value)
+}
+
+// setUpvalueVariableLocked 写回当前暂停 Lua closure 的一个具名 upvalue。
+//
+// 调用方必须持有 server.mu；共享 cell 存在时更新 cell，否则更新 legacy Upvalues 快照。
+func (server *Server) setUpvalueVariableLocked(name string, value runtime.Value) (map[string]any, error) {
+	// 通过当前暂停帧重新定位 upvalue，避免变量树缓存覆盖函数调用后的 closure。
+	for _, upvalue := range server.currentStopUpvaluesLocked() {
+		if upvalue.name != name {
+			// 名称不匹配时继续查找。
+			continue
+		}
+		if upvalue.index < len(upvalue.closure.UpvalueCells) && upvalue.closure.UpvalueCells[upvalue.index] != nil {
+			// 共享 cell 写回会同时影响引用该 cell 的其他 closure。
+			upvalue.closure.UpvalueCells[upvalue.index].Set(value)
+		} else {
+			// legacy closure 使用独立切片保存 upvalue，必要时扩容保持索引一致。
+			for len(upvalue.closure.Upvalues) <= upvalue.index {
+				upvalue.closure.Upvalues = append(upvalue.closure.Upvalues, runtime.NilValue())
+			}
+			upvalue.closure.Upvalues[upvalue.index] = value
+		}
+		return server.setVariableResponseLocked(value), nil
+	}
+	return nil, fmt.Errorf("upvalue %q is not available", name)
 }
 
 // setLocalVariableLocked 写回当前暂停帧中的局部变量。
@@ -787,8 +1141,8 @@ func (server *Server) valueReferenceWithTableKeyLocked(value runtime.Value, key 
 //
 // 调用方必须持有 server.mu；每次恢复或新暂停都会重建缓存，确保变量树反映最新 VM 状态。
 func (server *Server) clearVariableReferencesLocked() {
-	// reference=1 保留给 Locals scope，因此下一个 table reference 从 2 开始。
-	server.nextVariableID = 2
+	// 固定 scope 已占用 Locals/Upvalues 两个引用，因此 table 从 3 开始分配。
+	server.nextVariableID = dapFirstDynamicVariablesReference
 	server.variableValues = make(map[int]runtime.Value)
 	server.variableTables = make(map[*runtime.Table]int)
 	server.variableTableKeys = make(map[int]runtime.Value)
@@ -873,22 +1227,23 @@ func parseDAPVariableValue(text string) (runtime.Value, error) {
 	return runtime.StringValue(text), nil
 }
 
-// prepareStep 设置一次源码行级步进请求。
+// prepareStep 设置一次带调用深度边界的单步请求。
 //
-// 如果当前已暂停，则记录当前 source:line，恢复后遇到不同可见源码行时再次暂停；如果未暂停，则退化为
-// pause 请求，在下一条可见源码行暂停。
-func (server *Server) prepareStep() {
+// 如果当前已暂停，则记录当前 source、行号和调用深度；如果未暂停，则退化为下一条可见源码行暂停。
+func (server *Server) prepareStep(mode dapStepMode) {
 	server.mu.Lock()
 	defer server.mu.Unlock()
-	server.stepMode = true
+	server.stepMode = mode
 	if server.currentStop != nil {
 		// 从当前暂停位置开始，避免刚 resume 就停在同一源码行。
 		server.stepSource = server.currentStop.Source
 		server.stepLine = server.currentStop.Line
+		server.stepDepth = server.currentStop.Depth
 		return
 	}
 	server.stepSource = ""
 	server.stepLine = 0
+	server.stepDepth = 0
 }
 
 // requestPause 请求在下一条可见源码行暂停。
@@ -911,9 +1266,10 @@ func (server *Server) resumeAll(clearPendingStep bool) {
 	}
 	if clearPendingStep {
 		// 用户选择普通继续或结束会话时，必须取消此前未消费的单步/暂停请求，避免恢复后又被旧 step 拉回下一行。
-		server.stepMode = false
+		server.stepMode = dapStepModeNone
 		server.stepSource = ""
 		server.stepLine = 0
+		server.stepDepth = 0
 		server.pauseRequested = false
 	}
 	if !server.stopped {
@@ -950,7 +1306,7 @@ func (server *Server) BeforeInstruction(state *runtime.State, vm *runtime.VM, pr
 	if server.hasBreakpoint(source, line) {
 		// 命中用户设置的断点。
 		reason = "breakpoint"
-	} else if server.consumeStepStop(source, line) {
+	} else if server.consumeStepStop(source, line, state.CallDepth()) {
 		// 命中 step/pause 请求。
 		reason = "step"
 	}
@@ -963,13 +1319,14 @@ func (server *Server) BeforeInstruction(state *runtime.State, vm *runtime.VM, pr
 		// 暂停前复制当前活动局部变量，供 DAP variables 请求读取。
 		variables = vm.ActiveLocalSnapshots()
 	}
-	return server.pauseAt(state, stoppedLocation{Source: source, Line: line, PC: pc, Reason: reason, Variables: variables, VM: vm})
+	thread, _ := state.Running()
+	return server.pauseAt(state, stoppedLocation{Source: source, Line: line, PC: pc, Reason: reason, Variables: variables, VM: vm, Depth: state.CallDepth(), Frames: state.TracebackFrames(), State: state, Thread: thread})
 }
 
 // consumeStepStop 判断当前 source:line 是否满足步进或 pause 请求。
 //
 // 返回 true 时会消费本次 step/pause 状态；行级 step 会跳过恢复前所在的同一源码行。
-func (server *Server) consumeStepStop(source string, line int) bool {
+func (server *Server) consumeStepStop(source string, line int, depth int) bool {
 	server.mu.Lock()
 	defer server.mu.Unlock()
 	if server.pauseRequested {
@@ -977,7 +1334,7 @@ func (server *Server) consumeStepStop(source string, line int) bool {
 		server.pauseRequested = false
 		return true
 	}
-	if !server.stepMode {
+	if server.stepMode == dapStepModeNone {
 		// 没有步进请求时不暂停。
 		return false
 	}
@@ -985,9 +1342,31 @@ func (server *Server) consumeStepStop(source string, line int) bool {
 		// 仍在恢复前同一行，继续执行到下一条可见行。
 		return false
 	}
-	server.stepMode = false
+	switch server.stepMode {
+	case dapStepModeInto:
+		// stepIn 在任意调用深度的下一条不同源码行停止。
+	case dapStepModeOver:
+		// stepOver 必须忽略更深被调函数内部的源码行。
+		if depth > server.stepDepth {
+			return false
+		}
+	case dapStepModeOut:
+		// stepOut 只有在当前调用帧已经返回后才停止。
+		if depth >= server.stepDepth {
+			return false
+		}
+	default:
+		// 未知模式不应静默暂停，清理状态并继续执行。
+		server.stepMode = dapStepModeNone
+		server.stepSource = ""
+		server.stepLine = 0
+		server.stepDepth = 0
+		return false
+	}
+	server.stepMode = dapStepModeNone
 	server.stepSource = ""
 	server.stepLine = 0
+	server.stepDepth = 0
 	return true
 }
 
@@ -1027,6 +1406,11 @@ func (server *Server) pauseAt(state *runtime.State, location stoppedLocation) er
 		return nil
 	}
 	server.currentStop = &location
+	threadID := 1
+	if location.Thread != nil {
+		// 当前执行 coroutine 使用与 threads 请求相同的稳定 DAP id。
+		threadID = server.threadIDLocked(location.Thread)
+	}
 	server.clearVariableReferencesLocked()
 	server.stopped = true
 	continueCh := server.continueCh
@@ -1036,7 +1420,7 @@ func (server *Server) pauseAt(state *runtime.State, location stoppedLocation) er
 		Event: "stopped",
 		Body: map[string]any{
 			"reason":            location.Reason,
-			"threadId":          1,
+			"threadId":          threadID,
 			"allThreadsStopped": true,
 		},
 	})

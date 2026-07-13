@@ -1069,10 +1069,10 @@ func TestUpvalueIDSupportsGoClosureWithUpvalues(t *testing.T) {
 	}
 }
 
-// TestUpvalueJoinCopiesSourceSnapshot 验证 debug.upvaluejoin 的阶段性绑定行为。
+// TestUpvalueJoinCopiesLegacySourceSnapshot 验证 debug.upvaluejoin 对旧快照闭包的兼容 fallback。
 //
-// 当前 runtime 尚未实现共享 upvalue cell，因此 upvaluejoin 会把来源 upvalue 当前值复制到目标。
-func TestUpvalueJoinCopiesSourceSnapshot(t *testing.T) {
+// 没有 UpvalueCells 的手工旧闭包无法建立共享 identity，因此只复制来源当前值。
+func TestUpvalueJoinCopiesLegacySourceSnapshot(t *testing.T) {
 	// 构造目标和来源 Lua closure。
 	target := &runtime.LuaClosure{Upvalues: []runtime.Value{runtime.StringValue("target")}}
 	source := &runtime.LuaClosure{Upvalues: []runtime.Value{runtime.StringValue("source")}}
@@ -1093,9 +1093,51 @@ func TestUpvalueJoinCopiesSourceSnapshot(t *testing.T) {
 	}
 }
 
+// TestUpvalueJoinSharesSourceCell 验证 debug.upvaluejoin 会让目标和来源闭包共享真实 upvalue cell。
+//
+// join 后通过 debug.setupvalue 修改来源值，目标必须立即观察到变化，且两者 upvalueid 必须一致。
+func TestUpvalueJoinSharesSourceCell(t *testing.T) {
+	// 为目标和来源分别构造独立闭合 cell，避免测试依赖 VM 寄存器生命周期。
+	targetCell := runtime.NewClosedUpvalueCell(runtime.StringValue("target"))
+	sourceCell := runtime.NewClosedUpvalueCell(runtime.StringValue("source"))
+	target := &runtime.LuaClosure{
+		Upvalues:     []runtime.Value{runtime.StringValue("target")},
+		UpvalueCells: []*runtime.UpvalueCell{targetCell},
+	}
+	source := &runtime.LuaClosure{
+		Upvalues:     []runtime.Value{runtime.StringValue("source")},
+		UpvalueCells: []*runtime.UpvalueCell{sourceCell},
+	}
+	targetValue := runtime.ReferenceValue(runtime.KindLuaClosure, target)
+	sourceValue := runtime.ReferenceValue(runtime.KindLuaClosure, source)
+	if _, err := UpvalueJoin(targetValue, runtime.IntegerValue(1), sourceValue, runtime.IntegerValue(1)); err != nil {
+		// 合法 Lua closure 和 upvalue 下标必须完成共享绑定。
+		t.Fatalf("UpvalueJoin failed: %v", err)
+	}
+	if target.UpvalueCells[0] != sourceCell {
+		// 目标必须直接引用来源 cell，而不是只复制当前值。
+		t.Fatalf("target cell=%p source cell=%p", target.UpvalueCells[0], sourceCell)
+	}
+	if _, err := SetUpvalue(sourceValue, runtime.IntegerValue(1), runtime.StringValue("updated")); err != nil {
+		// 来源 setupvalue 必须写入共享 cell。
+		t.Fatalf("SetUpvalue failed: %v", err)
+	}
+	values, err := GetUpvalue(targetValue, runtime.IntegerValue(1))
+	if err != nil || len(values) != 2 || values[1].String != "updated" {
+		// 目标闭包应立即读取来源写入的新值。
+		t.Fatalf("GetUpvalue target values=%#v err=%v", values, err)
+	}
+	targetID, targetErr := UpvalueID(targetValue, runtime.IntegerValue(1))
+	sourceID, sourceErr := UpvalueID(sourceValue, runtime.IntegerValue(1))
+	if targetErr != nil || sourceErr != nil || len(targetID) != 1 || len(sourceID) != 1 || targetID[0].String != sourceID[0].String {
+		// 共享 cell 的 debug.upvalueid 必须相同。
+		t.Fatalf("upvalue ids target=%#v source=%#v errors=%v/%v", targetID, sourceID, targetErr, sourceErr)
+	}
+}
+
 // TestHookDispatchCallReturnLine 验证 call、return 和 line hook 显式派发。
 //
-// 当前 VM 尚未自动触发 hook，但 debug 环境已经提供可复用的事件检查点。
+// 该测试固定 debug 环境的底层显式派发顺序；VM 自动触发路径由 lua/api_test.go 的脚本回归覆盖。
 func TestHookDispatchCallReturnLine(t *testing.T) {
 	// 记录 hook 事件和行号，便于断言派发顺序。
 	environment := NewEnvironment(runtime.NewState())

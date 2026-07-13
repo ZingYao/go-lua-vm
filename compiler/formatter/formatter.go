@@ -311,14 +311,12 @@ func formatCodeLine(code string) string {
 	}
 
 	var builder strings.Builder
-	var previous lexer.Token
-	for index, token := range tokens {
-		if builder.Len() > 0 && needsSpace(previous, token) {
+	for index := range tokens {
+		if builder.Len() > 0 && needsSpace(tokens, index) {
 			// 相邻 token 需要分隔时插入单个空格。
 			builder.WriteByte(' ')
 		}
 		builder.WriteString(rawTokenText(code, tokens, index))
-		previous = token
 	}
 	return builder.String()
 }
@@ -340,21 +338,23 @@ func rawTokenText(code string, tokens []lexer.Token, index int) string {
 	return strings.TrimSpace(code[start:end])
 }
 
-// needsSpace 判断相邻两个 token 是否需要插入空格。
+// needsSpace 判断当前 token 与前一个 token 之间是否需要插入空格。
 //
-// previous 和 current 必须来自同一行 token 序列。
-func needsSpace(previous lexer.Token, current lexer.Token) bool {
+// tokens 必须来自同一行，index 必须指向有效 token；函数会结合更早的表达式上下文区分一元和二元运算符。
+func needsSpace(tokens []lexer.Token, index int) bool {
 	// 首个 token 前不插入空格。
-	if previous.Text == "" {
+	if index <= 0 || index >= len(tokens) {
 		return false
 	}
+	previous := tokens[index-1]
+	current := tokens[index]
 	if isSpacingPunctuation(previous.Text) || isSpacingPunctuation(current.Text) {
 		// 括号、索引、逗号、点号等标点按文本规则处理，避免 lexer kind 差异导致 a[1] 被拆开。
-		return operatorNeedsSpace(previous, current)
+		return operatorNeedsSpace(tokens, index)
 	}
 	if current.Kind == lexer.TokenOperator || previous.Kind == lexer.TokenOperator {
 		// 任一 token 是操作符时交给操作符规则判断。
-		return operatorNeedsSpace(previous, current)
+		return operatorNeedsSpace(tokens, index)
 	}
 	return true
 }
@@ -373,10 +373,16 @@ func isSpacingPunctuation(text string) bool {
 	}
 }
 
-// operatorNeedsSpace 处理标点和中缀操作符的空格规则。
+// operatorNeedsSpace 处理标点、一元操作符和中缀操作符的空格规则。
 //
-// previous 和 current 至少有一个是操作符 token。
-func operatorNeedsSpace(previous lexer.Token, current lexer.Token) bool {
+// tokens 必须来自同一行，index 指向当前 token，且当前 token 或前一个 token 至少有一个是操作符。
+func operatorNeedsSpace(tokens []lexer.Token, index int) bool {
+	// 调用方保证 index 有前置 token；这里再次限制范围，避免后续维护引入越界。
+	if index <= 0 || index >= len(tokens) {
+		return false
+	}
+	previous := tokens[index-1]
+	current := tokens[index]
 	// 标点前后空格规则使用小表表达，保持 formatter 行为可读。
 	noSpaceBefore := map[string]bool{
 		")": true, "[": true, "]": true, "}": true, ",": true, ";": true, ":": true, ".": true,
@@ -396,8 +402,8 @@ func operatorNeedsSpace(previous lexer.Token, current lexer.Token) bool {
 		// table constructor 前保留一个空格，便于和赋值/return 等分隔。
 		return true
 	}
-	if previous.Text == "#" {
-		// 长度操作符为前缀操作符，后续表达式直接黏接，不增加空格。
+	if isUnaryOperatorAt(tokens, index-1) {
+		// 一元操作符与操作数直接黏接，确保 -1、~mask 与 #items 不被拆开。
 		return false
 	}
 	if previous.Text == "," || previous.Text == ";" {
@@ -405,6 +411,48 @@ func operatorNeedsSpace(previous lexer.Token, current lexer.Token) bool {
 		return true
 	}
 	return true
+}
+
+// isUnaryOperatorAt 判断指定 token 是否在当前表达式中充当前缀一元操作符。
+//
+// tokens 必须来自同一行，index 指向候选操作符；返回 true 表示其后操作数不应插入空格。
+func isUnaryOperatorAt(tokens []lexer.Token, index int) bool {
+	// 越界 token 不具备一元语义。
+	if index < 0 || index >= len(tokens) {
+		return false
+	}
+	operator := tokens[index].Text
+	if operator != "-" && operator != "~" && operator != "#" {
+		// not 按 Lua 常用风格保留空格，其余非前缀操作符直接排除。
+		return false
+	}
+	if operator == "#" {
+		// 长度操作符在 Lua 中始终是一元操作符。
+		return true
+	}
+	if index == 0 {
+		// 行首的负号或按位非只能作为一元操作符。
+		return true
+	}
+	return !tokenCanEndExpression(tokens[index-1])
+}
+
+// tokenCanEndExpression 判断 token 是否可以作为一个完整表达式的末尾。
+//
+// token 来自 formatter 当前行；返回 false 时，紧随其后的 - 或 ~ 应解释为前缀一元操作符。
+func tokenCanEndExpression(token lexer.Token) bool {
+	// 字面量和标识符可以直接结束表达式。
+	if token.Kind == lexer.TokenIdentifier || token.Kind == lexer.TokenNumber || token.Kind == lexer.TokenString {
+		return true
+	}
+	switch token.Text {
+	case ")", "]", "}", "true", "false", "nil", "...":
+		// 闭合标点、语言常量和 vararg 都能作为左侧表达式。
+		return true
+	default:
+		// 赋值符、二元操作符、逗号和控制关键字后只能开始新表达式。
+		return false
+	}
 }
 
 // joinCodeAndComment 合并格式化后的代码和保留的短注释。

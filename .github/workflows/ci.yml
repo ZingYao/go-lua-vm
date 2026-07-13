@@ -57,6 +57,10 @@ jobs:
       - name: Project Gates
         run: ./scripts/check-go-gates.sh
 
+      - name: Lua Race Check
+        if: runner.os == 'Linux'
+        run: go test -race ./lua
+
   native-cross-compile:
     name: native cross compile (${{ matrix.name }})
     runs-on: ${{ matrix.os }}

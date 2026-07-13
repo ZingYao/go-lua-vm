@@ -1027,7 +1027,7 @@ func SetUpvalue(args ...runtime.Value) ([]runtime.Value, error) {
 		// 超出 upvalue 数量时按 Lua setupvalue 语义返回 nil。
 		return []runtime.Value{runtime.NilValue()}, nil
 	}
-	if upvalueIndex < len(closure.Proto.Upvalues) && closure.Proto.Upvalues[upvalueIndex].Const {
+	if closure.Proto != nil && upvalueIndex < len(closure.Proto.Upvalues) && closure.Proto.Upvalues[upvalueIndex].Const {
 		// glua const 捕获为 upvalue 后仍保持只读，debug.setupvalue 不能绕过语言层约束。
 		return nil, runtime.RaiseError(runtime.StringValue("cannot assign to const upvalue '" + upvalueName(closure, upvalueIndex) + "'"))
 	}
@@ -2677,7 +2677,7 @@ func joinLuaClosureUpvalue(targetClosure *runtime.LuaClosure, targetOffset int, 
 // dispatchHook 根据事件名执行已设置的 hook。
 //
 // event 必须是 Lua 5.3 标准 hook 事件名；line 仅对 line 事件有效。未设置 hook 或 mask 不匹配
-// 时返回 nil。hook 错误直接传播给调用方，后续 VM 接入时会转为运行时错误路径。
+// 时返回 nil。hook 错误直接传播给调用方；VM 指令循环会在 call、return、line 和 count 检查点复用该路径。
 func (environment *Environment) dispatchHook(event string, line int64) error {
 	// 默认 hook 调度只支持 debug 库可直接执行的 Go hook。
 	return environment.dispatchHookWithRunner(event, line, nil)

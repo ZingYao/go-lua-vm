@@ -1,0 +1,166 @@
+CONST DefaultMaxCallDepth
+CONST DefaultMaxStackDepth
+CONST ErrorClassOther
+CONST ErrorClassResourceLimit
+CONST ErrorClassRuntime
+CONST GluaEventProgressEnd
+CONST GluaEventProgressError
+CONST GluaEventProgressExit
+CONST GluaEventProgressFunctionCall
+CONST GluaEventProgressFunctionError
+CONST GluaEventProgressFunctionExit
+CONST GluaEventProgressFunctionReturn
+CONST GluaEventProgressLine
+CONST GluaEventProgressStart
+CONST KindBoolean
+CONST KindGoClosure
+CONST KindInteger
+CONST KindLuaClosure
+CONST KindNil
+CONST KindNumber
+CONST KindString
+CONST KindTable
+CONST KindThread
+CONST KindUserdata
+CONST ProgressEventLimitDrainTasks
+CONST ProgressEventLimitListeners
+CONST ProgressEventLimitQueuedTasks
+CONST ProgressEventScopeFile
+CONST ProgressEventScopeRuntime
+CONST RegistryIndexGlobals
+CONST RegistryIndexMainThread
+CONST RegistryPseudoIndex
+CONST ResourceLimitAllocation
+CONST ResourceLimitCall
+CONST ResourceLimitStack
+CONST SyntaxConst
+CONST SyntaxContinue
+CONST SyntaxSwitch
+FUNC func (context ProgressEventContext) Field(name string) Value
+FUNC func (context ProgressEventContext) RawValue() Value
+FUNC func (err *SyntaxError) Error() string
+FUNC func (err *SyntaxError) Unwrap() error
+FUNC func (eventError *ProgressEventArgumentError) Error() string
+FUNC func (eventError *ProgressEventArgumentError) Unwrap() error
+FUNC func (eventError *ProgressEventConfigConflictError) Error() string
+FUNC func (eventError *ProgressEventConfigConflictError) Unwrap() error
+FUNC func (eventError *ProgressEventLimitError) Error() string
+FUNC func (eventError *ProgressEventLimitError) Unwrap() error
+FUNC func (eventError *ProgressEventQueueFullError) Error() string
+FUNC func (eventError *ProgressEventQueueFullError) Unwrap() error
+FUNC func Call(state *State, function Value, args ...Value) ([]Value, error)
+FUNC func CallProgressEvent(state *State, source string, event string, payload ...Value) error
+FUNC func CallProgressEventAsync(state *State, source string, event string, payload ...Value) error
+FUNC func ChunkProgressEventSource(name string) (string, error)
+FUNC func ClassifyError(err error) ErrorClass
+FUNC func ClearProgressEvents(state *State, source string, event string) (int, error)
+FUNC func Close(state *State) error
+FUNC func DefaultOptions() Options
+FUNC func DefaultSyntaxExtensions() SyntaxSet
+FUNC func DoFile(state *State, path string) error
+FUNC func DoString(state *State, source string) error
+FUNC func ErrorObject(err error) Value
+FUNC func FileProgressEventSource(path string) (string, error)
+FUNC func FlushProgressEvents(state *State) (int, error)
+FUNC func GetGlobal(state *State, name string) (Value, error)
+FUNC func GetProgressEvent(state *State, eventID int64) (ProgressEventListener, bool, error)
+FUNC func IsResourceLimitError(err error) bool
+FUNC func IsRuntimeError(err error) bool
+FUNC func ListProgressEvents(state *State, source string) (ProgressEventSummary, error)
+FUNC func ListProgressEventsRaw(state *State, source string) (Value, error)
+FUNC func LoadFile(state *State, path string) error
+FUNC func LoadString(state *State, source string, chunkName string) error
+FUNC func NewState() *State
+FUNC func NewStateWithContext(ctx context.Context, options Options) (*State, error)
+FUNC func NewStateWithOptions(options Options) *State
+FUNC func NormalizeOptions(options Options) Options
+FUNC func NormalizeProgressEventSource(source string) (string, error)
+FUNC func OpenBase(state *State) error
+FUNC func OpenDebug(state *State) error
+FUNC func OpenIO(state *State) error
+FUNC func OpenLibs(state *State) error
+FUNC func OpenMath(state *State) error
+FUNC func OpenOS(state *State) error
+FUNC func OpenPackage(state *State) error
+FUNC func OpenString(state *State) error
+FUNC func OpenTable(state *State) error
+FUNC func OpenUTF8(state *State) error
+FUNC func PCall(state *State, call func(state *State) error) ([]Value, error)
+FUNC func PatchProgressEventOptions(state *State, eventID int64, patch ProgressEventOptionsPatch) (bool, error)
+FUNC func ProtectedCall(state *State, call func(state *State) error) error
+FUNC func Push(state *State, value Value) error
+FUNC func PushBoolean(state *State, value bool) error
+FUNC func PushInteger(state *State, value int64) error
+FUNC func PushNil(state *State) error
+FUNC func PushNumber(state *State, value float64) error
+FUNC func PushString(state *State, value string) error
+FUNC func RaiseError(object Value) error
+FUNC func Register(state *State, name string, fn Function) error
+FUNC func RemoveProgressEvent(state *State, eventID int64) (bool, error)
+FUNC func RemoveProgressEventGroup(state *State, source string, group string) (int, error)
+FUNC func SetContext(state *State, ctx context.Context) error
+FUNC func SetGlobal(state *State, name string, value Value) error
+FUNC func SetProgressEvent(state *State, source string, event string, callback ProgressEventCallback, options ...ProgressEventOptions) (int64, error)
+FUNC func SetProgressEventCallback(state *State, eventID int64, callback ProgressEventCallback) (bool, error)
+FUNC func SetProgressEventCallbackValue(state *State, eventID int64, callback Value) (bool, error)
+FUNC func SetProgressEventGroupMuted(state *State, source string, group string, muted bool) (int, error)
+FUNC func SetProgressEventMuted(state *State, eventID int64, muted bool) (bool, error)
+FUNC func SetProgressEventOptions(state *State, eventID int64, options ProgressEventOptions) (bool, error)
+FUNC func SetProgressEventTraceHook(state *State, hook ProgressEventTraceHook) error
+FUNC func SetProgressEventValue(state *State, source string, event string, callback Value, options ...ProgressEventOptions) (int64, error)
+FUNC func ToBoolean(state *State, index int) (bool, bool, error)
+FUNC func ToInteger(state *State, index int) (int64, bool, error)
+FUNC func ToNumber(state *State, index int) (float64, bool, error)
+FUNC func ToString(state *State, index int) (string, bool, error)
+FUNC func ToValue(state *State, index int) (Value, error)
+FUNC func WithGluaEvents(options Options, enabled bool) Options
+FUNC func WithSyntaxExtensions(options Options, syntax SyntaxSet) Options
+FUNC func WithoutSyntaxExtensions(options Options, disabled SyntaxSet) Options
+FUNC func XPCall(state *State, call func(state *State) error, handler ErrorHandler) ([]Value, error)
+TYPE type ErrorClass = runtime.ErrorClass
+TYPE type ErrorHandler = runtime.ErrorHandler
+TYPE type Function = GoResultsFunction
+TYPE type GoFunction = runtime.GoFunction
+TYPE type GoResultsFunction = runtime.GoResultsFunction
+TYPE type Options = runtime.Options
+TYPE type ProgressEventArgumentError struct
+TYPE type ProgressEventCallback func(context ProgressEventContext) error
+TYPE type ProgressEventConfigConflictError struct
+TYPE type ProgressEventContext struct
+TYPE type ProgressEventLimitError struct
+TYPE type ProgressEventLimitKind string
+TYPE type ProgressEventListener struct
+TYPE type ProgressEventNameSummary struct
+TYPE type ProgressEventOptions struct
+TYPE type ProgressEventOptionsPatch struct
+TYPE type ProgressEventQueueFullError struct
+TYPE type ProgressEventScope string
+TYPE type ProgressEventSummary struct
+TYPE type ProgressEventTrace struct
+TYPE type ProgressEventTraceHook func(trace ProgressEventTrace)
+TYPE type ProtectedCallFunc = runtime.ProtectedCallFunc
+TYPE type ResourceLimitError = runtime.ResourceLimitError
+TYPE type ResourceLimitKind = runtime.ResourceLimitKind
+TYPE type RuntimeError = runtime.RuntimeError
+TYPE type State = runtime.State
+TYPE type SyntaxError struct
+TYPE type SyntaxErrorDetails struct
+TYPE type SyntaxSet = extensions.SyntaxSet
+TYPE type Value = runtime.Value
+TYPE type ValueKind = runtime.ValueKind
+VAR ErrCallFrameUnderflow
+VAR ErrClosedState
+VAR ErrExecutionUnavailable
+VAR ErrExpectedCallable
+VAR ErrGluaEventsNotOpen
+VAR ErrGluaEventsUnavailable
+VAR ErrGluaNamespaceConflict
+VAR ErrLuaError
+VAR ErrNilContext
+VAR ErrNilProtectedCall
+VAR ErrNilState
+VAR ErrProgressEventConfigConflict
+VAR ErrProgressEventInvalidArgument
+VAR ErrProgressEventLimitExceeded
+VAR ErrProgressEventQueueFull
+VAR ErrStackUnderflow

@@ -1,5 +1,7 @@
 # GLua 语言扩展
 
+> 非商业用途可按 PolyForm Noncommercial 1.0.0 免费使用；商业用途需要向 `zing` 取得单独付费授权。完整条款见扩展内 `LICENSE` 和项目根目录 `COMMERCIAL_LICENSE.md`。
+
 面向 `go-lua-vm` / `glua` 的 VS Code 编辑器扩展，提供 GLua/Lua 编码、模块导航、文档提示、格式化和 DAP 调试连接能力。
 
 ## 概述

@@ -243,5 +243,5 @@ Windows 性能结果见 [Benchmark 最终结果](BENCHMARK.md)；功能验收复
 
 - 通过上述验收不代表任意动态库都能被 `require`；模块必须是 Lua 5.3 public C API 模块并导出 `luaopen_*`。
 - 不承诺依赖 Lua 内部头文件或访问 `lua_State` 内部结构的模块兼容。
-- 不承诺完整 Lua 5.3 C API 已覆盖；兼容范围以 `docs/NATIVE_MODULES_PLAN.md` 和现有 shim 实现为准。
+- 不承诺完整 Lua 5.3 C API 已覆盖；兼容范围以 `docs/NATIVE_MODULES_BUILD.md` 的已覆盖清单、`docs/NATIVE_MODULES_PLAN.md` 和现有 shim 回归测试为准。
 - 默认 no-CGO 构建仍必须独立通过 `CGO_ENABLED=0 go test ./...` 与 `./scripts/check-go-gates.sh`，native 验收不能替代默认构建门禁。

@@ -1,5 +1,7 @@
 - **开始**
   - [项目介绍](README.md)
+  - [在线 Playground](PLAYGROUND.md)
+  - [授权方式](LICENSING.md)
   - [CLI 兼容能力](CLI_COMPATIBILITY.md)
   - [兼容范围](COMPATIBILITY.md)
 
@@ -19,6 +21,10 @@
 
 - **嵌入与工具**
   - [Go 嵌入 API](API.md)
+  - [示例索引](https://github.com/ZingYao/go-lua-vm/tree/master/examples)
+  - [Go 模块桥接示例](https://github.com/ZingYao/go-lua-vm/tree/master/examples/bridge_module)
+  - [Go/Lua Event 示例](https://github.com/ZingYao/go-lua-vm/tree/master/examples/event_bridge)
+  - [扩展方法示例](https://github.com/ZingYao/go-lua-vm/tree/master/examples/extensions)
   - [Go/Lua Bridge](BRIDGE.md)
   - [Debug 与 DAP](DEBUG.md)
   - [gluac](LUAC.md)

@@ -63,6 +63,12 @@ GLUA_BIN=./bin/glua \
 ./scripts/benchmark-official-amortized.sh
 ~~~
 
+## CI 基准 Smoke
+
+`./scripts/check-performance-smoke.sh` 会在 `CGO_ENABLED=0`、`go1.26.4` 下以 `-benchtime=1x` 执行仓库 Go benchmark。它只用于发现 benchmark 编译失败、panic、死锁和明显资源回归，不比较不同 CI 机器的耗时，也不把 wall-clock 波动当作性能阈值。正式的 GLua/官方 Lua 倍率仍以同机三轮 `benchmark-official.sh` 结果为准。
+
+`./scripts/check-performance-baseline.sh` 额外对 VM dispatch 与 Event 同步/异步路径执行宽松的 `B/op`、`allocs/op` 预算校验。预算保存在 `scripts/performance-baseline.tsv`，刻意不约束 `ns/op`，因此适合不同 CI runner；若有意改变分配模型，必须同时复核基准、更新该文件并说明原因。
+
 ## 解读原则
 
 - 只比较同一机器、同一系统、同一电源模式下的官方 Lua 和 GLua。

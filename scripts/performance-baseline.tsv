@@ -1,0 +1,4 @@
+# benchmark\tmax_bytes_per_op\tmax_allocs_per_op
+BenchmarkVMDispatch	512	4
+BenchmarkProgressEventSyncDispatch	65536	128
+BenchmarkProgressEventAsyncQueueFlush	65536	128

@@ -2,6 +2,12 @@
 
 GLua 是以官方 Lua 5.3.6 行为为兼容基线、使用 Go 实现的 Lua 虚拟机与工具链。项目既可以作为 Go 库嵌入服务，也可以构建为 `glua`、`gluac` 和 `gluals` 命令行程序。
 
+文档中的 Lua/GLua 示例都可以点击右上角“运行”，在浏览器内打开支持输入、输出、断点和单步调试的 [GLua Playground](PLAYGROUND.md)。
+
+<div class="glua-note">
+非商业用途可按 PolyForm Noncommercial 1.0.0 免费使用；商业用途需要向 zing 取得单独的付费授权。GLua 属于 source-available，不是 OSI 开源软件。详情见<a href="#/LICENSING">授权方式</a>。
+</div>
+
 <div class="glua-capabilities">
   <div class="glua-capability"><strong>纯 Go 核心</strong>默认构建使用 <code>CGO_ENABLED=0</code>，VM、编译器、标准库和 Debug 不依赖系统 Lua，也不支持 Native C 模块。</div>
   <div class="glua-capability"><strong>Lua 5.3.6 兼容</strong>通过官方源码映射、可执行文件差分、Golden 和官方测试验证行为。</div>
@@ -94,6 +100,7 @@ func main() {
 - 查看 [语法糖](SYNTAX_EXTENSIONS.md)，了解编译与运行期开关。
 - 查看 [扩展方法总览](EXTENSION_APIS.md)，按命名空间查找 API 和示例。
 - 查看 [Go 嵌入 API](API.md) 与 [Bridge](BRIDGE.md)，把 GLua 集成到 Go 服务。
+- 查看 [授权方式](LICENSING.md)，确认非商业免费与商业付费边界。
 
 <div class="glua-note">
 Native 模块会执行本机机器码并继承当前进程权限。生产环境应限制动态库来源、package.cpath 和可写目录。

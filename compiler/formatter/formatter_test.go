@@ -73,3 +73,19 @@ func TestFormatUnaryLengthOperatorNoSpace(t *testing.T) {
 		t.Fatalf("formatted mismatch: %q want %q", got, want)
 	}
 }
+
+// TestFormatDistinguishesUnaryAndBinaryOperators 验证 formatter 能区分一元符号与二元计算符号。
+func TestFormatDistinguishesUnaryAndBinaryOperators(t *testing.T) {
+	// 同时覆盖函数参数、赋值右值、乘法右值、return 和连续正负运算。
+	source := "os.exit(- 1)\nlocal a=1-2\nlocal b=a* - 3\nlocal c=~ mask\nreturn - value,a- - 1\n"
+	got, err := Format(source, extensions.Default())
+	if err != nil {
+		// 合法的一元和二元表达式必须能够完成格式化。
+		t.Fatalf("Format failed: %v", err)
+	}
+	want := "os.exit(-1)\nlocal a = 1 - 2\nlocal b = a * -3\nlocal c = ~mask\nreturn -value, a - -1\n"
+	if got != want {
+		// 一元符号贴近操作数，二元计算符号两侧保留空格。
+		t.Fatalf("formatted mismatch: %q want %q", got, want)
+	}
+}
