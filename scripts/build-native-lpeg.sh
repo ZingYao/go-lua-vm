@@ -171,7 +171,10 @@ build_lpeg_module() {
     "-o" "${output_path}"
   )
 
-  args+=("${platform_cflags[@]}")
+  # macOS 自带 Bash 3.2 在 set -u 下不能展开空数组，仅在存在平台参数时追加。
+  if [[ "${#platform_cflags[@]}" -gt 0 ]]; then
+    args+=("${platform_cflags[@]}")
+  fi
   args+=("${link_args[@]}")
   args+=("${sources[@]}")
   if [[ "${#link_inputs[@]}" -gt 0 ]]; then
