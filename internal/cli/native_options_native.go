@@ -1,4 +1,4 @@
-//go:build native_modules
+//go:build cgo
 
 package cli
 
@@ -7,7 +7,7 @@ import (
 	"github.com/ZingYao/go-lua-vm/lua"
 )
 
-// applyNativeModuleOptions 在 native_modules 构建下为 CLI 注入 Lua C 模块 loader。
+// applyNativeModuleOptions 在 CGO 构建下为 CLI 注入 Lua C 模块 loader。
 func applyNativeModuleOptions(options lua.Options) lua.Options {
 	// 状态感知 loader 绑定当前 State，确保 luaopen_* 和后续 C function 访问同一个 VM 栈。
 	if options.PackageDynamicLibraryLoaderForState == nil {

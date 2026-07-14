@@ -46,7 +46,7 @@ type Options struct {
 	PackageDynamicLibraryLoader func(filename string, symbol string) (Value, error)
 	// PackageDynamicLibraryLoaderForState 为指定 State 创建 package.loadlib 使用的动态库 loader。
 	//
-	// native_modules 这类 Lua C API shim 需要把 luaopen_* 调用绑定到真实 State；该工厂在 package
+	// CGO 这类 Lua C API shim 需要把 luaopen_* 调用绑定到真实 State；该工厂在 package
 	// 库注册时执行，返回值优先于 PackageDynamicLibraryLoader。nil 表示沿用无状态 loader。
 	PackageDynamicLibraryLoaderForState func(state *State) func(filename string, symbol string) (Value, error)
 	// VirtualFilesystem 保存只读 Go fs.FS 虚拟文件系统。
@@ -102,14 +102,14 @@ func NormalizeOptions(options Options) Options {
 		// 未显式配置语法时，默认启用当前构建产物包含的扩展。
 		options.SyntaxExtensions = extensions.Default()
 	} else {
-		// 显式配置时裁剪未编译扩展，保证 runtime 选项不会绕过 build tag。
+		// 显式配置时裁剪到统一主线支持的扩展集合，拒绝未知能力位。
 		options.SyntaxExtensions &= extensions.Compiled()
 	}
 	if !options.GluaEventsEnabledSet {
 		// 未显式配置事件能力时，默认跟随当前构建产物是否编译进 glua events。
 		options.GluaEventsEnabled = gluaEventsCompiled()
 	} else if options.GluaEventsEnabled {
-		// 显式开启时仍受 build tag 裁剪，避免未编译事件文件时暴露半能力。
+		// 显式开启时按统一主线的事件能力归一化。
 		options.GluaEventsEnabled = gluaEventsCompiled()
 	}
 	if options.MaxGluaEventListeners <= 0 {
@@ -131,7 +131,7 @@ func NormalizeOptions(options Options) Options {
 
 // WithGluaEvents 返回配置 glua 自定义事件能力后的 Options 副本。
 func (options Options) WithGluaEvents(enabled bool) Options {
-	// 显式标记事件配置，NormalizeOptions 会继续按 build tag 裁剪不可用能力。
+	// 显式标记事件配置，NormalizeOptions 会继续执行运行时归一化。
 	options.GluaEventsEnabled = enabled
 	options.GluaEventsEnabledSet = true
 	return options

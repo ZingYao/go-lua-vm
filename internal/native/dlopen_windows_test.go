@@ -1,4 +1,4 @@
-//go:build native_modules && windows
+//go:build cgo && windows
 
 package native
 

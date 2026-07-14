@@ -1,10 +1,8 @@
-//go:build !lua53 && (with_events || with_all || (!with_switch && !with_continue && !with_const && !with_events && !with_all))
-
 package runtime
 
 // gluaEventsCompiled 表示当前构建产物包含 glua 自定义事件能力。
 func gluaEventsCompiled() bool {
-	// build tag 已经决定事件能力是否存在。
+	// 统一主线始终包含事件能力。
 	return true
 }
 

@@ -20,7 +20,7 @@ for arg in "$@"; do
       cat <<'USAGE'
 Usage: scripts/bootstrap-native-toolchains.sh [--install] [--emit-env]
 
-Checks or prepares the C toolchain environment used by native_modules cross
+Checks or prepares the C toolchain environment used by Native CGO cross
 compile scripts. The target matrix mirrors .github/workflows/release.yml.
 
   --install   install managed tools through mise when they are missing

@@ -9,7 +9,7 @@
 - 通过可选构建启用 native 模块：
 
 ```bash
-CGO_ENABLED=1 go build -tags native_modules ./cmd/glua
+CGO_ENABLED=1 go build ./cmd/glua
 ```
 
 - 构建模式、平台前置条件和当前限制见 [native_modules 构建说明](NATIVE_MODULES_BUILD.md)。
@@ -46,14 +46,12 @@ CGO_ENABLED=1 go build -tags native_modules ./cmd/glua
 
 默认构建：
 
-- build tag：无
 - `CGO_ENABLED=0`
 - `package.loadlib` 和 C searcher 保持当前禁用说明。
 - 所有现有兼容测试必须继续通过。
 
 native 构建：
 
-- build tag：`native_modules`
 - `CGO_ENABLED=1`
 - 注入 native dynamic loader。
 - 启用 Lua 5.3 public C API shim。
@@ -298,8 +296,8 @@ git ls-files --others --exclude-standard | rg '\.go$|_test\.go$'
 native 构建：
 
 ```bash
-CGO_ENABLED=1 go test -tags native_modules ./...
-CGO_ENABLED=1 go build -tags native_modules -o bin/glua-native ./cmd/glua
+CGO_ENABLED=1 go test ./...
+CGO_ENABLED=1 go build -o bin/glua-native ./cmd/glua
 ```
 
 fixture 验收：
@@ -328,6 +326,6 @@ GLUA_BIN=./bin/glua-native ./scripts/test-native-modules.sh
 
 ## 回滚策略
 
-- 默认构建与现有 `PackageDynamicLibraryLoader` 抽象必须保持独立；native 失败时可以整体移除 `native_modules` build tag，不影响 no-CGO 发布。
+- 纯 Go 构建与现有 `PackageDynamicLibraryLoader` 抽象必须保持独立；native 失败时可回退 `CGO_ENABLED=0` 产物，不影响 no-CGO 发布。
 - 每个 API shim 函数分批提交并配 fixture；出现语义不确定时保留未实现错误，不做错误兼容伪装。
 - Windows `lua53.dll` shim 若阻塞，不影响 Linux/macOS 阶段验收，但 TODO 必须明确未完成平台。

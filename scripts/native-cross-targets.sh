@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 
-# Shared native_modules cross targets and C compiler defaults.
+# Shared Native CGO cross targets and C compiler defaults.
 #
 # Target syntax is GOOS/GOARCH or GOOS/GOARCH/GOARM. The list mirrors the
-# release workflow matrix so native_modules compile checks do not quietly cover
+# release workflow matrix so Native CGO compile checks do not quietly cover
 # a smaller platform surface than the no-CGO CLI artifacts.
 
 native_release_targets() {

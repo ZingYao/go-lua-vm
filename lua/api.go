@@ -476,9 +476,9 @@ func WithoutSyntaxExtensions(options Options, disabled SyntaxSet) Options {
 
 // WithGluaEvents 返回配置 glua 自定义事件运行能力后的 Options 副本。
 //
-// enabled 为 true 时仍受当前 build tag 裁剪；未编译事件能力的二进制会在 NormalizeOptions 中保持关闭。
+// enabled 为 true 时启用事件能力；统一主线始终编译事件实现，NormalizeOptions 只负责运行时配置归一化。
 func WithGluaEvents(options Options, enabled bool) Options {
-	// 委托 runtime.Options 统一处理默认值与 build tag 裁剪。
+	// 委托 runtime.Options 统一处理默认值与运行时配置归一化。
 	return options.WithGluaEvents(enabled)
 }
 
@@ -1738,7 +1738,7 @@ func packageLuaFileLoader(state *State) packagelib.LuaFileLoader {
 func openPackageWithStateCaller(state *State) error {
 	environment := packagelib.NewEnvironmentWithOptions(packageLuaFileLoader(state), state.Options())
 	if stateAwareLoader := state.Options().PackageDynamicLibraryLoaderForState; stateAwareLoader != nil {
-		// native_modules 需要把 luaopen_* 调用绑定到当前 State；状态感知 loader 优先于无状态 loader。
+		// CGO 需要把 luaopen_* 调用绑定到当前 State；状态感知 loader 优先于无状态 loader。
 		environment.SetDynamicLibraryLoader(stateAwareLoader((*runtime.State)(state)))
 	}
 	environment.SetLoaderCaller(func(loader runtime.Value, args ...runtime.Value) ([]runtime.Value, error) {

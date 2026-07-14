@@ -1,4 +1,4 @@
-//go:build native_modules
+//go:build cgo
 
 package cli
 
@@ -9,7 +9,7 @@ import (
 	"github.com/ZingYao/go-lua-vm/runtime"
 )
 
-// TestApplyNativeModuleOptionsInjectsLoaders 验证 native_modules 构建会启用 CLI native loader。
+// TestApplyNativeModuleOptionsInjectsLoaders 验证 CGO 构建会启用 CLI native loader。
 func TestApplyNativeModuleOptionsInjectsLoaders(t *testing.T) {
 	// native CLI 构建需要自动接入 package.loadlib/searcher 使用的 loader。
 	options := applyNativeModuleOptions(lua.DefaultOptions())

@@ -1,4 +1,4 @@
-//go:build native_modules && (linux || darwin || android)
+//go:build cgo && (linux || darwin || android)
 
 package native
 
@@ -43,7 +43,7 @@ type dynamicLibrary struct {
 	filename string
 }
 
-// openDynamicLibrary 在 Linux/macOS/Android native_modules 构建下打开动态库。
+// openDynamicLibrary 在 Linux/macOS/Android CGO 构建下打开动态库。
 //
 // filename 必须是非空路径或系统动态加载器可解析的库名。成功时返回的句柄必须由调用方 close。
 func openDynamicLibrary(filename string) (*dynamicLibrary, error) {

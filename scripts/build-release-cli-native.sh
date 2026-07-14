@@ -20,7 +20,7 @@ fi
 cc_var="$(native_target_cc_var "${target_goos}" "${target_goarch}" "${target_goarm}")"
 cc_value="${!cc_var:-}"
 if [[ -z "${cc_value}" ]]; then
-  echo "${cc_var} is required for full-feature native_modules release build" >&2
+  echo "${cc_var} is required for the full-feature CGO release build" >&2
   exit 1
 fi
 
@@ -58,10 +58,10 @@ if [[ -n "${target_goarm}" ]]; then
 fi
 echo "CGO_ENABLED=1"
 echo "CC=${cc_value}"
-echo "tags=native_modules"
+echo "custom_tags=none"
 
 for cmd in glua gluac gluals; do
-  env "${go_env[@]}" go build -tags native_modules -trimpath -ldflags="-s -w" -o "${output_dir}/${cmd}${exe}" "./cmd/${cmd}"
+  env "${go_env[@]}" go build -trimpath -ldflags="-s -w" -o "${output_dir}/${cmd}${exe}" "./cmd/${cmd}"
 done
 
 # 发布目录必须携带非商业许可证和商业授权说明，避免二进制脱离仓库后丢失授权边界。

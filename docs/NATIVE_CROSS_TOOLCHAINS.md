@@ -1,9 +1,9 @@
-# native_modules 交叉编译工具链
+# Native CGO 交叉编译工具链
 
-本文记录仓库管理的可选 `native_modules` 交叉编译范围。默认发布仍使用 no-CGO 构建；以下设置仅用于：
+本文记录仓库管理的 Native CGO 交叉编译范围。统一主线不使用自定义 build tag；以下设置用于：
 
 ```bash
-CGO_ENABLED=1 go build -tags native_modules ./cmd/glua
+CGO_ENABLED=1 go build ./cmd/glua
 ```
 
 ## 目标矩阵
@@ -108,7 +108,7 @@ eval "$(./scripts/bootstrap-native-toolchains.sh --emit-env)"
 NATIVE_CROSS_REQUIRE_ALL=1 ./scripts/check-native-cross-compile.sh
 ```
 
-它会把 `./internal/native` 构建为测试二进制，并使用 `-tags native_modules` 构建 `./cmd/glua`。它不会运行其他平台的二进制，也不能替代各平台的运行时验收脚本。
+它会把 `./internal/native` 构建为测试二进制，并直接构建启用 CGO 的 `./cmd/glua`，不传自定义 build tag。它不会运行其他平台的二进制，也不能替代各平台的运行时验收脚本。
 
 运行时验收仍必须在目标操作系统上执行：
 

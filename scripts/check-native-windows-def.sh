@@ -30,7 +30,7 @@ fi
 generated_file="${work_dir}/lua53.def"
 
 {
-  printf '%s\n' '; Lua 5.3 ABI exports provided by the native_modules shim.'
+  printf '%s\n' '; Lua 5.3 ABI exports provided by the Native CGO shim.'
   printf '%s\n' '; Keep this file in sync with scripts/check-native-windows-def.sh.'
   printf '%s\n' 'LIBRARY lua53.dll'
   printf '%s\n' 'EXPORTS'

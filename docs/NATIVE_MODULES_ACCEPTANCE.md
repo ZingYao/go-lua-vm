@@ -1,13 +1,13 @@
-# native_modules 验收记录
+# Native module 验收记录
 
-本文记录 `native_modules` 可选构建的真实模块验收状态。它是当前验收台账；macOS arm64、Linux arm64、Windows amd64 与 Android arm64 已完成 fixture、lua-cjson、LPeg、LuaSocket 的目标平台运行期闭环。Android LuaSocket 官方脚本包含设备网络环境适配，其他未执行 OS/架构组合仍需独立验收。
+本文记录统一主线 CGO 构建的真实模块验收状态。它是当前验收台账；macOS arm64、Linux arm64、Windows amd64 与 Android arm64 已完成 fixture、lua-cjson、LPeg、LuaSocket 的目标平台运行期闭环。Android LuaSocket 官方脚本包含设备网络环境适配，其他未执行 OS/架构组合仍需独立验收。
 
 ## 当前记录
 
 - 日期：2026-07-08
 - 分支：`quanquan/feature/glua-native-module-loader`
-- 默认构建边界：默认无 build tag、`CGO_ENABLED=0` 路径不启用 native loader；标准库语义修复仍必须通过默认 no-CGO 门禁。
-- native 构建边界：`CGO_ENABLED=1 -tags native_modules`，只承诺按 Lua 5.3 public C API 编写并导出 `luaopen_*` 的 C 模块。
+- 纯 Go 构建边界：`CGO_ENABLED=0` 路径不启用 native loader；标准库语义修复仍必须通过 no-CGO 门禁。
+- native 构建边界：`CGO_ENABLED=1`，只承诺按 Lua 5.3 public C API 编写并导出 `luaopen_*` 的 C 模块。
 
 ## macOS arm64
 
@@ -37,7 +37,7 @@ source ~/.zshrc && CGO_ENABLED=1 ./scripts/test-native-real-modules.sh
 最近一次 native Go 门禁：
 
 ```bash
-CGO_ENABLED=1 go test -tags native_modules ./...
+CGO_ENABLED=1 go test ./...
 ```
 
 结果：通过。
@@ -77,7 +77,7 @@ Linux 验收环境：
 ```bash
 CGO_ENABLED=0 go test ./...
 ./scripts/check-go-gates.sh
-CGO_ENABLED=1 go test -tags native_modules ./...
+CGO_ENABLED=1 go test ./...
 CGO_ENABLED=1 ./scripts/test-native-real-modules.sh
 ```
 
@@ -102,7 +102,7 @@ Android 验收环境：
 - Android：`16`，SDK `36`。
 - Kernel：`Linux localhost 6.6.77-android15-8-gf9a1d4bd8353-abogki440974771-4k #1 SMP PREEMPT Fri Aug 29 01:48:34 UTC 2025 aarch64 Toybox`。
 - Android C toolchain：Android NDK `aarch64-linux-android35-clang`。
-- native `glua` 构建：`GOOS=android GOARCH=arm64 CGO_ENABLED=1 CC=aarch64-linux-android35-clang go build -tags native_modules`。
+- native `glua` 构建：`GOOS=android GOARCH=arm64 CGO_ENABLED=1 CC=aarch64-linux-android35-clang go build`。
 - fixture 设备目录：`/data/local/tmp/glua-native-modules/`。
 - 真实模块设备目录：`/data/local/tmp/glua-native-real-modules/`。
 
@@ -235,7 +235,7 @@ Windows 验收环境：
 .\scripts\test-native-windows-manual.ps1 -GoArch amd64 -Bash "C:\Program Files\Git\bin\bash.exe" -StrictRuntime
 ```
 
-结果：2026-07-08 本轮复跑通过；脚本覆盖默认 no-CGO Go tests、`./scripts/check-go-gates.sh`、`CGO_ENABLED=1 go test -tags native_modules ./...`、Windows `lua53.def` drift check、Windows `lua53.dll` runtime shim/import library 构建、fixture/lua-cjson/LPeg/LuaSocket DLL 构建、Windows source build strict aggregate，以及 fixture、lua-cjson、LPeg、LuaSocket 和 real modules 运行期验收。`-StrictRuntime` 未发现运行期 `skip:`。
+结果：2026-07-08 本轮复跑通过；脚本覆盖默认 no-CGO Go tests、`./scripts/check-go-gates.sh`、`CGO_ENABLED=1 go test ./...`、Windows `lua53.def` drift check、Windows `lua53.dll` runtime shim/import library 构建、fixture/lua-cjson/LPeg/LuaSocket DLL 构建、Windows source build strict aggregate，以及 fixture、lua-cjson、LPeg、LuaSocket 和 real modules 运行期验收。`-StrictRuntime` 未发现运行期 `skip:`。
 
 Windows 性能结果见 [Benchmark 最终结果](BENCHMARK.md)；功能验收复跑说明见 [Windows 功能验收手册](NATIVE_MODULES_WINDOWS_FUNCTIONAL_TEST.md)，benchmark 复跑说明见 [Windows Benchmark 手册](NATIVE_MODULES_WINDOWS_BENCHMARK.md)。
 

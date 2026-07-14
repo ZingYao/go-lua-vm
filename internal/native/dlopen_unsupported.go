@@ -1,4 +1,4 @@
-//go:build native_modules && !(linux || darwin || android || windows)
+//go:build cgo && !(linux || darwin || android || windows)
 
 package native
 

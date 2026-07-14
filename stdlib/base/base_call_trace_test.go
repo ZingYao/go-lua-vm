@@ -1,5 +1,3 @@
-//go:build call_trace
-
 package base
 
 import (
@@ -15,8 +13,8 @@ import (
 
 // TestBaseLuaCallTraceFixedResultPairs 输出固定单返回 CALL 的运行期寄存器窗口。
 //
-// 该测试仅在显式 `-tags call_trace` 下启用，用于定位 native_modules 真实模块暴露出的
-// CALL 写回、实参槽残留和后续局部槽布局差异；默认测试不运行它，避免把当前诊断状态固化为生产语义。
+// 该测试在统一主线常驻，用于锁定原生模块排查中确认的
+// CALL 写回、实参槽残留和后续局部槽布局边界；常规测试会执行这些断言，防止后续回归。
 func TestBaseLuaCallTraceFixedResultPairs(t *testing.T) {
 	// 逐个追踪已由 LPeg probe 证明存在 good/bad 差异的最小对。
 	for _, testCase := range []struct {
@@ -167,7 +165,7 @@ local payload = 17
 
 // traceBaseLuaCallEvents 编译并单步执行 Lua chunk，返回每个 CALL 写回后的诊断行。
 //
-// source 必须只依赖 base.Open 注册的全局函数；该 helper 只用于 call_trace 测试，不参与生产执行路径。
+// source 必须只依赖 base.Open 注册的全局函数；该 helper 只用于调用轨迹测试，不参与生产执行路径。
 func traceBaseLuaCallEvents(t *testing.T, source string) []string {
 	// 准备 State 与 base 全局函数，确保 GETTABUP _ENV 能读取 select/rawequal/error。
 	t.Helper()

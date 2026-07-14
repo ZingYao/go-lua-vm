@@ -8,11 +8,13 @@ on:
     branches:
       - main
       - master
+      - master-unified
       - "quanquan/**"
   pull_request:
     branches:
       - main
       - master
+      - master-unified
 
 permissions:
   contents: read
@@ -163,10 +165,10 @@ jobs:
         run: go version
 
       - name: Native Go Tests
-        run: go test -tags native_modules ./...
+        run: go test ./...
 
       - name: Native CLI Build
-        run: go build -tags native_modules -trimpath -o "build/ci-native-glua" ./cmd/glua
+        run: go build -trimpath -o "build/ci-native-glua" ./cmd/glua
 
       - name: Native Real Module Acceptance
         run: ./scripts/test-native-real-modules.sh

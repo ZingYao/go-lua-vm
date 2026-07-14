@@ -1,4 +1,4 @@
-//go:build !native_modules
+//go:build !cgo
 
 package cli
 

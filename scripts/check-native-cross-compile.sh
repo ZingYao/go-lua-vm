@@ -156,13 +156,13 @@ for target in "${targets[@]}"; do
     go_env+=(GOARM="${target_goarm}")
   fi
 
-  if ! env "${go_env[@]}" go test -c -tags native_modules -o "${test_output}" ./internal/native; then
+  if ! env "${go_env[@]}" go test -c -o "${test_output}" ./internal/native; then
     echo "native internal test compile failed for ${target_goos}/${target_goarch}" >&2
     status=1
     continue
   fi
 
-  if ! env "${go_env[@]}" go build -tags native_modules -trimpath -o "${glua_output}" ./cmd/glua; then
+  if ! env "${go_env[@]}" go build -trimpath -o "${glua_output}" ./cmd/glua; then
     echo "native glua compile failed for ${target_goos}/${target_goarch}" >&2
     status=1
     continue

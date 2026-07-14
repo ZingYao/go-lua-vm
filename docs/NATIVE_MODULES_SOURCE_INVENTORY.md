@@ -53,7 +53,7 @@
 ## 当前可验证边界
 
 - 默认构建仍以 `CGO_ENABLED=0 go test ./...` 和 `./scripts/check-go-gates.sh` 作为必过门禁。
-- `native_modules` 构建当前可通过 `CGO_ENABLED=1 go test -tags native_modules ./...` 验证仓库内 Go/CGO shim、平台 loader 和 Unix 内嵌 fixture。
+- `native_modules` 构建当前可通过 `CGO_ENABLED=1 go test ./...` 验证仓库内 Go/CGO shim、平台 loader 和 Unix 内嵌 fixture。
 - `scripts/check-native-source-builds.sh` 可作为真实模块源码构建矩阵入口，串联 fixture、lua-cjson、LPeg 和 LuaSocket 的源码构建脚本；它只证明目标平台动态模块源码可编译或明确 skip，不替代目标平台 `require(...)` 运行期验收。
 - `lua-cjson` 真实模块源码可通过 `CGO_ENABLED=1 scripts/build-native-cjson.sh` 做源码编译级验收，也可通过 `scripts/test-native-cjson.sh` 做 ABI 符号和运行期验收；运行期脚本覆盖 `require("cjson")`、`encode/decode`、`cjson.null` identity、非法 JSON `pcall` 和不可序列化 function `pcall`，macOS 覆盖 `.so` / `.dylib`，Linux 覆盖 `.so`，Windows 覆盖 `.dll`。
 - `third_party/lpeg/` 当前可通过 `CGO_ENABLED=1 scripts/build-native-lpeg.sh` 做源码编译级验收，也可通过 `scripts/test-native-lpeg.sh` 做运行期验收；macOS arm64 `.so` / `.dylib`、Linux arm64 `.so` 与 Windows amd64 `.dll` 已通过基础 smoke、完整官方 `test.lua` 和 `re` 模块路径。

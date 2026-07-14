@@ -1,6 +1,6 @@
-# native_modules 构建说明
+# Native 模块统一构建说明
 
-本文说明 `native_modules` 可选构建的使用方式、平台前置条件、当前阶段能力边界和后续验收命令。该构建用于逐步支持 `glua` 直接 `require` Lua 5.3 C 原生扩展模块。
+本文说明统一主线 Native CGO 构建的使用方式、平台前置条件、当前阶段能力边界和后续验收命令。该构建支持 `glua` 直接 `require` Lua 5.3 C 原生扩展模块。
 
 ## 构建模式
 
@@ -12,13 +12,13 @@ CGO_ENABLED=0 go build -o bin/glua ./cmd/glua
 
 默认构建下不会启用本机动态库加载器，`package.loadlib` 和 C searcher 继续保持现有禁用或不可用语义。
 
-native 构建需要显式启用 CGO 和 build tag：
+native 构建只需启用 CGO，不再需要自定义 build tag：
 
 ```bash
-CGO_ENABLED=1 go build -tags native_modules -o bin/glua-native ./cmd/glua
+CGO_ENABLED=1 go build -o bin/glua-native ./cmd/glua
 ```
 
-`native_modules` 构建允许引入 CGO，用于平台动态库加载、Lua 5.3 C API shim 和后续 `lua53` 兼容符号层。该允许范围只适用于 native 模块能力；默认构建仍必须保持 `CGO_ENABLED=0`。
+CGO 只用于平台动态库加载、Lua 5.3 C API shim 和 `lua53` 兼容符号层；核心 VM 不依赖 C。需要纯 Go 产物时使用 `CGO_ENABLED=0`。
 
 native 构建不得依赖系统已安装的 Lua C 开发包。项目侧 C shim、Lua 5.3 public headers、fixture、真实模块验收源码和构建脚本必须随仓库提交，便于在不同机器和 CI 中重复编译验证。
 
@@ -78,7 +78,7 @@ git ls-files --others --exclude-standard | rg '\.go$|_test\.go$'
 native 构建需要通过 Go/CGO shim 全量测试：
 
 ```bash
-CGO_ENABLED=1 go test -tags native_modules ./...
+CGO_ENABLED=1 go test ./...
 ```
 
 fixture loader smoke：

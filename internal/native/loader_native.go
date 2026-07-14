@@ -1,4 +1,4 @@
-//go:build native_modules
+//go:build cgo
 
 package native
 
@@ -11,12 +11,12 @@ import (
 	packagelib "github.com/ZingYao/go-lua-vm/stdlib/package"
 )
 
-// Loader 返回 native_modules 构建下的无状态原生动态库 loader。
+// Loader 返回 CGO 构建下的无状态原生动态库 loader。
 //
 // 该入口只验证动态库和符号可解析；真实 luaopen_* 调用需要使用 LoaderForState 绑定当前
 // runtime.State，避免 C 模块拿到错误的 lua_State* handle。
 func Loader() func(filename string, symbol string) (runtime.Value, error) {
-	// native_modules 构建下返回非 nil loader，便于 CLI 或嵌入方写入 PackageDynamicLibraryLoader。
+	// CGO 构建下返回非 nil loader，便于 CLI 或嵌入方写入 PackageDynamicLibraryLoader。
 	return func(filename string, symbol string) (runtime.Value, error) {
 		if err := validateDynamicLoaderRequest(filename, symbol); err != nil {
 			// 文件名或符号缺失属于调用方传参错误，按打开失败分类返回给 package.loadlib。

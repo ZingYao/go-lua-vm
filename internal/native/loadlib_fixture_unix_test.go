@@ -1,4 +1,4 @@
-//go:build native_modules && (linux || darwin || android)
+//go:build cgo && (linux || darwin || android)
 
 package native
 
@@ -273,7 +273,7 @@ func buildUnixNativeFixture(t *testing.T) string {
 
 // buildUnixNativeFixtureModule 构建指定模块文件名的 Lua C 动态库。
 func buildUnixNativeFixtureModule(t *testing.T, outputModule string) string {
-	// native_modules 测试依赖 C 编译器；若环境没有可用编译器则明确跳过。
+	// 原生模块测试依赖 C 编译器；若环境没有可用编译器则明确跳过。
 	t.Helper()
 	cc := os.Getenv("CC")
 	if cc == "" {

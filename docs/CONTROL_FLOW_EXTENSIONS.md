@@ -2,16 +2,13 @@
 
 本文档记录本项目在 Lua 5.3 基线之上新增 `continue` 与 `switch/case/default` 的设计。该扩展只改 lexer/parser/codegen 层，不新增 VM opcode，最终仍生成标准 Lua 5.3 VM 指令。
 
-## 启用与关闭
+## 运行时启用与关闭
 
 语法扩展通过 `extensions.SyntaxSet` 注册表统一管理。parser 只在语句起点做位图检查，VM 执行阶段不感知语法糖开关。
 
-- 默认构建会编译并启用当前已实现扩展。
-- 使用 `-tags lua53` 可编译出不包含任何语法扩展的二进制。
-- 使用 `-tags with_continue` 可只编译 `continue` 扩展。
-- 使用 `-tags with_switch` 可只编译 `switch` 扩展。
-- 使用 `-tags "with_continue with_switch"` 可只编译这两个扩展。
-- 使用 `-tags with_all` 可显式编译全部扩展。
+- 所有构建都会包含当前已实现扩展，不再通过 Go build tag 生成不同功能集合的二进制。
+- parser 仍按每次编译请求携带的 `extensions.SyntaxSet` 决定是否识别扩展语法。
+- Lua 5.3 兼容模式和部分扩展组合属于运行时配置，不会改变产物内容。
 
 命令行可在已编译扩展范围内关闭功能：
 

@@ -124,11 +124,11 @@ Invoke-Step "default gate script" {
     }
 }
 
-Invoke-Step "native_modules Go tests" {
+Invoke-Step "Native CGO Go tests" {
     $env:CGO_ENABLED = "1"
-    & $goPath test -tags native_modules ./...
+    & $goPath test ./...
     if ($LASTEXITCODE -ne 0) {
-        throw "CGO_ENABLED=1 go test -tags native_modules ./... failed"
+        throw "CGO_ENABLED=1 go test ./... failed"
     }
 }
 

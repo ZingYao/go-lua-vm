@@ -10,7 +10,7 @@
 .\scripts\test-native-windows-manual.ps1 -GoArch amd64 -Bash "C:\Program Files\Git\bin\bash.exe" -StrictRuntime
 ```
 
-结果：通过，脚本退出码为 0，`-StrictRuntime` 未发现运行期 `skip:`。本轮覆盖默认 no-CGO Go tests、`./scripts/check-go-gates.sh`、`CGO_ENABLED=1 go test -tags native_modules ./...`、Windows `lua53.def` drift check、`lua53.dll` runtime shim/import library 构建、fixture/lua-cjson/LPeg/LuaSocket DLL 构建、Windows source build strict aggregate，以及 fixture、lua-cjson、LPeg、LuaSocket 和 real modules 运行期验收。
+结果：通过，脚本退出码为 0，`-StrictRuntime` 未发现运行期 `skip:`。本轮覆盖默认 no-CGO Go tests、`./scripts/check-go-gates.sh`、`CGO_ENABLED=1 go test ./...`、Windows `lua53.def` drift check、`lua53.dll` runtime shim/import library 构建、fixture/lua-cjson/LPeg/LuaSocket DLL 构建、Windows source build strict aggregate，以及 fixture、lua-cjson、LPeg、LuaSocket 和 real modules 运行期验收。
 
 验收环境摘要：
 
@@ -25,7 +25,7 @@
 Windows 功能验收必须覆盖以下路径：
 
 - 默认 no-CGO 构建：`CGO_ENABLED=0 go test ./...` 和 `./scripts/check-go-gates.sh`。
-- native Go 测试：`CGO_ENABLED=1 go test -tags native_modules ./...`。
+- native Go 测试：`CGO_ENABLED=1 go test ./...`。
 - Windows ABI 清单：`native/lua53/windows/lua53.def` 与 native 源码导出符号一致。
 - Windows import library：从 `lua53.def` 生成 `liblua53.dll.a` 或 `lua53.lib`。
 - fixture DLL：`glua_native_smoke.dll` 和 `glua_native_failopen.dll` 构建与 `require`。

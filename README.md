@@ -112,28 +112,24 @@ func main() {
 
 ## 语法扩展
 
-项目在 Lua 5.3 基线上提供可选的 `continue`、`switch/case/default` 与 `const` 语法扩展。扩展只改变 lexer/parser/codegen 层，最终仍生成标准 Lua 5.3 VM 指令。
+项目在 Lua 5.3 基线上内置 `continue`、`switch/case/default` 与 `const` 语法扩展。扩展只改变 lexer/parser/codegen 层，最终仍生成标准 Lua 5.3 VM 指令；统一主线不再通过 Go build tag 裁剪功能。
 
 ```bash
-go build -tags lua53 ./cmd/glua
-go build -tags with_continue ./cmd/glua
-go build -tags with_switch ./cmd/glua
-go build -tags with_const ./cmd/glua
-go build -tags with_all ./cmd/glua
+go build ./cmd/glua
 ```
 
 运行时可通过 `--glua-syntax`、`--gluac-syntax` 或 Go API 选择 Lua 5.3 兼容模式或扩展模式。详细语义和示例见[在线语法糖文档](https://zingyao.github.io/go-lua-vm/#/SYNTAX_EXTENSIONS)。
 
 ## 动态库与 require 边界
 
-默认构建不支持 `require` 直接加载普通 Lua C 模块形式的 `.so/.dylib/.dll`。默认路径保持纯 Go、无 CGO，不提供 Lua C ABI，也不要求系统安装 Lua C 开发包。
+`CGO_ENABLED=0` 构建不支持 `require` 直接加载普通 Lua C 模块形式的 `.so/.dylib/.dll`。该路径保持纯 Go，不提供 Lua C ABI，也不要求系统安装 Lua C 开发包。
 
 动态库 loader 接入协议始终是显式 opt-in：`package.searchers` 会按 `package.cpath` 展开候选路径，`package.loadlib`、`lua.Options.PackageDynamicLibraryLoader` 或 `lua.Options.PackageDynamicLibraryLoaderForState` 可由 Go 宿主注入实现。普通动态库不是 Lua C 模块；只有导出 `luaopen_*` 并使用 Lua 5.3 public C API 的模块才能按 `require` 语义加载。
 
-`native_modules` 是可选 CGO 构建能力：
+统一主线不再使用 `native_modules` 自定义 build tag。Go 工具链启用 CGO 时，CLI 自动包含原生模块能力：
 
 ```bash
-CGO_ENABLED=1 go build -tags native_modules -o bin/glua-native ./cmd/glua
+CGO_ENABLED=1 go build -o bin/glua-native ./cmd/glua
 ```
 
 该构建在 CLI 中注入 State-aware native loader，用仓库内 Lua 5.3 public headers 和 native shim 支持 Lua C 模块。macOS arm64、Linux arm64 和 Windows amd64 已覆盖仓库内真实模块源码构建及运行期验收，包含 lua-cjson、LPeg 和 LuaSocket；其他系统与架构仍需目标平台独立验收。native 模块执行本机机器码，拥有进程权限；生产环境需要限制动态库来源和 `package.cpath`。三平台前置条件和命令见[在线 Native 构建文档](https://zingyao.github.io/go-lua-vm/#/NATIVE_BUILD_GUIDE)。
@@ -214,8 +210,8 @@ GLUAC_BIN=./bin/gluac \
 - [docs/CONTROL_FLOW_EXTENSIONS.md](docs/CONTROL_FLOW_EXTENSIONS.md)：`continue`、`switch/case/default` 语法扩展开关与语义。
 - [docs/CUSTOM_CHUNK.md](docs/CUSTOM_CHUNK.md)：自定义加密 chunk 的 encoder/decoder 接入规划与最小 Demo。
 - [docs/NATIVE_MODULES_PLAN.md](docs/NATIVE_MODULES_PLAN.md)：Lua C 原生模块加载方案、目标、非目标、架构和分期。
-- [docs/NATIVE_MODULES_BUILD.md](docs/NATIVE_MODULES_BUILD.md)：`native_modules` 构建方式、平台前置条件、验收命令和当前 API 覆盖边界。
-- [docs/NATIVE_CROSS_TOOLCHAINS.md](docs/NATIVE_CROSS_TOOLCHAINS.md)：`native_modules` 跨系统交叉编译矩阵、mise/Zig 工具链和 CI 验证入口。
+- [docs/NATIVE_MODULES_BUILD.md](docs/NATIVE_MODULES_BUILD.md)：Native CGO 构建方式、平台前置条件、验收命令和当前 API 覆盖边界。
+- [docs/NATIVE_CROSS_TOOLCHAINS.md](docs/NATIVE_CROSS_TOOLCHAINS.md)：Native CGO 跨系统交叉编译矩阵、mise/Zig 工具链和 CI 验证入口。
 - [docs/NATIVE_MODULES_SOURCE_INVENTORY.md](docs/NATIVE_MODULES_SOURCE_INVENTORY.md)：native shim、Lua public headers、fixture、真实模块源码和脚本的自包含清单。
 
 ### 运行时与标准库语义

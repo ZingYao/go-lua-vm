@@ -2,24 +2,15 @@
 
 GLua 在 Lua 5.3 基线上提供 `continue`、`switch/case/default` 和 `const`。这些扩展发生在 lexer、parser 和 codegen 层，不新增 VM opcode。
 
-## 开关
+## 运行时开关
 
-默认构建会编译全部语法糖。需要精确控制时，可以使用 Go build tag：
+统一主线始终编译全部语法糖，不再提供裁剪功能的 Go build tag。构建命令保持唯一：
 
 ~~~bash
-# 完全关闭扩展语法
-go build -tags lua53 -o bin/glua-lua53 ./cmd/glua
-
-# 只编译指定语法糖
-go build -tags with_continue -o bin/glua-continue ./cmd/glua
-go build -tags with_switch -o bin/glua-switch ./cmd/glua
-go build -tags with_const -o bin/glua-const ./cmd/glua
-
-# 显式编译全部扩展
-go build -tags with_all -o bin/glua ./cmd/glua
+go build -o bin/glua ./cmd/glua
 ~~~
 
-已编译的能力仍可在运行时选择：
+需要兼容 Lua 5.3 或选择部分扩展时，在运行时配置语法集合：
 
 ~~~bash
 glua --glua-syntax=lua53 script.lua

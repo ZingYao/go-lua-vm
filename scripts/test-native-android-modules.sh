@@ -80,7 +80,7 @@ mkdir -p "${build_dir}" "${fixture_dir}"
 
 echo "build Android native glua: ${glua_bin}"
 GOOS="${target_goos}" GOARCH="${target_goarch}" CGO_ENABLED=1 CC="${android_cc}" \
-  go build -tags native_modules -trimpath -o "${glua_bin}" ./cmd/glua
+  go build -trimpath -o "${glua_bin}" ./cmd/glua
 
 echo "build Android native fixture modules"
 TARGET_GOOS="${target_goos}" TARGET_GOARCH="${target_goarch}" BUILD_DIR="${fixture_dir}" CGO_ENABLED=1 CC="${android_cc}" \

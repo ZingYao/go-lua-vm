@@ -56,7 +56,7 @@ export CGO_ENABLED=1
 if [[ -z "${GLUA_BIN:-}" ]]; then
   mkdir -p "$(dirname "${glua_bin}")"
   echo "build native glua: ${glua_bin}"
-  go build -tags native_modules -trimpath -o "${glua_bin}" ./cmd/glua
+  go build -trimpath -o "${glua_bin}" ./cmd/glua
 elif [[ ! -x "${glua_bin}" ]]; then
   echo "GLUA_BIN is not executable: ${glua_bin}" >&2
   exit 1

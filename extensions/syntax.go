@@ -115,7 +115,7 @@ func ParseSyntaxSet(text string) (SyntaxSet, error) {
 		set = set.With(feature)
 	}
 	if unavailable := set.Without(Compiled()); unavailable != 0 {
-		// 用户请求了当前 build tag 未编译的扩展，必须明确报错。
+		// 防御性拒绝未进入统一功能集合的扩展，避免后续新增名称时静默失效。
 		return 0, fmt.Errorf("syntax extension not compiled: %s", strings.Join(unavailable.Names(), ","))
 	}
 	return set, nil

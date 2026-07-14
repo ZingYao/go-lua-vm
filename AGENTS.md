@@ -21,11 +21,12 @@
 
 ## CGO 规则
 
-- 默认构建禁止引入 CGO，核心 VM、编译器、标准库、Debug、bridge 与 Go 嵌入 API 必须保持纯 Go。
-- 只有 `native_modules` 显式构建边界允许使用 CGO；允许范围限定为 `internal/native/` 中带 `//go:build native_modules` 的 Go 文件，用于 Lua 5.3 public C API 原生模块加载与调用适配。
-- 默认构建、测试、基准测试必须使用 `CGO_ENABLED=0`；验证 `native_modules` 能力时必须显式使用 `CGO_ENABLED=1 go test -tags native_modules ...` 或对应 native 验收脚本。
-- 禁止在 `native_modules` 边界之外出现 `import "C"`，禁止让核心 VM 依赖 C 动态库、Lua C API 或宿主 C 扩展。
-- native module 适配层不得泄露到 `lua/` 稳定 API、`runtime/` 核心状态模型或默认 CLI 构建路径；外部宿主需要 native loader 时必须通过显式选项或显式构建标签接入。
+- 核心 VM、编译器、标准库、Debug、bridge 与 Go 嵌入 API 必须保持纯 Go；统一主线禁止使用自定义 build tag 裁剪产品功能。
+- CGO 只允许出现在 `internal/native/`，相关 Go 文件必须使用 Go 工具链内建的 `//go:build cgo` 与必要平台约束，用于 Lua 5.3 public C API 原生模块加载和调用适配。
+- `CGO_ENABLED=1` 时 CLI 自动接入 native loader，不需要 `native_modules` 或其它自定义 tag；`CGO_ENABLED=0` 与 `js/wasm` 构建自动使用纯 Go fallback。
+- 交付前必须分别执行 `CGO_ENABLED=0 go test ./...` 与 `CGO_ENABLED=1 go test ./...`，native 真实模块还需执行对应验收脚本。
+- 禁止在 `internal/native/` 之外出现 `import "C"`，禁止让核心 VM 依赖 C 动态库、Lua C API 或宿主 C 扩展。
+- native module 适配层不得泄露到 `lua/` 稳定 API 或 `runtime/` 核心状态模型；Go 宿主仍可通过显式 loader 选项覆盖默认行为。
 - 允许在 `third_party/` 存放 Lua 5.3 官方 C 源码，仅作为对照迁移参考，不参与 Go 构建。
 
 ## 注释规则

@@ -1,4 +1,4 @@
-//go:build native_modules
+//go:build cgo
 
 package native
 
@@ -11,9 +11,9 @@ import (
 	packagelib "github.com/ZingYao/go-lua-vm/stdlib/package"
 )
 
-// TestNativeLoaderRejectsEmptyArguments 验证 native_modules 构建下 loader 入口存在且校验参数。
+// TestNativeLoaderRejectsEmptyArguments 验证 CGO 构建下 loader 入口存在且校验参数。
 func TestNativeLoaderRejectsEmptyArguments(t *testing.T) {
-	// native_modules 构建需要暴露非 nil loader，后续平台实现会替换当前骨架失败。
+	// CGO 构建需要暴露非 nil loader，后续平台实现会替换当前骨架失败。
 	loader := Loader()
 	if loader == nil {
 		t.Fatalf("native Loader() = nil, want skeleton loader")

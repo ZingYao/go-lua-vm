@@ -73,7 +73,7 @@ mkdir -p "${build_dir}"
 
 echo "build Android native glua: ${glua_bin}"
 GOOS=android GOARCH="${target_goarch}" CGO_ENABLED=1 CC="${android_cc}" \
-  go build -tags native_modules -trimpath -o "${glua_bin}" ./cmd/glua
+  go build -trimpath -o "${glua_bin}" ./cmd/glua
 
 echo "build Android lua-cjson"
 TARGET_GOOS=android TARGET_GOARCH="${target_goarch}" BUILD_DIR="${build_dir}/cjson" CGO_ENABLED=1 CC="${android_cc}" \

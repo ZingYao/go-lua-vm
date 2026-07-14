@@ -1,13 +1,13 @@
 # Native 三平台构建
 
-`native_modules` 是 GLua 的可选 CGO 构建模式，用于让 `require` 加载按 Lua 5.3 public C API 编译的 `.so`、`.dylib` 或 `.dll` 模块。
+Native CGO 模式用于让 `require` 加载按 Lua 5.3 public C API 编译的 `.so`、`.dylib` 或 `.dll` 模块。
 
 默认纯 Go 构建与 Native 构建是两条独立路径：
 
-| 模式 | CGO | Build tag | Lua C 模块 |
-| --- | --- | --- | --- |
-| 默认 | `CGO_ENABLED=0` | 无 | 不提供内置 C 模块加载器 |
-| Native | `CGO_ENABLED=1` | `native_modules` | 启用 Lua 5.3 C API shim 和动态库加载 |
+| 模式 | CGO | Lua C 模块 |
+| --- | --- | --- |
+| 纯 Go | `CGO_ENABLED=0` | 不提供内置 C 模块加载器 |
+| Native | `CGO_ENABLED=1` | 自动启用 Lua 5.3 C API shim 和动态库加载 |
 
 ## 通用前置条件
 
@@ -20,7 +20,7 @@
 最小 Native 构建命令：
 
 ~~~bash
-CGO_ENABLED=1 go build -tags native_modules -trimpath -o bin/glua-native ./cmd/glua
+CGO_ENABLED=1 go build -trimpath -o bin/glua-native ./cmd/glua
 ~~~
 
 构建全部 CLI：
@@ -28,7 +28,7 @@ CGO_ENABLED=1 go build -tags native_modules -trimpath -o bin/glua-native ./cmd/g
 ~~~bash
 mkdir -p bin
 for command in glua gluac gluals; do
-  CGO_ENABLED=1 go build -tags native_modules -trimpath \
+  CGO_ENABLED=1 go build -trimpath \
     -o "bin/${command}" "./cmd/${command}"
 done
 ~~~
@@ -62,7 +62,7 @@ gcc --version
 ~~~bash
 mkdir -p bin
 CGO_ENABLED=1 CC=gcc \
-  go build -tags native_modules -trimpath \
+  go build -trimpath \
   -o bin/glua-native ./cmd/glua
 ~~~
 
@@ -98,7 +98,7 @@ xcrun clang --version
 ~~~bash
 mkdir -p bin
 CGO_ENABLED=1 CC="xcrun clang" \
-  go build -tags native_modules -trimpath \
+  go build -trimpath \
   -o bin/glua-native ./cmd/glua
 ~~~
 
@@ -109,7 +109,7 @@ Apple Silicon：
 ~~~bash
 CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 \
 CC="xcrun clang -arch arm64" \
-go build -tags native_modules -trimpath \
+go build -trimpath \
   -o bin/glua-darwin-arm64 ./cmd/glua
 ~~~
 
@@ -118,7 +118,7 @@ Intel：
 ~~~bash
 CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 \
 CC="xcrun clang -arch x86_64" \
-go build -tags native_modules -trimpath \
+go build -trimpath \
   -o bin/glua-darwin-amd64 ./cmd/glua
 ~~~
 
@@ -149,7 +149,7 @@ pacman -S --needed mingw-w64-ucrt-x86_64-gcc make git
 ~~~powershell
 $env:CGO_ENABLED = "1"
 $env:CC = "gcc"
-go build -tags native_modules -trimpath -o bin\glua-native.exe .\cmd\glua
+go build -trimpath -o bin\glua-native.exe .\cmd\glua
 ~~~
 
 Windows Lua C 模块通常使用 `.dll`，并可能链接 `lua53.dll`。仓库提供 `lua53.dll` shim、`.def` 和 import library 构建脚本。
@@ -210,8 +210,8 @@ export NATIVE_CC_LINUX_AMD64="zig cc -target x86_64-linux-gnu"
 Native Go 门禁：
 
 ~~~bash
-CGO_ENABLED=1 go test -tags native_modules ./...
-GO_LUA_VM_CHECK_NATIVE_MODULES=1 ./scripts/check-go-gates.sh
+CGO_ENABLED=1 go test ./...
+./scripts/check-go-gates.sh
 ~~~
 
 真实模块总验收：

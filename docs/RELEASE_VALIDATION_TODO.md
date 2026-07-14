@@ -60,9 +60,9 @@
 | --- | --- | --- | --- | --- | --- | --- |
 | DYN-01 | 默认无 CGO 不启用动态库 | `CGO_ENABLED=0 go test ./lua ./stdlib/package -run Test` | `lua/api_test.go`、`stdlib/package/package_test.go` | 默认 `package.loadlib`、C searcher、C root searcher 返回明确不支持，不打开真实动态库 | 若误打开动态库或依赖 CGO，立即回滚默认路径并补 no-CGO 检查 | all |
 | DYN-02 | 宿主覆盖 `package.loadlib` | `CGO_ENABLED=0 go test ./lua -run TestPackageLoadLibCanBeOverriddenByHostLoader` | `lua/api_test.go` | 覆盖后的 loader 可被 Lua 调用一次，返回宿主模拟模块值 | 若失败，检查全局 `package.loadlib` 覆盖、Go closure equality 和 loader 返回值调用 | host |
-| DYN-03 | 可选动态库 loader 接入点设计 | `go test ./lua -run TestDynamicLoaderOptions` | 后续新增设计测试 | 默认零值禁用；显式注入 loader 才按 filename/symbol 返回 Lua callable | 若 API 需要 build tag 或宿主插件，测试必须不破坏默认 no-CGO 路径 | host |
+| DYN-03 | 可选动态库 loader 接入点设计 | `go test ./lua -run TestDynamicLoaderOptions` | 后续新增设计测试 | 默认零值禁用；显式注入 loader 才按 filename/symbol 返回 Lua callable | 若 API 需要宿主插件，测试必须不破坏默认 no-CGO 路径 | host |
 | DYN-04 | 分平台候选扩展名和诊断文本 | `CGO_ENABLED=0 GOOS=<os> GOARCH=amd64 go test ./stdlib/package -run TestDynamicLibraryCandidates` | Linux/macOS/Windows 候选表 | Linux 包含 `.so`，macOS 包含 `.dylib`，Windows 运行期包含 `.dll` 且 `.lib` 只作为不支持边界说明 | 若交叉测试受限，至少把候选生成逻辑做成纯函数并按 GOOS 覆盖 | all |
-| DYN-05 | 显式 build tag 或宿主适配层验证 | `go test -tags <loader-tag> ./...` | 后续可选 loader 包 | 只有显式 tag 才启用平台 loader，默认门禁不受影响 | 若引入外部依赖或 CGO，必须在文档中标明不属于默认构建 | matrix |
+| DYN-05 | CGO 与宿主适配层验证 | `CGO_ENABLED=1 go test ./...` | native loader 与后续可选宿主包 | CGO 构建自动启用平台 loader，宿主适配仍需显式注入 | 若引入外部依赖，必须在文档中标明其构建与发布边界 | matrix |
 
 ## reflection 自动绑定
 

@@ -1,4 +1,4 @@
-//go:build native_modules && windows
+//go:build cgo && windows
 
 package native
 
@@ -18,7 +18,7 @@ type dynamicLibrary struct {
 	filename string
 }
 
-// openDynamicLibrary 在 Windows native_modules 构建下打开动态库。
+// openDynamicLibrary 在 Windows CGO 构建下打开动态库。
 //
 // filename 必须是非空路径或 Windows 动态加载器可解析的 DLL 名称。成功时返回的句柄必须由调用方 close。
 func openDynamicLibrary(filename string) (*dynamicLibrary, error) {

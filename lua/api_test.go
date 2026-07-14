@@ -1200,7 +1200,7 @@ func TestPackageDynamicLibraryLoaderOption(t *testing.T) {
 
 // TestPackageDynamicLibraryLoaderForStateOption 验证 lua.Options 可为当前 State 创建动态库 loader。
 //
-// Lua C API shim 需要在 luaopen_* loader 执行时访问真实 State；该入口让 native_modules 构建
+// Lua C API shim 需要在 luaopen_* loader 执行时访问真实 State；该入口让 CGO 构建
 // 可以在 package 库注册阶段绑定当前 State，同时保留默认无 CGO 构建不启用动态库加载。
 func TestPackageDynamicLibraryLoaderForStateOption(t *testing.T) {
 	// 创建带状态感知动态库 loader 的 State，并同时设置无状态 loader 以验证优先级。
@@ -5795,7 +5795,7 @@ __call_temp_tforcall_result_checks = checks
 // TestDoStringCallTemporaryCleanupClosureRootShapeGuards 验证固定返回 CALL 后的闭包根形态。
 //
 // native LPeg 诊断已把差异收敛到 selected tail 是否复用前置 local root；该测试不依赖 LPeg
-// 或 native_modules，用纯 Lua closure 覆盖 long-lived local、_ENV/global 和 shadow local 三种形态。
+// 或 CGO，用纯 Lua closure 覆盖 long-lived local、_ENV/global 和 shadow local 三种形态。
 func TestDoStringCallTemporaryCleanupClosureRootShapeGuards(t *testing.T) {
 	// 创建完整标准库 State，确保 select、collectgarbage、tostring 和 table 操作可用。
 	state := NewState()

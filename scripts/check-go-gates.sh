@@ -17,15 +17,21 @@ while IFS= read -r go_file; do
       echo "${go_file}: CGO is only allowed under internal/native/" >>/tmp/go-lua-vm-cgo-check.txt
       continue
     fi
-    if ! grep -Eq '^//go:build .*native_modules' "${go_file}"; then
-      echo "${go_file}: CGO files must be guarded by the native_modules build tag" >>/tmp/go-lua-vm-cgo-check.txt
+    if ! grep -Eq '^//go:build .*cgo' "${go_file}"; then
+      echo "${go_file}: CGO files must be guarded by the Go toolchain cgo constraint" >>/tmp/go-lua-vm-cgo-check.txt
     fi
   fi
 done < <(git ls-files '*.go')
 
 if [[ -s /tmp/go-lua-vm-cgo-check.txt ]]; then
   cat /tmp/go-lua-vm-cgo-check.txt >&2
-  echo "CGO is forbidden outside the internal/native native_modules boundary" >&2
+  echo "CGO is forbidden outside the internal/native cgo capability boundary" >&2
+  exit 1
+fi
+
+if git grep -nE '^//go:build .*([^[:alnum:]_]|^)(native_modules|lua53|with_continue|with_switch|with_const|with_events|with_all|call_trace)([^[:alnum:]_]|$)' -- '*.go' >/tmp/go-lua-vm-custom-build-tags.txt; then
+  cat /tmp/go-lua-vm-custom-build-tags.txt >&2
+  echo "custom product build tags are forbidden on the unified mainline" >&2
   exit 1
 fi
 
@@ -37,14 +43,9 @@ if [[ -s /tmp/go-lua-vm-untracked-go.txt ]]; then
 fi
 
 CGO_ENABLED=0 go test ./...
+CGO_ENABLED=1 go test ./internal/native ./internal/cli ./cmd/glua
 ./scripts/check-performance-smoke.sh
 ./scripts/check-performance-baseline.sh
 ./scripts/check-public-go-api-surface.sh
 ./scripts/check-public-go-api-fields.sh
 ./scripts/test-public-go-api.sh
-
-if [[ "${GO_LUA_VM_CHECK_NATIVE_MODULES:-0}" == "1" ]]; then
-  CGO_ENABLED=1 go test -tags native_modules ./internal/native ./internal/cli ./cmd/glua
-else
-  echo "skip native_modules gate: set GO_LUA_VM_CHECK_NATIVE_MODULES=1 to run CGO_ENABLED=1 go test -tags native_modules ./internal/native ./internal/cli ./cmd/glua"
-fi
