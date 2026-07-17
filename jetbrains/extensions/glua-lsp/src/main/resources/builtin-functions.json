@@ -1,6 +1,41 @@
 {
   "_schema": "glua builtin function docs. User builtinDocs JSON files use the same functions shape and override matching entries.",
   "functions": {
+    "console.log": {
+      "signature": {"en": "console.log(...values)", "zh-CN": "console.log(...values)"},
+      "returns": {"en": "No return value.", "zh-CN": "无返回值。"},
+      "params": {"en": ["...values: values to print"], "zh-CN": ["...values：需要输出的一个或多个值"]},
+      "description": {"en": "Writes a normal script message to the Lua output channel.", "zh-CN": "向 Lua 输出区写入普通脚本消息。"},
+      "example": {"en": "console.log('task completed')", "zh-CN": "console.log('任务完成')"}
+    },
+    "console.info": {
+      "signature": {"en": "console.info(...values)", "zh-CN": "console.info(...values)"},
+      "returns": {"en": "No return value.", "zh-CN": "无返回值。"},
+      "params": {"en": ["...values: values to print"], "zh-CN": ["...values：需要输出的一个或多个值"]},
+      "description": {"en": "Writes an Info-level script message.", "zh-CN": "输出 Info 级别脚本消息，在 Lua 日志区使用青绿色显示。"},
+      "example": {"en": "console.info('starting')", "zh-CN": "console.info('开始处理')"}
+    },
+    "console.debug": {
+      "signature": {"en": "console.debug(...values)", "zh-CN": "console.debug(...values)"},
+      "returns": {"en": "No return value.", "zh-CN": "无返回值。"},
+      "params": {"en": ["...values: values to print"], "zh-CN": ["...values：需要输出的一个或多个值"]},
+      "description": {"en": "Writes a Debug-level script message.", "zh-CN": "输出 Debug 级别脚本消息，在 Lua 日志区使用灰色显示。"},
+      "example": {"en": "console.debug('value', value)", "zh-CN": "console.debug('变量', value)"}
+    },
+    "console.warn": {
+      "signature": {"en": "console.warn(...values)", "zh-CN": "console.warn(...values)"},
+      "returns": {"en": "No return value.", "zh-CN": "无返回值。"},
+      "params": {"en": ["...values: values to print"], "zh-CN": ["...values：需要输出的一个或多个值"]},
+      "description": {"en": "Writes a Warn-level script message.", "zh-CN": "输出 Warn 级别脚本消息，在 Lua 日志区使用亮黄色显示。"},
+      "example": {"en": "console.warn('missing configuration')", "zh-CN": "console.warn('配置缺失')"}
+    },
+    "console.error": {
+      "signature": {"en": "console.error(...values)", "zh-CN": "console.error(...values)"},
+      "returns": {"en": "No return value.", "zh-CN": "无返回值。"},
+      "params": {"en": ["...values: values to print"], "zh-CN": ["...values：需要输出的一个或多个值"]},
+      "description": {"en": "Writes an Error-level script message.", "zh-CN": "输出 Error 级别脚本消息，在 Lua 日志区使用暗红色显示。"},
+      "example": {"en": "console.error('execution failed')", "zh-CN": "console.error('执行失败')"}
+    },
     "assert": {
       "signature": {
         "en": "assert(v [, message])",

@@ -57,8 +57,8 @@ public final class GluaLanguageServerExecutable {
     }
 
     static boolean isBundled(String os, String arch) {
-        return (os.equals("darwin") && (arch.equals("amd64") || arch.equals("arm64")))
-            || (os.equals("windows") && arch.equals("amd64"));
+        return (os.equals("darwin") || os.equals("linux") || os.equals("windows"))
+            && (arch.equals("amd64") || arch.equals("arm64"));
     }
 
     static String normalizedOs(String value) {

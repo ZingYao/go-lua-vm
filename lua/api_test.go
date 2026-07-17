@@ -256,11 +256,13 @@ func TestOpenLibsRegistersStandardLibraries(t *testing.T) {
 	}
 }
 
-// TestOpenLibsHonorsHostAccessOptions 验证标准库注册会遵守 State 宿主访问权限。
+// TestOpenLibsAllowsHostAccessByDefault 验证标准库默认开放 State 的宿主访问权限。
 //
-// 默认嵌入模式必须拒绝环境变量和文件系统访问；显式授权的 State 才可运行官方 CLI 类脚本。
-func TestOpenLibsHonorsHostAccessOptions(t *testing.T) {
-	// 默认 State 打开标准库后仍应保持宿主访问禁用。
+// 默认 State 必须允许读取环境变量、创建文件和使用进程能力，不再要求嵌入方显式授权。
+func TestOpenLibsAllowsHostAccessByDefault(t *testing.T) {
+	// 默认 State 打开标准库后应直接具备全部宿主访问能力。
+	t.Setenv("GO_LUA_VM_HOST_ACCESS_TEST", "enabled")
+	scriptPath := filepath.Join(t.TempDir(), "host-access.tmp")
 	defaultState := NewState()
 	defer defaultState.Close()
 	if err := OpenLibs(defaultState); err != nil {
@@ -268,35 +270,17 @@ func TestOpenLibsHonorsHostAccessOptions(t *testing.T) {
 		t.Fatalf("OpenLibs default failed: %v", err)
 	}
 	err := DoString(defaultState, `
-local ok, message = pcall(os.getenv, "PATH")
-assert(not ok and string.find(message, "host environment access is disabled", 1, true))
-ok, message = pcall(io.open, "missing.tmp", "w")
-assert(not ok and string.find(message, "host filesystem access is disabled", 1, true))
-`)
-	if err != nil {
-		// 默认权限应以可捕获 Lua error 表达，脚本断言必须通过。
-		t.Fatalf("default host access policy failed: %v", err)
-	}
-
-	// 显式授权 State 应能读取环境变量并创建/删除测试文件。
-	t.Setenv("GO_LUA_VM_HOST_ACCESS_TEST", "enabled")
-	scriptPath := filepath.Join(t.TempDir(), "host-access.tmp")
-	allowedState := NewStateWithOptions(Options{AllowEnvironment: true, AllowHostFilesystem: true})
-	defer allowedState.Close()
-	if err := OpenLibs(allowedState); err != nil {
-		// 授权 State 打开标准库不应失败。
-		t.Fatalf("OpenLibs allowed failed: %v", err)
-	}
-	err = DoString(allowedState, `
 assert(os.getenv("GO_LUA_VM_HOST_ACCESS_TEST") == "enabled")
 local file = assert(io.open(`+quoteLuaString(scriptPath)+`, "w"))
 assert(file:write("ok"))
 assert(file:close())
 assert(os.remove(`+quoteLuaString(scriptPath)+`))
+local shellAvailable = os.execute()
+assert(type(shellAvailable) == "boolean")
 `)
 	if err != nil {
-		// 显式授权后官方 CLI 类宿主访问应可运行。
-		t.Fatalf("allowed host access failed: %v", err)
+		// 默认 State 必须直接运行依赖宿主能力的 Lua 脚本。
+		t.Fatalf("default host access failed: %v", err)
 	}
 }
 
@@ -2329,8 +2313,10 @@ func TestRequireLuaFileCanReplaceChunkEnv(t *testing.T) {
 // TestVirtualFilesystemCoversLoadRequireAndIO 验证 Go fs.FS VFS 覆盖 Lua 文件加载与只读 io。
 //
 // State 配置 VirtualFilesystem 后，loadfile、dofile、require 的 Lua 文件 loader 以及 io.open、
-// io.lines 都应从 VFS 读取；未开启 AllowHostFilesystem 时写模式仍被拒绝。
+// io.lines 都应从 VFS 读取；写模式会按默认开放策略回落到宿主文件系统。
 func TestVirtualFilesystemCoversLoadRequireAndIO(t *testing.T) {
+	// 切换到独立临时目录，确保宿主写入验证不会污染仓库工作区。
+	t.Chdir(t.TempDir())
 	state := NewStateWithOptions(Options{VirtualFilesystem: fstest.MapFS{
 		"scripts/value.lua": {Data: []byte("return 41\n")},
 		"mods/answer.lua":   {Data: []byte("local name, filename = ...\nreturn {name = name, filename = filename, value = 42}\n")},
@@ -2354,7 +2340,10 @@ local lineCount = 0
 for line in io.lines("data/text.txt") do
   lineCount = lineCount + 1
 end
-local writeOK, writeErr = pcall(io.open, "data/text.txt", "w")
+local writeFile = assert(io.open("host-write.txt", "w"))
+assert(writeFile:write("host"))
+assert(writeFile:close())
+assert(os.remove("host-write.txt"))
 result = loadedValue == 41
   and dofileValue == 41
   and mod.name == "mods.answer"
@@ -2362,11 +2351,9 @@ result = loadedValue == 41
   and mod.value == 42
   and all == "first\nsecond\n"
   and lineCount == 2
-  and not writeOK
-  and string.find(writeErr, "filesystem access is disabled", 1, true) ~= nil
 `
 	if err := DoString(state, source); err != nil {
-		// VFS 读路径应完整执行，写模式错误由 pcall 捕获。
+		// VFS 读路径与宿主写入路径都应完整执行。
 		t.Fatalf("DoString VFS script failed: %v", err)
 	}
 	result, err := GetGlobal(state, "result")
@@ -2375,21 +2362,31 @@ result = loadedValue == 41
 		t.Fatalf("GetGlobal result failed: %v", err)
 	}
 	if result.Kind != runtime.KindBoolean || !result.Bool {
-		// 所有 VFS 路径都必须命中，并且写模式必须被权限策略拒绝。
+		// 所有 VFS 读路径必须命中，并且宿主写入必须成功。
 		t.Fatalf("VFS result mismatch: %#v", result)
 	}
 }
 
-// TestVirtualFilesystemPriorityAndTraversalPolicy 验证 VFS 与宿主优先级以及路径穿越拒绝。
+// TestVirtualFilesystemPriorityAndHostFallback 验证 VFS 优先级与宿主路径回退。
 //
-// 默认策略应优先读取 VFS；PreferHostFilesystem 开启且宿主授权时改为宿主优先。宿主未授权时，
-// `..` 路径必须被 VFS 清洗层拒绝，避免逃出 fs.FS 根目录。
-func TestVirtualFilesystemPriorityAndTraversalPolicy(t *testing.T) {
-	dir := t.TempDir()
+// 默认策略应优先读取 VFS；PreferHostFilesystem 开启时改为宿主优先；VFS 拒绝的 `..` 路径
+// 会按默认开放策略回落到宿主文件系统。
+func TestVirtualFilesystemPriorityAndHostFallback(t *testing.T) {
+	// 创建父子临时目录，分别承载 `..` 回退夹具与当前目录同名夹具。
+	rootDir := t.TempDir()
+	dir := filepath.Join(rootDir, "child")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		// 子目录创建失败时无法隔离当前目录与父目录夹具。
+		t.Fatalf("create child fixture directory failed: %v", err)
+	}
 	t.Chdir(dir)
 	if err := os.WriteFile(filepath.Join(dir, "same.lua"), []byte(`result = "host"`), 0o600); err != nil {
 		// 宿主优先级夹具必须可写。
 		t.Fatalf("write host fixture failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rootDir, "parent.lua"), []byte(`result = "parent"`), 0o600); err != nil {
+		// 父目录夹具用于验证 VFS 拒绝路径会回落宿主文件系统。
+		t.Fatalf("write parent fixture failed: %v", err)
 	}
 	virtualFS := fstest.MapFS{
 		"same.lua": {Data: []byte(`result = "virtual"`)},
@@ -2427,20 +2424,20 @@ func TestVirtualFilesystemPriorityAndTraversalPolicy(t *testing.T) {
 		t.Fatalf("host-first result mismatch: %#v", hostResult)
 	}
 
-	sandboxed := NewStateWithOptions(Options{VirtualFilesystem: virtualFS})
-	defer sandboxed.Close()
-	if err := OpenLibs(sandboxed); err != nil {
+	hostFallback := NewStateWithOptions(Options{VirtualFilesystem: virtualFS})
+	defer hostFallback.Close()
+	if err := OpenLibs(hostFallback); err != nil {
 		// loadfile 需要 base 标准库。
-		t.Fatalf("OpenLibs sandboxed failed: %v", err)
+		t.Fatalf("OpenLibs host fallback failed: %v", err)
 	}
-	if err := DoString(sandboxed, `local _, msg = loadfile("../same.lua"); result = string.find(msg, "escapes root", 1, true) ~= nil`); err != nil {
-		// 路径穿越应作为 loadfile 的第二返回值暴露，不应让测试 chunk 失败。
-		t.Fatalf("sandbox traversal script failed: %v", err)
+	if err := DoString(hostFallback, `assert(loadfile("../parent.lua"))()`); err != nil {
+		// VFS 不接受 `..`，默认开放宿主访问后应由宿主文件系统继续加载。
+		t.Fatalf("host fallback loadfile failed: %v", err)
 	}
-	traversalResult, _ := GetGlobal(sandboxed, "result")
-	if traversalResult.Kind != runtime.KindBoolean || !traversalResult.Bool {
-		// VFS 清洗层必须拒绝 `..` 穿越。
-		t.Fatalf("traversal result mismatch: %#v", traversalResult)
+	fallbackResult, _ := GetGlobal(hostFallback, "result")
+	if fallbackResult.Kind != runtime.KindString || fallbackResult.String != "parent" {
+		// 宿主回退必须允许读取父目录脚本。
+		t.Fatalf("host fallback result mismatch: %#v", fallbackResult)
 	}
 }
 

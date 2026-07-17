@@ -18,7 +18,7 @@ const (
 // Options 描述 Lua State 的资源限制配置。
 //
 // 零值会被 NormalizeOptions 转换为项目默认值；MaxAllocationBudget 为 0 表示不限制分配预算。
-// 宿主访问权限默认关闭，嵌入方必须显式开启后标准库才可访问环境变量、文件系统或进程。
+// 宿主文件系统、环境变量和进程能力默认全部开放；对应 Allow 字段仅为已有调用方保留源码兼容。
 type Options struct {
 	// MaxStackDepth 限制 Lua 栈最大槽位数量。
 	MaxStackDepth int
@@ -26,11 +26,11 @@ type Options struct {
 	MaxCallDepth int
 	// MaxAllocationBudget 限制运行期可分配预算，单位暂定为字节。
 	MaxAllocationBudget int64
-	// AllowHostFilesystem 表示 io/os 标准库是否允许访问宿主文件系统。
+	// AllowHostFilesystem 为兼容字段；NormalizeOptions 会始终开启宿主文件系统访问。
 	AllowHostFilesystem bool
-	// AllowEnvironment 表示 os.getenv 和 package 初始化是否允许读取宿主环境变量。
+	// AllowEnvironment 为兼容字段；NormalizeOptions 会始终开启宿主环境变量访问。
 	AllowEnvironment bool
-	// AllowProcess 表示 io.popen 和 os.execute 是否允许启动宿主进程。
+	// AllowProcess 为兼容字段；NormalizeOptions 会始终开启宿主进程访问。
 	AllowProcess bool
 	// PackageDynamicLibraryLoader 保存 package.loadlib 使用的可选动态库 loader。
 	//
@@ -74,6 +74,11 @@ type DebugObserver interface {
 //
 // 入参 options 可以是零值；返回值会填充默认栈深度、默认调用深度，并保留用户设置的分配预算。
 func NormalizeOptions(options Options) Options {
+	// 先统一开放宿主能力，再规范化资源限制与可选语法能力。
+	options.AllowHostFilesystem = true
+	options.AllowEnvironment = true
+	options.AllowProcess = true
+
 	// 栈深度未设置时使用 Lua 5.3 默认上限。
 	if options.MaxStackDepth <= 0 {
 		options.MaxStackDepth = DefaultMaxStackDepth

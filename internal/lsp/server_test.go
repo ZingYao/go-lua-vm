@@ -30,6 +30,16 @@ func TestAnalyzeDiagnosticsAcceptsExtensions(t *testing.T) {
 	}
 }
 
+// TestAnalyzeDiagnosticsAcceptsMemberFunctionCall 验证点号成员调用不会被误判为缺少赋值等号。
+func TestAnalyzeDiagnosticsAcceptsMemberFunctionCall(t *testing.T) {
+	// console.log 与普通 table 成员调用都是合法 Lua 函数调用语句。
+	diagnostics := analyzeDiagnostics("local name = 'zing'\nprint(\"AutoGo IDEA remote engine acceptance\")\nprint('zing')\nconsole.log('log')\nconsole.info('info')\nconsole.debug('debug')\nconsole.warn('warn')\nconsole.error('error')\n\n", extensions.Default())
+	if len(diagnostics) != 0 {
+		// 合法调用不得在 EOF 处产生 expected operator "=" 等伪诊断。
+		t.Fatalf("diagnostics = %#v, want none", diagnostics)
+	}
+}
+
 // TestAnalyzeDiagnosticsRejectsDuplicateSwitchCaseValue 验证 PLS 会诊断 switch 内重复 case 值。
 func TestAnalyzeDiagnosticsRejectsDuplicateSwitchCaseValue(t *testing.T) {
 	if !extensions.Default().Has(extensions.SyntaxSwitch) {
@@ -133,6 +143,23 @@ func TestServerInitializeAndFormatting(t *testing.T) {
 	if len(messages) < 4 {
 		// initialize 响应、publishDiagnostics、formatting 响应、shutdown 响应都应写出。
 		t.Fatalf("messages = %#v", messages)
+	}
+	foundDiagnostics := false
+	for _, message := range messages {
+		if message["method"] != "textDocument/publishDiagnostics" {
+			continue
+		}
+		foundDiagnostics = true
+		params, ok := message["params"].(map[string]any)
+		if !ok {
+			t.Fatalf("publishDiagnostics params = %#v", message["params"])
+		}
+		if diagnostics, ok := params["diagnostics"].([]any); !ok || diagnostics == nil {
+			t.Fatalf("publishDiagnostics diagnostics must be a JSON array, got %#v", params["diagnostics"])
+		}
+	}
+	if !foundDiagnostics {
+		t.Fatal("publishDiagnostics notification was not emitted")
 	}
 	formatResponse := findResponse(t, messages, float64(2))
 	resultBytes, err := json.Marshal(formatResponse["result"])
@@ -584,9 +611,39 @@ func TestLoadBuiltinCatalogFiles(t *testing.T) {
 		// catalog 补全结果必须可编码。
 		t.Fatalf("marshal completion items failed: %v", err)
 	}
-	if !strings.Contains(string(itemBytes), `"label":"call"`) || !strings.Contains(string(itemBytes), `"label":"flag"`) || !strings.Contains(string(itemBytes), `"kind":21`) {
+	if !strings.Contains(string(itemBytes), `"label":"call"`) || !strings.Contains(string(itemBytes), `"insertText":"call(${1:value})"`) || !strings.Contains(string(itemBytes), `"insertTextFormat":2`) || !strings.Contains(string(itemBytes), `"label":"flag"`) || !strings.Contains(string(itemBytes), `"kind":21`) {
 		// 无参数签名条目必须作为 Constant 返回。
 		t.Fatalf("catalog completion = %s", itemBytes)
+	}
+}
+
+// TestCompletionSnippetCaretPlacement 验证有参和无参函数的 Tab 接受光标语义。
+func TestCompletionSnippetCaretPlacement(t *testing.T) {
+	// 有参候选选中首个参数，无参候选插入完整括号。
+	if got := completionSnippet("log", "console.log(...values)"); got != "log(${1:...values})" {
+		t.Fatalf("parameter snippet = %q", got)
+	}
+	if got := completionSnippet("clear", "console.clear()"); got != "clear()" {
+		t.Fatalf("zero parameter snippet = %q", got)
+	}
+}
+
+// TestConsoleBuiltinCatalogDocumentsLevels 验证 Console 日志方法提供完整 Hover 文档。
+func TestConsoleBuiltinCatalogDocumentsLevels(t *testing.T) {
+	previousLocale := activeBuiltinCatalogLocale
+	defer func() { applyBuiltinCatalogLocale(previousLocale) }()
+	catalogPath := filepath.Join("..", "..", "vscode", "extensions", "glua-lsp", "server", "builtin-functions.json")
+	if err := LoadBuiltinCatalogFiles([]string{catalogPath}); err != nil {
+		t.Fatalf("LoadBuiltinCatalogFiles failed: %v", err)
+	}
+	applyBuiltinCatalogLocale("zh-CN")
+	info, ok := builtinFunctionInfo("console.info")
+	if !ok {
+		t.Fatal("console.info missing from builtin catalog")
+	}
+	hover := formatBuiltinHover("console.info", info)
+	if !strings.Contains(hover, "青绿色") || !strings.Contains(hover, "console.info(...values)") || !strings.Contains(hover, "参数") {
+		t.Fatalf("console.info hover incomplete: %s", hover)
 	}
 }
 

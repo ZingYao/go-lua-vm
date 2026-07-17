@@ -4,7 +4,10 @@ const path = require("path");
 const BUNDLED_TARGETS = new Map([
   ["darwin/amd64", ["darwin-amd64", "gluals"]],
   ["darwin/arm64", ["darwin-arm64", "gluals"]],
+  ["linux/amd64", ["linux-amd64", "gluals"]],
+  ["linux/arm64", ["linux-arm64", "gluals"]],
   ["win32/amd64", ["windows-amd64", "gluals.exe"]],
+  ["win32/arm64", ["windows-arm64", "gluals.exe"]],
 ]);
 
 function resolveGlualsExecutable(extensionPath, configuredPath, platform = process.platform, arch = process.arch) {

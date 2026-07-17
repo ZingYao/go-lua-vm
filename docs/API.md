@@ -34,11 +34,11 @@ type GoFunction func(args ...Value) (Value, error)
 type GoResultsFunction func(args ...Value) ([]Value, error)
 ```
 
-`Options` 使用零值表示默认限制。资源限制、宿主权限、VFS 和动态库 loader 策略在 `runtime`/stdlib 层执行，`lua` 包只负责把宿主配置转换为内部选项。`State` 和 `Value` 当前复用 runtime 的稳定值语义，外部调用方应只依赖 `lua` 包导出的别名、常量、构造函数和后续方法，不直接耦合内部包。
+`Options` 使用零值表示默认限制。文件系统、环境变量和进程能力默认全部开放，三个 `Allow*` 字段仅为已有调用方保留源码兼容，规范化时始终设为 `true`。资源限制、VFS 和动态库 loader 策略在 `runtime`/stdlib 层执行，`lua` 包只负责把宿主配置转换为内部选项。`State` 和 `Value` 当前复用 runtime 的稳定值语义，外部调用方应只依赖 `lua` 包导出的别名、常量、构造函数和后续方法，不直接耦合内部包。
 
 ## VFS 与动态库 loader
 
-`VirtualFilesystem` 接收只读 `fs.FS`，覆盖 `loadfile`、`dofile`、`require` Lua 文件 loader、只读 `io.open/io.lines` 和 `file:read/file:lines`。默认读取优先命中 VFS；设置 `PreferHostFilesystem` 且开启 `AllowHostFilesystem` 后，同名路径优先使用宿主文件系统。
+`VirtualFilesystem` 接收只读 `fs.FS`，覆盖 `loadfile`、`dofile`、`require` Lua 文件 loader、只读 `io.open/io.lines` 和 `file:read/file:lines`。默认读取优先命中 VFS；设置 `PreferHostFilesystem` 后，同名路径优先使用宿主文件系统。
 
 ```go
 state := lua.NewStateWithOptions(lua.Options{

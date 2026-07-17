@@ -139,8 +139,20 @@ jobs:
           cache: npm
           cache-dependency-path: vscode/extensions/glua-lsp/package-lock.json
 
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.4"
+          cache: true
+
+      - name: Build bundled gluals executables
+        run: ./scripts/build-gluals-platforms.sh
+
       - name: Package VS Code extension
         run: make package-vscode
+
+      - name: Verify VS Code bundled gluals executables
+        run: ./scripts/check-gluals-extension-package.sh vscode dist/glua-lsp-vscode.vsix
 
       - name: Upload VS Code extension artifact
         uses: actions/upload-artifact@v4
@@ -166,6 +178,15 @@ jobs:
         with:
           gradle-version: "9.0.0"
 
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.4"
+          cache: true
+
+      - name: Build bundled gluals executables
+        run: ./scripts/build-gluals-platforms.sh
+
       - name: Package JetBrains extension
         shell: bash
         run: |
@@ -180,6 +201,9 @@ jobs:
             rm -rf jetbrains/extensions/glua-lsp/.gradle jetbrains/extensions/glua-lsp/build
             sleep $((attempt * 10))
           done
+
+      - name: Verify JetBrains bundled gluals executables
+        run: ./scripts/check-gluals-extension-package.sh jetbrains dist/glua-jetbrains-*.zip
 
       - name: Upload JetBrains extension artifact
         uses: actions/upload-artifact@v4

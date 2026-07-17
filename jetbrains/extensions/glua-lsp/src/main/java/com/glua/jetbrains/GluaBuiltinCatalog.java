@@ -39,15 +39,22 @@ public final class GluaBuiltinCatalog {
     }
 
     public synchronized void reload() {
-        entries.clear();
+        // 从当前 IDE 设置读取语言和外部目录，再委托统一重载流程。
         GluaSettings currentSettings = settings();
-        resolvedLocale = resolveLocale(currentSettings.docLanguage());
+        reload(currentSettings.builtinDocs(), currentSettings.docLanguage());
+    }
+
+    // reload 按指定目录与语言重建 builtin catalog，供设置应用和隔离测试复用。
+    synchronized void reload(List<String> builtinDocs, String docLanguage) {
+        // 清空旧目录后依次合并随包目录与外部 JSON，确保后加载条目覆盖同名定义。
+        entries.clear();
+        resolvedLocale = resolveLocale(docLanguage);
         loadDefault();
-        for (String file : currentSettings.builtinDocs()) {
+        for (String file : builtinDocs) {
             loadPath(file);
         }
         loaded = true;
-        LOG.info("glua builtin docs locale=" + resolvedLocale + ", entries=" + entries.size() + ", files=" + currentSettings.builtinDocs().size());
+        LOG.info("glua builtin docs locale=" + resolvedLocale + ", entries=" + entries.size() + ", files=" + builtinDocs.size());
     }
 
     public synchronized Set<String> names() {
