@@ -120,9 +120,10 @@ func TestSessionWorkspaceVirtualFilesystem(t *testing.T) {
 	}
 }
 
-// TestSessionWorkspaceVirtualFilesystemErrors 验证缺失文件和写模式保留可诊断的沙箱语义。
-func TestSessionWorkspaceVirtualFilesystemErrors(t *testing.T) {
-	// 缺失只读文件应返回 nil/message，写模式则通过 pcall 捕获权限错误。
+// TestSessionWorkspaceVirtualFilesystemHostFallback 验证缺失文件错误与写模式宿主回退语义。
+func TestSessionWorkspaceVirtualFilesystemHostFallback(t *testing.T) {
+	// 切换到独立临时目录，避免默认开放的宿主写入污染仓库。
+	t.Chdir(t.TempDir())
 	events := make([]Event, 0)
 	session := NewSession(func(event Event) {
 		events = append(events, event)
@@ -130,8 +131,11 @@ func TestSessionWorkspaceVirtualFilesystemErrors(t *testing.T) {
 	source := `
 local missing, missingError = io.open("missing.txt", "r")
 print(missing == nil, missingError)
-local writeOK, writeError = pcall(io.open, "TODO.md", "w")
-print(writeOK, writeError)
+local writeFile, writeError = io.open("TODO.md", "w")
+print(writeFile ~= nil, writeError)
+assert(writeFile:write("host fallback"))
+assert(writeFile:close())
+assert(os.remove("TODO.md"))
 `
 	files := map[string]string{"main.glua": source, "TODO.md": "read only"}
 	if err := session.RunWorkspace(context.Background(), source, "main.glua", files, false); err != nil {
@@ -139,9 +143,9 @@ print(writeOK, writeError)
 		t.Fatalf("RunWorkspace handled VFS errors failed: %v", err)
 	}
 	stdout := eventText(events, "stdout")
-	if !strings.Contains(stdout, "true\topen missing.txt") || !strings.Contains(stdout, "false\tio.open: host filesystem access is disabled") {
-		// 页面必须同时看到缺失路径和写权限拒绝原因。
-		t.Fatalf("stdout = %q, want detailed VFS errors", stdout)
+	if !strings.Contains(stdout, "true\topen missing.txt") || !strings.Contains(stdout, "true\tnil") {
+		// 页面必须同时看到缺失路径错误和宿主写入成功结果。
+		t.Fatalf("stdout = %q, want missing error and host write success", stdout)
 	}
 }
 

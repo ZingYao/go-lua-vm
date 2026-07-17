@@ -10,6 +10,8 @@ import org.jetbrains.annotations.NotNull;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 public final class GluaLspServerDescriptor extends ProjectWideLspServerDescriptor {
@@ -25,11 +27,12 @@ public final class GluaLspServerDescriptor extends ProjectWideLspServerDescripto
 
     @Override
     public @NotNull GeneralCommandLine createCommandLine() throws ExecutionException {
+        // 解析 gluals 与全部 builtin catalog 路径后构造语言服务器启动命令。
         GluaSettings settings = ApplicationManager.getApplication().getService(GluaSettings.class);
         try {
             Path executable = GluaLanguageServerExecutable.resolve(settings.languageServerExecutable());
             Path catalog = GluaLanguageServerExecutable.resolveBuiltinCatalog();
-            return new GeneralCommandLine(executable.toString(), "--gluals-syntax", settings.syntax(), "--gluals-builtin-docs", catalog.toString());
+            return new GeneralCommandLine(executable.toString()).withParameters(commandArguments(settings, catalog));
         } catch (IOException error) {
             throw new ExecutionException(error.getMessage(), error);
         }
@@ -49,7 +52,26 @@ public final class GluaLspServerDescriptor extends ProjectWideLspServerDescripto
             "syntax", settings.syntax(),
             "events", settings.events(),
             "locale", settings.docLanguage(),
-            "resolvedLocale", resolvedLocale
+            "resolvedLocale", resolvedLocale,
+            "builtinExtensions", settings.builtinDocs()
         );
+    }
+
+    // commandArguments 生成语法模式、内置目录和用户扩展目录对应的 gluals 启动参数。
+    static List<String> commandArguments(GluaSettings settings, Path catalog) {
+        // 先加入插件随包目录，再按设置顺序追加有效的外部 JSON 绝对路径。
+        List<String> arguments = new ArrayList<>();
+        arguments.add("--gluals-syntax");
+        arguments.add(settings.syntax());
+        arguments.add("--gluals-builtin-docs");
+        arguments.add(catalog.toString());
+        for (String builtinDoc : settings.builtinDocs()) {
+            if (builtinDoc == null || builtinDoc.isBlank()) {
+                continue;
+            }
+            arguments.add("--gluals-builtin-docs");
+            arguments.add(Path.of(builtinDoc.trim()).toAbsolutePath().normalize().toString());
+        }
+        return arguments;
     }
 }

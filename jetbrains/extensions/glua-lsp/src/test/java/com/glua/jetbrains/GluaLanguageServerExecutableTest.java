@@ -10,9 +10,12 @@ final class GluaLanguageServerExecutableTest {
     void bundlesOnlyRequestedTargets() {
         assertTrue(GluaLanguageServerExecutable.isBundled("darwin", "amd64"));
         assertTrue(GluaLanguageServerExecutable.isBundled("darwin", "arm64"));
+        assertTrue(GluaLanguageServerExecutable.isBundled("linux", "amd64"));
+        assertTrue(GluaLanguageServerExecutable.isBundled("linux", "arm64"));
         assertTrue(GluaLanguageServerExecutable.isBundled("windows", "amd64"));
-        assertFalse(GluaLanguageServerExecutable.isBundled("linux", "amd64"));
-        assertFalse(GluaLanguageServerExecutable.isBundled("windows", "arm64"));
+        assertTrue(GluaLanguageServerExecutable.isBundled("windows", "arm64"));
+        assertFalse(GluaLanguageServerExecutable.isBundled("linux", "386"));
+        assertFalse(GluaLanguageServerExecutable.isBundled("freebsd", "amd64"));
     }
 
     @Test
