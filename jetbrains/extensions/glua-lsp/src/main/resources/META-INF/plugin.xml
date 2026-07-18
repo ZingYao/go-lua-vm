@@ -45,6 +45,13 @@
       language="GLua"
       implementationClass="com.glua.jetbrains.GluaCommenter"/>
 
+    <gotoDeclarationHandler
+      implementation="com.glua.jetbrains.GluaGotoDeclarationHandler"/>
+
+    <psi.referenceContributor
+      language="GLua"
+      implementation="com.glua.jetbrains.GluaBuiltinReferenceContributor"/>
+
     <enterHandlerDelegate
       implementation="com.glua.jetbrains.GluaEnterHandler"/>
 

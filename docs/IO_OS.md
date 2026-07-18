@@ -2,24 +2,24 @@
 
 ## 默认策略
 
-`io`、`os` 和 `package` 标准库默认不允许访问宿主文件系统、读取宿主环境变量或创建宿主进程。这个默认值用于库模式嵌入场景，避免脚本在调用方没有显式授权时读取、写入或删除宿主资源。
+`io`、`os` 和 `package` 标准库默认允许访问宿主文件系统、读取宿主环境变量和创建宿主进程。库模式与 CLI 使用同一开放策略，Lua 脚本不再需要调用方显式授权即可使用这些方法。
 
-CLI 普通模式会显式开启 `AllowHostFilesystem`、`AllowProcess` 和 `AllowEnvironment`，用于兼容官方 Lua 5.3 测试套件及常规命令行行为；CLI `-E` 模式会继续屏蔽环境变量读取。标准流属于进程已经打开的句柄，不等价于允许任意文件系统访问。
+`AllowHostFilesystem`、`AllowProcess` 和 `AllowEnvironment` 字段仅保留源码兼容，`NormalizeOptions` 会始终把三者设置为 `true`。CLI 与嵌入模式均可直接使用对应能力；`-E` 仍控制 Lua 初始化时是否采用环境配置，但不再作为 `os.getenv` 的权限开关。
 
 ## Sandbox 选项设计
 
-`lua.Options` 与底层 `runtime.Options` 当前承载以下已实现策略字段：
+`lua.Options` 与底层 `runtime.Options` 保留以下兼容字段：
 
-- `AllowHostFilesystem bool`：是否允许 `io.open`、`io.input`、`io.output`、`io.lines`、`io.tmpfile`、`os.remove`、`os.rename`、`os.tmpname` 等访问宿主文件系统。
-- `AllowProcess bool`：是否允许 `io.popen`、`os.execute` 等启动宿主进程。
-- `AllowEnvironment bool`：是否允许 `os.getenv` 读取宿主环境变量。
+- `AllowHostFilesystem bool`：规范化后固定为 `true`，允许文件系统相关方法。
+- `AllowProcess bool`：规范化后固定为 `true`，允许进程相关方法。
+- `AllowEnvironment bool`：规范化后固定为 `true`，允许环境变量相关方法。
 
 后续仍需补齐以下更细粒度策略字段：
 
 - `AllowedRoots []string`：允许访问的根目录集合；为空且启用文件系统时表示由宿主自行承担全局授权风险。
 - `StandardStreams bool`：是否注册 stdin/stdout/stderr；默认启用，关闭后 `io` 库只注册纯函数和后续明确授权的文件句柄。
 
-所有路径型 API 必须先规范化路径，再检查是否落在允许根目录内。进程型 API 默认关闭，启用时必须保留命令、参数和工作目录的审计入口。
+所有路径型 API 仍必须先规范化路径。进程型 API 默认开放；宿主如需审计，应在进程运行环境或嵌入封装层记录命令、参数和工作目录。
 
 ## 当前实现边界
 
@@ -41,10 +41,10 @@ CLI 普通模式会显式开启 `AllowHostFilesystem`、`AllowProcess` 和 `Allo
 - `os.clock` 使用纯 Go 单调 elapsed time 近似 Lua 5.3 CPU time。
 - `os.date` 已支持常用 strftime 子集和 `*t` table 输出，`!` 前缀使用 UTC。
 - `os.difftime` 已支持两个 Unix 秒时间戳的差值计算。
-- `os.execute` 当前默认禁用宿主进程；无参数查询 shell 可用性在禁用时返回 false，传入命令在禁用时返回进程禁用错误。
+- `os.execute` 默认允许查询 shell 可用性和执行宿主命令。
 - `os.exit` 在嵌入模式下不直接终止宿主进程，而是返回携带退出码的 Lua error；后续 CLI 层负责映射为真实进程退出。
-- `os.getenv` 默认禁用宿主环境变量访问；启用 `AllowEnvironment` 后读取 `os.LookupEnv`。
-- `os.remove`、`os.rename` 默认禁用宿主文件系统写入；启用 `AllowHostFilesystem` 后执行宿主文件操作，普通失败返回 `nil, message, code`。
+- `os.getenv` 默认读取 `os.LookupEnv`。
+- `os.remove`、`os.rename` 默认执行宿主文件操作，普通失败返回 `nil, message, code`。
 - `os.setlocale` 当前固定为 C locale；设置其他 locale 返回 nil。
 - `os.time` 已支持当前 Unix 秒和 date table 转 Unix 秒。
-- `os.tmpname` 默认禁用宿主临时路径访问；启用 `AllowHostFilesystem` 后返回宿主临时路径。
+- `os.tmpname` 默认返回宿主临时路径。

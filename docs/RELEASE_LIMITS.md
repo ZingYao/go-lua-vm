@@ -9,7 +9,7 @@
 - `glua` 支持 Lua 5.3 CLI 常用执行路径；`gluac` 支持标准 binary chunk 编译、输出和调试工具路径。
 - binary chunk 首版承诺本项目 load/dump roundtrip、当前平台标准 chunk 读写和 Lua 5.3 语义字段兼容。
 - Go 嵌入 API 支持显式注册 Go 函数、模块 table、`package.loaded`、`package.preload`、显式 table 构造、常量/变量注入、只读 table、显式对象代理、userdata 生命周期关闭、reflection 自动绑定和 Lua stub/代理代码生成。
-- 库模式默认关闭宿主文件系统、环境变量和进程访问；CLI 普通模式按官方 Lua 使用习惯开启宿主访问，`-E` 继续屏蔽环境变量读取。
+- 库模式与 CLI 默认开放宿主文件系统、环境变量和进程访问；`AllowHostFilesystem`、`AllowEnvironment`、`AllowProcess` 仅保留源码兼容，规范化后固定开启。
 - Go `fs.FS` 只读虚拟文件系统可通过 `lua.Options.VirtualFilesystem` 接入，覆盖 `loadfile`、`dofile`、`require` Lua 文件 loader、只读 `io.open/io.lines` 以及对应 `file:read/file:lines`；默认 VFS 优先，`PreferHostFilesystem` 可在宿主文件系统授权后切换宿主优先。
 - 项目核心与默认构建保持纯 Go、无 CGO，目标是避免跨系统编译困难；这不禁止宿主程序或可选扩展调用外部 `lib`、`.so`、`.dylib` 或 Windows `.dll`。嵌入方可以通过 `lua.Options.PackageDynamicLibraryLoader`、`lua.Options.PackageDynamicLibraryLoaderForState` 或 `stdlib/package` 环境注入可选 loader，也可以继续覆盖 `package.loadlib`、写入 `package.preload` 或替换 `package.searchers` 接入。
 - 默认跨平台编译不需要额外 C 头文件、预装 `.so/.dylib/.dll`、Lua C API 开发包或系统动态库依赖；`package.cpath` 和动态库 loader 接入点只是运行期扩展协议，不进入默认构建链路。

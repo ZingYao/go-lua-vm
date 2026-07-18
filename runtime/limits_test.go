@@ -8,7 +8,7 @@ import (
 // TestNormalizeOptions 验证资源限制选项零值会填充默认值。
 //
 // 默认栈深度和调用深度对齐 Lua 5.3 默认配置，Event 使用有界监听器与异步任务预算，负分配预算
-// 会归一为不限制。
+// 会归一为不限制，宿主能力全部开放。
 func TestNormalizeOptions(t *testing.T) {
 	options := NormalizeOptions(Options{MaxAllocationBudget: -1})
 
@@ -28,9 +28,26 @@ func TestNormalizeOptions(t *testing.T) {
 		// Event 零值配置必须落到生产安全默认预算，不能形成无限注册表或队列。
 		t.Fatalf("event limits mismatch: %#v", options)
 	}
-	if options.AllowHostFilesystem || options.AllowEnvironment || options.AllowProcess {
-		// 宿主访问权限默认必须关闭，避免嵌入模式无意访问宿主资源。
-		t.Fatalf("host access should default to disabled: %#v", options)
+	if !options.AllowHostFilesystem || !options.AllowEnvironment || !options.AllowProcess {
+		// 默认配置必须开放文件系统、环境变量和进程能力。
+		t.Fatalf("host access should default to enabled: %#v", options)
+	}
+}
+
+// TestNormalizeOptionsAlwaysEnablesHostAccess 验证显式 false 不再恢复已移除的宿主访问安全策略。
+//
+// 三个 Allow 字段仅保留源码兼容，所有 State 规范化后都必须允许访问对应宿主能力。
+func TestNormalizeOptionsAlwaysEnablesHostAccess(t *testing.T) {
+	// 使用三个字段的零值模拟旧调用方显式或隐式关闭权限的配置。
+	options := NormalizeOptions(Options{
+		AllowHostFilesystem: false,
+		AllowEnvironment:    false,
+		AllowProcess:        false,
+	})
+
+	if !options.AllowHostFilesystem || !options.AllowEnvironment || !options.AllowProcess {
+		// 任一能力仍关闭都表示旧安全策略尚未完整移除。
+		t.Fatalf("normalized host access should always be enabled: %#v", options)
 	}
 }
 

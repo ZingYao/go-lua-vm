@@ -520,6 +520,10 @@ type completionItem struct {
 	Detail string `json:"detail,omitempty"`
 	// Documentation 保存候选的 Markdown 文档。
 	Documentation *markupContent `json:"documentation,omitempty"`
+	// InsertText 保存接受函数候选时插入的 snippet。
+	InsertText string `json:"insertText,omitempty"`
+	// InsertTextFormat=2 表示 InsertText 使用 LSP snippet 语法。
+	InsertTextFormat int `json:"insertTextFormat,omitempty"`
 }
 
 // handleCompletion 处理补全请求。
@@ -664,7 +668,7 @@ func analyzeDiagnostics(text string, syntax extensions.SyntaxSet) []diagnostic {
 		// parser 通过后继续执行 codegen 语义诊断，覆盖 const 重新赋值等非纯语法错误。
 		return []diagnostic{diagnosticFromCompileError(err)}
 	}
-	return nil
+	return make([]diagnostic, 0)
 }
 
 // diagnosticFromCompileError 将 codegen 语义错误转换为 LSP 诊断。
@@ -1779,7 +1783,8 @@ func builtinCompletionItems(prefix string) []completionItem {
 			continue
 		}
 		documentation := markupContent{Kind: "markdown", Value: formatBuiltinHover(name, info)}
-		items = append(items, completionItem{Label: strings.TrimPrefix(name, namespacePrefix(prefix)), Kind: 3, Detail: info.Signature, Documentation: &documentation})
+		label := strings.TrimPrefix(name, namespacePrefix(prefix))
+		items = append(items, completionItem{Label: label, Kind: 3, Detail: info.Signature, Documentation: &documentation, InsertText: completionSnippet(label, info.Signature), InsertTextFormat: 2})
 	}
 	for _, name := range builtinConstantNames {
 		if prefix != "" && !strings.HasPrefix(name, prefix) {
@@ -1789,6 +1794,35 @@ func builtinCompletionItems(prefix string) []completionItem {
 		items = append(items, completionItem{Label: strings.TrimPrefix(name, namespacePrefix(prefix)), Kind: 21, Detail: name + " const"})
 	}
 	return items
+}
+
+// completionSnippet 将函数签名转换为编辑器可定位参数的 LSP snippet。
+func completionSnippet(name string, signature string) string {
+	// 参数名来自 catalog 签名，接受候选后首个参数被选中；无参数函数光标停在右括号后。
+	opening := strings.Index(signature, "(")
+	closing := strings.LastIndex(signature, ")")
+	if opening < 0 || closing < opening {
+		return name
+	}
+	parameters := make([]string, 0, 4)
+	for _, raw := range strings.Split(signature[opening+1:closing], ",") {
+		parameter := strings.TrimSpace(strings.NewReplacer("[", "", "]", "").Replace(raw))
+		if assignment := strings.Index(parameter, "="); assignment >= 0 {
+			parameter = strings.TrimSpace(parameter[:assignment])
+		}
+		if parameter != "" {
+			parameters = append(parameters, parameter)
+		}
+	}
+	if len(parameters) == 0 {
+		return name + "()"
+	}
+	placeholders := make([]string, 0, len(parameters))
+	for index, parameter := range parameters {
+		escaped := strings.NewReplacer("\\", "\\\\", "$", "\\$", "}", "\\}").Replace(parameter)
+		placeholders = append(placeholders, fmt.Sprintf("${%d:%s}", index+1, escaped))
+	}
+	return name + "(" + strings.Join(placeholders, ", ") + ")"
 }
 
 // documentCompletionItems 返回光标前可见的简单文件符号候选。
