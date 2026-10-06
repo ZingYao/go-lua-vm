@@ -284,8 +284,9 @@ type State struct {
 	pooledLuaVMFast *VM
 	// callArgumentScratch 保存 Lua closure 调用参数临时区，避免热路径每次 CALL 分配小切片。
 	callArgumentScratch []Value
-	// userdatas 保存当前 State 注册的 userdata 实例，Close 时触发显式 finalizer。
-	userdatas []*Userdata
+	// finalizableUserdatas 保存配置了显式 finalizer 的 userdata，Close 时按注册逆序回收。
+	// 普通 userdata 不进入该强引用队列，避免 State 生命周期无条件延长 Lua 已丢弃对象的寿命。
+	finalizableUserdatas []*Userdata
 	// finalizableTables 保存已登记 `__gc` 元方法的 table，完整 GC 时按逆序尝试终结。
 	finalizableTables []*Table
 	// finalizerInsertIndex 保存上次 finalizer 错误后新登记对象的插入位置，-1 表示正常追加。
@@ -511,7 +512,7 @@ func (state *State) Close() {
 	state.callArgumentScratch = nil
 	state.mainThread = nil
 	state.threads = nil
-	state.userdatas = nil
+	state.finalizableUserdatas = nil
 	state.finalizableTables = nil
 	state.finalizedTables = nil
 	state.tableFinalizerRunner = nil

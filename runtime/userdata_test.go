@@ -3,7 +3,9 @@ package runtime
 import (
 	"errors"
 	"fmt"
+	goRuntime "runtime"
 	"testing"
+	"weak"
 )
 
 // TestUserdataValueNil 与 Value 交互验证。
@@ -154,6 +156,44 @@ func TestRegisterUserdataAndCloseOrder(t *testing.T) {
 	if len(order) != 0 {
 		t.Fatalf("closed state should be idempotent, finalizers should not repeat")
 	}
+}
+
+// TestRegisterUserdataDoesNotRetainOrdinaryPayload 验证 State 不强持有无 finalizer 的 userdata。
+//
+// payload 模拟截图等大对象；注册完成且宿主引用离开作用域后，即使 State 仍保持打开，Go GC 也应
+// 能回收 payload。测试使用弱引用判定对象可达性，不依赖 RSS、睡眠或关闭 State。
+func TestRegisterUserdataDoesNotRetainOrdinaryPayload(t *testing.T) {
+	// 创建保持打开的 State，并在独立函数中构造短生命周期 payload，避免测试栈变量延长其寿命。
+	state := NewState()
+	defer state.Close()
+	payloadReference := registerOrdinaryUserdataPayload(t, state)
+
+	for attempt := 0; attempt < 20 && payloadReference.Value() != nil; attempt++ {
+		// 连续触发诊断 GC 并让出调度，等待弱引用反映不可达状态；不引入时间抖动判断。
+		goRuntime.GC()
+		goRuntime.Gosched()
+	}
+	if payloadReference.Value() != nil {
+		// State 打开期间仍可达说明注册路径依旧保留了普通 userdata 或其 payload。
+		t.Fatalf("ordinary userdata payload should be collectible while state remains open")
+	}
+}
+
+// registerOrdinaryUserdataPayload 构造并注册普通 userdata，返回 payload 弱引用供调用方验证。
+//
+// state 必须有效且未关闭；注册错误会直接终止测试。函数返回后不保留 payload 或 userdata 强引用。
+func registerOrdinaryUserdataPayload(t *testing.T, state *State) weak.Pointer[[]byte] {
+	// 分配足够大的独立 payload，避免 tiny allocator 合批影响弱引用清理判定。
+	payload := make([]byte, 12*1024*1024)
+	payloadPointer := &payload
+	payloadReference := weak.Make(payloadPointer)
+	userdata := NewUserdata(payloadPointer)
+	if err := state.RegisterUserdata(userdata); err != nil {
+		// 有效普通 userdata 注册失败时无法继续验证生命周期。
+		t.Fatalf("register ordinary userdata failed: %v", err)
+	}
+	goRuntime.KeepAlive(userdata)
+	return payloadReference
 }
 
 // TestRegisterValueUserdata 验证从 Value 注册 userdata 的边界。

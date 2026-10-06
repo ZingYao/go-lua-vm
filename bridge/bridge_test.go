@@ -2,12 +2,54 @@ package bridge
 
 import (
 	"errors"
+	"image"
+	goRuntime "runtime"
 	"strings"
 	"testing"
+	"weak"
 
 	"github.com/ZingYao/go-lua-vm/lua"
 	"github.com/ZingYao/go-lua-vm/runtime"
 )
+
+// TestBindReflectStructDoesNotRetainDroppedImage 验证反射代理不会把已丢弃截图保留到 State.Close。
+//
+// 测试模拟截图指针进入 Lua 后被置 nil 的路径；State 在诊断 GC 期间保持打开，只有代理内部循环引用
+// 和历史 RegisterUserdata 注册路径可能持有图片。图片弱引用必须最终失效。
+func TestBindReflectStructDoesNotRetainDroppedImage(t *testing.T) {
+	// 创建长期存活的 State，确保回收不是由 Close 清空根引用造成。
+	state := lua.NewState()
+	defer state.Close()
+	imageReference := bindAndDropReflectImage(t, state)
+
+	for attempt := 0; attempt < 20 && imageReference.Value() != nil; attempt++ {
+		// 连续触发诊断 GC 并让出调度，不依赖睡眠或进程退出判断生命周期。
+		goRuntime.GC()
+		goRuntime.Gosched()
+	}
+	if imageReference.Value() != nil {
+		// State 打开时图片仍可达说明 userdata 注册路径仍存在宿主强引用。
+		t.Fatalf("dropped reflected image should be collectible while state remains open")
+	}
+}
+
+// bindAndDropReflectImage 创建截图代理、模拟 Lua 全局引用释放，并返回图片弱引用。
+//
+// state 必须有效且未关闭；绑定失败会终止测试。函数返回后不保留图片、代理 table 或 userdata 强引用。
+func bindAndDropReflectImage(t *testing.T, state *lua.State) weak.Pointer[image.NRGBA] {
+	// 使用问题报告中的截图量级，确保测试覆盖大 Pix 宿主对象而非零尺寸占位值。
+	snapshot := image.NewNRGBA(image.Rect(0, 0, 1200, 2670))
+	imageReference := weak.Make(snapshot)
+	proxyValue, err := BindReflectStruct(state, snapshot)
+	if err != nil {
+		// 有效 NRGBA 指针必须可以通过反射桥接。
+		t.Fatalf("bind reflected image failed: %v", err)
+	}
+	state.SetGlobal("snapshot", proxyValue)
+	state.SetGlobal("snapshot", runtime.NilValue())
+	goRuntime.KeepAlive(proxyValue)
+	return imageReference
+}
 
 // reflectEmbeddedSample 用于验证 reflection 绑定会提升嵌入字段。
 type reflectEmbeddedSample struct {

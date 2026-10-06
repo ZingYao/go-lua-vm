@@ -112,9 +112,10 @@ func (userdata *Userdata) GetMetatable() *Table {
 	return userdata.metatable
 }
 
-// RegisterUserdata 注册 userdata 到 State，建立显式关闭路径。
+// RegisterUserdata 注册 userdata 到 State，并在需要时建立显式关闭路径。
 //
-// 注册不是“拥有”语义，允许重复调用，重复注册仅保留一次，避免 finalizer 重复执行。
+// 无 finalizer 的 userdata 注册后不由 State 强持有，使 Lua 与宿主均丢弃引用时 Go GC 可以回收；
+// 配置了 finalizer 的 userdata 会进入关闭队列。重复注册仅保留一次，避免 finalizer 重复执行。
 func (state *State) RegisterUserdata(userdata *Userdata) error {
 	if state == nil {
 		// nil State 无法维护关闭路径。
@@ -128,15 +129,19 @@ func (state *State) RegisterUserdata(userdata *Userdata) error {
 		// nil userdata 不具备生命周期。
 		return ErrNilUserdata
 	}
+	if userdata.finalizer == nil {
+		// 普通 userdata 不需要显式关闭，避免注册表把短生命周期宿主对象保留到 State.Close。
+		return nil
+	}
 
 	// 避免重复注册导致 finalizer 多次执行，重复添加会成为只读引用。
-	for index := range state.userdatas {
-		if state.userdatas[index] == userdata {
+	for index := range state.finalizableUserdatas {
+		if state.finalizableUserdatas[index] == userdata {
 			// 已注册对象再次进入不改变关闭序列。
 			return nil
 		}
 	}
-	state.userdatas = append(state.userdatas, userdata)
+	state.finalizableUserdatas = append(state.finalizableUserdatas, userdata)
 	return nil
 }
 
@@ -167,9 +172,9 @@ func (state *State) closeUserdatas() {
 		// nil state 不执行关闭路径。
 		return
 	}
-	for index := len(state.userdatas) - 1; index >= 0; index-- {
+	for index := len(state.finalizableUserdatas) - 1; index >= 0; index-- {
 		// 逆序执行更接近栈式资源释放直觉，减少嵌套依赖影响。
-		userdata := state.userdatas[index]
+		userdata := state.finalizableUserdatas[index]
 		if userdata == nil || userdata.closed {
 			// nil 或已关闭 userdata 直接跳过，保持幂等性。
 			continue
